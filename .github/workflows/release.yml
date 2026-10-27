@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keep every push queued, and serialize release/tap updates.
+concurrency:
+  group: release-main
+  queue: max
+
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main' && github.repository == 'zirkumflex-group/flexspeak'
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows-x64
+          - runner: macos-15
+            platform: macos-arm64
+          - runner: macos-15-intel
+            platform: macos-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@3da603d4464771f1a8c3dd4acb41f03bc8107551 # 1.92.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: release-${{ matrix.platform }}
+          cache-directories: target/release-opus
+      - name: Build and package
+        run: python scripts/release.py build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/releases/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/releases
+      - name: Publish complete release
+        id: release
+        shell: bash
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          tag="v${version}-build.${GITHUB_RUN_NUMBER}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          python3 scripts/release.py checksums
+          if gh release view "$tag" --json isDraft > "$RUNNER_TEMP/release-state.json" 2>/dev/null; then
+            if python3 -c 'import json,sys; sys.exit(not json.load(open(sys.argv[1]))["isDraft"])' "$RUNNER_TEMP/release-state.json"; then
+              gh release upload "$tag" dist/releases/* --clobber
+            else
+              # Published assets are immutable, including on workflow reruns.
+              gh release download "$tag" --dir dist/releases --clobber
+            fi
+          else
+            gh release create "$tag" dist/releases/* --draft --target "$GITHUB_SHA" \
+              --title "Flexspeak ${version} — build ${GITHUB_RUN_NUMBER}" \
+              --notes-file docs/release-notes.md
+          fi
+          gh release edit "$tag" --draft=false --latest=false
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$RUNNER_TEMP/release.json"
+      - name: Checkout private Homebrew tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zirkumflex-group/homebrew-flexspeak
+          ref: main
+          path: homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+      - name: Update Homebrew and latest release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if [[ -f homebrew-tap/.release-run ]] && (( GITHUB_RUN_NUMBER < $(cat homebrew-tap/.release-run) )); then
+            echo "A newer Homebrew build is already published."
+            exit 0
+          fi
+          python3 scripts/release.py cask "$RUNNER_TEMP/release.json" homebrew-tap/Casks/flexspeak.rb
+          cp docs/releases.md homebrew-tap/README.md
+          printf '%s\n' "$GITHUB_RUN_NUMBER" > homebrew-tap/.release-run
+          git -C homebrew-tap config user.name 'github-actions[bot]'
+          git -C homebrew-tap config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C homebrew-tap add Casks/flexspeak.rb README.md .release-run
+          if ! git -C homebrew-tap diff --cached --quiet; then
+            git -C homebrew-tap commit -m "Update Flexspeak to $RELEASE_TAG"
+            git -C homebrew-tap push origin main
+          fi
+          gh release edit "$RELEASE_TAG" --latest

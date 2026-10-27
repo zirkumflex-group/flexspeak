@@ -30,5 +30,11 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>NSMicrophoneUsageDescription</key><string>Native Voice uses your microphone for TeamSpeak voice chat and the local microphone test.</string>
 </dict></plist>
 PLIST
+if [ -n "${NATIVE_VOICE_BUILD_NUMBER:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NATIVE_VOICE_BUILD_NUMBER" "$app/Contents/Info.plist"
+fi
+if [ -n "${NATIVE_VOICE_APP_VERSION:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $NATIVE_VOICE_APP_VERSION" "$app/Contents/Info.plist"
+fi
 codesign --force --sign - "$app"
 printf 'Created %s/%s\n' "$PWD" "$app"

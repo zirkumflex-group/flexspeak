@@ -1,5 +1,7 @@
 # Native Voice
 
+GitHub project: **Flexspeak**. [Download the latest private Windows/macOS release](https://github.com/zirkumflex-group/flexspeak/releases/latest), or follow the [Homebrew installation and automatic-release guide](docs/releases.md). Every successful push to `main` publishes updated packages; pull requests use a separate fast Linux check.
+
 A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses Iced; audio uses CPAL and native libopus; connectivity and incoming jitter buffering use [ReSpeak/tsclientlib](https://github.com/ReSpeak/tsclientlib), pinned to commit `ee3bc6f45a7137db7793ba5593a321df400d53e5`.
 
 ## Included
