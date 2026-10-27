@@ -197,9 +197,12 @@ pub fn trace<'a, Message: 'a>(summary: &TraceSummary) -> Element<'a, Message> {
                 value: timing.cpu.as_secs_f64(),
                 color: CYAN,
                 detail: format!(
-                    "{} captured calls · {:.2}% of one core averaged over the recording",
+                    "{} captured calls · {} of one core averaged over the recording",
                     timing.calls,
-                    timing.cpu.as_secs_f64() / summary.duration.as_secs_f64().max(0.001) * 100.0
+                    crate::usage::format_cpu_percent(
+                        timing.cpu.as_secs_f64() / summary.duration.as_secs_f64().max(0.001)
+                            * 100.0
+                    )
                 ),
             }
         })

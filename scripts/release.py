@@ -85,6 +85,8 @@ def write_notices(destination, opus_source):
                 output.write(f"\n{path.name}\n{path.read_text(encoding='utf-8', errors='replace')}\n")
         output.write(f"\n--- Native Opus {OPUS_VERSION} ---\n")
         output.write((opus_source / "COPYING").read_text())
+        output.write("\n--- Lucide status icons ---\n")
+        output.write((ROOT / "assets/lucide/LICENSE").read_text())
 
 
 def package_linux(stage, version, number):

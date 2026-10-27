@@ -34,6 +34,14 @@ pub fn format_mib(bytes: Option<u64>) -> String {
     )
 }
 
+pub fn format_cpu_percent(value: f64) -> String {
+    if value > 0.0 && value < 0.001 {
+        return "<0.001%".into();
+    }
+    let value = format!("{value:.3}");
+    format!("{}%", value.trim_end_matches('0').trim_end_matches('.'))
+}
+
 #[cfg(target_os = "macos")]
 fn memory_detail_bytes() -> Option<u64> {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v0>::zeroed();
@@ -424,6 +432,22 @@ pub fn format_bytes(mut value: f64) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn cpu_display_preserves_small_readings_without_trailing_zeroes() {
+        for (value, expected) in [
+            (0.0, "0%"),
+            (0.0001, "<0.001%"),
+            (f64::from(0.001_f32), "0.001%"),
+            (f64::from(0.02_f32), "0.02%"),
+            (0.2, "0.2%"),
+            (1.23456, "1.235%"),
+            (100.0, "100%"),
+            (201.125, "201.125%"),
+        ] {
+            assert_eq!(format_cpu_percent(value), expected);
+        }
+    }
 
     #[test]
     fn traffic_rates_use_all_packet_categories_and_actual_elapsed_time() {

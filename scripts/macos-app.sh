@@ -10,7 +10,8 @@ case "$profile" in
 esac
 
 app="dist/Native Voice.app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp assets/lucide/LICENSE "$app/Contents/Resources/Lucide-LICENSE.txt"
 # Preserve the mapped executable of an already-running voice session.
 cp "target/$profile/teamspeak-native" "$app/Contents/MacOS/teamspeak-native.new"
 mv -f "$app/Contents/MacOS/teamspeak-native.new" "$app/Contents/MacOS/teamspeak-native"

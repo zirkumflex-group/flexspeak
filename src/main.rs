@@ -2,6 +2,7 @@
 
 mod audio;
 mod client;
+mod icons;
 mod memory;
 mod profiler;
 mod settings;
@@ -28,6 +29,8 @@ use iced::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
+
+use icons::Icon;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -96,6 +99,7 @@ fn main() -> anyhow::Result<()> {
         .antialiasing(false)
         .title("Native Voice — TeamSpeak client")
         .theme(Theme::TokyoNight)
+        .font(icons::FONT_BYTES)
         .window_size((900.0, 790.0))
         .centered()
         .exit_on_close_request(false)
@@ -836,6 +840,25 @@ impl App {
         }
     }
 
+    fn microphone_icon(&self) -> Icon {
+        if self.connected
+            && !self.stopping
+            && (self.loopback || (!self.muted && !self.deafened && self.state.can_talk))
+        {
+            Icon::Mic
+        } else {
+            Icon::MicOff
+        }
+    }
+
+    fn playback_icon(&self) -> Icon {
+        if self.deafened {
+            Icon::HeadphoneOff
+        } else {
+            Icon::Headphones
+        }
+    }
+
     fn shortcut_hint(&self) -> Element<'_, Message> {
         if let Some(error) = &self.shortcut_error {
             text(format!("Global shortcuts unavailable: {error}"))
@@ -857,7 +880,7 @@ impl App {
         let mut content = column![
             text("Settings").size(28),
             text("Save server, nickname, playback volume and global keybinds in one portable JSON file.").size(13),
-            text("Server address").size(13),
+            icons::label(Icon::Server, "Server address", 13),
             text_input("hostname:9987 or IP address", &self.address).on_input_maybe(idle.then_some(Message::Address)).padding(10),
             text("Nickname").size(13),
             text_input("Nickname", &self.nickname).on_input_maybe(idle.then_some(Message::Nickname)).padding(10),
@@ -928,17 +951,25 @@ impl App {
         };
         let mut info = column![
             text(format!("Connection: {connection}")),
-            text(format!(
-                "Server: {}",
-                if in_channel {
-                    &self.state.server
-                } else {
-                    "—"
-                }
-            )),
-            text(format!("Channel: {channel}")),
-            text(format!("Microphone: {}", self.microphone_status())),
-            text(format!("Playback: {playback}")),
+            icons::label(
+                Icon::Server,
+                format!(
+                    "Server: {}",
+                    if in_channel {
+                        &self.state.server
+                    } else {
+                        "—"
+                    }
+                ),
+                16
+            ),
+            icons::label(Icon::Channel, format!("Channel: {channel}"), 16),
+            icons::label(
+                self.microphone_icon(),
+                format!("Microphone: {}", self.microphone_status()),
+                16
+            ),
+            icons::label(self.playback_icon(), format!("Playback: {playback}"), 16),
         ]
         .spacing(8);
         if let Some(error) = &self.error {
@@ -947,21 +978,19 @@ impl App {
         if let Some(error) = &self.trace_error {
             info = info.push(text(format!("Trace: {error}")));
         }
-        let cpu = self
-            .process_usage
-            .cpu_percent
-            .map_or_else(|| "measuring…".into(), |value| format!("{value:.1}%"));
+        let cpu = self.process_usage.cpu_percent.map_or_else(
+            || "measuring…".into(),
+            |value| usage::format_cpu_percent(f64::from(value)),
+        );
         let ram = usage::format_mib(self.process_usage.memory_bytes);
         let memory_detail = usage::format_mib(self.process_usage.memory_detail_bytes);
         column![
             self.performance_switch(true),
             scrollable(info).height(Length::Fill),
             column![
-                text(format!("CPU: {cpu}")).size(14),
+                icons::label(Icon::Cpu, format!("CPU: {cpu}"), 14),
                 row![
-                    text(format!("RAM (RSS): {ram}"))
-                        .size(14)
-                        .width(Length::Fill),
+                    icons::label(Icon::Memory, format!("RAM (RSS): {ram}"), 14).width(Length::Fill),
                     text(format!("{}: {memory_detail}", usage::MEMORY_DETAIL_LABEL))
                         .size(14)
                         .width(Length::Fill),
@@ -994,7 +1023,7 @@ impl App {
             rule::horizontal(1),
             row![
                 column![
-                    text("Server").size(13),
+                    icons::label(Icon::Server, "Server", 13),
                     text_input("hostname:9987", &self.address)
                         .on_input_maybe((!busy).then_some(Message::Address))
                         .padding(10)
@@ -1021,7 +1050,7 @@ impl App {
             .spacing(6),
             row![
                 column![
-                    text("Microphone").size(13),
+                    icons::label(Icon::Mic, "Microphone", 13),
                     pick_list(
                         self.devices.inputs.clone(),
                         self.input.as_ref(),
@@ -1034,7 +1063,7 @@ impl App {
                 .spacing(6)
                 .width(Length::Fill),
                 column![
-                    text("Playback").size(13),
+                    icons::label(self.playback_icon(), "Playback", 13),
                     pick_list(
                         self.devices.outputs.clone(),
                         self.output.as_ref(),
@@ -1043,7 +1072,7 @@ impl App {
                     .placeholder("No playback device detected")
                     .width(Length::Fill)
                     .padding(10),
-                    text(format!("Volume · {volume}% · save in Settings")).size(12),
+                    icons::label(if volume == 0 { Icon::VolumeOff } else { Icon::Volume }, format!("Volume · {volume}% · save in Settings"), 12),
                     slider(0..=100, volume, Message::PlaybackVolume).step(1),
                 ]
                 .spacing(6)
@@ -1054,7 +1083,7 @@ impl App {
                 button("Refresh devices")
                     .on_press_maybe((!busy).then_some(Message::Refresh))
                     .style(button::secondary),
-                button("Test microphone locally")
+                button(icons::label(Icon::Mic, "Test microphone locally", 16))
                     .on_press_maybe((!busy).then_some(Message::TestAudio))
                     .style(button::secondary)
             ]
@@ -1076,20 +1105,28 @@ impl App {
                     })
                     .on_press_maybe((!self.stopping).then_some(Message::Stop))
                     .style(button::danger),
-                    button(if self.muted {
-                        "Unmute microphone"
-                    } else {
-                        "Mute microphone"
-                    })
+                    button(icons::label(
+                        self.microphone_icon(),
+                        if self.muted {
+                            "Unmute microphone"
+                        } else {
+                            "Mute microphone"
+                        },
+                        16
+                    ))
                     .on_press_maybe(
                         (self.connected && !self.loopback && !self.stopping)
                             .then_some(Message::Mute)
                     ),
-                    button(if self.deafened {
-                        "Enable playback"
-                    } else {
-                        "Deafen"
-                    })
+                    button(icons::label(
+                        self.playback_icon(),
+                        if self.deafened {
+                            "Enable playback"
+                        } else {
+                            "Deafen"
+                        },
+                        16
+                    ))
                     .on_press_maybe(
                         (self.connected && !self.loopback && !self.stopping)
                             .then_some(Message::Deafen)
@@ -1100,7 +1137,7 @@ impl App {
             );
         } else {
             content = content.push(
-                button("Connect to server")
+                button(icons::label(Icon::Server, "Connect to server", 16))
                     .on_press(Message::Connect)
                     .padding([12, 22]),
             );
@@ -1118,7 +1155,7 @@ impl App {
         if self.connected {
             content = content.push(text(&self.detail).size(12)).push(
                 row![
-                    text("Microphone").size(13),
+                    icons::label(self.microphone_icon(), "Microphone", 13),
                     progress_bar(0.0..=1.0, self.level.sqrt().min(1.0)).girth(8)
                 ]
                 .spacing(12)
@@ -1134,9 +1171,10 @@ impl App {
                         .size(12),
                     )
                     .push(rule::horizontal(1))
-                    .push(text(&self.state.server).size(20))
+                    .push(icons::label(Icon::Server, &self.state.server, 20))
                     .push(
                         row![
+                            Icon::Channel.view(18),
                             pick_list(
                                 self.state.channels.clone(),
                                 self.state.current.as_ref(),
@@ -1151,13 +1189,14 @@ impl App {
                                 .width(Length::Fill)
                                 .padding(10)
                         ]
-                        .spacing(12),
+                        .spacing(12)
+                        .align_y(iced::Alignment::Center),
                     );
                 if !self.muted && !self.deafened && !self.state.can_talk {
                     content = content.push(text("The server is not allowing speech in this channel. Try another channel or check talk permissions.").size(13));
                 }
                 let members = self.state.members.iter().fold(
-                    column![text("IN THIS CHANNEL").size(12)].spacing(7),
+                    column![icons::label(Icon::Channel, "IN THIS CHANNEL", 12)].spacing(7),
                     |list, member| list.push(text(member).size(14)),
                 );
                 content = content.push(members);
@@ -1266,7 +1305,10 @@ impl App {
         let histories = row![
             history_card(
                 "App CPU",
-                percent(self.process_usage.cpu_percent),
+                self.process_usage.cpu_percent.map_or_else(
+                    || "—".into(),
+                    |value| usage::format_cpu_percent(f64::from(value))
+                ),
                 &self.cpu_history,
                 true,
                 None,
@@ -1320,7 +1362,7 @@ fn history_card<'a>(
 ) -> Element<'a, Message> {
     let format = |value: f64| {
         if cpu {
-            format!("{value:.1} %")
+            usage::format_cpu_percent(value)
         } else {
             usage::format_bytes(value)
         }
@@ -1341,9 +1383,12 @@ fn history_card<'a>(
     } else {
         iced::Color::from_rgb8(163, 142, 246)
     };
-    let mut heading = row![text(format!("{label}   {current}")).size(14)]
-        .spacing(12)
-        .align_y(iced::Alignment::Center);
+    let mut heading = row![
+        if cpu { Icon::Cpu } else { Icon::Memory }.view(16),
+        text(format!("{label}   {current}")).size(14)
+    ]
+    .spacing(12)
+    .align_y(iced::Alignment::Center);
     if let Some((detail_label, value)) = memory_detail {
         heading = heading
             .push(iced::widget::space::horizontal())
@@ -1523,18 +1568,27 @@ mod tests {
     fn compact_microphone_status_accounts_for_deafen_permissions_and_disconnect() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         assert_eq!(app.microphone_status(), "Inactive");
+        assert_eq!(app.microphone_icon(), Icon::MicOff);
+        assert_eq!(app.playback_icon(), Icon::Headphones);
         app.connected = true;
         assert_eq!(app.microphone_status(), "Muted");
+        assert_eq!(app.microphone_icon(), Icon::MicOff);
         app.muted = false;
         assert_eq!(app.microphone_status(), "Blocked by server");
+        assert_eq!(app.microphone_icon(), Icon::MicOff);
         app.state.can_talk = true;
         assert_eq!(app.microphone_status(), "Unmuted");
+        assert_eq!(app.microphone_icon(), Icon::Mic);
         app.deafened = true;
         assert_eq!(app.microphone_status(), "Muted (deafened)");
+        assert_eq!(app.microphone_icon(), Icon::MicOff);
+        assert_eq!(app.playback_icon(), Icon::HeadphoneOff);
         app.loopback = true;
         assert_eq!(app.microphone_status(), "Local test only");
+        assert_eq!(app.microphone_icon(), Icon::Mic);
         app.stopping = true;
         assert_eq!(app.microphone_status(), "Inactive");
+        assert_eq!(app.microphone_icon(), Icon::MicOff);
         let _ = app.update(Message::Backend(client::Event::Stopped(None)));
         assert_eq!(app.microphone_status(), "Inactive");
     }
