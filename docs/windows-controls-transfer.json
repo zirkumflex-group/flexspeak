@@ -1,0 +1,11 @@
+{
+  "file": "NativeVoice-Windows-x64-controls.zip",
+  "bytes": 8475491,
+  "sha256": "b801bb7772065b55fb23bfc85ad14700f65f64832e1f96f57ddddc5c51733807",
+  "destination": "Tribunal via Tailscale Taildrop",
+  "cli_exit_code": 1,
+  "windows_runtime_tested": false,
+  "attempt_started_local_time": "2026-10-27 03:30:55 Europe/Berlin",
+  "status": "not_delivered",
+  "error": "Tribunal reportedly offline; Taildrop returned 502 Bad Gateway"
+}

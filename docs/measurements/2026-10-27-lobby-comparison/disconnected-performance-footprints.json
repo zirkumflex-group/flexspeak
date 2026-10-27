@@ -1,0 +1,22 @@
+[
+  {
+    "at_monotonic": 1448795.562524458,
+    "physical_footprint_mib": 35.6
+  },
+  {
+    "at_monotonic": 1448799.298620583,
+    "physical_footprint_mib": 126.3
+  },
+  {
+    "at_monotonic": 1448803.009550458,
+    "physical_footprint_mib": 35.7
+  },
+  {
+    "at_monotonic": 1448806.74215275,
+    "physical_footprint_mib": 35.7
+  },
+  {
+    "at_monotonic": 1448810.465009125,
+    "physical_footprint_mib": 35.7
+  }
+]

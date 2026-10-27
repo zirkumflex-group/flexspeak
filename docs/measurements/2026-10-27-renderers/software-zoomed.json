@@ -1,0 +1,95 @@
+{
+  "label": "software-zoomed-window",
+  "pid": 9946,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "warmup_seconds": 5,
+  "sample_seconds": 15.168630542000756,
+  "rss_mib_median": 570.328125,
+  "rss_mib_min": 389.03125,
+  "rss_mib_max": 680.578125,
+  "average_cpu_percent_one_core": 4.9444147111587196,
+  "samples": [
+    {
+      "at": 1446110.799998833,
+      "rss_mib": 680.578125,
+      "cpu_seconds": 2.7
+    },
+    {
+      "at": 1446111.810045958,
+      "rss_mib": 680.578125,
+      "cpu_seconds": 2.75
+    },
+    {
+      "at": 1446112.822687833,
+      "rss_mib": 680.578125,
+      "cpu_seconds": 2.8
+    },
+    {
+      "at": 1446113.8334565,
+      "rss_mib": 680.578125,
+      "cpu_seconds": 2.85
+    },
+    {
+      "at": 1446114.841393375,
+      "rss_mib": 570.265625,
+      "cpu_seconds": 2.9
+    },
+    {
+      "at": 1446115.854083083,
+      "rss_mib": 570.265625,
+      "cpu_seconds": 2.95
+    },
+    {
+      "at": 1446116.866259375,
+      "rss_mib": 570.328125,
+      "cpu_seconds": 3.0
+    },
+    {
+      "at": 1446117.879098,
+      "rss_mib": 570.328125,
+      "cpu_seconds": 3.05
+    },
+    {
+      "at": 1446118.89136575,
+      "rss_mib": 570.328125,
+      "cpu_seconds": 3.1
+    },
+    {
+      "at": 1446119.900487833,
+      "rss_mib": 570.328125,
+      "cpu_seconds": 3.15
+    },
+    {
+      "at": 1446120.911492125,
+      "rss_mib": 570.328125,
+      "cpu_seconds": 3.2
+    },
+    {
+      "at": 1446121.923150791,
+      "rss_mib": 570.28125,
+      "cpu_seconds": 3.25
+    },
+    {
+      "at": 1446122.935585083,
+      "rss_mib": 570.3125,
+      "cpu_seconds": 3.3
+    },
+    {
+      "at": 1446123.947475375,
+      "rss_mib": 570.3125,
+      "cpu_seconds": 3.35
+    },
+    {
+      "at": 1446124.959891666,
+      "rss_mib": 389.03125,
+      "cpu_seconds": 3.4
+    },
+    {
+      "at": 1446125.968629375,
+      "rss_mib": 389.03125,
+      "cpu_seconds": 3.45
+    }
+  ],
+  "vmmap_exit_code": 0,
+  "physical_footprint_mib": 321.1
+}

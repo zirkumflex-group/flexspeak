@@ -1,0 +1,10 @@
+{
+  "file": "NativeVoice-Windows-x64-memory-stats.zip",
+  "bytes": 8396213,
+  "sha256": "f60e2b68dd0760b0fa032049359389a13d3f11d29ce92ddc9951d23a9be83b2f",
+  "destination": "Tribunal via Tailscale Taildrop",
+  "completed_local_time": "2026-10-27 02:43:15 Europe/Berlin",
+  "cli_exit_code": 0,
+  "cli_confirmation": "sent \"NativeVoice-Windows-x64-memory-stats.zip\"",
+  "windows_runtime_tested": false
+}

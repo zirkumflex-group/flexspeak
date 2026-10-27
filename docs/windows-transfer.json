@@ -1,0 +1,11 @@
+{
+  "file": "NativeVoice-Windows-x64.zip",
+  "bytes": 8395907,
+  "sha256": "0f6b0a12a268ac092c486565c69ea070fe666eb7ef62311ec9d20063d61c31e9",
+  "destination": "Tribunal (Windows), via Tailscale Taildrop",
+  "completed_local_time": "2026-10-27 02:02:51 Europe/Berlin",
+  "cli_exit_code": 0,
+  "cli_confirmation": "sent \"NativeVoice-Windows-x64.zip\"",
+  "destination_directory": "Windows Taildrop default: Downloads; remote filesystem not inspected",
+  "windows_runtime_tested": false
+}

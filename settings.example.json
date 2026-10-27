@@ -1,0 +1,9 @@
+{
+  "server_address": "ts.zirkumflex.io",
+  "nickname": "Native Voice",
+  "playback_volume_percent": 100,
+  "keybinds": {
+    "toggle_mute": "Ctrl+Shift+M",
+    "toggle_deafen": "Ctrl+Shift+D"
+  }
+}

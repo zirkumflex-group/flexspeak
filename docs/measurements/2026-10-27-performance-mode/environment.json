@@ -1,0 +1,21 @@
+{
+  "date": "2026-10-27",
+  "hardware": "Apple M4, 10 logical CPUs",
+  "os": "macOS 27.0.1 arm64",
+  "compiler": "rustc 1.92.0, aarch64-apple-darwin",
+  "build": "release, thin LTO, GPU renderer, MSAA disabled",
+  "binary_sha256": "04909b89a167f92ec6b7b230e0c16fa535cd970357dba7637d169765f284ccdd",
+  "workload": "One process, disconnected; full Statistics then performance mode. Trace off; no audio streams.",
+  "sizes_logical": {
+    "full": [
+      900,
+      790
+    ],
+    "compact": [
+      440,
+      270
+    ]
+  },
+  "display_scale": 2,
+  "method": "5-second warmup and 20-second sampling each; no builds or UI interaction during samples; vmmap afterwards."
+}

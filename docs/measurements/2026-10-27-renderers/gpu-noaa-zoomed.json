@@ -1,0 +1,95 @@
+{
+  "label": "gpu-noaa-zoomed-window",
+  "pid": 9032,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "warmup_seconds": 5,
+  "sample_seconds": 15.177119415951893,
+  "rss_mib_median": 104.5625,
+  "rss_mib_min": 104.546875,
+  "rss_mib_max": 104.578125,
+  "average_cpu_percent_one_core": 0.5929979038407353,
+  "samples": [
+    {
+      "at": 1445994.68146625,
+      "rss_mib": 104.546875,
+      "cpu_seconds": 0.89
+    },
+    {
+      "at": 1445995.691845041,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.9
+    },
+    {
+      "at": 1445996.698597958,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.9
+    },
+    {
+      "at": 1445997.708583125,
+      "rss_mib": 104.546875,
+      "cpu_seconds": 0.91
+    },
+    {
+      "at": 1445998.721197666,
+      "rss_mib": 104.546875,
+      "cpu_seconds": 0.91
+    },
+    {
+      "at": 1445999.7364225,
+      "rss_mib": 104.546875,
+      "cpu_seconds": 0.92
+    },
+    {
+      "at": 1446000.747321625,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.93
+    },
+    {
+      "at": 1446001.761355916,
+      "rss_mib": 104.578125,
+      "cpu_seconds": 0.93
+    },
+    {
+      "at": 1446002.773786583,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.94
+    },
+    {
+      "at": 1446003.785143125,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.94
+    },
+    {
+      "at": 1446004.792762333,
+      "rss_mib": 104.578125,
+      "cpu_seconds": 0.95
+    },
+    {
+      "at": 1446005.802185625,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.95
+    },
+    {
+      "at": 1446006.818529666,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.96
+    },
+    {
+      "at": 1446007.833311125,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.96
+    },
+    {
+      "at": 1446008.846059833,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.97
+    },
+    {
+      "at": 1446009.858585666,
+      "rss_mib": 104.5625,
+      "cpu_seconds": 0.98
+    }
+  ],
+  "vmmap_exit_code": 0,
+  "physical_footprint_mib": 201.2
+}

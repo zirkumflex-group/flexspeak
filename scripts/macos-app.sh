@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+
+profile="${1:-release}"
+case "$profile" in
+    release) cargo build --release --locked ;;
+    debug) cargo build --locked ;;
+    *) printf 'Usage: sh scripts/macos-app.sh [release|debug]\n' >&2; exit 1 ;;
+esac
+
+app="dist/Native Voice.app"
+mkdir -p "$app/Contents/MacOS"
+# Preserve the mapped executable of an already-running voice session.
+cp "target/$profile/teamspeak-native" "$app/Contents/MacOS/teamspeak-native.new"
+mv -f "$app/Contents/MacOS/teamspeak-native.new" "$app/Contents/MacOS/teamspeak-native"
+cat > "$app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>teamspeak-native</string>
+<key>CFBundleIdentifier</key><string>io.venator.nativevoice</string>
+<key>CFBundleName</key><string>Native Voice</string>
+<key>CFBundleDisplayName</key><string>Native Voice</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>14.2</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSMicrophoneUsageDescription</key><string>Native Voice uses your microphone for TeamSpeak voice chat and the local microphone test.</string>
+</dict></plist>
+PLIST
+codesign --force --sign - "$app"
+printf 'Created %s/%s\n' "$PWD" "$app"

@@ -1,0 +1,120 @@
+{
+  "label": "gpu-msaa4-default-window",
+  "pid": 7075,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "warmup_seconds": 5,
+  "sample_seconds": 20.224180749850348,
+  "rss_mib_median": 101.453125,
+  "rss_mib_min": 101.4375,
+  "rss_mib_max": 101.46875,
+  "average_cpu_percent_one_core": 0.3955660849233265,
+  "samples": [
+    {
+      "at": 1445722.468120333,
+      "rss_mib": 101.4375,
+      "cpu_seconds": 0.59
+    },
+    {
+      "at": 1445723.481362958,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.59
+    },
+    {
+      "at": 1445724.493470916,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.6
+    },
+    {
+      "at": 1445725.505703,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.6
+    },
+    {
+      "at": 1445726.518742708,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.6
+    },
+    {
+      "at": 1445727.531982416,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.61
+    },
+    {
+      "at": 1445728.540012375,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.61
+    },
+    {
+      "at": 1445729.552234083,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.61
+    },
+    {
+      "at": 1445730.563715291,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.62
+    },
+    {
+      "at": 1445731.575580291,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.62
+    },
+    {
+      "at": 1445732.584350833,
+      "rss_mib": 101.453125,
+      "cpu_seconds": 0.63
+    },
+    {
+      "at": 1445733.597043125,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.63
+    },
+    {
+      "at": 1445734.607285333,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.63
+    },
+    {
+      "at": 1445735.615747916,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.64
+    },
+    {
+      "at": 1445736.623933208,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.64
+    },
+    {
+      "at": 1445737.636248041,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.65
+    },
+    {
+      "at": 1445738.648598958,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.65
+    },
+    {
+      "at": 1445739.66072025,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.65
+    },
+    {
+      "at": 1445740.671767958,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.66
+    },
+    {
+      "at": 1445741.680857375,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.66
+    },
+    {
+      "at": 1445742.692301083,
+      "rss_mib": 101.46875,
+      "cpu_seconds": 0.67
+    }
+  ],
+  "vmmap_exit_code": 0,
+  "physical_footprint_mib": 219.8
+}

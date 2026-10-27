@@ -1,0 +1,172 @@
+{
+  "label": "lobby-normal-voice-1",
+  "pid": 33450,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "warmup_seconds": 10,
+  "sample_seconds": 30.354519416112453,
+  "rss_mib_median": 107.859375,
+  "rss_mib_min": 107.859375,
+  "rss_mib_max": 108.046875,
+  "average_cpu_percent_one_core": 4.052114886546696,
+  "samples": [
+    {
+      "at": 1449059.831422125,
+      "rss_mib": 108.046875,
+      "cpu_seconds": 3.57
+    },
+    {
+      "at": 1449060.843977583,
+      "rss_mib": 108.046875,
+      "cpu_seconds": 3.62
+    },
+    {
+      "at": 1449061.857349125,
+      "rss_mib": 107.90625,
+      "cpu_seconds": 3.66
+    },
+    {
+      "at": 1449062.864722541,
+      "rss_mib": 107.90625,
+      "cpu_seconds": 3.69
+    },
+    {
+      "at": 1449063.879234291,
+      "rss_mib": 107.90625,
+      "cpu_seconds": 3.73
+    },
+    {
+      "at": 1449064.892121791,
+      "rss_mib": 107.90625,
+      "cpu_seconds": 3.78
+    },
+    {
+      "at": 1449065.904967625,
+      "rss_mib": 107.90625,
+      "cpu_seconds": 3.82
+    },
+    {
+      "at": 1449066.918698041,
+      "rss_mib": 107.90625,
+      "cpu_seconds": 3.86
+    },
+    {
+      "at": 1449067.931875916,
+      "rss_mib": 107.90625,
+      "cpu_seconds": 3.9
+    },
+    {
+      "at": 1449068.941519791,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 3.93
+    },
+    {
+      "at": 1449069.955623875,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 3.98
+    },
+    {
+      "at": 1449070.966944791,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.02
+    },
+    {
+      "at": 1449071.978785458,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.06
+    },
+    {
+      "at": 1449072.992162541,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.1
+    },
+    {
+      "at": 1449074.001211791,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.14
+    },
+    {
+      "at": 1449075.011099041,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.18
+    },
+    {
+      "at": 1449076.024968583,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.22
+    },
+    {
+      "at": 1449077.034889458,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.26
+    },
+    {
+      "at": 1449078.049288083,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.31
+    },
+    {
+      "at": 1449079.057519625,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.34
+    },
+    {
+      "at": 1449080.067154875,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.39
+    },
+    {
+      "at": 1449081.080654708,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.43
+    },
+    {
+      "at": 1449082.094663916,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.47
+    },
+    {
+      "at": 1449083.108053958,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.51
+    },
+    {
+      "at": 1449084.121615625,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.55
+    },
+    {
+      "at": 1449085.135929416,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.59
+    },
+    {
+      "at": 1449086.148852958,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.64
+    },
+    {
+      "at": 1449087.157829958,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.68
+    },
+    {
+      "at": 1449088.172342333,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.72
+    },
+    {
+      "at": 1449089.180382833,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.76
+    },
+    {
+      "at": 1449090.185941541,
+      "rss_mib": 107.859375,
+      "cpu_seconds": 4.8
+    }
+  ],
+  "vmmap_exit_code": 0,
+  "physical_footprint_mib": 158.9,
+  "valid_for_comparison": false,
+  "exclusion_reason": "Post-sample UI showed audio buffer-underrun/overrun and disconnected state; exact timing relative to vmmap inspection is unknown."
+}

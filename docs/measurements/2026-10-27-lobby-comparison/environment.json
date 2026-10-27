@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-27",
+  "pid": 33450,
+  "build": "optimized release, GPU rendering, MSAA disabled, ten-second compact CPU/RAM readout",
+  "binary_sha256": "4bf26e3d374d68ac813ae4a848201096eec21a57b6244de8469fc80a4f6a543d",
+  "hardware": "Apple M4, 10 logical CPUs",
+  "os": "macOS 27.0.1 arm64",
+  "display_scale": 2,
+  "normal_view": "Voice tab, 900x790 logical client area",
+  "performance_view": "compact text, 440x320 logical client area",
+  "tracing": "off",
+  "samples_per_condition": 2,
+  "sample_seconds": 30,
+  "warmup_seconds": 10,
+  "sequence": "disconnected normal 1, performance 1, performance 2, normal 2; connected normal 1, performance 1, performance 2, normal 2",
+  "connection_test": "ts.zirkumflex.io; Lobby only; microphone muted; playback enabled",
+  "sampling": "ps RSS and cumulative CPU deltas once per second; vmmap physical footprint after each timed sample",
+  "limitations": "Other desktop apps remain running. Memory footprint is a point-in-time observation. No builds, profiling traces or deliberate UI input during timed samples.",
+  "confirmed_connection": {
+    "server": "Zirkumflex",
+    "channel": "Lobby",
+    "channel_id": 1,
+    "microphone": "muted",
+    "playback": "enabled",
+    "input": "MacBook Pro Microphone, 48000 Hz, mono",
+    "output": "MacBook Pro Speakers, 48000 Hz, stereo",
+    "audio_packets_before": {
+      "sent": 0,
+      "received": 0
+    }
+  },
+  "footprint_sweeps": "Five vmmap snapshots per condition, roughly 3.7 seconds apart, outside the timed CPU samples; captures variation across compact redraw intervals.",
+  "connected_sampling": "ps CPU/RSS plus proc_pid_rusage(RUSAGE_INFO_V0) footprint once per second; no vmmap while connected.",
+  "inspection_note": "First connected attempt ended with an audio underrun/overrun. That attempt is excluded. Detailed vmmap inspection is a suspected trigger, not proven; the lightweight counter matched vmmap within 0.04 MiB in a disconnected check.",
+  "audio_packets_after": {
+    "sent": 0,
+    "received": 0
+  },
+  "final_state": "Connected to Lobby, microphone muted, playback on, performance mode enabled",
+  "valid_connected_runs": "Four complete runs after reconnect using lightweight counters; connection and mute/channel state verified before/after each mode."
+}

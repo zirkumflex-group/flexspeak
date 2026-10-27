@@ -1,0 +1,172 @@
+{
+  "label": "interactive-preview-session-excluded-from-idle-comparison",
+  "pid": 24164,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "warmup_seconds": 5,
+  "sample_seconds": 30.364173208130524,
+  "rss_mib_median": 104.84375,
+  "rss_mib_min": 102.8125,
+  "rss_mib_max": 104.90625,
+  "average_cpu_percent_one_core": 3.984959484014542,
+  "samples": [
+    {
+      "at": 1448108.011320083,
+      "rss_mib": 102.8125,
+      "cpu_seconds": 3.88
+    },
+    {
+      "at": 1448109.02249325,
+      "rss_mib": 102.953125,
+      "cpu_seconds": 4.1
+    },
+    {
+      "at": 1448110.033841875,
+      "rss_mib": 103.03125,
+      "cpu_seconds": 4.21
+    },
+    {
+      "at": 1448111.047629708,
+      "rss_mib": 103.09375,
+      "cpu_seconds": 4.28
+    },
+    {
+      "at": 1448112.05442425,
+      "rss_mib": 103.078125,
+      "cpu_seconds": 4.31
+    },
+    {
+      "at": 1448113.064063666,
+      "rss_mib": 103.09375,
+      "cpu_seconds": 4.34
+    },
+    {
+      "at": 1448114.076755708,
+      "rss_mib": 103.09375,
+      "cpu_seconds": 4.41
+    },
+    {
+      "at": 1448115.087509041,
+      "rss_mib": 103.09375,
+      "cpu_seconds": 4.45
+    },
+    {
+      "at": 1448116.098955125,
+      "rss_mib": 104.859375,
+      "cpu_seconds": 4.51
+    },
+    {
+      "at": 1448117.114034083,
+      "rss_mib": 104.90625,
+      "cpu_seconds": 4.55
+    },
+    {
+      "at": 1448118.123349,
+      "rss_mib": 104.890625,
+      "cpu_seconds": 4.6
+    },
+    {
+      "at": 1448119.136585666,
+      "rss_mib": 104.890625,
+      "cpu_seconds": 4.62
+    },
+    {
+      "at": 1448120.148232583,
+      "rss_mib": 104.890625,
+      "cpu_seconds": 4.63
+    },
+    {
+      "at": 1448121.162500041,
+      "rss_mib": 104.90625,
+      "cpu_seconds": 4.64
+    },
+    {
+      "at": 1448122.175209,
+      "rss_mib": 104.90625,
+      "cpu_seconds": 4.64
+    },
+    {
+      "at": 1448123.184693333,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.65
+    },
+    {
+      "at": 1448124.198168291,
+      "rss_mib": 104.859375,
+      "cpu_seconds": 4.66
+    },
+    {
+      "at": 1448125.21085025,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.66
+    },
+    {
+      "at": 1448126.223767333,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.67
+    },
+    {
+      "at": 1448127.239181333,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.67
+    },
+    {
+      "at": 1448128.252308,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.68
+    },
+    {
+      "at": 1448129.266197291,
+      "rss_mib": 104.859375,
+      "cpu_seconds": 4.7
+    },
+    {
+      "at": 1448130.27897775,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.76
+    },
+    {
+      "at": 1448131.285696,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.77
+    },
+    {
+      "at": 1448132.29943475,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.8
+    },
+    {
+      "at": 1448133.310714666,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.9
+    },
+    {
+      "at": 1448134.321795833,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 4.93
+    },
+    {
+      "at": 1448135.33824375,
+      "rss_mib": 104.84375,
+      "cpu_seconds": 5.0
+    },
+    {
+      "at": 1448136.345843125,
+      "rss_mib": 104.859375,
+      "cpu_seconds": 5.01
+    },
+    {
+      "at": 1448137.360428958,
+      "rss_mib": 104.890625,
+      "cpu_seconds": 5.07
+    },
+    {
+      "at": 1448138.375493291,
+      "rss_mib": 104.890625,
+      "cpu_seconds": 5.09
+    }
+  ],
+  "vmmap_exit_code": 0,
+  "physical_footprint_mib": 201.3,
+  "valid_for_compact_idle_comparison": false,
+  "exclusion_reason": "The preview was subsequently observed enlarged on full Statistics with a trace result; the window/mode was not held fixed for this run."
+}

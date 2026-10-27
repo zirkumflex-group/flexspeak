@@ -1,0 +1,70 @@
+{
+  "label": "gpu-msaa4-restored-window",
+  "pid": 7075,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "warmup_seconds": 3,
+  "sample_seconds": 10.10057962499559,
+  "rss_mib_median": 105.515625,
+  "rss_mib_min": 105.515625,
+  "rss_mib_max": 105.515625,
+  "average_cpu_percent_one_core": 0.39601687710092676,
+  "samples": [
+    {
+      "at": 1445906.388099291,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.94
+    },
+    {
+      "at": 1445907.395975833,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.94
+    },
+    {
+      "at": 1445908.407892541,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.95
+    },
+    {
+      "at": 1445909.417994333,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.95
+    },
+    {
+      "at": 1445910.430297916,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.96
+    },
+    {
+      "at": 1445911.437718958,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.96
+    },
+    {
+      "at": 1445912.450516041,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.97
+    },
+    {
+      "at": 1445913.460589458,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.97
+    },
+    {
+      "at": 1445914.470014833,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.98
+    },
+    {
+      "at": 1445915.478473083,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.98
+    },
+    {
+      "at": 1445916.488678916,
+      "rss_mib": 105.515625,
+      "cpu_seconds": 1.98
+    }
+  ],
+  "vmmap_exit_code": 0,
+  "physical_footprint_mib": 328.3
+}
