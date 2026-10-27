@@ -17,20 +17,15 @@ end
 
 cask "flexspeak" do
   version "${VERSION}"
-  sha256 arm: "${ARM_SHA}", intel: "${INTEL_SHA}"
+  sha256 "${ARM_SHA}"
 
-  on_arm do
-    url "https://api.github.com/repos/zirkumflex-group/flexspeak/releases/assets/${ARM_ID}",
-        using: FlexspeakPrivateDownloadStrategy
-  end
-  on_intel do
-    url "https://api.github.com/repos/zirkumflex-group/flexspeak/releases/assets/${INTEL_ID}",
-        using: FlexspeakPrivateDownloadStrategy
-  end
+  url "https://api.github.com/repos/zirkumflex-group/flexspeak/releases/assets/${ARM_ID}",
+      using: FlexspeakPrivateDownloadStrategy
   name "Flexspeak (Native Voice)"
   desc "Native TeamSpeak-compatible voice client"
   homepage "https://github.com/zirkumflex-group/flexspeak"
 
+  depends_on arch: :arm64
   depends_on macos: :sonoma
   container type: :dmg
 

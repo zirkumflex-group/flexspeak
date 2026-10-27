@@ -1,7 +1,8 @@
 Automatic build from `main`. The release tag identifies the build, and GitHub links the exact source commit.
 
 - **Windows x64:** download `Flexspeak-windows-x64.zip`, extract, and open `Flexspeak.exe`. The standalone `.exe` is also available. Opus and the Microsoft C runtime are linked statically.
-- **macOS:** download the `arm64` DMG for Apple Silicon or `x64` DMG for Intel, then drag **Native Voice.app** into Applications. Requires macOS 14.2 or later.
+- **macOS (Apple Silicon):** download the `arm64` DMG, then drag **Native Voice.app** into Applications. Requires macOS 14.2 or later.
+- **Linux x64 / Omarchy:** download `Flexspeak-linux-x64.pkg.tar.zst` and install with `sudo pacman -U ./Flexspeak-linux-x64.pkg.tar.zst`. A Linux tarball is also included. Native Wayland global shortcuts are currently unsupported; use the in-app controls.
 - **Homebrew:** follow the [private tap installation instructions](https://github.com/zirkumflex-group/homebrew-flexspeak).
 
 The macOS app is ad-hoc signed and not notarized; Windows builds are not Authenticode-signed. The OS may ask you to approve these internal builds. No installer disables OS security protections.

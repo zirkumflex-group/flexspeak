@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Flexspeak
+Comment=TeamSpeak-compatible voice chat
+Exec=flexspeak
+Icon=audio-headset
+Terminal=false
+Categories=Network;AudioVideo;Audio;
+StartupNotify=true

@@ -28,8 +28,8 @@ jobs:
             platform: windows-x64
           - runner: macos-15
             platform: macos-arm64
-          - runner: macos-15-intel
-            platform: macos-x64
+          - runner: ubuntu-24.04
+            platform: linux-x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -41,6 +41,9 @@ jobs:
         with:
           shared-key: release-${{ matrix.platform }}
           cache-directories: target/release-opus
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libxkbcommon-dev libwayland-dev desktop-file-utils
       - name: Build and package
         run: python scripts/release.py build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

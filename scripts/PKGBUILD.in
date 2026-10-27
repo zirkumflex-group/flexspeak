@@ -1,0 +1,20 @@
+pkgname=flexspeak
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Native TeamSpeak-compatible voice client'
+arch=('x86_64')
+url='https://github.com/zirkumflex-group/flexspeak'
+license=('LicenseRef-Proprietary')
+depends=('glibc>=2.39' 'gcc-libs' 'alsa-lib' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'libx11' 'libxcursor' 'libxrandr' 'libxi')
+optdepends=('vulkan-icd-loader: hardware accelerated rendering with a compatible GPU driver')
+options=('!debug' '!strip')
+source=('Flexspeak-linux-x64.tar.gz')
+sha256sums=('@SHA256@')
+
+package() {
+    install -Dm755 "$srcdir/flexspeak" "$pkgdir/usr/bin/flexspeak"
+    install -Dm644 "$srcdir/flexspeak.desktop" "$pkgdir/usr/share/applications/flexspeak.desktop"
+    install -Dm644 "$srcdir/THIRD-PARTY-LICENSES.txt" "$pkgdir/usr/share/licenses/flexspeak/THIRD-PARTY-LICENSES.txt"
+    install -Dm644 -t "$pkgdir/usr/share/doc/flexspeak" \
+        "$srcdir/README.md" "$srcdir/BUILD-INFO.json" "$srcdir/settings.example.json"
+}

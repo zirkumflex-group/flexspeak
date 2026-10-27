@@ -44,9 +44,11 @@ def build_opus(env):
     if not source.exists():
         with tarfile.open(archive) as file:
             file.extractall(work, filter="data")
-    options = ["-G", "Visual Studio 17 2022", "-A", "x64"] if os.name == "nt" else [
-        "-DCMAKE_OSX_DEPLOYMENT_TARGET=14.2"
-    ]
+    options = []
+    if os.name == "nt":
+        options = ["-G", "Visual Studio 17 2022", "-A", "x64"]
+    elif sys.platform == "darwin":
+        options = ["-DCMAKE_OSX_DEPLOYMENT_TARGET=14.2"]
     run("cmake", "-S", source, "-B", work / "build", *options,
         "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_INSTALL_PREFIX={work / 'install'}",
         "-DBUILD_SHARED_LIBS=OFF", "-DOPUS_STATIC_RUNTIME=ON",
@@ -85,9 +87,44 @@ def write_notices(destination, opus_source):
         output.write((opus_source / "COPYING").read_text())
 
 
+def package_linux(stage, version, number):
+    archive = OUTPUT / "Flexspeak-linux-x64.tar.gz"
+    with tarfile.open(archive, "w:gz") as file:
+        for path in sorted(stage.iterdir()):
+            file.add(path, arcname=path.name)
+    work = ROOT / "target/arch-package"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir()
+    shutil.copy2(archive, work)
+    recipe = (ROOT / "scripts/PKGBUILD.in").read_text()
+    (work / "PKGBUILD").write_text(recipe.replace("@VERSION@", f"{version}.r{number}")
+                                  .replace("@SHA256@", sha256(archive)))
+    # makepkg packages the already-built binary; it does not compile a second copy.
+    run("docker", "run", "--rm", "--platform", "linux/amd64",
+        "-e", f"PACKAGER_UID={os.getuid()}", "-v", f"{work}:/work",
+        "-w", "/work", "archlinux:base-devel", "bash", "-euc", """
+pacman -Syu --noconfirm
+useradd --uid "$PACKAGER_UID" --create-home packager
+chown -R packager:packager /work
+runuser -u packager -- makepkg --nodeps --noconfirm
+pacman -U --noconfirm /work/flexspeak-*.pkg.tar.zst
+cmp /work/src/flexspeak /usr/bin/flexspeak
+flexspeak --help
+""")
+    packages = list(work.glob("*.pkg.tar.zst"))
+    if len(packages) != 1:
+        raise ValueError("Expected exactly one Arch package")
+    shutil.copy2(packages[0], OUTPUT / "Flexspeak-linux-x64.pkg.tar.zst")
+
+
 def build():
-    if sys.platform not in ("darwin", "win32"):
-        raise ValueError("Release packaging needs a native macOS or Windows runner")
+    if sys.platform not in ("darwin", "win32", "linux"):
+        raise ValueError("Release packaging needs a native macOS, Windows or Linux runner")
+    if sys.platform == "darwin" and platform.machine() != "arm64":
+        raise ValueError("macOS releases require an Apple Silicon runner")
+    if sys.platform == "linux" and platform.machine() != "x86_64":
+        raise ValueError("Linux releases require an x86_64 runner")
     env = os.environ.copy()
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     number = int(env.get("GITHUB_RUN_NUMBER", "1"))
@@ -118,7 +155,7 @@ def build():
             for path in sorted(stage.iterdir()):
                 archive.write(path, path.name)
         shutil.copy2(stage / "THIRD-PARTY-LICENSES.txt", OUTPUT)
-    else:
+    elif sys.platform == "darwin":
         run("sh", "scripts/macos-app.sh", "release", env=env)
         app = stage / "Native Voice.app"
         shutil.copytree(ROOT / "dist/Native Voice.app", app)
@@ -133,11 +170,18 @@ def build():
             raise ValueError("App links to a Homebrew library instead of being standalone")
         run(binary, "--help")
         (stage / "Applications").symlink_to("/Applications")
-        architecture = "arm64" if platform.machine() == "arm64" else "x64"
-        dmg = OUTPUT / f"Flexspeak-macos-{architecture}.dmg"
+        dmg = OUTPUT / "Flexspeak-macos-arm64.dmg"
         run("hdiutil", "create", "-ov", "-volname", "Flexspeak", "-srcfolder", stage,
             "-format", "UDZO", dmg)
         run("hdiutil", "verify", dmg)
+    else:
+        run("cargo", "build", "--release", "--locked", env=env)
+        executable = ROOT / "target/release/teamspeak-native"
+        run(executable, "--help")
+        shutil.copy2(executable, stage / "flexspeak")
+        shutil.copy2(ROOT / "scripts/flexspeak.desktop", stage)
+        run("desktop-file-validate", stage / "flexspeak.desktop")
+        package_linux(stage, version, number)
 
 
 def cask(release, output, artifacts=OUTPUT):
@@ -145,16 +189,14 @@ def cask(release, output, artifacts=OUTPUT):
     if not match:
         raise ValueError("Unexpected release tag")
     values = {"VERSION": f"{match[1]},{match[2]}"}
-    for architecture, key in (("arm64", "ARM"), ("x64", "INTEL")):
-        name = f"Flexspeak-macos-{architecture}.dmg"
-        assets = [asset for asset in release["assets"] if asset["name"] == name]
-        if len(assets) != 1 or type(assets[0]["id"]) is not int or assets[0]["id"] <= 0:
-            raise ValueError(f"Expected one uploaded asset: {name}")
-        digest = sha256(artifacts / name)
-        if assets[0].get("digest") != f"sha256:{digest}":
-            raise ValueError(f"Uploaded asset checksum does not match: {name}")
-        values[f"{key}_ID"] = assets[0]["id"]
-        values[f"{key}_SHA"] = digest
+    name = "Flexspeak-macos-arm64.dmg"
+    assets = [asset for asset in release["assets"] if asset["name"] == name]
+    if len(assets) != 1 or type(assets[0]["id"]) is not int or assets[0]["id"] <= 0:
+        raise ValueError(f"Expected one uploaded asset: {name}")
+    digest = sha256(artifacts / name)
+    if assets[0].get("digest") != f"sha256:{digest}":
+        raise ValueError(f"Uploaded asset checksum does not match: {name}")
+    values.update(ARM_ID=assets[0]["id"], ARM_SHA=digest)
     rendered = Template((ROOT / "scripts/flexspeak.rb.in").read_text()).substitute(values)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered)
@@ -162,7 +204,8 @@ def cask(release, output, artifacts=OUTPUT):
 
 def checksums():
     required = {"Flexspeak-windows-x64.exe", "Flexspeak-windows-x64.zip",
-                "Flexspeak-macos-arm64.dmg", "Flexspeak-macos-x64.dmg", "THIRD-PARTY-LICENSES.txt"}
+                "Flexspeak-macos-arm64.dmg", "Flexspeak-linux-x64.tar.gz",
+                "Flexspeak-linux-x64.pkg.tar.zst", "THIRD-PARTY-LICENSES.txt"}
     if not required.issubset(path.name for path in OUTPUT.iterdir()):
         raise ValueError("Missing release artifacts")
     (OUTPUT / "SHA256SUMS.txt").write_text("".join(
