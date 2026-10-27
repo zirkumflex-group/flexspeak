@@ -2,7 +2,7 @@
 
 GitHub project: **Flexspeak**. [Download the latest private Windows/macOS/Linux release](https://github.com/zirkumflex-group/flexspeak/releases/latest), or follow the [Homebrew, Omarchy and automatic-release guide](docs/releases.md). Every successful push to `main` publishes updated packages; pull requests use a separate fast Linux check.
 
-A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses Iced; audio uses CPAL and native libopus; connectivity and incoming jitter buffering use [ReSpeak/tsclientlib](https://github.com/ReSpeak/tsclientlib), pinned to commit `ee3bc6f45a7137db7793ba5593a321df400d53e5`.
+A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses Iced; audio uses CPAL and native libopus; connectivity and incoming jitter buffering use a vendored [ReSpeak/tsclientlib](https://github.com/ReSpeak/tsclientlib) based on `ee3bc6f45a7137db7793ba5593a321df400d53e5`, with a narrow TS6 streaming-notification hook.
 
 ## Included
 
@@ -10,14 +10,16 @@ A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses Ic
 - Native microphone/playback device detection and selection.
 - Local microphone-to-speaker test, disconnected from TeamSpeak.
 - Opus microphone transmission and incoming voice playback.
-- Channel selection, optional channel password, and current channel members.
+- A channel/client tree with health dots, conditional mute/deafen icons, clickable channel headings and password prompts.
 - Mute, deafen, microphone level, sent/received audio packet counters.
 - Editable global mute/deafen shortcuts and an app-only playback volume slider.
 - A Settings tab with portable JSON for server address, nickname, volume and keybinds.
 - A Statistics tab with CPU/RAM usage, five-minute history graphs, and P50/P90/P99.
 - Live upload/download rates, session traffic totals, packet loss in/out, ping variation, idle time, and server-reported file-transfer rates.
+- Own connection health and compact line charts in the fixed footer; current-channel clients have collapsed health labels and expandable details in Voice (subject to server permissions).
 - On-demand traces, CPU timing by subsystem, and a memory breakdown with explicit measurement boundaries.
 - Persistent local TeamSpeak identity, bounded audio buffers, and device-rate conversion.
+- Dismissible error modals, duplicate suppression, acknowledged audio controls and adaptive server-command pacing. See [error handling](docs/error-handling.md).
 - Cancel/disconnect and visible network/audio errors. Temporary network interruptions use the protocol library's reconnect behavior.
 
 The prefilled server address is `ts.zirkumflex.io`; it remains editable. The microphone starts muted on every connection. Unmuting transmits continuously until you mute, deafen, disconnect, or lose permission to speak. Use headphones: this prototype does not yet include echo cancellation, noise suppression, automatic gain control, voice activation, or push-to-talk.
@@ -67,26 +69,32 @@ libopus links statically. The binding finds an installed libopus using pkg-confi
 
 ## First voice session
 
-1. Select your microphone and headphones/speakers.
-2. Choose **Test microphone locally**, approve microphone permission, speak, and check the meter and local playback. Stop the test.
+1. In **Settings → Audio**, select your microphone and headphones/speakers.
+2. Choose **Test microphone locally**, approve microphone permission, speak, and check the activity bar below Microphone and local playback. Stop the test.
 3. Enter the server address (hostname, `hostname:port`, or IP), nickname, and password if needed.
-4. Click **Connect to server**. Choose a channel. Enter a channel password before choosing a protected channel.
+4. On **Voice**, click **Connect to server**. Use **Join** beside a channel in the left sidebar; protected channels prompt for a password when you join.
 5. Click **Unmute microphone** to speak. The outgoing packet counter should increase; incoming packets indicate received voice. A second participant using TeamSpeak is needed to verify a real conversation.
 6. **Deafen** stops playback and transmission. **Disconnect** releases the audio devices.
 
 Devices are fixed for one session. Refresh/select and reconnect after unplugging devices or changing a Bluetooth audio profile. This version requires both an input and an output device. Microphone input is downmixed to mono; incoming Opus Music can play in stereo. Only Opus Voice/Music channels are supported.
 
-If AirPods or other Bluetooth headphones are missing, connect them to this computer first and confirm they appear in the operating system's sound output list. Then **Disconnect → Refresh devices → choose the headphones under Playback → Connect**. The app keeps its selected output until you change it; changing the system default alone does not reroute an existing session. If incoming packet counts increase but playback is silent, check the selected device's system volume and mute setting, then use the local microphone test to check the output path.
+If AirPods or other Bluetooth headphones are missing, connect them to this computer first and confirm they appear in the operating system's sound output list. Then **Disconnect → Settings → Audio → Refresh devices → choose the headphones under Playback → Voice → Connect**. The app keeps its selected output until you change it; changing the system default alone does not reroute an existing session. If incoming packet counts increase but playback is silent, check the selected device's system volume and mute setting, then use the local microphone test to check the output path.
 
 ## Controls and saved settings
 
 The default global toggles are **Ctrl+Shift+M** for mute/unmute and **Ctrl+Shift+D** for deafen/undeafen. Change them in **Settings → Save settings**. The same JSON file stores the server address, nickname and playback volume. Use **Copy settings path** to locate it; edit/copy the file and use **Reload JSON** while disconnected, or restart the app. On native Wayland, global shortcuts are currently unavailable and the app reports that limitation.
 
-The **Volume** slider below Playback changes only Native Voice's output (0–100%), including a live session or local audio test. Save in Settings to retain it. Setting volume to zero does not mute your microphone. See [controls, JSON format and validation](docs/controls-and-settings.md) and [the example JSON](settings.example.json).
+The **Volume** slider in **Settings → Audio**, below Playback, changes only Native Voice's output (0–100%), including a live session or local audio test. Save in Settings to retain it. Setting volume to zero does not mute your microphone. See [controls, JSON format and validation](docs/controls-and-settings.md) and [the example JSON](settings.example.json).
+
+## Streaming
+
+**Streaming**, beside **Voice**, contains an experimental macOS receiver for peer-to-peer screen shares from TS6 clients. Join the publisher’s channel, refresh the stream list and choose **Watch**. The viewer does not capture or publish your screen, and stream audio is not played. Leaving Streaming or stopping/disconnecting releases the receiver. Moving AV1 video at 1280×720 from official TeamSpeak 6 on Windows has been verified, including Stop/rejoin and leaving the tab. This is one tested version/network path, not general TS6 feature parity. See [receiver scope, measurements and validation](docs/streaming.md).
 
 ## Usage and connection metrics
 
-Open **Statistics** next to **Voice**. Sampling and history continue while either tab is selected.
+Open **Statistics** using the graph icon at the top right. Sampling and history continue while either tab is selected.
+
+The fixed bottom bar keeps your connection-health indicator at the left, followed by a row of small loss-in, loss-out, ping and idle charts while connected in normal mode. CPU, RAM (RSS) and the platform memory detail remain at the right. The bar stays visible across Voice, Streaming, Statistics and Settings while the content scrolls.
 
 ### Performance mode
 
@@ -112,7 +120,7 @@ The [updated normal/performance comparison](docs/lobby-mode-comparison.md) inclu
 - **Idle time** uses the server's report in `HH:MM:SS`, advances between reports, and resets when this client sends voice.
 - **File transfer (in/out)** uses the server-reported per-client bandwidth in bytes per second. File sharing is not implemented in this prototype; absent server fields appear as `—`, not invented zeros.
 
-Process and local connection metrics refresh once per second. Only this process's CPU/memory is sampled; history drawings are cached between updates. The client requests its own server-side connection information every five seconds. If the server denies that request, polling stops until reconnecting. Server measurements older than 15 seconds become unavailable, and disconnected/unsupported values show `—`.
+Process and local connection metrics refresh once per second. Only this process's CPU/memory is sampled; history drawings are cached between updates. The client requests its own server-side connection information every five seconds. If the server denies that request, polling stops until reconnecting. Expanding another client in Voice requests that client's connection health while the details are visible; see [connection health and thresholds](docs/controls-and-settings.md#connection-health). Server measurements older than 15 seconds become unavailable, and disconnected/unsupported values show `—`.
 
 ### Traces and breakdowns
 

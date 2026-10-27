@@ -291,22 +291,42 @@ pub struct ConnectionUsage {
 
 /// Only copy the metrics we display, not the address/private fields in the
 /// server's connection-info response.
+#[derive(Debug, Clone, Copy)]
 pub struct ServerUsage {
     received_at: Instant,
-    packet_loss_out: Option<f32>,
-    idle_seconds: u64,
-    file_upload_per_second: Option<u64>,
-    file_download_per_second: Option<u64>,
+    quality: ConnectionUsage,
 }
 
 impl ServerUsage {
     pub fn new(data: &ConnectionClientData, now: Instant) -> Self {
         Self {
             received_at: now,
-            packet_loss_out: loss_percent(data.client_to_server_packetloss_total),
-            idle_seconds: data.idle_time.whole_seconds().max(0) as u64,
-            file_upload_per_second: data.filetransfer_bandwidth_sent,
-            file_download_per_second: data.filetransfer_bandwidth_received,
+            quality: ConnectionUsage {
+                ping_ms: data
+                    .ping
+                    .filter(|v| !v.is_negative())
+                    .map(|v| v.as_seconds_f64() * 1000.0),
+                ping_deviation_ms: data
+                    .ping_deviation
+                    .filter(|v| !v.is_negative())
+                    .map(|v| v.as_seconds_f64() * 1000.0),
+                packet_loss_in: data
+                    .server_to_client_packetloss_total
+                    .and_then(loss_percent),
+                packet_loss_out: loss_percent(data.client_to_server_packetloss_total),
+                idle_seconds: Some(data.idle_time.whole_seconds().max(0) as u64),
+                file_upload_per_second: data.filetransfer_bandwidth_sent,
+                file_download_per_second: data.filetransfer_bandwidth_received,
+            },
+        }
+    }
+
+    pub fn sample(&self, now: Instant) -> ConnectionUsage {
+        if now.saturating_duration_since(self.received_at) > SERVER_MAX_AGE {
+            ConnectionUsage::default()
+        } else {
+            // Remote idle time is a server snapshot: speech may resume between replies.
+            self.quality
         }
     }
 }
@@ -321,21 +341,130 @@ pub fn connection_usage(
         ping_ms: (!stats.rtt.is_zero()).then_some(stats.rtt.as_secs_f64() * 1000.0),
         ping_deviation_ms: (!stats.rtt.is_zero()).then_some(stats.rtt_dev.as_secs_f64() * 1000.0),
         packet_loss_in: loss_percent(stats.get_packetloss_s2c_total()),
-        ..ConnectionUsage::default()
+        ..server.map_or_else(ConnectionUsage::default, |server| server.sample(now))
     };
     if let Some(server) = server {
         let age = now.saturating_duration_since(server.received_at);
         if age <= SERVER_MAX_AGE {
-            usage.packet_loss_out = server.packet_loss_out;
             usage.idle_seconds = Some(match last_voice.filter(|last| *last > server.received_at) {
                 Some(last) => now.saturating_duration_since(last).as_secs(),
-                None => server.idle_seconds.saturating_add(age.as_secs()),
+                None => server
+                    .quality
+                    .idle_seconds
+                    .unwrap_or(0)
+                    .saturating_add(age.as_secs()),
             });
-            usage.file_upload_per_second = server.file_upload_per_second;
-            usage.file_download_per_second = server.file_download_per_second;
         }
     }
     usage
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Good,
+    Fair,
+    Poor,
+    Unknown,
+}
+
+impl Health {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Good => "Good",
+            Self::Fair => "Fair",
+            Self::Poor => "Poor",
+            Self::Unknown => "Unavailable",
+        }
+    }
+
+    fn threshold(value: Option<f64>, fair: f64, poor: f64) -> Self {
+        match value.filter(|v| v.is_finite() && *v >= 0.0) {
+            Some(v) if v >= poor => Self::Poor,
+            Some(v) if v >= fair => Self::Fair,
+            Some(_) => Self::Good,
+            None => Self::Unknown,
+        }
+    }
+
+    pub fn loss(percent: Option<f32>) -> Self {
+        Self::threshold(percent.filter(|v| *v <= 100.0).map(f64::from), 1.0, 5.0)
+    }
+
+    pub fn ping(ms: Option<f64>, deviation: Option<f64>) -> Self {
+        let ping = Self::threshold(ms, 100.0, 200.0);
+        match (ping, Self::threshold(deviation, 20.0, 50.0)) {
+            (Self::Poor, _) | (_, Self::Poor) => Self::Poor,
+            (Self::Fair, _) | (_, Self::Fair) => Self::Fair,
+            (Self::Unknown, _) => Self::Unknown,
+            _ => Self::Good,
+        }
+    }
+}
+
+impl ConnectionUsage {
+    pub fn health_tooltip(self) -> String {
+        let mut problems = Vec::new();
+        let mut missing = Vec::new();
+        for (label, value, health) in [
+            (
+                "Incoming packet loss",
+                self.packet_loss_in.map(|v| format!("{v:.1}%")),
+                Health::loss(self.packet_loss_in),
+            ),
+            (
+                "Outgoing packet loss",
+                self.packet_loss_out.map(|v| format!("{v:.1}%")),
+                Health::loss(self.packet_loss_out),
+            ),
+            (
+                "Latency",
+                self.ping_ms.map(|v| format!("{v:.0} ms")),
+                Health::threshold(self.ping_ms, 100.0, 200.0),
+            ),
+            (
+                "Ping variation",
+                self.ping_deviation_ms.map(|v| format!("{v:.1} ms")),
+                Health::threshold(self.ping_deviation_ms, 20.0, 50.0),
+            ),
+        ] {
+            match health {
+                Health::Fair | Health::Poor => {
+                    problems.push(format!("{label}: {}", value.unwrap()))
+                }
+                Health::Unknown => missing.push(label),
+                Health::Good => {}
+            }
+        }
+        if !problems.is_empty() {
+            problems.join("\n")
+        } else if !missing.is_empty() {
+            format!("Unavailable: {}", missing.join(", "))
+        } else {
+            "No connection issues detected.".into()
+        }
+    }
+
+    pub fn health(self) -> Health {
+        let readings = [
+            Health::loss(self.packet_loss_in),
+            Health::loss(self.packet_loss_out),
+            Health::ping(self.ping_ms, self.ping_deviation_ms),
+        ];
+        for health in [Health::Poor, Health::Fair, Health::Unknown] {
+            if readings.contains(&health) {
+                return health;
+            }
+        }
+        Health::Good
+    }
+
+    pub fn ping_text(self) -> String {
+        match (self.ping_ms, self.ping_deviation_ms) {
+            (Some(ping), Some(deviation)) => format!("{ping:.0} ms ± {deviation:.1}"),
+            (Some(ping), None) => format!("{ping:.0} ms"),
+            _ => "—".into(),
+        }
+    }
 }
 
 fn loss_percent(ratio: f32) -> Option<f32> {
@@ -529,10 +658,12 @@ mod tests {
         stats.rtt_dev = Duration::from_micros(2100);
         let server = ServerUsage {
             received_at: start,
-            packet_loss_out: loss_percent(0.025),
-            idle_seconds: 3600,
-            file_upload_per_second: Some(100),
-            file_download_per_second: None,
+            quality: ConnectionUsage {
+                packet_loss_out: loss_percent(0.025),
+                idle_seconds: Some(3600),
+                file_upload_per_second: Some(100),
+                ..Default::default()
+            },
         };
         let sample = connection_usage(&stats, Some(&server), None, start + Duration::from_secs(3));
         assert_eq!(sample.ping_ms, Some(17.0));
@@ -556,6 +687,125 @@ mod tests {
         assert_eq!(stale.ping_ms, Some(17.0));
         assert_eq!(loss_percent(f32::NAN), None);
         assert_eq!(loss_percent(-0.1), None);
+    }
+
+    #[test]
+    fn health_flags_loss_latency_and_variation_without_treating_missing_data_as_good() {
+        for (value, expected) in [
+            (None, Health::Unknown),
+            (Some(f32::NAN), Health::Unknown),
+            (Some(-1.0), Health::Unknown),
+            (Some(101.0), Health::Unknown),
+            (Some(0.0), Health::Good),
+            (Some(0.9), Health::Good),
+            (Some(1.0), Health::Fair),
+            (Some(5.0), Health::Poor),
+        ] {
+            assert_eq!(Health::loss(value), expected);
+        }
+        assert_eq!(Health::ping(Some(99.0), None), Health::Good);
+        assert_eq!(Health::ping(Some(100.0), None), Health::Fair);
+        assert_eq!(Health::ping(Some(200.0), None), Health::Poor);
+        assert_eq!(Health::ping(Some(23.0), Some(20.0)), Health::Fair);
+        assert_eq!(Health::ping(Some(23.0), Some(50.0)), Health::Poor);
+        assert_eq!(Health::ping(None, Some(0.0)), Health::Unknown);
+        assert_eq!(Health::ping(None, Some(50.0)), Health::Poor);
+        let mut quality = ConnectionUsage {
+            ping_ms: Some(23.0),
+            packet_loss_in: Some(0.0),
+            packet_loss_out: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(quality.health(), Health::Good);
+        quality.packet_loss_out = None;
+        assert_eq!(quality.health(), Health::Unknown);
+        quality.packet_loss_in = Some(5.0);
+        assert_eq!(quality.health(), Health::Poor);
+    }
+
+    #[test]
+    fn health_tooltip_only_lists_problems_and_separates_missing_measurements() {
+        let mut quality = ConnectionUsage {
+            packet_loss_in: Some(0.0),
+            packet_loss_out: Some(0.0),
+            ping_ms: Some(23.0),
+            ping_deviation_ms: Some(11.2),
+            idle_seconds: Some(86_400),
+            ..Default::default()
+        };
+        assert_eq!(quality.health_tooltip(), "No connection issues detected.");
+        quality.packet_loss_out = Some(2.0);
+        quality.ping_deviation_ms = Some(55.0);
+        assert_eq!(
+            quality.health_tooltip(),
+            "Outgoing packet loss: 2.0%\nPing variation: 55.0 ms"
+        );
+        assert_eq!(quality.health(), Health::Poor);
+        quality.packet_loss_out = None;
+        quality.ping_deviation_ms = Some(0.0);
+        assert_eq!(
+            quality.health_tooltip(),
+            "Unavailable: Outgoing packet loss"
+        );
+        assert_eq!(quality.health(), Health::Unknown);
+        quality.ping_ms = Some(220.0);
+        assert_eq!(quality.health_tooltip(), "Latency: 220 ms");
+    }
+
+    #[test]
+    fn remote_samples_expire_and_do_not_invent_idle_activity_between_responses() {
+        let now = Instant::now();
+        let sample = ServerUsage {
+            received_at: now,
+            quality: ConnectionUsage {
+                ping_ms: Some(23.0),
+                ping_deviation_ms: Some(11.2),
+                packet_loss_in: Some(0.0),
+                packet_loss_out: Some(0.0),
+                idle_seconds: Some(60),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            sample.sample(now + Duration::from_secs(5)).idle_seconds,
+            Some(60)
+        );
+        assert_eq!(sample.sample(now).ping_text(), "23 ms ± 11.2");
+        let expired = sample.sample(now + Duration::from_secs(16));
+        assert_eq!(expired.health(), Health::Unknown);
+        assert!(
+            expired.ping_ms.is_none()
+                && expired.packet_loss_in.is_none()
+                && expired.packet_loss_out.is_none()
+                && expired.idle_seconds.is_none()
+        );
+    }
+
+    #[test]
+    fn server_metrics_keep_client_directions_units_and_missing_fields() {
+        let data: ConnectionClientData = serde_json::from_value(serde_json::json!({
+            "client_id": 7,
+            "ping": [0, 23_000_000], "ping_deviation": [0, 11_200_000],
+            "idle_time": [60, 0],
+            "server_to_client_packetloss_total": 0.025,
+            "client_to_server_packetloss_speech": 0.0,
+            "client_to_server_packetloss_keepalive": 0.0,
+            "client_to_server_packetloss_control": 0.0,
+            "client_to_server_packetloss_total": 0.01
+        }))
+        .unwrap();
+        let now = Instant::now();
+        let quality = ServerUsage::new(&data, now).sample(now);
+        assert_eq!(quality.ping_ms, Some(23.0));
+        assert!((quality.ping_deviation_ms.unwrap() - 11.2).abs() < 0.0001);
+        assert_eq!(quality.packet_loss_in, Some(2.5));
+        assert_eq!(quality.packet_loss_out, Some(1.0));
+        assert_eq!(quality.idle_seconds, Some(60));
+        let mut missing = data;
+        missing.ping = None;
+        missing.server_to_client_packetloss_total = None;
+        let quality = ServerUsage::new(&missing, now).sample(now);
+        assert!(quality.ping_ms.is_none() && quality.packet_loss_in.is_none());
     }
 
     #[test]

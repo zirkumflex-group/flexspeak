@@ -1,0 +1,204 @@
+{
+  "label": "Fixed renderer, official Windows TS6 AV1 1280x720 ~30 decoded FPS, microphone muted",
+  "pid": 77848,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "warmup_seconds": 5,
+  "sample_seconds": 30.416525500128046,
+  "rss_mib_median": 142.0,
+  "rss_mib_min": 141.984375,
+  "rss_mib_max": 142.015625,
+  "average_cpu_percent_one_core": 67.7263417214214,
+  "physical_footprint_mib": 223.01663208007812,
+  "physical_footprint_mib_median": 223.01663208007812,
+  "physical_footprint_mib_min": 216.62600708007812,
+  "physical_footprint_mib_max": 235.75100708007812,
+  "footprint_method": "proc_pid_rusage(RUSAGE_INFO_V0)",
+  "samples": [
+    {
+      "at": 1505507.677914708,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 36.75,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505508.69162425,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 37.45,
+      "physical_footprint_mib": 229.36038208007812
+    },
+    {
+      "at": 1505509.704460375,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 38.14,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505510.718297916,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 38.81,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505511.732848375,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 39.5,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505512.748071791,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 40.23,
+      "physical_footprint_mib": 229.36038208007812
+    },
+    {
+      "at": 1505513.759983375,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 40.94,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505514.775479583,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 41.62,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505515.789427166,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 42.34,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505516.800596291,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 43.01,
+      "physical_footprint_mib": 222.98538208007812
+    },
+    {
+      "at": 1505517.816060708,
+      "rss_mib": 141.984375,
+      "cpu_seconds": 43.72,
+      "physical_footprint_mib": 229.36038208007812
+    },
+    {
+      "at": 1505518.83130975,
+      "rss_mib": 142.0,
+      "cpu_seconds": 44.46,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505519.84288675,
+      "rss_mib": 142.0,
+      "cpu_seconds": 45.2,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505520.858016875,
+      "rss_mib": 142.0,
+      "cpu_seconds": 45.98,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505521.872078458,
+      "rss_mib": 142.0,
+      "cpu_seconds": 46.68,
+      "physical_footprint_mib": 223.00100708007812
+    },
+    {
+      "at": 1505522.884115875,
+      "rss_mib": 142.0,
+      "cpu_seconds": 47.43,
+      "physical_footprint_mib": 223.00100708007812
+    },
+    {
+      "at": 1505523.8996795,
+      "rss_mib": 142.0,
+      "cpu_seconds": 48.15,
+      "physical_footprint_mib": 223.00100708007812
+    },
+    {
+      "at": 1505524.914750583,
+      "rss_mib": 142.0,
+      "cpu_seconds": 48.87,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505525.927221791,
+      "rss_mib": 142.0,
+      "cpu_seconds": 49.55,
+      "physical_footprint_mib": 223.00100708007812
+    },
+    {
+      "at": 1505526.941365458,
+      "rss_mib": 142.0,
+      "cpu_seconds": 50.18,
+      "physical_footprint_mib": 216.62600708007812
+    },
+    {
+      "at": 1505527.955758791,
+      "rss_mib": 142.0,
+      "cpu_seconds": 50.88,
+      "physical_footprint_mib": 223.00100708007812
+    },
+    {
+      "at": 1505528.971294583,
+      "rss_mib": 142.0,
+      "cpu_seconds": 51.53,
+      "physical_footprint_mib": 235.75100708007812
+    },
+    {
+      "at": 1505529.984317291,
+      "rss_mib": 142.0,
+      "cpu_seconds": 52.13,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505530.999131125,
+      "rss_mib": 142.0,
+      "cpu_seconds": 52.73,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505532.012208375,
+      "rss_mib": 142.0,
+      "cpu_seconds": 53.32,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505533.023834375,
+      "rss_mib": 142.0,
+      "cpu_seconds": 53.98,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505534.037469583,
+      "rss_mib": 142.0,
+      "cpu_seconds": 54.66,
+      "physical_footprint_mib": 223.00100708007812
+    },
+    {
+      "at": 1505535.051657791,
+      "rss_mib": 142.0,
+      "cpu_seconds": 55.34,
+      "physical_footprint_mib": 229.37600708007812
+    },
+    {
+      "at": 1505536.065632833,
+      "rss_mib": 142.015625,
+      "cpu_seconds": 56.04,
+      "physical_footprint_mib": 223.01663208007812
+    },
+    {
+      "at": 1505537.07873875,
+      "rss_mib": 142.015625,
+      "cpu_seconds": 56.7,
+      "physical_footprint_mib": 223.01663208007812
+    },
+    {
+      "at": 1505538.094440208,
+      "rss_mib": 142.015625,
+      "cpu_seconds": 57.35,
+      "physical_footprint_mib": 223.01663208007812
+    }
+  ]
+}

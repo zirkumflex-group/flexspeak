@@ -1,13 +1,20 @@
 use crate::audio::{AudioEngine, DeviceChoice, PlaybackVolume};
 use crate::profiler::{self, Category};
 use crate::usage::{self, ConnectionUsage, NetworkUsage, ServerUsage, TrafficMeter};
+use crate::{
+    alerts::Source,
+    command_flow::{AudioState, Controls, Flow, Operation, Ticket},
+    streaming,
+};
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use std::{
-    fmt,
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,7 +23,8 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tsclientlib::{
-    ChannelId, Codec, Connection, DisconnectOptions, Identity, MessageHandle, StreamItem,
+    ChannelId, ChannelPermissionHint, ClientId, Codec, Connection, DisconnectOptions, Identity,
+    StreamItem,
     events::{Event as BookEvent, PropertyId},
     prelude::*,
 };
@@ -24,6 +32,9 @@ use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 
 pub struct Config {
     pub performance_mode: Arc<AtomicBool>,
+    pub channel_health_visible: Arc<AtomicBool>,
+    pub streaming_visible: Arc<AtomicBool>,
+    pub video_surface: Arc<streaming::Surface>,
     pub playback_volume: Arc<PlaybackVolume>,
     pub address: String,
     pub nickname: String,
@@ -38,26 +49,63 @@ pub enum Command {
     Mute(bool),
     Deafen(bool),
     Join(u64, String),
+    RefreshStreams,
+    WatchStream(String),
+    StopWatching,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JoinAccess {
+    Allowed,
+    Denied,
+    #[default]
+    Unknown,
+    UnsupportedCodec,
+}
+
+impl JoinAccess {
+    pub fn can_request(self) -> bool {
+        matches!(self, Self::Allowed | Self::Unknown)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub id: u16,
+    pub name: String,
+    pub is_self: bool,
+    pub mic_muted: bool,
+    pub sound_muted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Channel {
     pub id: u64,
     pub name: String,
-}
-impl fmt::Display for Channel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}  ·  #{}", self.name, self.id)
-    }
+    pub parent: u64,
+    pub order: u64,
+    pub depth: usize,
+    pub join_access: JoinAccess,
+    pub has_password: bool,
+    pub members_visible: bool,
+    pub members: Vec<Member>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub server: String,
+    pub server_version: String,
     pub channels: Vec<Channel>,
     pub current: Option<Channel>,
-    pub members: Vec<String>,
     pub can_talk: bool,
+}
+
+impl Snapshot {
+    pub fn current_members(&self) -> &[Member] {
+        self.current
+            .as_ref()
+            .map_or(&[], |channel| &channel.members)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +113,7 @@ pub enum Event {
     Status(String),
     Connected(String),
     State(Snapshot),
+    Streaming(streaming::Event),
     Meter {
         level: f32,
         sent: u64,
@@ -75,9 +124,31 @@ pub enum Event {
         network: NetworkUsage,
         connection: ConnectionUsage,
     },
-    Warning(String),
-    Stopped(Option<String>),
+    ClientUsage {
+        id: u16,
+        result: Result<ServerUsage, &'static str>,
+    },
+    Warning {
+        source: Source,
+        detail: String,
+    },
+    Recovered(Source),
+    Controls {
+        confirmed: Option<AudioState>,
+        pending: bool,
+    },
+    ChannelPasswordRequired(u64),
+    Stopped(Option<(Source, String)>),
 }
+
+#[derive(Debug)]
+struct AudioFailure(anyhow::Error);
+impl std::fmt::Display for AudioFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for AudioFailure {}
 
 pub fn start(
     config: Config,
@@ -100,9 +171,14 @@ pub fn start(
                     }
                 })
             })();
-            let _ = events.blocking_send(Event::Stopped(
-                result.err().map(|error| format!("{error:#}")),
-            ));
+            let _ = events.blocking_send(Event::Stopped(result.err().map(|error| {
+                let source = if error.downcast_ref::<AudioFailure>().is_some() {
+                    Source::Audio
+                } else {
+                    Source::Connection
+                };
+                (source, format!("{error:#}"))
+            })));
         })?;
     Ok((commands, output))
 }
@@ -151,44 +227,169 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
         .clients
         .get(&state.own_client)
         .map(|client| client.channel);
-    let mut channels: Vec<_> = state
-        .channels
-        .values()
-        .map(|c| Channel {
-            id: c.id.0,
-            name: c.name.clone(),
-        })
-        .collect();
-    channels.sort_by_key(|c| c.id);
+    let mut members: BTreeMap<u64, Vec<Member>> = BTreeMap::new();
+    for client in state.clients.values() {
+        members.entry(client.channel.0).or_default().push(Member {
+            id: client.id.0,
+            name: client.name.clone(),
+            is_self: client.id == state.own_client,
+            mic_muted: client.input_muted || client.output_muted || !client.input_hardware_enabled,
+            sound_muted: client.output_muted
+                || client.output_only_muted
+                || !client.output_hardware_enabled,
+        });
+    }
+    for clients in members.values_mut() {
+        clients
+            .sort_by_cached_key(|client| (!client.is_self, client.name.to_lowercase(), client.id));
+    }
+    let channels = order_channels(
+        state
+            .channels
+            .values()
+            .map(|c| Channel {
+                id: c.id.0,
+                name: c.name.clone(),
+                parent: c.parent.0,
+                order: c.order.0,
+                join_access: channel_join_access(c),
+                has_password: c.has_password.unwrap_or(false),
+                members_visible: c.subscribed || Some(c.id) == current_id,
+                members: members.remove(&c.id.0).unwrap_or_default(),
+                depth: 0,
+            })
+            .collect(),
+    );
     let current = channels
         .iter()
         .find(|c| Some(ChannelId(c.id)) == current_id)
         .cloned();
-    let mut members: Vec<_> = state
-        .clients
-        .values()
-        .filter(|c| Some(c.channel) == current_id)
-        .map(|c| {
-            format!(
-                "{}{}{}",
-                c.name,
-                if c.id == state.own_client {
-                    " (you)"
-                } else {
-                    ""
-                },
-                if c.input_muted { " · muted" } else { "" }
-            )
-        })
-        .collect();
-    members.sort();
     Ok(Snapshot {
         server: state.server.name.clone(),
+        server_version: state.server.version.clone(),
         channels,
         current,
-        members,
         can_talk: connection.can_send_audio(),
     })
+}
+
+fn channel_join_access(channel: &tsclientlib::data::Channel) -> JoinAccess {
+    if !matches!(channel.codec, Codec::OpusVoice | Codec::OpusMusic) {
+        return JoinAccess::UnsupportedCodec;
+    }
+    match channel.permission_hints {
+        Some(hints) if hints.contains(ChannelPermissionHint::JOIN) => JoinAccess::Allowed,
+        Some(_) => JoinAccess::Denied,
+        None => JoinAccess::Unknown,
+    }
+}
+
+#[derive(Default)]
+struct PeerPoll {
+    last_request: Option<Instant>,
+    disabled: bool,
+}
+
+#[derive(Default)]
+struct ChannelPolls {
+    channel: Option<ChannelId>,
+    peers: HashMap<ClientId, PeerPoll>,
+}
+
+impl ChannelPolls {
+    fn sync(&mut self, channel: Option<ChannelId>, ids: impl Iterator<Item = ClientId>) {
+        if self.channel != channel {
+            self.peers.clear();
+            self.channel = channel;
+        }
+        let ids: HashSet<_> = ids.collect();
+        self.peers.retain(|id, _| ids.contains(id));
+        for id in ids {
+            self.peers.entry(id).or_default();
+        }
+    }
+
+    fn next_due(&self, now: Instant) -> Option<ClientId> {
+        self.peers
+            .iter()
+            .filter(|(_, peer)| {
+                !peer.disabled
+                    && peer.last_request.is_none_or(|at| {
+                        now.saturating_duration_since(at) >= usage::SERVER_REFRESH_INTERVAL
+                    })
+            })
+            .min_by_key(|(id, peer)| (peer.last_request, id.0))
+            .map(|(id, _)| *id)
+    }
+
+    fn requested(&mut self, id: ClientId, now: Instant) {
+        if let Some(peer) = self.peers.get_mut(&id) {
+            peer.last_request = Some(now);
+        }
+    }
+
+    fn disable(&mut self, id: ClientId, channel: Option<ChannelId>) -> bool {
+        if self.channel == channel
+            && let Some(peer) = self.peers.get_mut(&id)
+        {
+            peer.disabled = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn order_channels(channels: Vec<Channel>) -> Vec<Channel> {
+    let mut groups: BTreeMap<u64, Vec<Channel>> = BTreeMap::new();
+    for channel in channels {
+        groups.entry(channel.parent).or_default().push(channel);
+    }
+    for siblings in groups.values_mut() {
+        let mut remaining: BTreeMap<_, _> = siblings
+            .drain(..)
+            .map(|channel| (channel.id, channel))
+            .collect();
+        let mut successors: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for channel in remaining.values() {
+            successors
+                .entry(channel.order)
+                .or_default()
+                .push(channel.id);
+        }
+        let mut previous = 0;
+        while !remaining.is_empty() {
+            let id = successors
+                .get(&previous)
+                .and_then(|ids| ids.iter().find(|id| remaining.contains_key(id)))
+                .copied()
+                .unwrap_or_else(|| *remaining.first_key_value().unwrap().0);
+            siblings.push(remaining.remove(&id).unwrap());
+            previous = id;
+        }
+    }
+    let mut ordered = Vec::new();
+    let mut stack: Vec<_> = groups
+        .remove(&0)
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .map(|channel| (channel, 0))
+        .collect();
+    while !stack.is_empty() || !groups.is_empty() {
+        // Missing parents and malformed cycles still appear once, without recursion.
+        if stack.is_empty() {
+            let (_, orphaned) = groups.pop_first().unwrap();
+            stack.extend(orphaned.into_iter().rev().map(|channel| (channel, 0)));
+        }
+        let (mut channel, depth) = stack.pop().unwrap();
+        if let Some(children) = groups.remove(&channel.id) {
+            stack.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
+        }
+        channel.depth = depth;
+        ordered.push(channel);
+    }
+    ordered
 }
 
 fn update_codec(connection: &Connection, audio: &mut AudioEngine) -> Result<()> {
@@ -245,7 +446,8 @@ async fn run_connection(
         &config.input,
         &config.output,
         config.playback_volume.clone(),
-    )?;
+    )
+    .map_err(AudioFailure)?;
     if commands.is_closed()
         || events.is_closed()
         || matches!(commands.try_recv(), Ok(Command::Stop))
@@ -260,9 +462,18 @@ async fn run_connection(
         .input_muted(true)
         .connect()?;
     let mut traffic = TrafficMeter::new(Instant::now());
+    let flow = Rc::new(RefCell::new(Flow::default()));
+    let mut streams = streaming::Session::new(
+        events.clone(),
+        config.video_surface.clone(),
+        config.streaming_visible.clone(),
+        config.performance_mode.clone(),
+        flow.clone(),
+    );
     let result = async {
-        let mut muted = true;
-        let mut deafened = false;
+        let mut controls = Controls::new(Instant::now());
+        let mut subscription: Option<Ticket> = None;
+        let mut subscription_finished = false;
         let mut connected = false;
         let mut deadline = Instant::now();
         let mut sent = 0;
@@ -271,12 +482,15 @@ async fn run_connection(
         let mut last_usage = Instant::now();
         let mut last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
         let mut server_usage: Option<ServerUsage> = None;
-        let mut pending_info: Option<(MessageHandle, Instant)> = None;
+        let mut pending_info: Option<(Ticket, ClientId, Option<ChannelId>, Instant)> = None;
+        let mut channel_polls = ChannelPolls::default();
+        let mut last_info_check = Instant::now() - usage::REFRESH_INTERVAL;
+        let mut pending_join: Option<(Ticket, u64, Instant)> = None;
         let mut server_info_enabled = true;
         let mut last_voice = None;
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Tick }
+        enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(Option<streaming::MediaEvent>), Tick }
         loop {
             let step = {
                 let mut stream = connection.events();
@@ -288,6 +502,7 @@ async fn run_connection(
                 tokio::select! {
                     command = commands.recv() => Step::Command(command),
                     event = next_event => Step::Network(event),
+                    event = streams.next_media() => Step::Media(event),
                     _ = tick.tick() => Step::Tick,
                 }
             };
@@ -298,21 +513,48 @@ async fn run_connection(
                     let state = connection.get_state()?;
                     match command {
                         Command::Mute(value) => {
-                            muted = value;
+                            controls.desired.muted = value;
                             if value { audio.set_capture(false); }
-                            state.client_update().set_input_muted(value).send_with_result(&mut connection)?;
+                            controls.changed(&mut flow.borrow_mut(), Instant::now());
+                            let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: controls.pending.is_some() || controls.confirmed != Some(controls.desired) });
                         },
                         Command::Deafen(value) => {
-                            deafened = value;
+                            controls.desired.deafened = value;
                             audio.clear_playback();
                             audio.set_capture(false);
-                            state.client_update().set_output_muted(value).send_with_result(&mut connection)?;
+                            controls.changed(&mut flow.borrow_mut(), Instant::now());
+                            let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: controls.pending.is_some() || controls.confirmed != Some(controls.desired) });
                         },
                         Command::Join(id, password) => {
+                            if flow.borrow().cooling_down(Instant::now()) {
+                                let _ = events.try_send(Event::Warning { source: Source::Flood, detail: flow.borrow().flood_detail(Operation::Join, Instant::now()) });
+                                continue;
+                            }
+                            if pending_join.is_some() {
+                                let _ = events.try_send(Event::Warning { source: Source::Join, detail: "A channel join is already in progress.".into() });
+                                continue;
+                            }
+                            let access = state.channels.get(&ChannelId(id)).map(channel_join_access);
+                            if !access.is_some_and(JoinAccess::can_request) {
+                                let _ = events.try_send(Event::Warning { source: Source::Join, detail: "Cannot join: channel access is unavailable or denied.".into() });
+                                continue;
+                            }
                             if let Some(client) = state.clients.get(&state.own_client) {
-                                client.client_move(ChannelId(id)).set_password(&password).send_with_result(&mut connection)?;
+                                let handle = flow.borrow_mut().enqueue(client.client_move(ChannelId(id)).set_password(&password).to_packet(), Operation::Join)?;
+                                pending_join = Some((handle, id, Instant::now()));
                             }
                         },
+                        Command::RefreshStreams => streams.refresh(&mut connection),
+                        Command::WatchStream(id) => {
+                            if flow.borrow().cooling_down(Instant::now()) {
+                                let _ = events.try_send(Event::Warning { source: Source::Flood, detail: flow.borrow().flood_detail(Operation::StreamJoin, Instant::now()) });
+                                continue;
+                            }
+                            if let Err(error) = streams.watch(&mut connection, &id) {
+                                let _ = events.try_send(Event::Warning { source: Source::StreamWatch, detail: error.to_string() });
+                            }
+                        },
+                        Command::StopWatching => streams.stop(&mut connection, streaming::Phase::Stopped, "Stopped watching"),
                         Command::Stop => break,
                     }
                     let _ = events.try_send(Event::State(snapshot(&connection)?));
@@ -326,54 +568,118 @@ async fn run_connection(
                             server_info_enabled = true;
                             last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
                             let _ = events.try_send(Event::Connected(audio.description.clone()));
-                            connection.get_state()?.client_update().set_input_muted(muted).set_output_muted(deafened).send_with_result(&mut connection)?;
+                            controls.reconnect(Instant::now());
+                            subscription_finished = false;
+                            subscription = None;
                         }
                         let state = connection.get_state()?;
-                        if changes.iter().any(|change| matches!(change,
-                            BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }
-                            | BookEvent::PropertyChanged { id: PropertyId::ConnectionClientData(id), .. }
-                            if *id == state.own_client))
-                            && let Some(data) = state.clients.get(&state.own_client).and_then(|client| client.connection_data.as_ref()) {
-                            server_usage = Some(ServerUsage::new(data, Instant::now()));
+                        let own_channel = state.clients.get(&state.own_client).map(|client| client.channel);
+                        channel_polls.sync(own_channel, state.clients.values()
+                            .filter(|client| client.id != state.own_client && Some(client.channel) == own_channel)
+                            .map(|client| client.id));
+                        // Deliver membership first so new-channel samples cannot populate the old view.
+                        let _ = events.try_send(Event::State(snapshot(&connection)?));
+                        for change in &changes {
+                            if let BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }
+                                | BookEvent::PropertyChanged { id: PropertyId::ConnectionClientData(id), .. } = change
+                                && let Some(data) = state.clients.get(id).and_then(|client| client.connection_data.as_ref()) {
+                                let sample = ServerUsage::new(data, Instant::now());
+                                if *id == state.own_client {
+                                    server_usage = Some(sample);
+                                } else if channel_polls.peers.contains_key(id) {
+                                    let _ = events.try_send(Event::ClientUsage { id: id.0, result: Ok(sample) });
+                                }
+                            }
                         }
                         update_codec(&connection, &mut audio)?;
-                        let _ = events.try_send(Event::State(snapshot(&connection)?));
+                        streams.sync(&mut connection);
                     },
                     StreamItem::Audio(packet) => {
                         received += 1;
-                        if !deafened && connection.can_receive_audio() { audio.receive(packet); }
+                        if !controls.desired.deafened && connection.can_receive_audio() { audio.receive(packet); }
                     },
                     StreamItem::IdentityLevelIncreasing(level) => { let _ = events.try_send(Event::Status(format!("Preparing server identity (security level {level})…"))); },
                     StreamItem::DisconnectedTemporarily(_) => {
+                        streams.reset();
+                        *flow.borrow_mut() = Flow::default();
+                        controls.reconnect(Instant::now());
+                        subscription = None;
+                        subscription_finished = false;
                         connected = false;
                         deadline = Instant::now();
                         audio.set_capture(false);
                         audio.clear_playback();
                         server_usage = None;
                         pending_info = None;
+                        channel_polls = ChannelPolls::default();
+                        pending_join = None;
                         last_voice = None;
                         let network = traffic.reset_transport(Instant::now());
                         let _ = events.try_send(Event::Usage { network, connection: ConnectionUsage::default() });
                         let _ = events.try_send(Event::Status("Connection lost. Reconnecting…".into()));
                     },
                     StreamItem::MessageResult(handle, result) => {
-                        if pending_info.is_some_and(|(pending, _)| pending == handle) {
-                            pending_info = None;
-                            if result.is_err() { server_info_enabled = false; server_usage = None; }
-                        } else if let Err(error) = result { let _ = events.try_send(Event::Warning(format!("Server: {error}"))); }
+                        let reply = flow.borrow_mut().result(handle, result, Instant::now());
+                        if let Some(reply) = reply {
+                            let ticket = reply.ticket;
+                            if reply.flooded {
+                                let seconds = flow.borrow().wait_seconds(Instant::now());
+                                let _ = events.try_send(Event::Warning { source: Source::Flood, detail: format!(
+                                    "The server rejected {} (ClientIsFlooding). Optional requests are paused for about {seconds} seconds. Local mute/deafen still apply; one command will check recovery afterward.", reply.operation.label()) });
+                            }
+                            if reply.recovered { let _ = events.try_send(Event::Recovered(Source::Flood)); }
+                            if controls.reply(ticket, reply.result.is_ok(), reply.flooded) {
+                                let pending = controls.confirmed != Some(controls.desired) && (reply.flooded || reply.result.is_ok());
+                                let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending });
+                                if reply.result.is_ok() && !pending {
+                                    let _ = events.try_send(Event::Recovered(Source::Controls));
+                                } else if !reply.flooded && let Err(error) = &reply.result {
+                                    let _ = events.try_send(Event::Warning { source: Source::Controls, detail: format!("Server rejected the mute/deafen update: {error}. Your local audio choice is still applied.") });
+                                }
+                            } else if subscription == Some(ticket) {
+                                subscription = None;
+                                subscription_finished = !reply.flooded;
+                                if reply.result.is_ok() { let _ = events.try_send(Event::Recovered(Source::Subscription)); }
+                                else if !reply.flooded && let Err(error) = &reply.result {
+                                    let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: format!("Channel subscription: {error}") });
+                                }
+                            } else if streams.message_result(&mut connection, ticket, &reply.result) {
+                            } else if pending_join.is_some_and(|(pending, _, _)| pending == ticket) {
+                                let (_, id, _) = pending_join.take().unwrap();
+                                if let Err(error) = reply.result {
+                                    if error.error == tsclientlib::TsError::ChannelInvalidPassword {
+                                        let _ = events.try_send(Event::ChannelPasswordRequired(id));
+                                    } else if !reply.flooded {
+                                        let _ = events.try_send(Event::Warning { source: Source::Join, detail: format!("Could not join channel: {error}") });
+                                    }
+                                } else { let _ = events.try_send(Event::Recovered(Source::Join)); }
+                            } else if pending_info.is_some_and(|(pending, _, _, _)| pending == ticket) {
+                                let (_, id, channel, _) = pending_info.take().unwrap();
+                                if reply.result.is_err() && !reply.flooded {
+                                    if id == connection.get_state()?.own_client {
+                                        server_info_enabled = false;
+                                        server_usage = None;
+                                    } else if channel_polls.disable(id, channel) {
+                                        let _ = events.try_send(Event::ClientUsage { id: id.0, result: Err("Server denied connection details.") });
+                                    }
+                                }
+                            }
+                        }
                     },
                     StreamItem::AudioChange(_) => { let _ = events.try_send(Event::State(snapshot(&connection)?)); },
+                    StreamItem::StreamCommand { name, content } => streams.notification(&mut connection, &name, &content),
                     _ => {},
                 },
                 Step::Network(Some(Err(error))) => return Err(connection_error(error)).context("TeamSpeak connection failed"),
                 Step::Network(None) => bail!("The server closed the connection."),
+                Step::Media(event) => streams.media_event(&mut connection, event),
                 Step::Tick => {
                     if events.is_closed() { break; }
                     if !connected && deadline.elapsed() > Duration::from_secs(40) { bail!("Connection timed out. Check the address, UDP port, password, and server availability."); }
                     {
-                        let can_send = connected && !muted && !deafened && connection.can_send_audio();
+                        let can_send = connected && controls.capture_allowed() && connection.can_send_audio();
                         audio.set_capture(can_send);
-                        let packets = audio.tick(false, deafened || !connected)?;
+                        let packets = audio.tick(false, controls.desired.deafened || !connected).map_err(AudioFailure)?;
                         if can_send {
                             for packet in packets {
                                 let _trace = profiler::scope(Category::Network, "network.send_voice");
@@ -383,6 +689,42 @@ async fn run_connection(
                             }
                         }
                         let now = Instant::now();
+                        let expired = flow.borrow_mut().expired(now);
+                        for (ticket, operation) in expired {
+                            if controls.reply(ticket, false, false) {
+                                let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: false });
+                                let _ = events.try_send(Event::Warning { source: Source::Controls, detail: "The server did not acknowledge the mute/deafen update. Local audio protection remains applied.".into() });
+                            } else if subscription == Some(ticket) {
+                                subscription = None;
+                                subscription_finished = true;
+                                let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: "Channel subscription timed out.".into() });
+                            } else if streams.timeout(&mut connection, ticket) {
+                            } else if pending_join.is_some_and(|(pending, _, _)| pending == ticket) {
+                                pending_join = None;
+                                let _ = events.try_send(Event::Warning { source: Source::Join, detail: "Channel join timed out. Try joining again.".into() });
+                            } else if pending_info.is_some_and(|(pending, _, _, _)| pending == ticket) {
+                                let (_, id, channel, _) = pending_info.take().unwrap();
+                                if id == connection.get_state()?.own_client { server_info_enabled = false; server_usage = None; }
+                                else if channel_polls.disable(id, channel) { let _ = events.try_send(Event::ClientUsage { id: id.0, result: Err("Connection details timed out.") }); }
+                            } else {
+                                tracing::debug!(operation = operation.label(), "Expired obsolete command");
+                            }
+                        }
+                        if connected && controls.needs_send(now) {
+                            let desired = controls.desired;
+                            let command = connection.get_state()?.client_update().set_input_muted(desired.muted).set_output_muted(desired.deafened);
+                            let ticket = flow.borrow_mut().enqueue(command.to_packet(), Operation::Controls)?;
+                            controls.pending = Some((ticket, desired));
+                            let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: true });
+                        }
+                        if connected && !subscription_finished && subscription.is_none() && !flow.borrow().cooling_down(now) {
+                            let command = connection.get_state()?.server.set_subscribed(true);
+                            subscription = Some(flow.borrow_mut().enqueue(command, Operation::Subscribe)?);
+                        }
+                        if pending_join.is_some_and(|(_, _, at)| now.duration_since(at) > Duration::from_secs(10)) {
+                            if let Some((ticket, _, _)) = pending_join.take() { flow.borrow_mut().cancel(ticket); }
+                            let _ = events.try_send(Event::Warning { source: Source::Join, detail: "Channel join timed out. You can try again.".into() });
+                        }
                         let show_telemetry = !config.performance_mode.load(Ordering::Relaxed);
                         if show_telemetry && now.duration_since(last_usage) >= usage::REFRESH_INTERVAL {
                             if let Ok(stats) = connection.get_network_stats() {
@@ -392,26 +734,47 @@ async fn run_connection(
                             }
                             last_usage = now;
                         }
-                        // Ask only for our own stats, and stop polling if the server
-                        // denies or times out rather than repeatedly triggering errors.
-                        if pending_info.is_some_and(|(_, at)| now.duration_since(at) > Duration::from_secs(10)) {
-                            pending_info = None;
-                            server_info_enabled = false;
-                            server_usage = None;
-                        }
-                        if show_telemetry && connected && server_info_enabled && pending_info.is_none()
-                            && now.duration_since(last_server_request) >= usage::SERVER_REFRESH_INTERVAL
-                            && let Ok(state) = connection.get_state()
-                            && let Some(client) = state.clients.get(&state.own_client) {
-                            match client.connection_info().send_with_result(&mut connection) {
-                                Ok(handle) => pending_info = Some((handle, now)),
-                                Err(_) => server_info_enabled = false,
+                        // One request per second at most, shared by ourselves and current-channel peers.
+                        if pending_info.is_some_and(|(_, _, _, at)| now.duration_since(at) > Duration::from_secs(10)) {
+                            let (ticket, id, channel, _) = pending_info.take().unwrap();
+                            flow.borrow_mut().cancel(ticket);
+                            if id == connection.get_state()?.own_client {
+                                server_info_enabled = false;
+                                server_usage = None;
+                            } else if channel_polls.disable(id, channel) {
+                                let _ = events.try_send(Event::ClientUsage { id: id.0, result: Err("Connection details timed out.") });
                             }
-                            last_server_request = now;
+                        }
+                        if show_telemetry && connected && pending_info.is_none()
+                            && flow.borrow().optional_ready(now)
+                            && now.duration_since(last_info_check) >= usage::REFRESH_INTERVAL {
+                            last_info_check = now;
+                            let state = connection.get_state()?;
+                            let own = state.own_client;
+                            let target = if server_info_enabled && now.duration_since(last_server_request) >= usage::SERVER_REFRESH_INTERVAL {
+                                Some(own)
+                            } else if config.channel_health_visible.load(Ordering::Relaxed) {
+                                channel_polls.next_due(now)
+                            } else { None };
+                            if let Some(id) = target && let Some(client) = state.clients.get(&id) {
+                                match flow.borrow_mut().enqueue(client.connection_info().to_packet(), Operation::Statistics) {
+                                    Ok(handle) => pending_info = Some((handle, id, channel_polls.channel, now)),
+                                    Err(_) if id == own => { server_info_enabled = false; server_usage = None; },
+                                    Err(_) => {
+                                        channel_polls.disable(id, channel_polls.channel);
+                                        let _ = events.try_send(Event::ClientUsage { id: id.0, result: Err("Cannot request connection details.") });
+                                    },
+                                }
+                                if id == own { last_server_request = now; } else { channel_polls.requested(id, now); }
+                            }
                         }
                         if show_telemetry && last_meter.elapsed() >= Duration::from_millis(100) {
                             let _ = events.try_send(Event::Meter { level: audio.level(), sent, received, audio_buffer_bytes: audio.buffer_bytes() });
                             last_meter = Instant::now();
+                        }
+                        if connected {
+                            streams.tick(&mut connection);
+                            flow.borrow_mut().flush(&mut connection, now)?;
                         }
                     }
                 },
@@ -419,6 +782,11 @@ async fn run_connection(
         }
         Ok(())
     }.await;
+    streams.stop(
+        &mut connection,
+        streaming::Phase::Stopped,
+        "The voice session ended",
+    );
     close(&mut connection).await;
     if let Ok(stats) = connection.get_network_stats() {
         traffic.sample(&stats.total_bytes, Instant::now());
@@ -439,7 +807,8 @@ async fn run_loopback(
         &config.input,
         &config.output,
         config.playback_volume.clone(),
-    )?;
+    )
+    .map_err(AudioFailure)?;
     audio.set_capture(true);
     let _ = events.try_send(Event::Connected(audio.description.clone()));
     let mut tick = tokio::time::interval(Duration::from_millis(10));
@@ -450,7 +819,7 @@ async fn run_loopback(
             command = commands.recv() => if matches!(command, None | Some(Command::Stop)) { break; },
             _ = tick.tick() => {
                 if events.is_closed() { break; }
-                audio.tick(true, false)?;
+                audio.tick(true, false).map_err(AudioFailure)?;
                 if !config.performance_mode.load(Ordering::Relaxed)
                     && last_meter.elapsed() >= Duration::from_millis(100) {
                     let _ = events.try_send(Event::Meter { level: audio.level(), sent: 0, received: 0, audio_buffer_bytes: audio.buffer_bytes() });
@@ -505,6 +874,228 @@ pub fn probe(address: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_health_polling_rotates_fairly_and_stops_retrying_denied_peers() {
+        let now = Instant::now();
+        let mut polls = ChannelPolls::default();
+        polls.sync(
+            Some(ChannelId(1)),
+            [ClientId(2), ClientId(3), ClientId(4)].into_iter(),
+        );
+        for (second, id) in [(0, 2), (1, 3), (2, 4)] {
+            let at = now + Duration::from_secs(second);
+            assert_eq!(polls.next_due(at), Some(ClientId(id)));
+            polls.requested(ClientId(id), at);
+        }
+        assert_eq!(polls.next_due(now + Duration::from_secs(4)), None);
+        assert_eq!(
+            polls.next_due(now + Duration::from_secs(5)),
+            Some(ClientId(2))
+        );
+        assert!(!polls.disable(ClientId(2), Some(ChannelId(9))));
+        assert!(polls.disable(ClientId(2), Some(ChannelId(1))));
+        assert_eq!(
+            polls.next_due(now + Duration::from_secs(6)),
+            Some(ClientId(3))
+        );
+        // A departed client is removed; a new channel resets denials and schedules fresh samples.
+        polls.sync(Some(ChannelId(1)), [ClientId(2), ClientId(4)].into_iter());
+        assert_eq!(
+            polls.next_due(now + Duration::from_secs(20)),
+            Some(ClientId(4))
+        );
+        polls.sync(Some(ChannelId(2)), [ClientId(2), ClientId(5)].into_iter());
+        assert_eq!(
+            polls.next_due(now + Duration::from_secs(20)),
+            Some(ClientId(2))
+        );
+        assert!(!polls.disable(ClientId(2), Some(ChannelId(1))));
+        polls.sync(None, std::iter::empty());
+        assert!(polls.peers.is_empty());
+        assert_eq!(polls.next_due(now), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "Explicit network-only QA; set NATIVE_VOICE_TEST_SERVER"]
+    async fn server_tree_probe_stays_muted_in_lobby() -> Result<()> {
+        let address = std::env::var("NATIVE_VOICE_TEST_SERVER")?;
+        let mut connection = Connection::build(address)
+            .name("Native Voice Tree Check")
+            .identity(Identity::create())
+            .channel_id(ChannelId(1))
+            .input_muted(true)
+            .output_muted(true)
+            .connect()?;
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut flow = Flow::default();
+            let mut pending = HashSet::new();
+            let mut initialized = false;
+            let mut tick = tokio::time::interval(Duration::from_millis(25));
+            loop {
+                let event = {
+                    let mut stream = connection.events();
+                    tokio::select! {
+                        event = stream.next() => Some(event),
+                        _ = tick.tick() => None,
+                    }
+                };
+                let Some(event) = event else {
+                    flow.flush(&mut connection, Instant::now())?;
+                    continue;
+                };
+                match event {
+                    Some(Ok(StreamItem::BookEvents(_))) if !initialized => {
+                        let state = connection.get_state()?;
+                        if let Some(own) = state.clients.get(&state.own_client) {
+                            assert_eq!(own.channel, ChannelId(1));
+                            pending.insert(
+                                flow.enqueue(
+                                    state
+                                        .client_update()
+                                        .set_input_muted(true)
+                                        .set_output_muted(true)
+                                        .to_packet(),
+                                    Operation::Controls,
+                                )?,
+                            );
+                            pending.insert(flow.enqueue(
+                                state.server.set_subscribed(true),
+                                Operation::Subscribe,
+                            )?);
+                            pending.insert(flow.enqueue(
+                                own.connection_info().to_packet(),
+                                Operation::Statistics,
+                            )?);
+                            initialized = true;
+                        }
+                    }
+                    Some(Ok(StreamItem::MessageResult(handle, result))) => {
+                        if let Some(reply) = flow.result(handle, result, Instant::now()) {
+                            reply.result?;
+                            assert!(pending.remove(&reply.ticket));
+                            println!("Paced acknowledgement: {}", reply.operation.label());
+                            if pending.is_empty() {
+                                let server = &connection.get_state()?.server;
+                                println!(
+                                    "Server version: {} · platform: {} · protocol: {}",
+                                    server.version, server.platform, server.protocol_version
+                                );
+                                return snapshot(&connection);
+                            }
+                        }
+                    }
+                    Some(Err(error)) => return Err(error.into()),
+                    None => bail!("Disconnected before receiving paced command acknowledgements"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .context("Server tree probe timed out")
+        .and_then(|result| result);
+        close(&mut connection).await;
+        let state = result?;
+        assert_eq!(state.current.as_ref().map(|channel| channel.id), Some(1));
+        let own = state
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.members)
+            .find(|member| member.is_self)
+            .context("Own client missing")?;
+        assert!(own.mic_muted && own.sound_muted);
+        println!(
+            "Tree probe: {} channels, {} visible clients, {} subscribed channels; join hints: {} allowed / {} denied / {} unavailable. Muted/deafened in Lobby; no audio devices opened.",
+            state.channels.len(),
+            state
+                .channels
+                .iter()
+                .map(|channel| channel.members.len())
+                .sum::<usize>(),
+            state
+                .channels
+                .iter()
+                .filter(|channel| channel.members_visible)
+                .count(),
+            state
+                .channels
+                .iter()
+                .filter(|channel| channel.join_access == JoinAccess::Allowed)
+                .count(),
+            state
+                .channels
+                .iter()
+                .filter(|channel| channel.join_access == JoinAccess::Denied)
+                .count(),
+            state
+                .channels
+                .iter()
+                .filter(|channel| channel.join_access == JoinAccess::Unknown)
+                .count()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tree_preserves_parent_hierarchy_and_linked_sibling_order() {
+        let channels = [
+            (3, 0, 7),
+            (2, 10, 8),
+            (4, 2, 0),
+            (7, 0, 10),
+            (8, 10, 0),
+            (10, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, parent, order)| Channel {
+            id,
+            parent,
+            order,
+            ..Channel::default()
+        })
+        .collect();
+        let ordered = order_channels(channels);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|channel| (channel.id, channel.depth))
+                .collect::<Vec<_>>(),
+            [(10, 0), (8, 1), (2, 1), (4, 2), (7, 0), (3, 0)]
+        );
+    }
+
+    #[test]
+    fn tree_keeps_orphans_and_cycles_once_without_recursing() {
+        let channels = [(1, 2, 2), (2, 1, 1), (3, 999, 777), (4, 0, 4)]
+            .into_iter()
+            .map(|(id, parent, order)| Channel {
+                id,
+                parent,
+                order,
+                ..Channel::default()
+            })
+            .collect();
+        let ordered = order_channels(channels);
+        let mut ids: Vec<_> = ordered.iter().map(|channel| channel.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn join_access_requires_a_positive_server_hint_and_supported_codec() {
+        let mut channel: tsclientlib::data::Channel = serde_json::from_value(serde_json::json!({
+            "id": 1, "parent": 0, "name": "Lobby", "order": 0, "codec": "OpusVoice",
+            "channel_type": "Permanent", "forced_silence": false, "subscribed": true
+        }))
+        .unwrap();
+        assert_eq!(channel_join_access(&channel), JoinAccess::Unknown);
+        channel.permission_hints = Some(ChannelPermissionHint::SUBSCRIBE);
+        assert_eq!(channel_join_access(&channel), JoinAccess::Denied);
+        channel.permission_hints = Some(ChannelPermissionHint::JOIN);
+        assert_eq!(channel_join_access(&channel), JoinAccess::Allowed);
+        channel.codec = Codec::SpeexNarrowband;
+        assert_eq!(channel_join_access(&channel), JoinAccess::UnsupportedCodec);
+    }
 
     #[tokio::test]
     async fn cancelling_an_unconnected_session_does_not_drive_the_handshake() -> Result<()> {

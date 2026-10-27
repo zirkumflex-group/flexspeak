@@ -1,0 +1,10 @@
+Native WebRTC receiver dependencies
+
+libwebrtc 0.3.54 and webrtc-sys 0.3.51
+Copyright 2025 LiveKit, Inc.
+Licensed under the Apache License, Version 2.0.
+https://github.com/livekit/rust-sdks
+
+Native WebRTC SDK: webrtc-a545de4 (macOS ARM64 release).
+WebRTC and bundled component licenses are preserved in WebRTC-LICENSE.txt.
+The full Apache 2.0 license is also included in tsclientlib-LICENSE-APACHE.txt.

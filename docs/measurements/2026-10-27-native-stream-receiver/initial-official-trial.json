@@ -1,0 +1,22 @@
+{
+  "source": "Native app diagnostics observed through CUA, 2026-10-27",
+  "channel": "Die Wei\u00dfe Front",
+  "channel_override_explicitly_authorized": true,
+  "publisher_version": "6.0.0-beta5 [Build: 1791901251]",
+  "publisher_platform": "Windows",
+  "codec": "video/AV1",
+  "codec_parameters": "level-idx=5;profile=0;tier=0",
+  "decoder": "dav1d",
+  "width": 1280,
+  "height": 720,
+  "decoded_fps_last": 31.0,
+  "rtp_packets": 6201,
+  "decoded_frames": 533,
+  "ui_updates": 315,
+  "received_mib_displayed": 6.5,
+  "ice_path": "Host \u2194 Host \u00b7 UDP",
+  "result": "Native negotiation and decoding worked; user reported flickering and observed UI was blank between image uploads. Playback stopped for fix.",
+  "root_cause": "Unallocated image handles replaced the display before Iced completed asynchronous GPU uploads. RGBA 1280x720 exceeds iced_wgpu synchronous upload threshold of 2 MiB.",
+  "fix": "Allocate each frame first, retain current allocation until ready callback, allow only one upload in flight and retain only latest decoded frame.",
+  "official_playback_passed": false
+}

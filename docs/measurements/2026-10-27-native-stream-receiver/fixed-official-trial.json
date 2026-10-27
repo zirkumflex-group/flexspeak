@@ -1,0 +1,64 @@
+{
+  "source": "Native app diagnostics and visual inspection through CUA, 2026-10-27",
+  "channel": "Die Wei\u00dfe Front",
+  "channel_override_explicitly_authorized": true,
+  "publisher_version": "6.0.0-beta5 [Build: 1791901251]",
+  "publisher_platform": "Windows",
+  "codec": "video/AV1",
+  "codec_parameters": "level-idx=5;profile=0;tier=0",
+  "decoder": "dav1d",
+  "width": 1280,
+  "height": 720,
+  "decoded_fps_observed": [
+    30.0,
+    31.0
+  ],
+  "ice_path": "Host \u2194 Host \u00b7 UDP",
+  "observations": [
+    {
+      "decoded_frames": 717,
+      "ui_updates": 402,
+      "rtp_packets": 7570,
+      "received_mib_displayed": 8.1,
+      "picture": "Game scene visibly rendered"
+    },
+    {
+      "decoded_frames": 2584,
+      "ui_updates": 1440,
+      "rtp_packets": 26906,
+      "received_mib_displayed": 28.8,
+      "picture": "Game action and camera changed; image remained visible"
+    },
+    {
+      "decoded_frames": 3186,
+      "ui_updates": 1766,
+      "rtp_packets": 33177,
+      "received_mib_displayed": 35.4,
+      "picture": "Stop watching cleared the picture and changed state to Not watching"
+    }
+  ],
+  "visual_limit": "Discrete observations, not a continuous recorded flicker audit. No video contents saved.",
+  "presentation_limit": "UI updates were fewer than decoded frames; 30 decoded FPS is not a claim of 30 displayed FPS.",
+  "voice_sent_packets_before": 0,
+  "voice_connection_remained_connected": true,
+  "stop_cleared_picture": true,
+  "rejoin_verified": true,
+  "leave_tab_verified": true,
+  "user_flicker_confirmation": "User confirmed: Yes, flickering is gone.",
+  "voice_sent_packets_after": 0,
+  "voice_received_packets_after": 0,
+  "microphone_muted_after": true,
+  "second_session": {
+    "decoded_frames": 897,
+    "ui_updates": 512,
+    "rtp_packets": 9624,
+    "received_mib_displayed": 10.3,
+    "ended_by": "Leaving Streaming tab"
+  },
+  "measurements": [
+    "fixed-idle.json",
+    "fixed-receiving.json",
+    "fixed-after-stop.json"
+  ],
+  "official_playback_passed": true
+}

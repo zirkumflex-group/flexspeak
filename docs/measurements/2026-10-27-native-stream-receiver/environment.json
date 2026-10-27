@@ -1,0 +1,40 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "rust": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+  "branch": "changes",
+  "uncommitted": true,
+  "binary_sha256": "5dd5acb3efb9ca924f9ed17ad30bd2f1a42c3135b574ac04528aa70958e15f9d",
+  "binary_bytes": 39156592,
+  "native_webrtc": {
+    "libwebrtc": "0.3.54",
+    "webrtc_sys": "0.3.51",
+    "sdk": "webrtc-a545de4"
+  },
+  "server_probe": {
+    "version": "6.0.0-beta13 [Build: 1789645103]",
+    "platform": "Linux",
+    "protocol": 8,
+    "channel_id": 1,
+    "muted": true,
+    "deafened": true,
+    "audio_devices_opened": false
+  },
+  "synthetic_receiver_test": {
+    "codec": "video/VP8",
+    "width": 320,
+    "height": 180,
+    "rtp_packets": 84,
+    "decoded_frames": 19,
+    "rgba_frames": 18,
+    "distinct_red_levels": 12,
+    "ice_path": "host-to-host UDP",
+    "capture_devices": false,
+    "external_stun": false,
+    "cleanup_passed": true
+  },
+  "official_stream_verified": true,
+  "initial_binary_sha256": "a316161cdc2ebae6c00f72467ca286fc7974f1da916c66a8cc90124aded07041",
+  "render_upload_fix": true,
+  "official_verification": "Moving AV1 video from official Windows TS6 observed natively after explicit GPU upload fix; Stop/rejoin/leave-tab verified. See fixed-official-trial.json for exact scope."
+}

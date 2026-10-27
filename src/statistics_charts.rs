@@ -59,7 +59,7 @@ fn card<'a, Message: 'a>(title: &'static str, value: String, note: String) -> El
     )
     .padding(14)
     .width(Length::Fill)
-    .style(container::rounded_box)
+    .style(crate::appearance::card)
     .into()
 }
 
@@ -100,7 +100,7 @@ fn bars<'a, Message: 'a>(
                     .style(move |theme: &Theme| progress_bar::Style {
                         background: theme.extended_palette().background.weak.color.into(),
                         bar: color.into(),
-                        border: iced::Border::default().rounded(4),
+                        border: iced::Border::default(),
                     }),
                 text(entry.detail).size(11),
             ]
@@ -110,7 +110,7 @@ fn bars<'a, Message: 'a>(
     container(content)
         .padding(18)
         .width(Length::Fill)
-        .style(container::bordered_box)
+        .style(crate::appearance::card)
         .into()
 }
 
@@ -179,7 +179,7 @@ pub fn trace<'a, Message: 'a>(summary: &TraceSummary) -> Element<'a, Message> {
                 .spacing(7),
             )
             .padding(14)
-            .style(container::rounded_box),
+            .style(crate::appearance::card),
         );
     } else {
         content = content.push(

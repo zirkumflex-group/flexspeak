@@ -65,7 +65,7 @@ def write_notices(destination, opus_source):
     with destination.open("w", encoding="utf-8") as output:
         output.write("Dependency license notices\n")
         for package in sorted(metadata["packages"], key=lambda item: (item["name"], item["version"])):
-            if package["source"] is None:
+            if Path(package["manifest_path"]).resolve() == (ROOT / "Cargo.toml").resolve():
                 continue
             directory = Path(package["manifest_path"]).parent
             files = {path for path in directory.rglob("*") if path.is_file()

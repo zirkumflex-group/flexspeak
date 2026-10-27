@@ -12,6 +12,10 @@ esac
 app="dist/Native Voice.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp assets/lucide/LICENSE "$app/Contents/Resources/Lucide-LICENSE.txt"
+cp assets/webrtc/LICENSE.md "$app/Contents/Resources/WebRTC-LICENSE.txt"
+cp assets/webrtc/NOTICE.txt "$app/Contents/Resources/WebRTC-NOTICE.txt"
+cp vendor/tsclientlib/LICENSE-MIT "$app/Contents/Resources/tsclientlib-LICENSE-MIT.txt"
+cp vendor/tsclientlib/LICENSE-APACHE "$app/Contents/Resources/tsclientlib-LICENSE-APACHE.txt"
 # Preserve the mapped executable of an already-running voice session.
 cp "target/$profile/teamspeak-native" "$app/Contents/MacOS/teamspeak-native.new"
 mv -f "$app/Contents/MacOS/teamspeak-native.new" "$app/Contents/MacOS/teamspeak-native"

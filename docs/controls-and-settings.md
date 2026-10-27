@@ -11,17 +11,65 @@ Lucide icons accompany the CPU, RAM, server, channel, microphone, playback and v
 
 ## Change and save controls
 
-Open **Settings**. Edit the server address, nickname, and shortcut text, then choose **Save settings**. A hostname, IP address, or address with a port can be used. Examples of shortcut text include `Ctrl+Shift+M`, `Ctrl+Alt+D`, `F8`, and `CmdOrCtrl+Shift+M`. The latter uses Command on macOS and Control on other platforms.
+Open **Settings** using the gear icon at the top right. The adjacent graph icon opens **Statistics**; both show a label on hover and highlight the selected page. Edit the server address, nickname, and shortcut text, then choose **Save settings**. A hostname, IP address, or address with a port can be used. Examples of shortcut text include `Ctrl+Shift+M`, `Ctrl+Alt+D`, `F8`, and `CmdOrCtrl+Shift+M`. The latter uses Command on macOS and Control on other platforms.
 
 The two actions must use different shortcuts. Invalid syntax is rejected. New keys are registered before old keys are released; an ordinary registration conflict preserves the previous working keys and leaves the file unchanged. The Settings page shows registration/save errors and the last shortcut received, so the keys can be checked while disconnected.
 
 Global shortcuts use the native event loop on macOS and Windows, and X11 on Linux. Native Wayland is not supported by the selected hotkey library and is reported as unavailable; settings can still be saved there. The app's event bridge is driven by key presses, with no periodic hotkey polling.
 
+## Microphone activity
+
+In **Settings → Audio**, the **Input activity** bar below the Microphone selector shows the captured microphone level during a local microphone test or while unmuted and allowed to speak in a call. It remains empty while disconnected, muted, deafened, blocked by the server, or stopping. Use **Test microphone locally** and **Stop microphone test** there to check it without connecting. Performance mode keeps microphone-meter updates paused.
+
 ## Playback volume
 
-The slider directly below **Playback** controls this app from 0–100%, starting at 100%. It works before connecting, during a session, and during the local microphone test. It applies output gain immediately through an atomic value read by the playback callback, with a short ramp to avoid abrupt changes. No allocation or lock is added to the audio callback.
+The slider directly below **Settings → Audio → Playback** controls this app from 0–100%, starting at 100%. It works before connecting, during a session, and during the local microphone test. It applies output gain immediately through an atomic value read by the playback callback, with a short ramp to avoid abrupt changes. No allocation or lock is added to the audio callback.
 
 0% silences playback while continuing to drain queued samples. It does not mute the microphone or change system volume. Use **Settings → Save settings** to retain the volume for the next launch.
+
+## Channels and clients
+
+While connected, the Voice sidebar places icon-only Disconnect, Mute and Deafen controls above the server name. Hover to see their actions. Audio settings live in the top-right Settings tab. Channel headings use speaker icons, clear spacing and a border on hover; clicking the heading joins the channel, while its separate arrow expands/collapses the hierarchy. The current channel stays highlighted. User avatars, channel user counts and separate Join/Joined buttons are omitted. Client rows show a health dot before the name and microphone/sound icons only while muted or deafened (including unavailable audio hardware). The app subscribes to channel updates once per connection. A channel whose members are not visible is explicitly marked rather than reported as empty.
+
+Channel names are clickable when the server allows access or access is not known in advance; the server accepts or rejects the request. Explicit denials and unsupported voice codecs disable joining. Password-protected channels prompt only after clicking the channel name; passwords remain in memory and are cleared after submission or cancellation. Missing/incorrect passwords reopen the prompt with an error. Press Escape or Cancel to dismiss it. The server always makes the final decision, including passwords, channel capacity and permission changes.
+
+## Connection health
+
+While connected in normal mode, the fixed bottom bar shows incoming/outgoing packet loss, ping with variation, and idle time in a row immediately right of the overall-health indicator. Each reading has a value and a 20-pixel-high, 60-second line chart; its color indicates health and its hover detail includes the health label. The row stays visible on Voice, Streaming, Settings and Statistics while content scrolls. Graphs have a minimum width of 110 logical pixels; if the window is too narrow, only this graph strip scrolls horizontally, while the health indicator and resource readings stay fixed. Samples move left as time passes; continuous colored lines join adjacent measured values and a translucent purple band shows ping ± variation. Each chart scales vertically to its data. Missing samples and intervals longer than 15 seconds leave gaps. Loss is Good below 1%, Fair from 1%, and Poor from 5%. Ping is Fair from 100 ms or 20 ms variation, and Poor from 200 ms or 50 ms variation. These are UI guidelines, not server guarantees; hover over a reading for its thresholds. Idle time has a neutral Active/Idle label and is not treated as a network fault.
+
+**Channel connections**, below the channel/audio status card in Voice, lists only the other clients in your current channel. Every row shows a health dot before the name even while collapsed: Good (green), Fair (amber), Poor (red), or Unknown (neutral). The repeated channel name is omitted. Hover the dot for its health label and only problematic or unavailable measurements, using the same explanation as the footer. Sidebar client dots use the same data; your own dot uses your local connection metrics, and clients outside your channel show Unknown with an explanation that they are not sampled. The worst available loss/ping/variation rating wins; idle time is not a fault. Good requires all primary readings. Click a row to expand the same four charts; one client is expanded at a time. The channel tree keeps its normal names and mute indicators.
+
+While Voice is visible in normal mode, the worker refreshes all current-channel clients, including collapsed ones. Requests are staggered: at most one statistics request per second and one outstanding request across your own server statistics and all peers. Each peer is requested no more often than every five seconds, with the oldest request first. Your own five-second statistics retain priority. Small channels therefore refresh in roughly five seconds; large channels take longer, and samples older than 15 seconds become Unknown until refreshed. Leaving Voice pauses peer polling; performance mode pauses all optional network telemetry and drops chart histories/caches. Membership and channel changes remove obsolete samples and polling targets.
+
+For a small channel, each peer adds up to 12 requests per minute, but the shared cap stays at 60 total requests per minute including your own. The pinned protocol's example plaintext reply is 314 bytes; a synthetic reply containing all declared fields with ten-character values is 2,012 bytes. At the shared one-request/second cap those examples represent about 0.3–2 KB/s of response payload total, before transport framing, acknowledgements, retries and any server-to-peer exchange. These are size estimates, not measured live traffic or guaranteed bounds. Roster/mute-state subscriptions remain separate.
+
+Only the latest sample/error is cached for each current-channel peer. Histories retain at most 60 samples each for your connection and the expanded client. They reuse existing update events, add no audio-callback work, and are included in the known-history buffer count in Statistics. Opening a different client starts a fresh history rather than retaining a growing history per user.
+
+Missing or stale values show `—` and overall Unknown, never a fabricated healthy reading. Remote idle time is sampled rather than extrapolated. Denials/timeouts appear inside the details and stop that peer's requests until a new channel membership or reconnection resets them. The app copies displayed metrics from connection-info responses, not client IP addresses.
+
+Local validation: 39 tests passed (one opt-in network test skipped), covering fair polling order, five-second per-peer spacing, denial handling, collapsed-label updates, stale data, and removal on channel/member changes. Clippy with warnings denied, formatting, and the macOS release build passed. An isolated native preview verified collapsed Good/Fair/Poor/Unknown labels and an expanded panel whose single poor metric correctly made the overall label Poor. The active call was left running on the earlier build. Live server polling cost and Windows/Linux runtime behavior remain unmeasured.
+
+## Visual layers and connection footer
+
+The [design system](design-system.md) defines shared button geometry, typography, spacing and surface colors in `src/appearance.rs`: a dark canvas, sidebar/chrome, content cards, and a raised layer for controls and floating details. Voice, Settings, Statistics, dialogs and the footer use the same palette. All rectangular widgets use zero corner radius, including buttons, inputs, dropdowns, menus, meters and scrollbars. These are static widget backgrounds and borders, with no new animation, renderer, dependencies or sampling tasks.
+
+The fixed footer shows your channel connection's overall health at the bottom left. Hover to see only problematic incoming/outgoing loss, latency or ping variation. Healthy measurements and idle time are omitted from problem details; missing data is identified when it prevents a reading. Complete healthy readings show “No connection issues detected.” Your four compact metric graphs sit immediately to its right, with CPU/RAM/Footprint stacked at the far right. The indicator and graphs remain visible across all normal-mode tabs. Expanded peer graphs remain in Voice.
+
+Performance mode shows Unknown with a tooltip explaining that connection-health sampling is paused, rather than presenting stale measurements as healthy. Its footer keeps the resource row above the health indicator to fit the compact window. Disconnected, connecting, stopping and local-test states are explicitly labeled.
+
+Footer-row validation: the optimized Mac app showed all four graphs at normal width and kept them visible on Voice, Settings and Streaming. At a user-narrowed 464-logical-pixel window, horizontal scrolling and dragging the thin scrollbar reached the final Idle graph while health and process readings stayed fixed. Performance mode and restoration to normal mode were checked; the microphone remained muted. Clippy with warnings denied, formatting, diff whitespace checks and the release build passed. No additional polling or audio work was introduced.
+
+Design validation: 41 tests passed (one explicit network test skipped), and final formatting/Clippy checks passed. The native offline preview confirmed the layered Voice/Settings/Statistics views, readable disabled fields, square controls, continuous connection lines with a shaded ping-variation band, and all five compact status rows fitting above the footer. Hovering the footer showed only outgoing packet loss and ping variation from the deliberately degraded fixture. The local macOS release bundle was built; the real session was left running on its earlier executable. Windows/Linux UI behavior was not checked for this redesign.
+
+## Fixed resource bar
+
+CPU, RAM and the platform-specific memory detail stay in the bottom bar while Voice, Statistics, Settings or the channel tree scroll. RAM here means resident memory (RSS). These are the same process readings used by Statistics, refreshed every second in normal mode and every ten seconds in performance mode; the bar adds no separate sampling timer.
+
+## Errors and rate limiting
+
+Connection, audio, command, settings, trace and streaming failures use a shared Iced modal with Close/Enter/Escape dismissal. Repeats are grouped and dismissed incidents stay suppressed until a retry or relevant recovery. Wrong channel passwords stay in the password dialog; missing telemetry remains a status/tooltip.
+
+Server commands share a bounded scheduler with acknowledgement tracking. Rapid mute/deafen changes retain only the latest unsent state while applying local protection immediately. Pending/unconfirmed server state is shown separately. Flood responses pause optional work, use a 10–60 second cooldown and a single acknowledged recovery probe, and lower the command rate. Server permissions and thresholds are unchanged. See [error lifetime, pacing and validation](error-handling.md).
 
 ## JSON file
 

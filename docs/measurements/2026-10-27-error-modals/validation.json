@@ -1,0 +1,37 @@
+{
+  "branch": "changes",
+  "uncommitted": true,
+  "binary_sha256": "4c320c5ef9c712016aa0a8fca531a2e1a7b8dc6d1bb36185ed42fc924af26c67",
+  "ordinary_tests_passed": 58,
+  "opt_in_tests_skipped_in_ordinary_run": 2,
+  "modal_ui": {
+    "local_validation_error_shown": true,
+    "close_button_verified": true,
+    "escape_release_verified_clean_build": true,
+    "enter_dismissal_verified": true,
+    "background_fields_unchanged": true,
+    "saved_settings_modified": false
+  },
+  "network_probe": {
+    "test": "server_tree_probe_stays_muted_in_lobby",
+    "passed": true,
+    "duration_seconds": 2.79,
+    "channel_id": 1,
+    "muted": true,
+    "deafened": true,
+    "audio_devices_opened": false,
+    "acknowledged_operations": [
+      "mute/deafen update",
+      "channel subscription",
+      "connection statistics"
+    ],
+    "server_version": "6.0.0-beta13 [Build: 1789645103]",
+    "server_protocol": 8
+  },
+  "flood_recovery": "Simulated clock and command replies; no deliberate live-server flooding",
+  "runtime_limit": "Two normal-app connection attempts waited in CoreAudio input-stream initialization before network setup. A one-second process sample showed AudioUnitSetProperty -> CoreAudio HAL property IPC. Root cause not established; app left running disconnected.",
+  "final_app_state": "Ready to connect, disconnected",
+  "temporary_instrumentation_removed": true,
+  "server_policy_changed": false,
+  "published": false
+}

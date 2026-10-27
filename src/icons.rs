@@ -18,6 +18,10 @@ pub enum Icon {
     VolumeOff,
     Server,
     Channel,
+    Settings,
+    ChartLine,
+    Disconnect,
+    MonitorPlay,
 }
 
 impl Icon {
@@ -33,6 +37,10 @@ impl Icon {
             Self::VolumeOff => "\u{e1ac}",
             Self::Server => "\u{e153}",
             Self::Channel => "\u{e0ef}",
+            Self::Settings => "\u{e154}",
+            Self::ChartLine => "\u{e2a5}",
+            Self::Disconnect => "\u{e45d}",
+            Self::MonitorPlay => "\u{e485}",
         };
         text(glyph).font(FONT).size(size).line_height(1.0)
     }
