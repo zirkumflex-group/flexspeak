@@ -106,12 +106,19 @@ The portable format is shown in [`settings.example.json`](../settings.example.js
   "playback_volume_percent": 100,
   "audio_processing": {
     "noise_suppression": false,
+    "suppression_level": "moderate",
     "automatic_gain": false,
     "echo_cancellation": false
   },
+  "transmission": {
+    "mode": "continuous",
+    "ptt_release_ms": 150,
+    "voice_threshold_db": -40
+  },
   "keybinds": {
     "toggle_mute": "Ctrl+Shift+M",
-    "toggle_deafen": "Ctrl+Shift+D"
+    "toggle_deafen": "Ctrl+Shift+D",
+    "push_to_talk": "Ctrl+Shift+Space"
   }
 }
 ```
@@ -130,13 +137,13 @@ The disconnected test profile uses separate keys and a temporary settings path s
 
 **Settings → Audio → Microphone processing** offers three independent, opt-in WebRTC effects on Mac and Windows:
 
-- **Noise suppression** (Rauschunterdrückung) reduces background noise using the bundled processor’s moderate setting.
+- **Noise suppression** (Rauschunterdrückung) has Low, Moderate, High and Very high strength. Moderate preserves the earlier behavior; stronger settings can affect voice quality.
 - **Automatic microphone gain** applies adaptive digital gain to keep voice levels more consistent. It does not change the operating system’s microphone volume.
 - **Echo cancellation (experimental)** reduces this app’s speaker playback returning through the microphone. Its reference includes received voice and stream audio, after app volume, channel mapping and device-format conversion. Audio played independently by other apps is outside that reference.
 
 All effects default to **off**, including when loading older JSON. Change effects while disconnected or after stopping the local test, then **Save settings** to persist them. The next session uses the chosen values. The local headphone test previews suppression and gain but bypasses echo cancellation: listening to your own microphone through speakers is a feedback loop, not a useful echo test. Linux retains saved preferences but does not apply these effects; its settings explain that processing is unavailable.
 
-Microphone processing runs on the existing voice worker in 10 ms / 480-sample frames after resampling to 48 kHz and before local monitoring or 20 ms Opus encoding. The PCM16 adapter bounds nonfinite/out-of-range input; when effects are off, original float samples bypass it. Enabling any effect also enables WebRTC’s high-pass filter. Shared music/system-audio publishing is not processed. Microphone meters remain input meters, and continuous voice transmission, mute, deafen and server restrictions retain their existing meanings.
+Microphone processing runs on the existing voice worker in 10 ms / 480-sample frames after resampling to 48 kHz and before local monitoring or 20 ms Opus encoding. The PCM16 adapter bounds nonfinite/out-of-range input; when effects are off, original float samples bypass it. Enabling any effect also enables WebRTC’s high-pass filter. Shared music/system-audio publishing is not processed. Microphone meters remain input meters. Transmission mode is applied after processing and before Opus encoding; mute, deafen and server restrictions remain authoritative.
 
 Echo reference samples are copied into a bounded queue from the actual playback buffer, including silence on underrun. Each callback maps its own CPAL clock to the worker’s monotonic clock; the worker accounts for resampling latency and both capture/playback delays. Reference processing precedes capture processing. Capture generations reject in-flight pre-mute samples, and mute/resume, audio-buffer discontinuities, device changes and reconnects reset partial frames and processor history. Echo cancellation needs a short reconvergence period after resets; startup capture is discarded until usable reference timing arrives (at most 500 ms).
 
@@ -145,6 +152,24 @@ Processor errors, unavailable timestamps, a stale reference or out-of-range echo
 Automated checks cover the pinned native processor, irregular frame sizes, silence/reset behavior, exact bypass, PCM bounds, independent timestamp origins, reference timing failures, post-volume/mono/stereo output references, overflow and pre-mute sample rejection. A generated delayed-echo test verifies attenuation through the native AEC. These are synthetic checks, not proof of real speaker, Bluetooth or Windows hardware quality; echo cancellation stays labeled experimental. No new SDK/provider dependency or Krisp integration was added. See the [research and integration evidence](audio-processing-research.md).
 
 Validation on 2026-11-01: 83 ordinary Rust tests and three packaging tests passed (three explicit network/media integration tests remained ignored). Formatting, Mac/Windows all-target Clippy and optimized Mac/Windows builds passed. The final input-timing guard was rechecked with the focused processor tests and Mac Clippy before the release builds. The new app was not launched and microphone/speaker hardware was not exercised.
+
+## Voice transmission
+
+Select **Settings → Audio → Voice transmission** while disconnected or after stopping the local test, then save:
+
+- **Continuous** preserves the existing behavior: unmuting sends continuously.
+- **Push to talk** captures/transmits while the assigned global key is held, followed by the chosen **0–500 ms release delay** (default 150 ms). Set/apply the key under **Global keybinds**, then unmute before holding it during a call. New profiles suggest `Ctrl+Shift+Space`; older two-key profiles retain their existing bindings and leave PTT unassigned until you choose a key. Empty PTT bindings do not disable mute/deafen, but starting a PTT session requires a registered PTT key. Duplicate bindings are rejected.
+- **Voice activation** requires both WebRTC speech detection and a level above the **−60 to 0 dBFS** threshold (default −40). Level is RMS after microphone processing, so it differs from the raw peak input meter. It keeps up to 60 ms of preceding audio and a 200 ms tail to avoid clipping word beginnings/endings. Speech detection is not a guarantee against every background sound.
+
+The local headphone test uses the selected transmission mode without connecting: hold the PTT key in PTT mode, or speak above the threshold in voice-activation mode. Stop the test to adjust settings. Echo cancellation remains bypassed in this feedback test. Continuous stays the default for older configurations; imported unsupported modes never silently switch to continuous.
+
+PTT state reaches the voice worker directly from the hotkey callback, so a delayed UI queue cannot miss a release or reopen the microphone. A release closes capture after its configured tail. Mute/deafen, unavailable talk permission, stop and disconnect override it. The pinned Windows hotkey backend detects key release at approximately 50 ms intervals, in addition to the selected delay and audio buffering. Global PTT is supported on Mac, Windows and Linux X11; native Wayland cannot start a PTT session. Speech detection and selectable WebRTC suppression are currently Mac/Windows only.
+
+The worker gates complete 20 ms frames, bounds pre-roll, clears it on mute/reset, resets the Opus encoder at utterance starts and sends an empty TeamSpeak voice packet at utterance ends. Waiting/transmit status changes are reported independently of the meter, including in performance mode. Shared stream/system audio remains outside microphone processing and transmission gating.
+
+`native/audio.cpp` is a small fixed-frame C interface to the existing pinned WebRTC binary. It exposes APM suppression strength and WebRTC VAD; it does not add a second DSP engine, model download or Krisp. Build-time `cc` and `webrtc-sys-build` use the same headers, defines and artifact as `libwebrtc`; keep their pins aligned when upgrading. Native errors stop the audio session rather than bypassing the selected speech gate.
+
+Validation of transmission controls: 91 ordinary Rust tests and three packaging tests passed, with three opt-in network/media tests ignored. Mac/Windows all-target Clippy and optimized Mac/Windows builds passed. Tests cover old two-key profiles, duplicate/optional PTT bindings, press/release behavior, permission overrides, bounded pre-roll/hangover, actual native speech detection and suppression-strength differences, utterance markers, and status delivery with a busy UI or performance mode. Physical keyboard holds, real conversations and native UI interaction were not tested for this update.
 
 ## Earlier onboarding validation
 

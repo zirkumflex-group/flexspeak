@@ -11,7 +11,10 @@ use std::{
 use crate::audio_processing::{self, Processor, Timed, callback_time, sample_time};
 use crate::profiler::{self, Category};
 use anyhow::{Context, Result, bail};
-use audiopus::{Application, Bitrate, Channels, SampleRate, coder::Encoder};
+use audiopus::{
+    Application, Bitrate, Channels, SampleRate,
+    coder::{Encoder, GenericCtl},
+};
 use cpal::{
     Device, FromSample, Sample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -308,6 +311,9 @@ pub struct AudioEngine {
     playback: Arc<ArrayQueue<[f32; 2]>>,
     errors: Arc<ArrayQueue<String>>,
     processor: Processor,
+    voice_gate: crate::transmission::VoiceGate,
+    packet_boundary: crate::transmission::PacketBoundary,
+    last_frame: Option<Instant>,
     reference: Option<Reference>,
     input_clock: ResampleClock,
     input_device_rate: u32,
@@ -330,7 +336,9 @@ impl AudioEngine {
         output: &DeviceChoice,
         volume: Arc<PlaybackVolume>,
         processing: audio_processing::Settings,
+        transmission: crate::transmission::Settings,
     ) -> Result<Self> {
+        let voice_gate = crate::transmission::VoiceGate::new(transmission)?;
         let input_device = find_device(input, true)?;
         let output_device = find_device(output, false)?;
         let input_config =
@@ -421,6 +429,9 @@ impl AudioEngine {
             playback,
             errors,
             processor,
+            voice_gate,
+            packet_boundary: crate::transmission::PacketBoundary::default(),
+            last_frame: None,
             reference,
             input_clock: ResampleClock::default(),
             input_device_rate: input_config.sample_rate(),
@@ -438,13 +449,15 @@ impl AudioEngine {
         })
     }
 
-    pub fn set_capture(&mut self, enabled: bool) {
+    pub fn set_capture(&mut self, enabled: bool) -> Result<()> {
         if self.capture.enabled() != enabled {
-            self.reset_capture(enabled);
+            self.reset_capture(enabled)?;
         }
+        Ok(())
     }
 
-    fn reset_capture(&mut self, enabled: bool) {
+    fn reset_capture(&mut self, enabled: bool) -> Result<()> {
+        self.packet_boundary.end();
         self.capture.clear(enabled);
         self.pcm.clear();
         self.monitor.clear();
@@ -452,10 +465,13 @@ impl AudioEngine {
         self.input_clock = ResampleClock::default();
         self.input_len = 0;
         self.input_at = None;
-        self.processor.reset();
+        self.processor.reset()?;
+        self.voice_gate.reset()?;
+        self.last_frame = None;
         if let Some(reference) = &mut self.reference {
             reference.reset();
         }
+        Ok(())
     }
 
     pub fn set_codec(&mut self, codec: CodecType, quality: u8) -> Result<()> {
@@ -503,12 +519,21 @@ impl AudioEngine {
         f32::from_bits(self.capture.level.load(Ordering::Relaxed))
     }
 
+    pub fn transmitting(&self) -> bool {
+        self.capture.enabled()
+            && self.voice_gate.active()
+            && self
+                .last_frame
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
+    }
+
     pub fn buffer_bytes(&self) -> usize {
         self.capture.samples.capacity() * std::mem::size_of::<(u64, Timed<f32>)>()
             + self.playback.capacity() * std::mem::size_of::<[f32; 2]>()
             + (self.pcm.capacity() + self.monitor.capacity()) * std::mem::size_of::<f32>()
             + self.input_rate.buffer_bytes()
             + self.output_rate.buffer_bytes()
+            + self.voice_gate.buffer_bytes()
             + self.reference.as_ref().map_or(0, |reference| {
                 reference.samples.capacity() * std::mem::size_of::<Timed<[f32; 2]>>()
                     + reference.converter.buffer_bytes()
@@ -527,12 +552,13 @@ impl AudioEngine {
             bail!("Audio device failed: {error}. Refresh devices and reconnect.");
         }
         if self.capture.discontinuity.swap(false, Ordering::AcqRel) {
-            self.reset_capture(self.capture.enabled());
+            self.reset_capture(self.capture.enabled())?;
         }
         if let Some(reference) = &mut self.reference {
             reference.process(&mut self.processor)?;
         }
         let mut packets = Vec::new();
+        self.packet_boundary.flush(&mut packets);
         for _ in 0..self.capture.samples.len() {
             let Some(sample) = self.capture.pop() else {
                 break;
@@ -559,26 +585,40 @@ impl AudioEngine {
                 delay,
             );
             self.input_len = 0;
-            if loopback {
-                self.processor
-                    .capture(&samples[0][..count], at, &mut self.monitor)?;
-                while self.monitor.len() > RATE / 4 {
-                    self.monitor.pop_front();
-                }
-            } else {
-                self.processor
-                    .capture(&samples[0][..count], at, &mut self.pcm)?;
-            }
+            self.processor
+                .capture(&samples[0][..count], at, &mut self.pcm)?;
         }
         while self.pcm.len() >= FRAME {
             let mut frame = [0.0; FRAME];
             for sample in &mut frame {
                 *sample = self.pcm.pop_front().unwrap_or_default();
             }
-            let mut encoded = [0; 1275];
-            let count = self.encoder.encode_float(&frame, &mut encoded)?;
-            packets.push(encoded[..count].to_vec());
+            self.voice_gate.process(frame)?;
+            self.last_frame = Some(Instant::now());
+            while let Some(frame) = self.voice_gate.pop() {
+                if loopback {
+                    self.monitor.extend(frame);
+                    while self.monitor.len() > RATE / 4 {
+                        self.monitor.pop_front();
+                    }
+                } else {
+                    if self.packet_boundary.begin(&mut packets) {
+                        self.encoder.reset_state()?;
+                    }
+                    let mut encoded = [0; 1275];
+                    let count = self.encoder.encode_float(&frame, &mut encoded)?;
+                    packets.push(encoded[..count].to_vec());
+                }
+            }
+            if !self.voice_gate.active() {
+                self.packet_boundary.end();
+                self.packet_boundary.flush(&mut packets);
+            }
         }
+        if !self.transmitting() {
+            self.packet_boundary.end();
+        }
+        self.packet_boundary.flush(&mut packets);
         // Keep only ~20 ms of device audio queued, so stop/mute stays responsive.
         for _ in 0..4 {
             if self.playback.len() >= self.output_target {

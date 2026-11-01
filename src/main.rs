@@ -8,12 +8,15 @@ mod command_flow;
 mod connection_charts;
 mod icons;
 mod memory;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod native_audio;
 mod onboarding;
 mod permissions;
 mod profiler;
 mod settings;
 mod shortcuts;
 mod streaming;
+mod transmission;
 mod ui;
 mod usage;
 mod window_icon;
@@ -120,6 +123,9 @@ struct App {
     settings_message: Option<String>,
     playback_volume: Arc<audio::PlaybackVolume>,
     audio_processing: audio_processing::Settings,
+    transmission: transmission::Settings,
+    ptt: Arc<AtomicBool>,
+    transmitting: bool,
     performance_mode: Arc<AtomicBool>,
     channel_health_visible: Arc<AtomicBool>,
     subscribe_all: Arc<AtomicBool>,
@@ -196,11 +202,13 @@ enum Message {
     Shortcut(shortcuts::Action),
     MuteKeybind(String),
     DeafenKeybind(String),
+    PttKeybind(String),
     SaveSettings,
     ReloadSettings,
     CopySettingsPath,
     PlaybackVolume(u8),
     AudioProcessing(audio_processing::Settings),
+    Transmission(transmission::Settings),
     PerformanceMode(bool),
     Address(String),
     Nickname(String),
@@ -258,7 +266,7 @@ impl App {
             Ok(path) => app.load_settings(path),
             Err(error) => app.alerts.raise(Source::SettingsLoad, format!("{error:#}")),
         }
-        let (mut shortcuts, events) = shortcuts::Shortcuts::new();
+        let (mut shortcuts, events) = shortcuts::Shortcuts::new(app.ptt.clone());
         if app.onboarding.is_none() {
             app.shortcut_error = shortcuts
                 .configure(&app.keybinds)
@@ -310,6 +318,9 @@ impl App {
             settings_message: None,
             playback_volume: Arc::new(audio::PlaybackVolume::default()),
             audio_processing: audio_processing::Settings::default(),
+            transmission: transmission::Settings::default(),
+            ptt: Arc::new(AtomicBool::new(false)),
+            transmitting: false,
             performance_mode: Arc::new(AtomicBool::new(false)),
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
@@ -470,6 +481,7 @@ impl App {
         self.playback_volume
             .set_percent(saved.playback_volume_percent);
         self.audio_processing = saved.audio_processing;
+        self.transmission = saved.transmission;
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
@@ -481,9 +493,11 @@ impl App {
             nickname: self.nickname.trim().into(),
             playback_volume_percent: self.playback_volume.percent(),
             audio_processing: self.audio_processing,
+            transmission: self.transmission,
             keybinds: shortcuts::Keybinds {
                 toggle_mute: self.keybind_draft.toggle_mute.trim().into(),
                 toggle_deafen: self.keybind_draft.toggle_deafen.trim().into(),
+                push_to_talk: self.keybind_draft.push_to_talk.trim().into(),
             },
             input_device_id: self.input.as_ref().map(|device| device.id.clone()),
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
@@ -580,6 +594,22 @@ impl App {
         {
             return Task::none();
         }
+        if self.transmission.mode == transmission::Mode::PushToTalk
+            && (!shortcuts::supported()
+                || !self
+                    .shortcuts
+                    .as_ref()
+                    .is_some_and(shortcuts::Shortcuts::has_ptt))
+        {
+            self.alerts.raise(Source::Shortcuts, "Push-to-talk needs a working global shortcut. Apply one in Settings, or choose another transmission mode. Native Wayland is not supported.");
+            return Task::none();
+        }
+        if self.transmission.mode == transmission::Mode::VoiceActivation
+            && !audio_processing::AVAILABLE
+        {
+            self.alerts.raise(Source::Audio, "Speech detection is available on Mac and Windows. Choose continuous transmission or push-to-talk.");
+            return Task::none();
+        }
         let (Some(input), Some(output)) = (self.input.clone(), self.output.clone()) else {
             self.alerts.raise(
                 Source::Audio,
@@ -595,6 +625,8 @@ impl App {
         let config = client::Config {
             playback_volume: self.playback_volume.clone(),
             audio_processing: self.audio_processing,
+            transmission: self.transmission,
+            ptt: self.ptt.clone(),
             performance_mode: self.performance_mode.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
             subscribe_all: self.subscribe_all.clone(),
@@ -606,6 +638,8 @@ impl App {
             input,
             output,
         };
+        self.ptt.store(false, Ordering::Release);
+        self.transmitting = false;
         for source in [
             Source::Connection,
             Source::Audio,
@@ -747,6 +781,7 @@ impl App {
                 match action {
                     shortcuts::Action::Mute => self.toggle_mute(),
                     shortcuts::Action::Deafen => self.toggle_deafen(),
+                    shortcuts::Action::PushToTalk(_) => {}
                 }
             }
             Message::PlaybackVolume(percent) => {
@@ -758,6 +793,16 @@ impl App {
                     self.audio_processing = options;
                     self.settings_message = None;
                 }
+            }
+            Message::Transmission(settings) => {
+                if self.session.is_none() && settings.validate().is_ok() {
+                    self.transmission = settings;
+                    self.settings_message = None;
+                }
+            }
+            Message::PttKeybind(value) => {
+                self.keybind_draft.push_to_talk = value;
+                self.settings_message = None;
             }
             Message::MuteKeybind(value) => {
                 self.keybind_draft.toggle_mute = value;
@@ -1251,6 +1296,7 @@ impl App {
                     }
                     self.streaming.update(event);
                 }
+                client::Event::Transmitting(value) => self.transmitting = value,
                 client::Event::Meter {
                     level,
                     sent,
@@ -1308,6 +1354,8 @@ impl App {
                     }
                 }
                 client::Event::Stopped(error) => {
+                    self.ptt.store(false, Ordering::Release);
+                    self.transmitting = false;
                     self.streaming.reset();
                     self.clear_client_details();
                     self.client_usage.clear();
@@ -1398,7 +1446,11 @@ impl App {
         if !self.connected || self.stopping {
             "Inactive"
         } else if self.loopback {
-            "Local test only"
+            match (self.transmission.mode, self.transmitting) {
+                (transmission::Mode::PushToTalk, false) => "Local test: hold push-to-talk",
+                (transmission::Mode::VoiceActivation, false) => "Local test: waiting for speech",
+                _ => "Local test only",
+            }
         } else if self.deafened {
             "Muted (deafened)"
         } else if self.muted {
@@ -1406,7 +1458,12 @@ impl App {
         } else if !self.state.can_talk {
             "Blocked by server"
         } else {
-            "Unmuted"
+            match (self.transmission.mode, self.transmitting) {
+                (transmission::Mode::PushToTalk, false) => "Waiting for push-to-talk",
+                (transmission::Mode::VoiceActivation, false) => "Waiting for speech",
+                (transmission::Mode::Continuous, _) => "Unmuted",
+                _ => "Transmitting",
+            }
         }
     }
 
@@ -1633,6 +1690,7 @@ mod tests {
         app.keybind_draft = shortcuts::Keybinds {
             toggle_mute: "F8".into(),
             toggle_deafen: "F9".into(),
+            ..shortcuts::Keybinds::default()
         };
         std::fs::write(&root, "not a directory").unwrap();
         let _ = app.update(Message::SetupNext);
@@ -2083,6 +2141,7 @@ mod tests {
             noise_suppression: true,
             automatic_gain: true,
             echo_cancellation: true,
+            ..crate::audio_processing::Settings::default()
         };
         let _ = app.update(Message::AudioProcessing(chosen));
         assert_eq!(
@@ -2107,6 +2166,42 @@ mod tests {
         ));
         assert_eq!(app.audio_processing, chosen);
         assert!(app.muted && app.deafened);
+    }
+
+    #[test]
+    fn transmission_ui_preserves_safety_gates_and_requires_a_ptt_binding() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let settings = transmission::Settings {
+            mode: transmission::Mode::PushToTalk,
+            ptt_release_ms: 75,
+            voice_threshold_db: -35,
+        };
+        let _ = app.update(Message::Transmission(settings));
+        assert_eq!(app.edited_settings().transmission, settings);
+        let _ = app.start(false);
+        assert!(app.session.is_none());
+        assert_eq!(app.alerts.current().unwrap().source, Source::Shortcuts);
+        app.ptt.store(false, Ordering::Release);
+        let _ = app.update(Message::Shortcut(shortcuts::Action::PushToTalk(true)));
+        assert!(
+            !app.ptt.load(Ordering::Acquire),
+            "Delayed UI messages must not reopen a released key"
+        );
+        let (sender, _commands) = mpsc::channel(1);
+        app.session = Some(sender);
+        app.connected = true;
+        app.state.can_talk = true;
+        app.muted = false;
+        assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
+        app.transmitting = true;
+        assert_eq!(app.microphone_status(), "Transmitting");
+        app.performance_mode.store(true, Ordering::Relaxed);
+        let _ = app.update(Message::Backend(client::Event::Transmitting(false)));
+        assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
+        app.muted = true;
+        assert_eq!(app.microphone_status(), "Muted");
+        let _ = app.update(Message::Transmission(transmission::Settings::default()));
+        assert_eq!(app.transmission, settings);
     }
 
     #[test]

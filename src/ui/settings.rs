@@ -333,6 +333,8 @@ pub fn shortcut_settings(s: &App, t: &Theme, k: &Kit) -> El {
     let detected = match s.last_shortcut {
         Some(shortcuts::Action::Mute) => "Detected mute / unmute",
         Some(shortcuts::Action::Deafen) => "Detected deafen / undeafen",
+        Some(shortcuts::Action::PushToTalk(true)) => "Detected push-to-talk pressed",
+        Some(shortcuts::Action::PushToTalk(false)) => "Detected push-to-talk released",
         None => "Press a shortcut after testing to check it",
     };
     col()

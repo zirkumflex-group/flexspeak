@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    fmt,
     time::{Duration, Instant},
 };
 
@@ -11,9 +12,34 @@ pub const SAMPLES: usize = 480;
 const RATE: u32 = 48_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(i32)]
+pub enum SuppressionLevel {
+    Low = 0,
+    #[default]
+    Moderate = 1,
+    High = 2,
+    VeryHigh = 3,
+}
+impl SuppressionLevel {
+    pub const ALL: [Self; 4] = [Self::Low, Self::Moderate, Self::High, Self::VeryHigh];
+}
+impl fmt::Display for SuppressionLevel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Low => "Low",
+            Self::Moderate => "Moderate",
+            Self::High => "High",
+            Self::VeryHigh => "Very high",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub noise_suppression: bool,
+    pub suppression_level: SuppressionLevel,
     pub automatic_gain: bool,
     pub echo_cancellation: bool,
 }
@@ -62,7 +88,7 @@ pub fn callback_time(
     }
 }
 
-fn pcm16(sample: f32) -> i16 {
+pub(crate) fn pcm16(sample: f32) -> i16 {
     if sample.is_finite() {
         (sample.clamp(-1.0, 1.0) * 32768.0).round() as i16
     } else {
@@ -89,7 +115,7 @@ pub struct Processor {
     reference: Option<(Instant, Instant)>,
     started: Instant,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    apm: Option<libwebrtc::native::apm::AudioProcessingModule>,
+    apm: Option<crate::native_audio::Apm>,
 }
 
 impl Processor {
@@ -109,19 +135,16 @@ impl Processor {
             reference: None,
             started: Instant::now(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            apm: settings.enabled().then(|| {
-                libwebrtc::native::apm::AudioProcessingModule::new(
-                    settings.echo_cancellation,
-                    settings.automatic_gain,
-                    true,
-                    settings.noise_suppression,
-                )
-            }),
+            apm: settings
+                .enabled()
+                .then(|| crate::native_audio::Apm::new(settings))
+                .transpose()?,
         })
     }
 
-    pub fn reset(&mut self) {
-        *self = Self::new(self.settings).expect("An existing processor has supported settings");
+    pub fn reset(&mut self) -> Result<()> {
+        *self = Self::new(self.settings)?;
+        Ok(())
     }
 
     pub fn echo_enabled(&self) -> bool {
@@ -154,7 +177,7 @@ impl Processor {
                 self.apm
                     .as_mut()
                     .unwrap()
-                    .process_reverse_stream(&mut self.render, RATE as i32, 2)
+                    .render(&mut self.render)
                     .map_err(|error| {
                         anyhow::anyhow!("Echo reference processing failed: {error}")
                     })?;
@@ -220,14 +243,9 @@ impl Processor {
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     let apm = self.apm.as_mut().unwrap();
-                    if let Some(delay) = delay {
-                        apm.set_stream_delay_ms(delay)
-                            .map_err(|error| anyhow::anyhow!("Echo timing failed: {error}"))?;
-                    }
-                    apm.process_stream(&mut pcm, RATE as i32, 1)
-                        .map_err(|error| {
-                            anyhow::anyhow!("Microphone processing failed: {error}")
-                        })?;
+                    apm.capture(&mut pcm, delay).map_err(|error| {
+                        anyhow::anyhow!("Microphone processing failed: {error}")
+                    })?;
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 let _ = (delay, &mut pcm);
@@ -257,6 +275,7 @@ mod tests {
             noise_suppression: true,
             automatic_gain: true,
             echo_cancellation: true,
+            ..Settings::default()
         };
         let local = selected.for_session(true);
         assert!(!local.echo_cancellation);
@@ -321,7 +340,7 @@ mod tests {
         );
         assert!(output.iter().any(|sample| sample.abs() > 0.001));
         processor.capture(&[0.8; 123], None, &mut output)?;
-        processor.reset();
+        processor.reset()?;
         output.clear();
         processor.capture(&[0.0; SAMPLES - 1], None, &mut output)?;
         assert!(output.is_empty());
@@ -366,7 +385,7 @@ mod tests {
                 )
                 .is_err()
         );
-        processor.reset();
+        processor.reset()?;
         processor.started = now - Duration::from_secs(1);
         let mut output = VecDeque::new();
         assert!(
@@ -425,6 +444,44 @@ mod tests {
         assert!(
             output_energy < input_energy * 0.5,
             "Echo should be attenuated: input {input_energy}, output {output_energy}"
+        );
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn native_suppression_levels_change_actual_noise_attenuation() -> Result<()> {
+        let mut energies = Vec::new();
+        for suppression_level in SuppressionLevel::ALL {
+            let mut processor = Processor::new(Settings {
+                noise_suppression: true,
+                suppression_level,
+                ..Settings::default()
+            })?;
+            let mut random = 12345_u32;
+            let mut energy = 0.0_f64;
+            for block in 0..300 {
+                let input: [f32; SAMPLES] = std::array::from_fn(|_| {
+                    random ^= random << 13;
+                    random ^= random >> 17;
+                    random ^= random << 5;
+                    (random as f64 / u32::MAX as f64 * 0.2 - 0.1) as f32
+                });
+                let mut output = VecDeque::new();
+                processor.capture(&input, None, &mut output)?;
+                assert_eq!(output.len(), SAMPLES);
+                if block >= 200 {
+                    energy += output
+                        .iter()
+                        .map(|value| f64::from(*value).powi(2))
+                        .sum::<f64>();
+                }
+            }
+            energies.push(energy);
+        }
+        assert!(
+            energies.windows(2).all(|pair| pair[1] < pair[0]),
+            "Stronger levels must change native filtering: {energies:?}"
         );
         Ok(())
     }

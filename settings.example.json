@@ -4,11 +4,18 @@
   "playback_volume_percent": 100,
   "audio_processing": {
     "noise_suppression": false,
+    "suppression_level": "moderate",
     "automatic_gain": false,
     "echo_cancellation": false
   },
+  "transmission": {
+    "mode": "continuous",
+    "ptt_release_ms": 150,
+    "voice_threshold_db": -40
+  },
   "keybinds": {
     "toggle_mute": "Ctrl+Shift+M",
-    "toggle_deafen": "Ctrl+Shift+D"
+    "toggle_deafen": "Ctrl+Shift+D",
+    "push_to_talk": "Ctrl+Shift+Space"
   }
 }

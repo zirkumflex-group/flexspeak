@@ -8,6 +8,7 @@ This build adds:
 - Recoverable audio-buffer glitches no longer end the voice session; device failures still report an error.
 - A more desktop-like interface: compact 28 pt controls, flat grouped surfaces without glows or shadows, a neutral dark palette, and Settings as a grouped form with labels beside their controls.
 - Opt-in WebRTC noise suppression, automatic microphone gain and experimental echo cancellation on Mac/Windows. Set them in Settings → Audio while disconnected, then save. Local headphone tests preview suppression/gain; echo cancellation runs during calls.
+- Push-to-talk with a configurable release delay, speech-and-threshold voice activation, and four noise-suppression strengths. Continuous remains the default; choose a PTT key under Global keybinds.
 
 **Validation:** 76 ordinary Rust tests, three packaging tests, formatting, macOS Clippy and a Windows x64 Clippy cross-check passed before this merge. Earlier generated-media tests and local Mac screen/system-audio capture passed. Official-client playback of published streams, Windows hardware capture/playback and the complete onboarding permission flow remain unverified. See [error-handling validation](https://github.com/zirkumflex-group/flexspeak/blob/main/docs/error-handling.md) and [streaming scope](https://github.com/zirkumflex-group/flexspeak/blob/main/docs/streaming.md).
 

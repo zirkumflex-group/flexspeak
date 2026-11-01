@@ -39,6 +39,8 @@ pub struct Config {
     pub video_surface: Arc<streaming::Surface>,
     pub playback_volume: Arc<PlaybackVolume>,
     pub audio_processing: crate::audio_processing::Settings,
+    pub transmission: crate::transmission::Settings,
+    pub ptt: Arc<AtomicBool>,
     pub address: String,
     pub nickname: String,
     pub password: String,
@@ -121,6 +123,8 @@ pub enum Event {
     State(Snapshot),
     /// The clients heard right now, sent whenever the set changes.
     Talking(BTreeSet<u16>),
+    /// Whether the microphone gate (push-to-talk or voice activation) is open.
+    Transmitting(bool),
     Streaming(streaming::Event),
     Meter {
         level: f32,
@@ -189,6 +193,12 @@ pub fn start(
             })));
         })?;
     Ok((commands, output))
+}
+
+fn report_transmission(events: &mpsc::Sender<Event>, reported: &mut bool, transmitting: bool) {
+    if *reported != transmitting && events.try_send(Event::Transmitting(transmitting)).is_ok() {
+        *reported = transmitting;
+    }
 }
 
 pub fn identity_path() -> Result<PathBuf> {
@@ -494,6 +504,7 @@ async fn run_connection(
         &config.output,
         config.playback_volume.clone(),
         config.audio_processing.for_session(false),
+        config.transmission,
     )
     .map_err(AudioFailure)?;
     if commands.is_closed()
@@ -510,6 +521,8 @@ async fn run_connection(
         .input_muted(true)
         .connect()?;
     let mut traffic = TrafficMeter::new(Instant::now());
+    let mut ptt_gate = crate::transmission::PttGate::default();
+    let mut reported_transmission = false;
     let flow = Rc::new(RefCell::new(Flow::default()));
     let mut streams = streaming::Session::new(
         events.clone(),
@@ -564,7 +577,7 @@ async fn run_connection(
                     match command {
                         Command::Mute(value) => {
                             controls.desired.muted = value;
-                            if value { audio.set_capture(false); }
+                            if value { audio.set_capture(false).map_err(AudioFailure)?; }
                             controls.changed(&mut flow.borrow_mut(), Instant::now());
                             let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: controls.pending.is_some() || controls.confirmed != Some(controls.desired) });
                         },
@@ -572,7 +585,7 @@ async fn run_connection(
                             controls.desired.deafened = value;
                             config.video_surface.set_audio_enabled(!value);
                             audio.clear_playback();
-                            audio.set_capture(false);
+                            audio.set_capture(false).map_err(AudioFailure)?;
                             controls.changed(&mut flow.borrow_mut(), Instant::now());
                             let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: controls.pending.is_some() || controls.confirmed != Some(controls.desired) });
                         },
@@ -677,7 +690,7 @@ async fn run_connection(
                         subscribed = None;
                         connected = false;
                         deadline = Instant::now();
-                        audio.set_capture(false);
+                        audio.set_capture(false).map_err(AudioFailure)?;
                         audio.clear_playback();
                         server_usage = None;
                         pending_info = None;
@@ -749,20 +762,22 @@ async fn run_connection(
                     if !connected && deadline.elapsed() > Duration::from_secs(40) { bail!("Connection timed out. Check the address, UDP port, password, and server availability."); }
                     {
                         let can_send = connected && controls.capture_allowed() && connection.can_send_audio();
-                        audio.set_capture(can_send);
+                        let capture = ptt_gate.allows(can_send, config.ptt.load(Ordering::Acquire), Instant::now(), config.transmission);
+                        audio.set_capture(capture).map_err(AudioFailure)?;
                         config.video_surface.set_audio_enabled(!controls.desired.deafened && connected);
                         let packets = audio.tick(false, controls.desired.deafened || !connected, Some(&config.video_surface)).map_err(AudioFailure)?;
-                        if can_send && !packets.is_empty() && audio.level().sqrt() > crate::audio::SPEAKING_METER {
+                        // Empty packets end an utterance when push-to-talk or voice activation closes.
+                        if can_send && packets.iter().any(|packet| !packet.is_empty()) && audio.level().sqrt() > crate::audio::SPEAKING_METER {
                             speakers.packet(connection.get_state()?.own_client.0, false, Instant::now());
                         }
-                        if can_send {
-                            for packet in packets {
+                        for packet in packets {
+                            if (packet.is_empty() && connected) || (!packet.is_empty() && can_send) {
                                 let _trace = profiler::scope(Category::Network, "network.send_voice");
                                 connection.send_audio(OutAudio::new(&AudioData::C2S { id: 0, codec: audio.codec, data: &packet }))?;
-                                sent += 1;
-                                last_voice = Some(Instant::now());
+                                if !packet.is_empty() { sent += 1; last_voice = Some(Instant::now()); }
                             }
                         }
+                        report_transmission(events, &mut reported_transmission, can_send && audio.transmitting());
                         let now = Instant::now();
                         speakers.report(now, |talking| events.try_send(Event::Talking(talking)).is_ok());
                         let expired = flow.borrow_mut().expired(now);
@@ -886,9 +901,11 @@ async fn run_loopback(
         &config.output,
         config.playback_volume.clone(),
         config.audio_processing.for_session(true),
+        config.transmission,
     )
     .map_err(AudioFailure)?;
-    audio.set_capture(true);
+    let mut ptt_gate = crate::transmission::PttGate::default();
+    let mut reported_transmission = false;
     let _ = events.try_send(Event::Connected(audio.description.clone()));
     let mut tick = tokio::time::interval(Duration::from_millis(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -898,7 +915,10 @@ async fn run_loopback(
             command = commands.recv() => if matches!(command, None | Some(Command::Stop)) { break; },
             _ = tick.tick() => {
                 if events.is_closed() { break; }
+                let capture = ptt_gate.allows(true, config.ptt.load(Ordering::Acquire), Instant::now(), config.transmission);
+                audio.set_capture(capture).map_err(AudioFailure)?;
                 audio.tick(true, false, None).map_err(AudioFailure)?;
+                report_transmission(events, &mut reported_transmission, audio.transmitting());
                 if !config.performance_mode.load(Ordering::Relaxed)
                     && last_meter.elapsed() >= Duration::from_millis(100) {
                     let _ = events.try_send(Event::Meter { level: audio.level(), sent: 0, received: 0, audio_buffer_bytes: audio.buffer_bytes() });
@@ -987,6 +1007,25 @@ mod tests {
         sent.clear();
         report(&mut speakers, &mut sent, now + Speakers::HOLD, true);
         assert_eq!(sent.pop(), Some(BTreeSet::new()), "silence ends speech");
+    }
+
+    #[test]
+    fn transmit_status_retries_a_full_ui_queue_and_does_not_need_meter_sampling() {
+        let (events, mut receiver) = mpsc::channel(1);
+        events.try_send(Event::Status("busy".into())).unwrap();
+        let mut reported = false;
+        report_transmission(&events, &mut reported, true);
+        assert!(!reported);
+        receiver.try_recv().unwrap();
+        report_transmission(&events, &mut reported, true);
+        assert!(matches!(receiver.try_recv(), Ok(Event::Transmitting(true))));
+        report_transmission(&events, &mut reported, true);
+        assert!(receiver.try_recv().is_err());
+        report_transmission(&events, &mut reported, false);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::Transmitting(false))
+        ));
     }
 
     #[test]
