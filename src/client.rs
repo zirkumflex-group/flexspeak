@@ -38,6 +38,7 @@ pub struct Config {
     pub streaming_visible: Arc<AtomicBool>,
     pub video_surface: Arc<streaming::Surface>,
     pub playback_volume: Arc<PlaybackVolume>,
+    pub audio_processing: crate::audio_processing::Settings,
     pub address: String,
     pub nickname: String,
     pub password: String,
@@ -492,6 +493,7 @@ async fn run_connection(
         &config.input,
         &config.output,
         config.playback_volume.clone(),
+        config.audio_processing.for_session(false),
     )
     .map_err(AudioFailure)?;
     if commands.is_closed()
@@ -883,6 +885,7 @@ async fn run_loopback(
         &config.input,
         &config.output,
         config.playback_volume.clone(),
+        config.audio_processing.for_session(true),
     )
     .map_err(AudioFailure)?;
     audio.set_capture(true);

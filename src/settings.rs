@@ -15,6 +15,7 @@ pub struct Settings {
     pub server_address: String,
     pub nickname: String,
     pub playback_volume_percent: u8,
+    pub audio_processing: crate::audio_processing::Settings,
     pub keybinds: Keybinds,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_device_id: Option<String>,
@@ -31,6 +32,7 @@ impl Default for Settings {
             server_address: "ts.zirkumflex.io".into(),
             nickname: "Flexspeak".into(),
             playback_volume_percent: 100,
+            audio_processing: crate::audio_processing::Settings::default(),
             keybinds: Keybinds::default(),
             input_device_id: None,
             output_device_id: None,
@@ -122,6 +124,11 @@ mod tests {
             server_address: "[::1]:9987".into(),
             nickname: "Älex".into(),
             playback_volume_percent: 37,
+            audio_processing: crate::audio_processing::Settings {
+                noise_suppression: true,
+                automatic_gain: true,
+                echo_cancellation: true,
+            },
             keybinds: Keybinds {
                 toggle_mute: "F8".into(),
                 toggle_deafen: "Ctrl+Alt+D".into(),
@@ -138,6 +145,14 @@ mod tests {
         let minimal: Settings =
             serde_json::from_str(r#"{"server_address":"voice.example:9987","nickname":"Alex"}"#)?;
         assert_eq!(minimal.playback_volume_percent, 100);
+        assert_eq!(
+            minimal.audio_processing,
+            crate::audio_processing::Settings::default()
+        );
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"audio_processing":{"noise_suppresion":true}}"#)
+                .is_err()
+        );
         assert_eq!(minimal.keybinds, Keybinds::default());
         assert!(serde_json::from_str::<Settings>(r#"{"nicknmae":"Alex"}"#).is_err());
         assert!(

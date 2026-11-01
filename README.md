@@ -9,6 +9,7 @@ A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses [R
 - Editable server address, nickname, and optional server password.
 - Native microphone/playback device detection and selection.
 - Local microphone-to-speaker test, disconnected from TeamSpeak.
+- Opt-in WebRTC microphone noise suppression, automatic gain and experimental echo cancellation on Mac/Windows.
 - Opus microphone transmission and incoming voice playback.
 - A channel/client tree with health dots, conditional mute/deafen icons, clickable channel headings and password prompts.
 - Mute, deafen, microphone level, sent/received audio packet counters.
@@ -22,7 +23,7 @@ A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses [R
 - Dismissible error modals, duplicate suppression, acknowledged audio controls and adaptive server-command pacing. See [error handling](docs/error-handling.md).
 - Cancel/disconnect and visible network/audio errors. Temporary network interruptions use the protocol library's reconnect behavior.
 
-The prefilled server address is `ts.zirkumflex.io`; it remains editable. The microphone starts muted on every connection. Unmuting transmits continuously until you mute, deafen, disconnect, or lose permission to speak. Use headphones: this prototype does not yet include echo cancellation, noise suppression, automatic gain control, voice activation, or push-to-talk.
+The prefilled server address is `ts.zirkumflex.io`; it remains editable. The microphone starts muted on every connection. Unmuting transmits continuously until you mute, deafen, disconnect, or lose permission to speak; noise suppression does not gate transmission. Mac/Windows users can enable microphone processing in **Settings → Audio** while disconnected. Effects default to off. The headphone test previews suppression and gain; experimental echo cancellation runs during calls using this app’s playback as its reference. Speaker/Bluetooth performance still needs hardware validation. Voice activation and push-to-talk are not included. See [audio processing](docs/controls-and-settings.md#audio-processing-options).
 
 ## Run
 

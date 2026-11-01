@@ -2,6 +2,7 @@
 
 mod alerts;
 mod audio;
+mod audio_processing;
 mod client;
 mod command_flow;
 mod connection_charts;
@@ -118,6 +119,7 @@ struct App {
     alerts: Alerts,
     settings_message: Option<String>,
     playback_volume: Arc<audio::PlaybackVolume>,
+    audio_processing: audio_processing::Settings,
     performance_mode: Arc<AtomicBool>,
     channel_health_visible: Arc<AtomicBool>,
     subscribe_all: Arc<AtomicBool>,
@@ -198,6 +200,7 @@ enum Message {
     ReloadSettings,
     CopySettingsPath,
     PlaybackVolume(u8),
+    AudioProcessing(audio_processing::Settings),
     PerformanceMode(bool),
     Address(String),
     Nickname(String),
@@ -306,6 +309,7 @@ impl App {
             alerts,
             settings_message: None,
             playback_volume: Arc::new(audio::PlaybackVolume::default()),
+            audio_processing: audio_processing::Settings::default(),
             performance_mode: Arc::new(AtomicBool::new(false)),
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
@@ -465,6 +469,7 @@ impl App {
         self.nickname = saved.nickname;
         self.playback_volume
             .set_percent(saved.playback_volume_percent);
+        self.audio_processing = saved.audio_processing;
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
@@ -475,6 +480,7 @@ impl App {
             server_address: self.address.trim().into(),
             nickname: self.nickname.trim().into(),
             playback_volume_percent: self.playback_volume.percent(),
+            audio_processing: self.audio_processing,
             keybinds: shortcuts::Keybinds {
                 toggle_mute: self.keybind_draft.toggle_mute.trim().into(),
                 toggle_deafen: self.keybind_draft.toggle_deafen.trim().into(),
@@ -588,6 +594,7 @@ impl App {
         }
         let config = client::Config {
             playback_volume: self.playback_volume.clone(),
+            audio_processing: self.audio_processing,
             performance_mode: self.performance_mode.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
             subscribe_all: self.subscribe_all.clone(),
@@ -745,6 +752,12 @@ impl App {
             Message::PlaybackVolume(percent) => {
                 self.playback_volume.set_percent(percent);
                 self.settings_message = None;
+            }
+            Message::AudioProcessing(options) => {
+                if self.session.is_none() && audio_processing::AVAILABLE {
+                    self.audio_processing = options;
+                    self.settings_message = None;
+                }
             }
             Message::MuteKeybind(value) => {
                 self.keybind_draft.toggle_mute = value;
@@ -2061,6 +2074,39 @@ mod tests {
         assert_eq!(app.nickname, "Portable name");
         assert_eq!(worker_volume.percent(), 42);
         assert!(app.password.is_empty() && app.channel_password.is_empty());
+    }
+
+    #[test]
+    fn processing_settings_are_saved_but_cannot_change_under_an_active_session() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let chosen = audio_processing::Settings {
+            noise_suppression: true,
+            automatic_gain: true,
+            echo_cancellation: true,
+        };
+        let _ = app.update(Message::AudioProcessing(chosen));
+        assert_eq!(
+            app.audio_processing,
+            if audio_processing::AVAILABLE {
+                chosen
+            } else {
+                audio_processing::Settings::default()
+            }
+        );
+        app.apply_settings(settings::Settings {
+            audio_processing: chosen,
+            ..settings::Settings::default()
+        });
+        assert_eq!(app.edited_settings().audio_processing, chosen);
+        let (sender, _commands) = mpsc::channel(1);
+        app.session = Some(sender);
+        app.muted = true;
+        app.deafened = true;
+        let _ = app.update(Message::AudioProcessing(
+            audio_processing::Settings::default(),
+        ));
+        assert_eq!(app.audio_processing, chosen);
+        assert!(app.muted && app.deafened);
     }
 
     #[test]

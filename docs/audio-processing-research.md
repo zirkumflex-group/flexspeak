@@ -2,6 +2,8 @@
 
 Date: **2026-11-01**. Research only; no implementation, builds, benchmarks or hardware capture performed. “Krips” is interpreted as **Krisp**.
 
+Implementation follow-up: WebRTC suppression, gain and experimental AEC were subsequently added on `changes-next-2`; see [current controls and validation](controls-and-settings.md#audio-processing-options). The findings and proposals below record the research stage.
+
 **Recommendation**
 
 Reuse the already pinned WebRTC Audio Processing Module (APM) for a first **macOS/Windows microphone noise-suppression option**, with optional automatic gain control (AGC). This is the smallest integration supported by the inspected dependencies; it is not a claim that WebRTC sounds better than Krisp. Keep acoustic echo cancellation (AEC) off until playback-reference and timing handling are implemented and validated. The existing Rust binding exposes all three effects, but does not connect them to Flexspeak’s CPAL/Opus path automatically. [Pinned API][apm-rs], [current audio path][audio].
@@ -26,7 +28,7 @@ Treat embedded Krisp as a separate commercial evaluation, and its desktop app as
 
 **What the pinned WebRTC API actually permits**
 
-The import is `libwebrtc::apm::AudioProcessingModule`. Source permalinks below use the revisions recorded in the installed crates’ `.cargo_vcs_info.json`; the bundled WebRTC header links to the inspected local build artifact. The following was verified in **0.3.54**, its **0.3.51 C++ bridge**, and the locally cached **`webrtc-a545de4` headers**, rather than inferred from upstream main. [Rust wrapper][apm-rs], [bridge configuration][apm-h], [bridge implementation][apm-cpp], [bundled header][webrtc-header].
+The import is `libwebrtc::native::apm::AudioProcessingModule`. Source permalinks below use the revisions recorded in the installed crates’ `.cargo_vcs_info.json`; the bundled WebRTC header links to the inspected local build artifact. The following was verified in **0.3.54**, its **0.3.51 C++ bridge**, and the locally cached **`webrtc-a545de4` headers**, rather than inferred from upstream main. [Rust wrapper][apm-rs], [bridge configuration][apm-h], [bridge implementation][apm-cpp], [bundled header][webrtc-header].
 
 | Surface | Verified behavior / constraint |
 | --- | --- |

@@ -2,6 +2,11 @@
   "server_address": "ts.zirkumflex.io",
   "nickname": "Flexspeak",
   "playback_volume_percent": 100,
+  "audio_processing": {
+    "noise_suppression": false,
+    "automatic_gain": false,
+    "echo_cancellation": false
+  },
   "keybinds": {
     "toggle_mute": "Ctrl+Shift+M",
     "toggle_deafen": "Ctrl+Shift+D"

@@ -104,6 +104,11 @@ The portable format is shown in [`settings.example.json`](../settings.example.js
   "server_address": "ts.zirkumflex.io",
   "nickname": "Flexspeak",
   "playback_volume_percent": 100,
+  "audio_processing": {
+    "noise_suppression": false,
+    "automatic_gain": false,
+    "echo_cancellation": false
+  },
   "keybinds": {
     "toggle_mute": "Ctrl+Shift+M",
     "toggle_deafen": "Ctrl+Shift+D"
@@ -123,8 +128,24 @@ The disconnected test profile uses separate keys and a temporary settings path s
 
 ## Audio processing options
 
-Noise suppression (Rauschunterdrückung), automatic microphone gain and echo cancellation are not yet wired into the microphone path. The bundled native WebRTC APM on Mac/Windows already exposes these plus a high-pass filter. A practical next step is microphone-only noise suppression and optional automatic gain; the current binding supports on/off switches. Echo cancellation additionally needs synchronized playback reference frames (including voice and received stream audio), the actual playback gain and device delay. These effects should not process shared music/system audio by default. See [WebRTC APM's capture/render contract](https://webrtc.googlesource.com/src/+/refs/heads/main/api/audio/audio_processing.h).
+**Settings → Audio → Microphone processing** offers three independent, opt-in WebRTC effects on Mac and Windows:
 
-## Validation of this update
+- **Noise suppression** (Rauschunterdrückung) reduces background noise using the bundled processor’s moderate setting.
+- **Automatic microphone gain** applies adaptive digital gain to keep voice levels more consistent. It does not change the operating system’s microphone volume.
+- **Echo cancellation (experimental)** reduces this app’s speaker playback returning through the microphone. Its reference includes received voice and stream audio, after app volume, channel mapping and device-format conversion. Audio played independently by other apps is outside that reference.
+
+All effects default to **off**, including when loading older JSON. Change effects while disconnected or after stopping the local test, then **Save settings** to persist them. The next session uses the chosen values. The local headphone test previews suppression and gain but bypasses echo cancellation: listening to your own microphone through speakers is a feedback loop, not a useful echo test. Linux retains saved preferences but does not apply these effects; its settings explain that processing is unavailable.
+
+Microphone processing runs on the existing voice worker in 10 ms / 480-sample frames after resampling to 48 kHz and before local monitoring or 20 ms Opus encoding. The PCM16 adapter bounds nonfinite/out-of-range input; when effects are off, original float samples bypass it. Enabling any effect also enables WebRTC’s high-pass filter. Shared music/system-audio publishing is not processed. Microphone meters remain input meters, and continuous voice transmission, mute, deafen and server restrictions retain their existing meanings.
+
+Echo reference samples are copied into a bounded queue from the actual playback buffer, including silence on underrun. Each callback maps its own CPAL clock to the worker’s monotonic clock; the worker accounts for resampling latency and both capture/playback delays. Reference processing precedes capture processing. Capture generations reject in-flight pre-mute samples, and mute/resume, audio-buffer discontinuities, device changes and reconnects reset partial frames and processor history. Echo cancellation needs a short reconvergence period after resets; startup capture is discarded until usable reference timing arrives (at most 500 ms).
+
+Processor errors, unavailable timestamps, a stale reference or out-of-range echo delay stop the audio session and show the existing audio error dialog. Nothing silently falls back to unprocessed transmission. Change devices or disable echo cancellation before retrying a timing failure. Buffer glitches reset processing rather than being treated as device loss.
+
+Automated checks cover the pinned native processor, irregular frame sizes, silence/reset behavior, exact bypass, PCM bounds, independent timestamp origins, reference timing failures, post-volume/mono/stereo output references, overflow and pre-mute sample rejection. A generated delayed-echo test verifies attenuation through the native AEC. These are synthetic checks, not proof of real speaker, Bluetooth or Windows hardware quality; echo cancellation stays labeled experimental. No new SDK/provider dependency or Krisp integration was added. See the [research and integration evidence](audio-processing-research.md).
+
+Validation on 2026-11-01: 83 ordinary Rust tests and three packaging tests passed (three explicit network/media integration tests remained ignored). Formatting, Mac/Windows all-target Clippy and optimized Mac/Windows builds passed. The final input-timing guard was rechecked with the focused processor tests and Mac Clippy before the release builds. The new app was not launched and microphone/speaker hardware was not exercised.
+
+## Earlier onboarding validation
 
 74 ordinary tests, the three packaging tests, Mac/Windows cross-target Clippy and both optimized builds passed. Automated checks cover setup order, required username/server input, interrupted setup, device persistence, failed-write and invalid-hotkey handling, old/corrupt config behavior, and the unified view's sampling/streaming visibility. Native permission dialogs, device playback and visual layout were not exercised through computer-use automation, per the user's request to stop that testing.
