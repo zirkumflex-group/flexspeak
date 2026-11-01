@@ -51,6 +51,9 @@ pub enum Command {
     Join(u64, String),
     RefreshStreams,
     WatchStream(String),
+    StartSharing(streaming::publishing::Options),
+    StopSharing,
+    DecideViewer(u16, bool),
     StopWatching,
 }
 
@@ -520,6 +523,7 @@ async fn run_connection(
                         },
                         Command::Deafen(value) => {
                             controls.desired.deafened = value;
+                            config.video_surface.set_audio_enabled(!value);
                             audio.clear_playback();
                             audio.set_capture(false);
                             controls.changed(&mut flow.borrow_mut(), Instant::now());
@@ -555,6 +559,22 @@ async fn run_connection(
                             }
                         },
                         Command::StopWatching => streams.stop(&mut connection, streaming::Phase::Stopped, "Stopped watching"),
+                        Command::StartSharing(options) => {
+                            streams.sync(&mut connection);
+                            let result = if !connected || config.performance_mode.load(Ordering::Relaxed) || !config.streaming_visible.load(Ordering::Relaxed) {
+                                Err(anyhow::anyhow!("Open your connected server view to share"))
+                            } else if !connection.get_state()?.server.version.starts_with("6.") {
+                                Err(anyhow::anyhow!("Sharing requires a TeamSpeak 6 server"))
+                            } else {
+                                streams.stop(&mut connection, streaming::Phase::Stopped, "Stopped watching to share");
+                                streams.publisher.start(options)
+                            };
+                            if let Err(error) = result { let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() }); }
+                        },
+                        Command::StopSharing => streams.publisher.stop("Stopped sharing"),
+                        Command::DecideViewer(id, allow) => if let Err(error) = streams.publisher.decide(id,allow) {
+                            let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() });
+                        },
                         Command::Stop => break,
                     }
                     let _ = events.try_send(Event::State(snapshot(&connection)?));
@@ -679,7 +699,8 @@ async fn run_connection(
                     {
                         let can_send = connected && controls.capture_allowed() && connection.can_send_audio();
                         audio.set_capture(can_send);
-                        let packets = audio.tick(false, controls.desired.deafened || !connected).map_err(AudioFailure)?;
+                        config.video_surface.set_audio_enabled(!controls.desired.deafened && connected);
+                        let packets = audio.tick(false, controls.desired.deafened || !connected, Some(&config.video_surface)).map_err(AudioFailure)?;
                         if can_send {
                             for packet in packets {
                                 let _trace = profiler::scope(Category::Network, "network.send_voice");
@@ -782,6 +803,7 @@ async fn run_connection(
         }
         Ok(())
     }.await;
+    streams.publisher.stop("Disconnected");
     streams.stop(
         &mut connection,
         streaming::Phase::Stopped,
@@ -819,7 +841,7 @@ async fn run_loopback(
             command = commands.recv() => if matches!(command, None | Some(Command::Stop)) { break; },
             _ = tick.tick() => {
                 if events.is_closed() { break; }
-                audio.tick(true, false).map_err(AudioFailure)?;
+                audio.tick(true, false, None).map_err(AudioFailure)?;
                 if !config.performance_mode.load(Ordering::Relaxed)
                     && last_meter.elapsed() >= Duration::from_millis(100) {
                     let _ = events.try_send(Event::Meter { level: audio.level(), sent: 0, received: 0, audio_buffer_bytes: audio.buffer_bytes() });

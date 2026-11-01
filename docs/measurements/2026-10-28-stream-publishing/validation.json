@@ -1,0 +1,107 @@
+{
+  "date": "2026-10-28",
+  "branch": "changes-next",
+  "base_commit": "3d1001a4b01590121c4d8c441bbf5372f8111b00",
+  "uncommitted": true,
+  "ordinary_tests": {
+    "passed": 69,
+    "ignored": 3
+  },
+  "packaging_tests_passed": 3,
+  "mac_clippy": "passed",
+  "windows_cross_target_clippy": "passed",
+  "mac_release_build": "passed",
+  "windows_release_build": "passed",
+  "generated_publisher_receiver": {
+    "video_frames": 8,
+    "distinct_video_levels": 7,
+    "audible_stereo_blocks": 41,
+    "peak": 0.24542236,
+    "hardware_capture": false,
+    "external_stun": false,
+    "server_connection": false,
+    "cleanup": "passed"
+  },
+  "generated_video_receiver": {
+    "codec": "VP8",
+    "size": "320x180",
+    "rtp_packets": 54,
+    "decoded_frames": 13,
+    "rgba_frames": 13,
+    "distinct_red_levels": 8
+  },
+  "mac_ui": {
+    "channel": "Lobby (#1)",
+    "connected": true,
+    "microphone_muted": true,
+    "voice_packets_sent": 0,
+    "voice_packets_received": 0,
+    "source_controls_visible": true,
+    "system_picker_opened": true,
+    "recording_permission_granted_by_agent": false,
+    "source_selected": false,
+    "viewers_approved": 0,
+    "capture_timeout_shown": true,
+    "picker_cancelled": true,
+    "final_state": "disconnected"
+  },
+  "limitations": [
+    "Official TS6 viewer playback of published media remains unverified; no viewers were approved",
+    "Windows hardware playback/capture remains unverified",
+    "Mac system-audio capture currently requires an output-only endpoint",
+    "Do not label the local capture as a verified blank-document test; first selected source was T3 Code and the later source was not independently confirmed"
+  ],
+  "mac_executable_sha256": "e482b233f83a20b6fb5ad999a50429af5dac6da83646f2f8aad7981719f04ab9",
+  "windows_executable_sha256": "c7e441bf284c59035dd9f25e179e3e4b438231d12057652c3f3e35692ccb82e4",
+  "windows_archive_sha256": "f36ac5f4087ba15d71eb2ba3facfeb03274369767076ec673edd7c68e1d40aa2",
+  "published": false,
+  "windows_delivery": {
+    "file": "Flexspeak-windows-x64-streaming.zip",
+    "destination": "Tribunal via Tailscale Taildrop",
+    "confirmed_sent": "2026-10-28 13:48:38 Europe/Berlin",
+    "cli_exit_code": 0,
+    "remote_directory": "Windows Taildrop default Downloads; remote filesystem not inspected"
+  },
+  "mac_local_capture": {
+    "approved_by_user": true,
+    "channel": "Lobby (#1)",
+    "source_selection": "User operated the macOS content picker; first successful selection was explicitly corrected to T3 Code. The later selected source was not independently confirmed, so this is not recorded as a verified blank-document capture.",
+    "first_observed_capture": {
+      "video_frames": 1474,
+      "audio_blocks": 6030,
+      "viewers": 0
+    },
+    "later_observed_capture": {
+      "video_frames": 6781,
+      "audio_blocks": 27958,
+      "viewers": 0
+    },
+    "server_start_accepted": true,
+    "system_audio_device": "MacBook Pro Speakers",
+    "test_tone": {
+      "generated": true,
+      "frequency_hz": 440,
+      "sample_rate_hz": 48000,
+      "channels": 2,
+      "duration_seconds": 3,
+      "briefly_looped": true,
+      "audio_meter_responded": true
+    },
+    "microphone_muted": true,
+    "voice_packets_sent": 0,
+    "voice_packets_received": 0,
+    "viewers_approved": 0,
+    "remote_media_playback_tested": false,
+    "stop_sharing_verified": true,
+    "disconnected_after_test": true,
+    "test_windows_closed": true,
+    "tone_stopped_and_loop_restored": true,
+    "capture_contents_saved": false,
+    "executable_sha256": "e482b233f83a20b6fb5ad999a50429af5dac6da83646f2f8aad7981719f04ab9"
+  },
+  "user_follow_up": {
+    "test_document_selected": true,
+    "streaming_report": "streaming worked",
+    "scope": "User confirmation after the local test; platform and remote-viewer playback details were not specified."
+  }
+}

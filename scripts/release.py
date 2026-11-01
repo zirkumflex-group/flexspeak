@@ -87,6 +87,9 @@ def write_notices(destination, opus_source):
         output.write((opus_source / "COPYING").read_text())
         output.write("\n--- Lucide status icons ---\n")
         output.write((ROOT / "assets/lucide/LICENSE").read_text())
+        output.write("\n--- Native WebRTC ---\n")
+        output.write((ROOT / "assets/webrtc/LICENSE.md").read_text())
+        output.write((ROOT / "assets/webrtc/NOTICE.txt").read_text())
 
 
 def package_linux(stage, version, number):

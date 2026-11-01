@@ -91,7 +91,7 @@ pub fn devices() -> Result<Devices> {
     })
 }
 
-fn find_device(selected: &DeviceChoice, input: bool) -> Result<Device> {
+pub(crate) fn find_device(selected: &DeviceChoice, input: bool) -> Result<Device> {
     let host = cpal::default_host();
     let devices = if input {
         host.input_devices()?
@@ -361,7 +361,12 @@ impl AudioEngine {
     }
 
     /// Codec work and resampling happen on the worker, never in an OS audio callback.
-    pub fn tick(&mut self, loopback: bool, deafened: bool) -> Result<Vec<Vec<u8>>> {
+    pub fn tick(
+        &mut self,
+        loopback: bool,
+        deafened: bool,
+        stream_audio: Option<&crate::streaming::Surface>,
+    ) -> Result<Vec<Vec<u8>>> {
         let _trace = profiler::scope(Category::AudioProcessing, "audio.process");
         if let Some(error) = self.errors.pop() {
             bail!("Audio device failed: {error}. Refresh devices and reconnect.");
@@ -403,6 +408,9 @@ impl AudioEngine {
                 }
             } else if !deafened {
                 self.incoming.fill_buffer(&mut stereo);
+                if let Some(surface) = stream_audio {
+                    surface.mix_audio(&mut stereo);
+                }
             }
             for (i, frame) in stereo.chunks_exact(2).enumerate() {
                 self.output_rate.input[0][i] = frame[0];
@@ -416,6 +424,13 @@ impl AudioEngine {
             }
         }
         Ok(packets)
+    }
+}
+
+pub(crate) fn report_stream_error(error: cpal::Error, errors: &ArrayQueue<String>) {
+    // CPAL continues the stream after an xrun; a dropped buffer is not a device failure.
+    if error.kind() != cpal::ErrorKind::Xrun {
+        let _ = errors.push(error.to_string());
     }
 }
 
@@ -450,9 +465,7 @@ where
             }
             level.store(peak.to_bits(), Ordering::Relaxed);
         },
-        move |error| {
-            let _ = errors.push(error.to_string());
-        },
+        move |error| report_stream_error(error, &errors),
         Some(Duration::from_secs(5)),
     )?)
 }
@@ -477,9 +490,7 @@ where
             let _trace = profiler::scope(Category::AudioCallbacks, "audio.playback_callback");
             write_playback(data, channels, &queue, &mut gain, volume.gain(), gain_step);
         },
-        move |error| {
-            let _ = errors.push(error.to_string());
-        },
+        move |error| report_stream_error(error, &errors),
         Some(Duration::from_secs(5)),
     )?)
 }
@@ -511,6 +522,31 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
 mod tests {
     use super::*;
     use audiopus::coder::Decoder;
+
+    #[test]
+    fn buffer_glitches_do_not_end_audio_or_crowd_out_device_failures() {
+        let errors = ArrayQueue::new(4);
+        for _ in 0..100 {
+            report_stream_error(cpal::ErrorKind::Xrun.into(), &errors);
+        }
+        assert!(
+            errors.is_empty(),
+            "Buffer glitches must not fail the next audio tick"
+        );
+
+        for kind in [
+            cpal::ErrorKind::DeviceNotAvailable,
+            cpal::ErrorKind::StreamInvalidated,
+            cpal::ErrorKind::PermissionDenied,
+            cpal::ErrorKind::BackendError,
+        ] {
+            let error = cpal::Error::new(kind);
+            report_stream_error(error.clone(), &errors);
+            report_stream_error(cpal::ErrorKind::Xrun.into(), &errors);
+            assert_eq!(errors.pop(), Some(error.to_string()));
+            assert!(errors.is_empty());
+        }
+    }
 
     #[test]
     fn playback_volume_scales_channels_and_zero_volume_drains_to_silence() {

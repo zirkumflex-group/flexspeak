@@ -20,6 +20,9 @@ pub enum Operation {
     StreamJoin,
     StreamSignal,
     StreamLeave,
+    StreamStart,
+    StreamStop,
+    StreamAdmit,
     PublisherInfo,
 }
 impl Operation {
@@ -33,6 +36,9 @@ impl Operation {
             Self::StreamJoin => "stream viewing request",
             Self::StreamSignal => "video negotiation",
             Self::StreamLeave => "stop watching",
+            Self::StreamStart => "start sharing",
+            Self::StreamStop => "stop sharing",
+            Self::StreamAdmit => "viewer admission",
             Self::PublisherInfo => "publisher information",
         }
     }
@@ -44,7 +50,7 @@ impl Operation {
     }
     fn priority(self) -> u8 {
         match self {
-            Self::Controls | Self::Join | Self::Subscribe => 0,
+            Self::Controls | Self::Join | Self::Subscribe | Self::StreamStop => 0,
             _ if self.optional() => 2,
             _ => 1,
         }

@@ -5,11 +5,21 @@ The native Iced error dialog replaces persistent error blocks for connection/aud
 ## Error lifetime
 
 - Close, Enter and Escape dismiss the current incident. The same incident stays suppressed until its operation recovers or the user explicitly retries that operation.
-- There is one incident per error source, at most 14, with details bounded to 4,096 characters. Repeated reports update the incident/count instead of opening additional dialogs. Different sources wait behind the current dialog.
+- There is one incident per error source, at most 15, with details bounded to 4,096 characters. Repeated reports update the incident/count instead of opening additional dialogs. Different sources wait behind the current dialog.
 - Recovery clears only the corresponding source. An unrelated successful command cannot clear a flood error. A failed server update cannot be presented as acknowledged.
 - Incorrect channel passwords stay inside the existing password prompt; other queued errors wait until that prompt closes.
 - Covered widgets do not receive mouse, scroll, keyboard or input-method events. Their widget state is retained, restoring the previous input focus after dismissal. The error dialog's keyboard action is Close (Enter/Escape); Tab cannot move into the covered form. Audio, protocol work and global mute/deafen shortcuts continue.
 - Missing/stale peer telemetry and unsupported-platform capabilities remain status/tooltip information, not repeated modal incidents.
+
+## Audio buffer glitches
+
+CPAL's `ErrorKind::Xrun` reports a buffer underrun/overrun while the audio stream continues. On Windows, WASAPI emits it for a capture-buffer discontinuity. Previously, either audio callback queued every notification as a device failure, causing the next audio tick to stop the voice session or local microphone test and show **Audio unavailable**.
+
+Input and output callbacks now exclude `Xrun` from the fatal-error queue. Repeated glitches cannot fill that queue or crowd out a later device failure. Device removal, stream invalidation, permission errors and other failures still use the existing stop/error path. This prevents a recoverable glitch from disconnecting the session; it does not eliminate audio dropouts caused by device or scheduling delays. See [CPAL's error categories](https://docs.rs/cpal/0.18.2/cpal/enum.ErrorKind.html#variant.Xrun).
+
+A regression test injects repeated glitches followed by device failures without opening audio hardware. For this fix, 59 ordinary tests and Mac/Windows cross-target Clippy with warnings denied passed. Windows hardware retesting is still required; this fix does not address the separate macOS CoreAudio initialization stall described below.
+
+Screen-sharing capture and publishing errors use their own modal source. Stopping capture does not wait for a server acknowledgement. Publishing commands use the same scheduler; a late start notification after cancellation is taken down instead of restarting capture.
 
 ## Control commands
 
@@ -39,3 +49,5 @@ These are application-side controls, not a claim to know the server's command we
 Native UI verification covered local validation errors, Close-button/Enter dismissal, Escape release in the final clean build, and background input protection. Short dialogs shrink to their text; long details scroll. Temporary action-only diagnostics were removed. Saved settings were not changed.
 
 Two normal-app connection attempts stalled in macOS CoreAudio input-stream initialization, before any server connection or scheduler work. The captured call stack was `AudioUnitSetProperty` → CoreAudio HAL property IPC. Its root cause remains unestablished; the final app is running disconnected. Full voice/video runtime validation of this scheduler remains limited by that audio startup stall. See [validation evidence](measurements/2026-10-27-error-modals/validation.json).
+
+On 2026-10-28 the new Mac development build successfully opened 48 kHz input/output and connected in Lobby, remaining muted with zero voice packets while the Streaming UI was inspected. No CoreAudio fix was applied, and this does not establish the cause of the earlier startup stalls or validate a two-person voice conversation.

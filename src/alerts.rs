@@ -16,6 +16,7 @@ pub enum Source {
     StreamDiscovery,
     StreamWatch,
     StreamFrame,
+    StreamPublish,
 }
 
 impl Source {
@@ -35,6 +36,7 @@ impl Source {
             Self::StreamDiscovery => "Could not find streams",
             Self::StreamWatch => "Could not watch stream",
             Self::StreamFrame => "Video frame could not be displayed",
+            Self::StreamPublish => "Screen sharing unavailable",
         }
     }
 }

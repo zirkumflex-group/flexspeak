@@ -43,6 +43,7 @@ enum Pending {
 }
 
 pub struct Session {
+    pub publisher: super::publishing::Publisher,
     events: mpsc::Sender<client::Event>,
     surface: Arc<Surface>,
     visible: Arc<AtomicBool>,
@@ -69,6 +70,7 @@ impl Session {
         flow: Rc<RefCell<Flow>>,
     ) -> Self {
         Self {
+            publisher: super::publishing::Publisher::new(events.clone(), flow.clone()),
             events,
             surface,
             visible,
@@ -112,6 +114,23 @@ impl Session {
             .clients
             .get(&state.own_client)
             .map(|client| client.channel);
+        let own = state.own_client;
+        let names = state
+            .clients
+            .values()
+            .filter(|client| Some(client.channel) == channel && client.id != own)
+            .map(|client| {
+                (
+                    client.id.0,
+                    client
+                        .name
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(160)
+                        .collect(),
+                )
+            })
+            .collect();
         self.supported = state.server.version.starts_with("6.");
         let members: HashSet<_> = state
             .clients
@@ -120,6 +139,10 @@ impl Session {
             .map(|client| client.id.0)
             .collect();
         if channel != self.channel {
+            if self.publisher.active() {
+                self.publisher
+                    .stop("Sharing stopped after changing channels");
+            }
             self.stop(
                 connection,
                 Phase::Stopped,
@@ -157,6 +180,7 @@ impl Session {
             }
         }
         self.members = members;
+        self.publisher.sync(own, names);
     }
 
     pub fn refresh(&mut self, connection: &mut Connection) {
@@ -183,14 +207,18 @@ impl Session {
     pub fn watch(&mut self, connection: &mut Connection, id: &str) -> Result<()> {
         self.sync(connection);
         ensure!(
+            !self.publisher.active(),
+            "Stop sharing before watching another stream"
+        );
+        ensure!(
             AVAILABLE,
-            "The native stream receiver is currently available on macOS"
+            "The native stream receiver is currently available on Mac and Windows"
         );
         ensure!(
             self.supported
                 && self.visible.load(Ordering::Relaxed)
                 && !self.performance.load(Ordering::Relaxed),
-            "Open Streaming in normal mode on a TeamSpeak 6 server"
+            "Open your server view in normal mode on a TeamSpeak 6 server"
         );
         let info = self
             .catalog
@@ -212,7 +240,7 @@ impl Session {
             candidates: Vec::new(),
             receiver: None,
         });
-        self.state(Phase::Requesting, "The publisher may need to accept your request. Video only; stream audio is not played.");
+        self.state(Phase::Requesting, "The publisher may need to accept your request. Stream audio follows playback volume and deafen.");
         if let Err(error) = self.send(
             protocol::join(&info, false),
             Pending::Control(generation),
@@ -251,6 +279,7 @@ impl Session {
     }
 
     pub fn reset(&mut self) {
+        self.publisher.reset();
         self.state(Phase::Stopped, "The server connection ended");
         if let Some(watch) = self.watch.take() {
             self.surface.end(watch.generation);
@@ -270,16 +299,21 @@ impl Session {
         let visible =
             self.visible.load(Ordering::Relaxed) && !self.performance.load(Ordering::Relaxed);
         if !visible {
+            if self.publisher.active() {
+                self.publisher
+                    .stop("Sharing stopped when leaving the server view");
+            }
             self.stop(
                 connection,
                 Phase::Stopped,
-                "Stopped when leaving the Streaming view",
+                "Stopped when leaving the server view",
             );
         }
         if visible && !self.was_visible {
             self.refresh(connection);
         }
         self.was_visible = visible;
+        self.publisher.tick();
         if self.watch.as_ref().is_some_and(|watch| {
             watch.receiver.is_none() && watch.started.elapsed() > Duration::from_secs(45)
         }) {
@@ -337,6 +371,9 @@ impl Session {
         handle: Ticket,
         result: &std::result::Result<(), CommandError>,
     ) -> bool {
+        if self.publisher.result(handle, result) {
+            return true;
+        }
         let Some((kind, _)) = self.pending.remove(&handle) else {
             return false;
         };
@@ -401,6 +438,9 @@ impl Session {
     }
 
     pub fn timeout(&mut self, connection: &mut Connection, ticket: Ticket) -> bool {
+        if self.publisher.timeout(ticket) {
+            return true;
+        }
         let Some((kind, _)) = self.pending.remove(&ticket) else {
             return false;
         };
@@ -431,6 +471,7 @@ impl Session {
             return;
         };
         for args in parts {
+            self.publisher.notification(name, &args);
             match name {
                 "notifycliententerview" | "notifyclientupdated" => {
                     if let Some(id) = args
@@ -578,9 +619,9 @@ impl Session {
             watch.phase = Phase::Negotiating;
             self.state(
                 Phase::Negotiating,
-                "Negotiating a receive-only video connection",
+                "Negotiating a receive-only media connection",
             );
-        } else {
+        } else if matches!(input, Input::Candidate { .. }) {
             ensure!(
                 watch.candidates.len() < MAX_CANDIDATES,
                 "Too many pending connection candidates"
@@ -636,7 +677,7 @@ impl Session {
                 }
                 self.state(
                     Phase::Receiving,
-                    "Video only · stop watching before leaving this channel",
+                    "Receiving stream · audio follows playback volume and deafen",
                 );
             }
             Some(rtc::Output::Stats(mut stats)) => {

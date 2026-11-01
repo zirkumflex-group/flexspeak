@@ -1,26 +1,47 @@
 # Experimental native TeamSpeak stream receiver
 
-## Current scope
+## Current scope — development update, 2026-10-28
 
-**Streaming**, beside **Voice**, discovers screen shares in your current channel and lets you request one with **Watch**. This first receiver proof is available on macOS. It is video-only: no screen, camera or microphone capture is started by the viewer, and the shared stream's audio is not played. Existing TeamSpeak voice uses the unchanged CPAL/Opus path.
+The native media backend is now enabled on **macOS and Windows** for watching and publishing peer-to-peer streams through the existing TS6 server connection. The earlier Windows build disabled Watch because the backend was compiled only on macOS. Watch still requires a TS6 server, a current-channel stream and no other active watch/share.
 
-The app uses the existing TS6 connection for discovery, viewer admission, SDP and ICE signaling. Media is handled by native `libwebrtc` 0.3.54, with no browser UI, custom signaling service or LiveKit server. Screen publishing and server/SFU streams are not implemented. Direct connectivity uses TeamSpeak's public STUN endpoints; no TURN credentials or relay service are configured.
+Incoming stream audio is decoded to stereo 48 kHz PCM and mixed into the existing CPAL playback path. App volume and deafen apply to both voice and stream audio. Deafen, stopping and receiver-generation changes clear buffered stream sound. WebRTC never opens a microphone or a playback device; TeamSpeak voice continues to use CPAL/Opus.
+
+Publishing captures a selected screen/window and optionally the sound on a selected output device. It uses native `libwebrtc` 0.3.54 with CPAL output loopback; there is no browser UI, LiveKit service or extra signaling server. SFU publishing and TURN relaying are not configured.
+
+## Start sharing
+
+1. Connect and join the channel where you want to share. Open the server view → **Choose source**.
+2. On Windows, select a screen or window from the list. On Mac, select **Choose a screen or window…**; **Start sharing** opens the system content picker.
+3. Leave **Share system audio** enabled and select the output carrying the sound, or disable it for silent video. **All sound on that output is shared**, including calls and notifications, even for a single-window share. This is not per-application audio. Microphone mute remains separate.
+4. Press **Start sharing** and grant the OS capture permissions if needed. The app announces the stream only after capture starts. A generic stream name is announced; the selected window's title is not sent as metadata.
+5. Each viewer must request access and be approved with **Allow**. **Deny** suppresses repeat requests for that share. Up to four current-channel viewers can be admitted. The app enforces admission and limits itself rather than relying on the server's advertised privacy fields.
+6. **Stop sharing**, opening Settings or Statistics, changing channels, entering performance mode or disconnecting stops capture. The Stop control cancels media directly, even when the voice-worker command queue is full. Server cleanup continues through the paced command scheduler. A timed-out, unconfirmed start may require reconnecting before another start.
+
+Publishing uses VP8 video at up to 1280×720 / 30 FPS and a 2.5 Mbit/s cap per viewer, plus stereo Opus audio capped at 128 kbit/s. Captured frames/audio blocks are capture counters, not proof of remote rendering. Each viewer has its own peer connection, so upload grows with the number of viewers. No publishing CPU/RAM or hardware-encoding performance claim is made.
+
+On Mac, the current CPAL loopback path requires an **output-only audio endpoint**, such as the built-in speakers. A duplex endpoint that also exposes input is rejected explicitly so it cannot accidentally record the microphone; select another output or share without audio. Screen Recording and System Audio Recording permission may be required. On Windows, loopback captures the selected WASAPI render endpoint. Mono is duplicated to stereo; surround output is downmixed so center and other channels are retained.
+
+## Development validation
+
+69 ordinary tests passed, including manual admission, channel scoping, bounded requests, stale peer events, direct cancellation, delayed start cleanup, BGRA conversion and stream-audio deafen/reset behavior. A generated native sender-to-production-receiver test delivered **8 changing video frames and 41 audible stereo blocks**, with no capture devices, external STUN or TeamSpeak server. It also verified receiver cleanup. An unsafe empty-sender-track inspection in the native binding was identified during this test and avoided; receive-only behavior is checked from the generated SDP instead.
+
+Both optimized builds and Mac/Windows cross-target Clippy passed. Native Mac UI inspection connected in Lobby with the microphone muted and zero voice packets, showed the publishing controls, and opened the system content picker. The capture attempt timed out without a source being selected; the picker was cancelled and the app was disconnected. No viewers were approved. A subsequent user-approved local test captured video and system audio in Lobby: counters reached 6,781 video frames / 27,958 audio blocks, and the input meter responded to a quiet generated 440 Hz tone played through MacBook Pro Speakers. The server accepted the stream announcement; zero viewers were approved. Stop sharing and disconnect both completed, with the microphone muted and zero voice packets throughout. The user selected T3 Code in the first successful run; the later selected source was not independently confirmed, so this is not evidence of a blank-document capture. No capture contents were saved. Official TS6 viewer playback and Windows hardware interoperability remain unverified. The earlier official-client receive proof below applies to the previous Mac video-only receiver; it must not be presented as validation of the new publishing/audio paths. The separate macOS CoreAudio startup stall remains documented in [error handling](error-handling.md).
 
 ## Use
 
 1. Connect to a TS6 server and join the publisher's channel.
-2. Start a peer-to-peer screen share from an official TS6 client. For the initial proof, use a harmless window and leave stream audio off.
-3. Open **Streaming**, use **Refresh streams** if necessary, then **Watch**. The publisher may need to accept the request.
+2. Start a peer-to-peer screen share from an official TS6 client. Use a harmless window for validation.
+3. Open the server view, use **Refresh streams** if necessary, then **Watch**. The publisher may need to accept the request.
 4. A transport connection alone does not count as successful video. Look for decoded frames, UI updates and a visibly changing picture.
-5. **Stop watching**, changing channels, leaving Streaming, entering performance mode or disconnecting stops the viewer. An interrupted video connection requires clicking Watch again.
+5. **Stop watching**, changing channels, opening Settings or Statistics, entering performance mode or disconnecting stops the viewer. An interrupted video connection requires clicking Watch again.
 
 The player and its Stop button appear only while requesting or watching a stream. The watched stream is omitted from the available-stream list, so it appears once. After stopping, the player disappears and the single catalog entry offers **Watch** again. Failed requests leave an explanation above the list.
 
-The UI reports the server version, negotiated video codec/parameters, decoder name, ICE candidate types (without IP addresses), RTP packet/byte counts, decoded frames/FPS, UI updates and the publisher's version when the server reports it. CPU and memory stay in the footer. Existing Statistics network counters describe the TeamSpeak transport; WebRTC media bytes are reported separately in Streaming.
+The receiving UI reports the server version, negotiated video codec/parameters, decoder name, ICE candidate types (without IP addresses), video RTP packet/byte counts, decoded frames/FPS, UI updates and the publisher's version when the server reports it. CPU and memory stay in the footer. Existing Statistics network counters describe the TeamSpeak transport; WebRTC media bytes are reported separately in Streaming.
 
 ## Resource and lifecycle bounds
 
-- Only one receiver/peer connection is active. Native decoding runs on a separate worker so peer setup does not block the voice loop.
+- Only one receiver is active. Watching and publishing are mutually exclusive. Native decoding runs on a separate worker so peer setup does not block the voice loop.
 - The native frame callback queue and application display slot each keep the latest frame. Superseded frames are dropped, not queued for later display.
 - The renderer explicitly uploads the next image before replacing the visible picture. It retains the displayed GPU allocation and permits only one upload in flight, including across a stop/restart. This avoids the blank frames caused by Iced's asynchronous upload of larger images; failed or late uploads cannot clear or revive the current picture.
 - Display conversion is capped at 1280×720 and approximately 30 FPS. The incoming stream may be decoded at a larger resolution/rate; the diagnostics report its actual decoded size/FPS.
@@ -31,7 +52,7 @@ The UI reports the server version, negotiated video codec/parameters, decoder na
 
 `vendor/tsclientlib` is based on ReSpeak revision `ee3bc6f45a7137db7793ba5593a321df400d53e5`. Its narrow extension forwards TS6 stream notifications and optional streaming-flag updates; protocol dependencies, handshake and crypto stay on the original pin. See its [patch notes](../vendor/tsclientlib/FLEXSPEAK-PATCH.md). The wire shapes follow the MIT-licensed [WebSpeak3 implementation](https://github.com/WebSpeak3/webspeak3/tree/10ae24a99f4b397460f078798480a5527ea0f706), not its browser/gateway deployment.
 
-The macOS build downloads the pinned native WebRTC SDK through its build dependency. `build.rs` adds `-ObjC`, required for WebRTC's Objective-C categories. The app bundle includes native WebRTC and protocol-library license notices. Windows/Linux keep the voice client and discovery code; the native media backend is intentionally unavailable there for this first proof.
+The Mac and Windows builds download the pinned native WebRTC SDK through its build dependency. `build.rs` adds `-ObjC`, required for WebRTC's Objective-C categories. The app bundle includes native WebRTC and protocol-library license notices. Linux keeps the voice client and discovery code; its native media backend remains unavailable. Windows now includes the same native receiving and publishing backend as Mac.
 
 On this macOS 27 host, stripped release procedural-macro dylibs failed to load with `mis-aligned LINKEDIT string pool`. A direct `rustc --extern` probe reproduced the failure against a newly built plugin, while an older plugin loaded. Disabling stripping for release **build dependencies** made the same load check pass. The application still uses thin LTO and release debuginfo stripping.
 
@@ -59,4 +80,4 @@ Video decoding reported **30–31 FPS**, using software **dav1d** and **Host ↔
 
 See [raw measurements and trial observations](measurements/2026-10-27-native-stream-receiver/), including the exact binary SHA256, server/publisher versions, the initial flicker failure and the fixed retest. Video contents, raw SDP and ICE addresses were not saved. Discrete visual observations confirmed changing rendered content, and the user subsequently confirmed that the flickering was gone. No continuous flicker recording was taken. The official stream test covers this AV1 version/network combination only. Other codecs, remote NAT/TURN paths, publisher restart, video recovery, simultaneous active voice, and native Windows/Linux receiving remain unverified.
 
-The earlier [interoperability research](teamspeak-streaming-research.md) records source evidence and the remaining protocol/version risks. Native screen capture and publishing are later work, after this receive proof succeeds.
+The earlier [interoperability research](teamspeak-streaming-research.md) records source evidence and the remaining protocol/version risks. The newer publishing path and its validation are described above.

@@ -69,10 +69,13 @@ libopus links statically. The binding finds an installed libopus using pkg-confi
 
 ## First voice session
 
+A missing settings file opens setup for your username, one saved server, permissions, devices and global shortcuts. Finish saves the profile; existing valid settings go straight to the saved-server card. Use its plug button to connect. While connected, the channel tree stays on the left and streaming occupies the right. Settings and Statistics are available from the header.
+
+
 1. In **Settings → Audio**, select your microphone and headphones/speakers.
 2. Choose **Test microphone locally**, approve microphone permission, speak, and check the activity bar below Microphone and local playback. Stop the test.
 3. Enter the server address (hostname, `hostname:port`, or IP), nickname, and password if needed.
-4. On **Voice**, click **Connect to server**. Use **Join** beside a channel in the left sidebar; protected channels prompt for a password when you join.
+4. On the home screen, use the saved server’s **Connect** icon. Click a channel heading in the left sidebar to join; protected channels prompt for a password.
 5. Click **Unmute microphone** to speak. The outgoing packet counter should increase; incoming packets indicate received voice. A second participant using TeamSpeak is needed to verify a real conversation.
 6. **Deafen** stops playback and transmission. **Disconnect** releases the audio devices.
 
@@ -88,7 +91,7 @@ The **Volume** slider in **Settings → Audio**, below Playback, changes only Na
 
 ## Streaming
 
-**Streaming**, beside **Voice**, contains an experimental macOS receiver for peer-to-peer screen shares from TS6 clients. Join the publisher’s channel, refresh the stream list and choose **Watch**. The viewer does not capture or publish your screen, and stream audio is not played. Leaving Streaming or stopping/disconnecting releases the receiver. Moving AV1 video at 1280×720 from official TeamSpeak 6 on Windows has been verified, including Stop/rejoin and leaving the tab. This is one tested version/network path, not general TS6 feature parity. See [receiver scope, measurements and validation](docs/streaming.md).
+The connected server view includes streaming controls that support experimental native watching and screen/window sharing on Mac and Windows. Join a TS6 channel, choose a capture source and optional system-output audio, then approve viewers individually. Stream playback uses the app's volume and deafen controls. Up to four viewers are supported. Generated-media tests and a local Mac capture/system-audio check passed; official-client viewer playback and Windows hardware still need runtime verification. See [scope, use and validation](docs/streaming.md).
 
 ## Usage and connection metrics
 
@@ -180,7 +183,7 @@ Validation on 2026-10-26: the optimized Apple Silicon build, native window, audi
 
 The app stores a TeamSpeak identity under the operating system's per-user application-data directory (`--identity-path` shows the location). It is a private key, saved with owner-only file permissions on Unix. Back it up to retain the same server identity. Windows uses the account's inherited application-data permissions. Passwords are held in memory and are not saved. Audio is neither recorded nor stored on disk.
 
-This is a voice prototype. It does not implement video, myTeamSpeak, your future authentication/chat/file services, or full TS6 audio-processing parity. Server acceptance also depends on minimum client-version rules and permissions. The protocol library's compatibility must be tested against each target server.
+This is a voice prototype. It does not implement myTeamSpeak, your future authentication/chat/file services, or full TS6 audio-processing parity. Server acceptance also depends on minimum client-version rules and permissions. The protocol library's compatibility must be tested against each target server.
 
 ## Structure
 

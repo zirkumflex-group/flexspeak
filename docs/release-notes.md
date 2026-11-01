@@ -2,12 +2,12 @@ Automatic build from `main`. The release tag identifies the build, and GitHub li
 
 This build adds:
 
-- A clearer channel/client tree, click-to-join channel headings, sidebar audio controls and connection-health indicators.
-- Fixed connection graphs beside CPU/RAM readings, including horizontal scrolling in narrow windows.
-- Dismissible Iced error dialogs, grouped repeated errors, acknowledged audio-state updates and adaptive server-command pacing after flood responses.
-- An experimental **macOS-only, video-only** receiver for peer-to-peer TeamSpeak 6 screen shares. AV1 1280×720 playback from an official Windows client was verified before the command-scheduler update. Screen publishing and shared-stream audio are not included.
+- Five-step first-run setup for username, server, permissions, audio devices and shortcuts. Existing valid settings skip setup; selected devices are saved.
+- A saved-server home screen and a connected view with channels on the left and streaming on the right, plus a 760 × 560 minimum window size.
+- Experimental native screen/window sharing and stream audio on Mac and Windows, with individual viewer approval and up to four viewers. Stream playback follows app volume and deafen.
+- Recoverable audio-buffer glitches no longer end the voice session; device failures still report an error.
 
-**Known validation limit:** the latest local macOS 27 test stalled in CoreAudio while opening the microphone, before connecting to the server. The final app passed modal UI checks, 58 ordinary tests and a separate muted/deafened network-only test of paced command acknowledgements. Full voice/video runtime testing of this build remains incomplete. See [error-handling validation](https://github.com/zirkumflex-group/flexspeak/blob/main/docs/error-handling.md) and [streaming scope](https://github.com/zirkumflex-group/flexspeak/blob/main/docs/streaming.md).
+**Validation:** 74 ordinary Rust tests, three packaging tests, formatting and macOS Clippy passed before this merge. Earlier generated-media tests and local Mac screen/system-audio capture passed. Official-client playback of published streams, Windows hardware capture/playback and the complete onboarding permission flow remain unverified. Noise suppression and echo cancellation are not yet implemented. See [error-handling validation](https://github.com/zirkumflex-group/flexspeak/blob/main/docs/error-handling.md) and [streaming scope](https://github.com/zirkumflex-group/flexspeak/blob/main/docs/streaming.md).
 
 - **Windows x64:** download `Flexspeak-windows-x64.zip`, extract, and open `Flexspeak.exe`. The standalone `.exe` is also available. Opus and the Microsoft C runtime are linked statically.
 - **macOS (Apple Silicon):** download the `arm64` DMG, then drag **Native Voice.app** into Applications. Requires macOS 14.2 or later.

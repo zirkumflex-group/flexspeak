@@ -21,11 +21,12 @@ pub enum Icon {
     Settings,
     ChartLine,
     Disconnect,
+    Connect,
     MonitorPlay,
 }
 
 impl Icon {
-    pub fn view(self, size: u32) -> Text<'static> {
+    pub fn view<'a>(self, size: u32) -> Text<'a> {
         let glyph = match self {
             Self::Cpu => "\u{e0a9}",
             Self::Memory => "\u{e445}",
@@ -40,6 +41,7 @@ impl Icon {
             Self::Settings => "\u{e154}",
             Self::ChartLine => "\u{e2a5}",
             Self::Disconnect => "\u{e45d}",
+            Self::Connect => "\u{e37f}",
             Self::MonitorPlay => "\u{e485}",
         };
         text(glyph).font(FONT).size(size).line_height(1.0)

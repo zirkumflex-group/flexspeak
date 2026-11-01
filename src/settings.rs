@@ -16,6 +16,10 @@ pub struct Settings {
     pub nickname: String,
     pub playback_volume_percent: u8,
     pub keybinds: Keybinds,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_device_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -25,6 +29,8 @@ impl Default for Settings {
             nickname: "Native Voice".into(),
             playback_volume_percent: 100,
             keybinds: Keybinds::default(),
+            input_device_id: None,
+            output_device_id: None,
         }
     }
 }
@@ -54,19 +60,15 @@ pub fn path() -> Result<PathBuf> {
     Ok(dirs.data_local_dir().join("settings.json"))
 }
 
-pub fn load_or_create(path: &Path) -> Result<Settings> {
+pub fn load(path: &Path) -> Result<Option<Settings>> {
     match fs::read_to_string(path) {
         Ok(json) => {
             let settings: Settings = serde_json::from_str(&json)
                 .context("Invalid settings.json; the file was not changed")?;
             settings.validate()?;
-            Ok(settings)
+            Ok(Some(settings))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let settings = Settings::default();
-            save(path, &settings)?;
-            Ok(settings)
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).context("Cannot read settings.json"),
     }
 }
@@ -120,6 +122,8 @@ mod tests {
                 toggle_mute: "F8".into(),
                 toggle_deafen: "Ctrl+Alt+D".into(),
             },
+            input_device_id: Some("input-id".into()),
+            output_device_id: Some("output-id".into()),
         };
         settings.validate()?;
         assert_eq!(
@@ -150,16 +154,23 @@ mod tests {
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
         ));
         let path = root.join("settings.json");
-        let mut settings = load_or_create(&path)?;
-        settings.nickname = "Saved name".into();
+        assert_eq!(load(&path)?, None);
+        assert!(
+            !path.exists(),
+            "Starting setup must not create a completed config"
+        );
+        let mut settings = Settings {
+            nickname: "Saved name".into(),
+            ..Settings::default()
+        };
         save(&path, &settings)?;
-        assert_eq!(load_or_create(&path)?, settings);
+        assert_eq!(load(&path)?, Some(settings.clone()));
         let old = fs::read(&path)?;
         settings.playback_volume_percent = 200;
         assert!(save(&path, &settings).is_err());
         assert_eq!(fs::read(&path)?, old);
         fs::write(&path, "{ malformed")?;
-        assert!(load_or_create(&path).is_err());
+        assert!(load(&path).is_err());
         assert_eq!(fs::read_to_string(&path)?, "{ malformed");
         fs::remove_dir_all(root)?;
         Ok(())

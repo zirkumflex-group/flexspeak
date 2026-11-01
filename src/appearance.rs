@@ -186,9 +186,7 @@ pub fn compact_button<'a, Message: 'a>(
         .padding([0, COMPACT_PADDING])
 }
 
-pub fn icon_only_button<Message: 'static>(
-    icon: crate::icons::Icon,
-) -> button::Button<'static, Message> {
+pub fn icon_only_button<'a, Message: 'a>(icon: crate::icons::Icon) -> button::Button<'a, Message> {
     primary_button(container(icon.view(NAV_ICON_SIZE)).center_x(Length::Fill))
         .width(CONTROL_HEIGHT)
         .padding(0)

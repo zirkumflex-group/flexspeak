@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub enum Output {
     Signal(Value),
     TransportConnected,
@@ -25,12 +25,14 @@ impl Drop for Receiver {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn start(_: String, _: Vec<Input>, _: u64, _: Arc<Surface>) -> Result<Receiver> {
-    anyhow::bail!("The experimental native video receiver is currently available on macOS.")
+    anyhow::bail!(
+        "The experimental native video receiver is currently available on Mac and Windows."
+    )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn start(
     offer: String,
     candidates: Vec<Input>,
@@ -49,8 +51,8 @@ pub fn start(
     )
 }
 
-#[cfg(target_os = "macos")]
-fn start_with_servers(
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn start_with_servers(
     offer: String,
     candidates: Vec<Input>,
     generation: u64,
@@ -89,7 +91,7 @@ fn start_with_servers(
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native {
     use super::*;
     use crate::streaming::{MAX_CANDIDATES, protocol};
@@ -98,6 +100,7 @@ mod native {
     use iced::widget::image::Handle;
     use libwebrtc::{
         MediaType,
+        audio_stream::native::NativeAudioStream,
         ice_candidate::IceCandidate,
         media_stream_track::MediaStreamTrack,
         peer_connection::{AnswerOptions, PeerConnection, PeerConnectionState},
@@ -145,15 +148,6 @@ mod native {
         pc.set_remote_description(offer)
             .await
             .map_err(|_| anyhow!("The video offer could not be accepted"))?;
-        // No stream audio or local capture: the existing CPAL voice session owns audio devices.
-        for transceiver in pc.transceivers() {
-            if let Some(MediaStreamTrack::Audio(track)) = transceiver.receiver().track() {
-                track.set_enabled(false);
-                transceiver
-                    .stop()
-                    .map_err(|_| anyhow!("Could not disable stream audio"))?;
-            }
-        }
         for candidate in candidates.drain(..) {
             add_candidate(pc, candidate).await;
         }
@@ -162,6 +156,13 @@ mod native {
             .await
             .map_err(|_| anyhow!("Could not create a video answer"))?;
         let wire = answer.to_string();
+        // This binding cannot safely inspect an empty sender track; validate the generated SDP.
+        ensure!(
+            !wire
+                .lines()
+                .any(|line| matches!(line, "a=sendrecv" | "a=sendonly")),
+            "A stream receiver must not send local media"
+        );
         pc.set_local_description(answer)
             .await
             .map_err(|_| anyhow!("Could not apply the video answer"))?;
@@ -232,9 +233,12 @@ mod native {
             })));
         }
         let mut video: Option<NativeVideoStream> = None;
+        let mut audio: Option<NativeAudioStream> = None;
         let result = async {
-            pc.add_transceiver_for_media(MediaType::Video, RtpTransceiverInit { direction: RtpTransceiverDirection::RecvOnly, stream_ids: vec![], send_encodings: vec![] })
-                .map_err(|_| anyhow!("Could not create a receive-only video track"))?;
+            for media in [MediaType::Video, MediaType::Audio] {
+                pc.add_transceiver_for_media(media, RtpTransceiverInit { direction: RtpTransceiverDirection::RecvOnly, stream_ids: vec![], send_encodings: vec![] })
+                    .map_err(|_| anyhow!("Could not create a receive-only media track"))?;
+            }
             let accept = tokio::time::timeout(Duration::from_secs(15), accept_offer(&pc, &offer, &mut pending, output));
             tokio::select! {
                 _ = cancel.changed() => return Ok(()),
@@ -271,7 +275,10 @@ mod native {
                             if let Some(stream) = &mut video { stream.close(); }
                             video = Some(NativeVideoStream::new(track));
                         },
-                        Some(Callback::Track(MediaStreamTrack::Audio(track))) => { track.set_enabled(false); },
+                        Some(Callback::Track(MediaStreamTrack::Audio(track))) => {
+                            if let Some(stream) = &mut audio { stream.close(); }
+                            audio = Some(NativeAudioStream::new(track,48000,2));
+                        },
                         Some(Callback::State(_)) => {},
                         None => break,
                     },
@@ -281,6 +288,11 @@ mod native {
                         present_frame(frame, generation, &surface)?;
                         last_presented = Instant::now();
                         if !first_frame { first_frame = true; send(output, Output::Playing)?; }
+                    },
+                    frame = async { match &mut audio { Some(stream) => stream.next().await, None => std::future::pending().await } } => {
+                        let Some(frame) = frame else { audio = None; continue; };
+                        ensure!(frame.sample_rate == 48000 && frame.num_channels == 2,"Unexpected stream audio format");
+                        surface.publish_audio(generation,&frame.data);
                     },
                     _ = stats_tick.tick() => {
                         ensure!(first_frame || started.elapsed() < Duration::from_secs(30), "No decoded video arrived within 30 seconds");
@@ -293,6 +305,9 @@ mod native {
             Ok(())
         }.await;
         if let Some(mut stream) = video {
+            stream.close();
+        }
+        if let Some(mut stream) = audio {
             stream.close();
         }
         pc.on_track(None);

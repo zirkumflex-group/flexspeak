@@ -33,6 +33,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>LSMinimumSystemVersion</key><string>14.2</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Native Voice uses your microphone for TeamSpeak voice chat and the local microphone test.</string>
+<key>NSScreenCaptureUsageDescription</key><string>Flexspeak shares the screen or window you select with viewers you approve.</string>
+<key>NSAudioCaptureUsageDescription</key><string>Flexspeak shares sound from your chosen output device when you enable system audio for a screen share.</string>
 </dict></plist>
 PLIST
 if [ -n "${NATIVE_VOICE_BUILD_NUMBER:-}" ]; then

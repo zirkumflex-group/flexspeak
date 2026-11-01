@@ -1,13 +1,18 @@
 mod protocol;
+mod publish_media;
+pub mod publishing;
 mod rtc;
 mod session;
+#[cfg(target_os = "macos")]
+pub use publish_media::request_system_audio_access;
+pub use publish_media::sources as share_sources;
 
 use iced::widget::image::Handle;
 pub(crate) use rtc::Output as MediaEvent;
 pub use session::Session;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
-pub const AVAILABLE: bool = cfg!(target_os = "macos");
+pub const AVAILABLE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 pub const MAX_SDP_BYTES: usize = 64 * 1024;
 pub const MAX_CANDIDATES: usize = 256;
 
@@ -62,6 +67,7 @@ pub struct Stats {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    Publishing(publishing::Status),
     Catalog(Vec<StreamInfo>),
     Notice(String),
     State {
@@ -78,6 +84,7 @@ pub enum Event {
 
 #[derive(Default)]
 pub struct View {
+    pub sharing: publishing::Ui,
     pub catalog: Vec<StreamInfo>,
     pub stream: Option<StreamInfo>,
     pub generation: u64,
@@ -98,6 +105,7 @@ impl View {
         self.phase.is_some_and(Phase::active)
     }
     pub fn reset(&mut self) {
+        self.sharing.status = publishing::Status::default();
         self.clear_picture();
         self.catalog.clear();
         self.stream = None;
@@ -115,6 +123,7 @@ impl View {
     }
     pub fn update(&mut self, event: Event) {
         match event {
+            Event::Publishing(status) => self.sharing.status = status,
             Event::Catalog(catalog) => self.catalog = catalog,
             Event::Notice(notice) => self.notice = notice,
             Event::State {
@@ -201,6 +210,8 @@ struct SurfaceState {
     active: bool,
     sequence: u64,
     frame: Option<Frame>,
+    audio: std::collections::VecDeque<[f32; 2]>,
+    audio_disabled: bool,
 }
 
 /// One latest frame, never a queue of image buffers. Old sessions cannot publish into new ones.
@@ -218,6 +229,7 @@ impl Surface {
         state.active = true;
         state.sequence = 0;
         state.frame = None;
+        state.audio.clear();
         state.generation
     }
     pub fn end(&self, generation: u64) {
@@ -225,9 +237,10 @@ impl Surface {
         if state.generation == generation {
             state.active = false;
             state.frame = None;
+            state.audio.clear();
         }
     }
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn publish(&self, generation: u64, handle: Handle, rotation: f32) {
         let mut state = self.0.lock().unwrap();
         if state.active && state.generation == generation {
@@ -243,11 +256,70 @@ impl Surface {
     pub fn take(&self) -> Option<Frame> {
         self.0.lock().unwrap().frame.take()
     }
+    pub fn set_audio_enabled(&self, enabled: bool) {
+        let mut state = self.0.lock().unwrap();
+        state.audio_disabled = !enabled;
+        if !enabled {
+            state.audio.clear();
+        }
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    pub fn publish_audio(&self, generation: u64, pcm: &[i16]) {
+        let mut state = self.0.lock().unwrap();
+        if !state.active || state.generation != generation || state.audio_disabled {
+            return;
+        }
+        for frame in pcm.chunks_exact(2) {
+            if state.audio.len() == 3840 {
+                state.audio.pop_front();
+            }
+            state
+                .audio
+                .push_back([f32::from(frame[0]) / 32768.0, f32::from(frame[1]) / 32768.0]);
+        }
+    }
+    pub fn mix_audio(&self, stereo: &mut [f32]) {
+        let mut state = self.0.lock().unwrap();
+        if !state.active || state.audio_disabled {
+            return;
+        }
+        for frame in stereo.chunks_exact_mut(2) {
+            let Some([left, right]) = state.audio.pop_front() else {
+                break;
+            };
+            frame[0] = (frame[0] + left).clamp(-1.0, 1.0);
+            frame[1] = (frame[1] + right).clamp(-1.0, 1.0);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stream_audio_is_bounded_scoped_and_deafen_discards_backlog() {
+        let surface = Surface::default();
+        let first = surface.begin();
+        surface.publish_audio(first, &vec![16384; 20000]);
+        assert_eq!(surface.0.lock().unwrap().audio.len(), 3840);
+        let mut mixed = [0.25, -0.25];
+        surface.mix_audio(&mut mixed);
+        assert_eq!(mixed, [0.75, 0.25]);
+        surface.set_audio_enabled(false);
+        surface.publish_audio(first, &[16384; 4]);
+        surface.set_audio_enabled(true);
+        let mut silent = [0.0; 2];
+        surface.mix_audio(&mut silent);
+        assert_eq!(silent, [0.0; 2]);
+        let next = surface.begin();
+        surface.publish_audio(first, &[16384; 4]);
+        surface.mix_audio(&mut silent);
+        assert_eq!(silent, [0.0; 2]);
+        surface.publish_audio(next, &[16384; 4]);
+        surface.end(next);
+        surface.mix_audio(&mut silent);
+        assert_eq!(silent, [0.0; 2]);
+    }
     #[test]
     fn uploading_a_frame_keeps_the_previous_picture_visible() {
         let mut view = View::default();
