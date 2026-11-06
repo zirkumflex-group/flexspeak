@@ -5,7 +5,7 @@ use rune::{Color, Drag, El, Icon, Phase, ScrollSpec, TextEdit, Tx, col, el, icon
 use rune_kit::{Kit, Select, TextInput};
 
 use super::theme::{Theme, motion, radius, size, ty};
-use super::{dispatch, send};
+use super::{dispatch, icons, send};
 use crate::{App, Message, usage::Health};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -278,16 +278,36 @@ pub fn vertical_divider(t: &Theme, height: f32) -> El {
 }
 
 /// A lit dot in the health colour, with its explanation as the tooltip.
+/// Connection health as a globe in the health colour; the tooltip carries the details.
 pub fn health_dot(t: &Theme, health: Health, help: impl Into<String>) -> El {
-    let color = t.health(health);
-    let lit = if health == Health::Unknown { 0.0 } else { 1.0 };
     el().w(16.0).h(20.0).center().help(help).child(
-        el().size(8.0, 8.0)
-            .radius(4.0)
-            .fill(color.alpha(if lit > 0.0 { 1.0 } else { 0.7 }))
+        icon(&icons::GLOBE, 13.0)
+            .color(t.health(health))
             .motion(motion::READING)
             .a11y_hidden(),
     )
+}
+
+/// A ring that fills and glows softly while the client is heard.
+pub fn speaking_dot(t: &Theme, talking: bool) -> El {
+    let (ring, fill, glow) = if talking {
+        (t.good, t.good, t.good.alpha(0.55))
+    } else {
+        (t.faint.alpha(0.7), t.good.alpha(0.0), t.good.alpha(0.0))
+    };
+    el().w(12.0)
+        .h(20.0)
+        .center()
+        .help(if talking { "Speaking" } else { "Not speaking" })
+        .child(
+            el().size(8.0, 8.0)
+                .radius(4.0)
+                .fill(fill)
+                .border(1.5, ring)
+                .shadow(0.0, 8.0, glow)
+                .motion(motion::QUICK)
+                .a11y_hidden(),
+        )
 }
 
 /// A level from 0 to 1. Readings arrive about ten times a second, so the bar steps to each one

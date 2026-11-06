@@ -210,6 +210,7 @@ fn setup(s: &mut App, waker: Waker) {
 
 /// Sampling timers and video frame bookkeeping. True only when something visible changed.
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
+    crate::window_icon::apply();
     let mut changed = false;
     let now = Instant::now();
     if now >= s.next_usage_tick {

@@ -25,6 +25,8 @@ use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf};
 pub const RATE: usize = 48_000;
 pub const FRAME: usize = 960;
 const BLOCK: usize = 480;
+/// Meter reading (the square root of the microphone level) above which you count as speaking.
+pub const SPEAKING_METER: f32 = 0.08;
 
 pub struct PlaybackVolume(AtomicU8);
 

@@ -15,9 +15,10 @@ mod shortcuts;
 mod streaming;
 mod ui;
 mod usage;
+mod window_icon;
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -150,6 +151,8 @@ struct App {
     state: client::Snapshot,
     collapsed_channels: HashSet<u64>,
     expanded_client: Option<u16>,
+    /// Clients heard right now, including yourself while you transmit.
+    talking: BTreeSet<u16>,
     client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
     connection_history: ConnectionHistory,
     client_history: ConnectionHistory,
@@ -331,6 +334,7 @@ impl App {
             state: client::Snapshot::default(),
             collapsed_channels: HashSet::new(),
             expanded_client: None,
+            talking: BTreeSet::new(),
             client_usage: BTreeMap::new(),
             connection_history: ConnectionHistory::new(),
             client_history: ConnectionHistory::new(),
@@ -586,6 +590,7 @@ impl App {
         self.collapsed_channels.clear();
         self.clear_client_details();
         self.client_usage.clear();
+        self.talking.clear();
         self.connection_history = ConnectionHistory::new();
         self.network_usage = usage::NetworkUsage::default();
         self.connection_usage = usage::ConnectionUsage::default();
@@ -1122,6 +1127,7 @@ impl App {
                     self.streaming.reset();
                     self.clear_client_details();
                     self.client_usage.clear();
+                    self.talking.clear();
                     self.connection_history = ConnectionHistory::new();
                     self.password_channel = None;
                     self.channel_password.clear();
@@ -1172,6 +1178,7 @@ impl App {
                         self.channel_password.clear();
                     }
                 }
+                client::Event::Talking(talking) => self.talking = talking,
                 client::Event::Streaming(event) => {
                     match &event {
                         streaming::Event::State {
@@ -1253,6 +1260,7 @@ impl App {
                     self.streaming.reset();
                     self.clear_client_details();
                     self.client_usage.clear();
+                    self.talking.clear();
                     self.connection_history = ConnectionHistory::new();
                     self.password_channel = None;
                     self.channel_password.clear();

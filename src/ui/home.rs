@@ -6,7 +6,7 @@ use rune_kit::{Kit, Switch};
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
     Variant, body, button, card, divider, faint, heading, health_dot, icon_button, labelled, meter,
-    muted, overline, pulse, scroll_page, vertical_divider,
+    muted, overline, pulse, scroll_page, speaking_dot, vertical_divider,
 };
 use super::{footer, icons, send, settings, statistics, streams};
 use crate::{App, Message, Tab, client, shortcuts, usage};
@@ -329,7 +329,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     ));
     let speaking = s.microphone_meter_level();
     // Lit while you are heard; it eases in and out only as that changes, not with every reading.
-    let talking = speaking > 0.08;
+    let talking = speaking > crate::audio::SPEAKING_METER;
     let mut panel = col()
         .key("voice")
         .w_full()
@@ -540,6 +540,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .radius(radius::ROW)
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
         .child(health_dot(t, health, format!("{label}\n{detail}")))
+        .child(speaking_dot(t, s.talking.contains(&member.id)))
         .child(
             text(if member.is_self {
                 format!("{} (you)", member.name)

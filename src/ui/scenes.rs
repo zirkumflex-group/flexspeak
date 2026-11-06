@@ -110,6 +110,7 @@ fn connected(s: &mut App) {
     ];
     s.state.channels = channels;
     s.state.current = Some(lobby);
+    s.talking = [2].into();
     s.server_controls = Some(crate::command_flow::AudioState {
         muted: false,
         deafened: false,
