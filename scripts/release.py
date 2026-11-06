@@ -145,6 +145,7 @@ def build():
                NATIVE_VOICE_BUILD_NUMBER=str(number),
                CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=+crt-static")
     opus_source = build_opus(env)
+    cargo_target = ROOT / env.get("CARGO_TARGET_DIR", "target")
     OUTPUT.mkdir(parents=True, exist_ok=True)
     stage = ROOT / "target/release-package"
     if stage.exists():
@@ -169,7 +170,7 @@ def build():
             run("cargo", "build", "--release", "--locked", env=env)
         notices.result()
     if os.name == "nt":
-        executable = ROOT / "target/x86_64-pc-windows-msvc/release/flexspeak.exe"
+        executable = cargo_target / "x86_64-pc-windows-msvc/release/flexspeak.exe"
         run(executable, "--help")
         shutil.copy2(executable, stage / "Flexspeak.exe")
         shutil.copy2(executable, OUTPUT / "Flexspeak-windows-x64.exe")
@@ -196,7 +197,7 @@ def build():
             "-format", "UDZO", dmg)
         run("hdiutil", "verify", dmg)
     else:
-        executable = ROOT / "target/release/flexspeak"
+        executable = cargo_target / "release/flexspeak"
         run(executable, "--help")
         shutil.copy2(executable, stage / "flexspeak")
         shutil.copy2(ROOT / "scripts/flexspeak.desktop", stage)
