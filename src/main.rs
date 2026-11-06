@@ -120,6 +120,7 @@ struct App {
     playback_volume: Arc<audio::PlaybackVolume>,
     performance_mode: Arc<AtomicBool>,
     channel_health_visible: Arc<AtomicBool>,
+    subscribe_all: Arc<AtomicBool>,
     window_restore: Option<(f32, f32)>,
     window_size: (f32, f32),
     next_usage_tick: Instant,
@@ -212,6 +213,7 @@ enum Message {
     Deafen,
     Join(u64),
     ToggleChannel(u64),
+    ToggleSubscribeAll,
     ToggleClient(u16),
     Backend(client::Event),
     Close,
@@ -303,6 +305,7 @@ impl App {
             playback_volume: Arc::new(audio::PlaybackVolume::default()),
             performance_mode: Arc::new(AtomicBool::new(false)),
             channel_health_visible: Arc::new(AtomicBool::new(true)),
+            subscribe_all: Arc::new(AtomicBool::new(true)),
             window_restore: None,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -557,6 +560,7 @@ impl App {
             playback_volume: self.playback_volume.clone(),
             performance_mode: self.performance_mode.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
+            subscribe_all: self.subscribe_all.clone(),
             streaming_visible: self.streaming.visible.clone(),
             video_surface: self.streaming.surface.clone(),
             address: self.address.trim().into(),
@@ -1095,6 +1099,9 @@ impl App {
                 self.password_error = None;
                 self.channel_password.clear();
             }
+            Message::ToggleSubscribeAll => {
+                self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
+            }
             Message::ToggleChannel(id) => {
                 if !self.collapsed_channels.remove(&id) {
                     self.collapsed_channels.insert(id);
@@ -1611,6 +1618,19 @@ mod tests {
         assert!(app.input.is_none());
         assert!(app.output.is_some());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_eye_toggles_between_every_channel_and_your_own() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        assert!(
+            app.subscribe_all.load(Ordering::Relaxed),
+            "TeamSpeak's default"
+        );
+        let _ = app.update(Message::ToggleSubscribeAll);
+        assert!(!app.subscribe_all.load(Ordering::Relaxed));
+        let _ = app.update(Message::ToggleSubscribeAll);
+        assert!(app.subscribe_all.load(Ordering::Relaxed));
     }
 
     #[test]

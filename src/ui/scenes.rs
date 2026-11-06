@@ -96,7 +96,7 @@ fn connected(s: &mut App) {
             id: 3,
             name: "Focus room".into(),
             has_password: true,
-            members_visible: true,
+            members_visible: false,
             join_access: client::JoinAccess::Unknown,
             ..client::Channel::default()
         },

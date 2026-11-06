@@ -33,6 +33,8 @@ use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 pub struct Config {
     pub performance_mode: Arc<AtomicBool>,
     pub channel_health_visible: Arc<AtomicBool>,
+    /// See every channel's members (subscribe to all), or only your own channel's.
+    pub subscribe_all: Arc<AtomicBool>,
     pub streaming_visible: Arc<AtomicBool>,
     pub video_surface: Arc<streaming::Surface>,
     pub playback_volume: Arc<PlaybackVolume>,
@@ -516,8 +518,9 @@ async fn run_connection(
     );
     let result = async {
         let mut controls = Controls::new(Instant::now());
-        let mut subscription: Option<Ticket> = None;
-        let mut subscription_finished = false;
+        // The request in flight, and the subscription the server last settled on.
+        let mut subscription: Option<(Ticket, bool)> = None;
+        let mut subscribed: Option<bool> = None;
         let mut connected = false;
         let mut deadline = Instant::now();
         let mut sent = 0;
@@ -631,7 +634,7 @@ async fn run_connection(
                             last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
                             let _ = events.try_send(Event::Connected(audio.description.clone()));
                             controls.reconnect(Instant::now());
-                            subscription_finished = false;
+                            subscribed = None;
                             subscription = None;
                         }
                         let state = connection.get_state()?;
@@ -669,7 +672,7 @@ async fn run_connection(
                         *flow.borrow_mut() = Flow::default();
                         controls.reconnect(Instant::now());
                         subscription = None;
-                        subscription_finished = false;
+                        subscribed = None;
                         connected = false;
                         deadline = Instant::now();
                         audio.set_capture(false);
@@ -702,9 +705,9 @@ async fn run_connection(
                                 } else if !reply.flooded && let Err(error) = &reply.result {
                                     let _ = events.try_send(Event::Warning { source: Source::Controls, detail: format!("Server rejected the mute/deafen update: {error}. Your local audio choice is still applied.") });
                                 }
-                            } else if subscription == Some(ticket) {
+                            } else if let Some((_, wanted)) = subscription.filter(|(pending, _)| *pending == ticket) {
                                 subscription = None;
-                                subscription_finished = !reply.flooded;
+                                if !reply.flooded { subscribed = Some(wanted); }
                                 if reply.result.is_ok() { let _ = events.try_send(Event::Recovered(Source::Subscription)); }
                                 else if !reply.flooded && let Err(error) = &reply.result {
                                     let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: format!("Channel subscription: {error}") });
@@ -765,9 +768,9 @@ async fn run_connection(
                             if controls.reply(ticket, false, false) {
                                 let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: false });
                                 let _ = events.try_send(Event::Warning { source: Source::Controls, detail: "The server did not acknowledge the mute/deafen update. Local audio protection remains applied.".into() });
-                            } else if subscription == Some(ticket) {
+                            } else if let Some((_, wanted)) = subscription.filter(|(pending, _)| *pending == ticket) {
                                 subscription = None;
-                                subscription_finished = true;
+                                subscribed = Some(wanted);
                                 let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: "Channel subscription timed out.".into() });
                             } else if streams.timeout(&mut connection, ticket) {
                             } else if pending_join.is_some_and(|(pending, _, _)| pending == ticket) {
@@ -788,9 +791,10 @@ async fn run_connection(
                             controls.pending = Some((ticket, desired));
                             let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: true });
                         }
-                        if connected && !subscription_finished && subscription.is_none() && !flow.borrow().cooling_down(now) {
-                            let command = connection.get_state()?.server.set_subscribed(true);
-                            subscription = Some(flow.borrow_mut().enqueue(command, Operation::Subscribe)?);
+                        let wanted = config.subscribe_all.load(Ordering::Relaxed);
+                        if connected && subscribed != Some(wanted) && subscription.is_none() && !flow.borrow().cooling_down(now) {
+                            let command = connection.get_state()?.server.set_subscribed(wanted);
+                            subscription = Some((flow.borrow_mut().enqueue(command, Operation::Subscribe)?, wanted));
                         }
                         if pending_join.is_some_and(|(_, _, at)| now.duration_since(at) > Duration::from_secs(10)) {
                             if let Some((ticket, _, _)) = pending_join.take() { flow.borrow_mut().cancel(ticket); }

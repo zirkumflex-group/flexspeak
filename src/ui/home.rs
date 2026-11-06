@@ -63,21 +63,23 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
             Some(Message::ShowTab(Tab::Home)),
         ));
     }
+    // Connected, the sidebar already names the server.
     let title = match s.tab {
-        Tab::Home if s.connected && !s.loopback => s.state.server.clone(),
-        Tab::Home => "Flexspeak".into(),
-        Tab::Statistics => "Usage & Statistics".into(),
-        Tab::Settings => "Settings".into(),
+        Tab::Home if s.connected && !s.loopback => None,
+        Tab::Home => Some("Flexspeak"),
+        Tab::Statistics => Some("Usage & Statistics"),
+        Tab::Settings => Some("Settings"),
     };
-    bar = bar
-        .child(
+    if let Some(title) = title {
+        bar = bar.child(
             text(title)
                 .font(ty::HEADING)
                 .color(t.text)
                 .truncate()
                 .ml(4.0),
-        )
-        .child(el().grow(1.0));
+        );
+    }
+    bar = bar.child(el().grow(1.0));
     bar = bar
         .child(performance_switch(k, false))
         .child(vertical_divider(t, 24.0));
@@ -239,11 +241,7 @@ fn connect_button(t: &Theme, busy: bool, label: &str, on: Option<Message>) -> El
 }
 
 fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
-    let channel = s
-        .state
-        .current
-        .as_ref()
-        .map_or("No channel", |channel| channel.name.as_str());
+    let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
     let server = row()
         .w_full()
         .gap(12.0)
@@ -256,13 +254,23 @@ fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
                 .child(icon(&icons::SERVER, 15.0).color(t.accent).a11y_hidden()),
         )
         .child(
-            col()
+            heading(t, s.state.server.clone())
+                .truncate_fade()
                 .grow(1.0)
-                .min_w(0.0)
-                .gap(2.0)
-                .child(heading(t, s.state.server.clone()).truncate_fade())
-                .child(labelled(&icons::CHANNEL, channel, t.muted)),
-        );
+                .min_w(0.0),
+        )
+        .child(icon_button(
+            t,
+            "subscribe-all",
+            if all { &icons::EYE } else { &icons::EYE_OFF },
+            if all {
+                "Seeing every channel · show only your channel"
+            } else {
+                "Seeing only your channel · show every channel"
+            },
+            if all { Variant::Active } else { Variant::Ghost },
+            Some(Message::ToggleSubscribeAll),
+        ));
     col()
         .key("sidebar")
         .w(size::SIDEBAR)
@@ -448,8 +456,17 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     .font(ty::BODY_STRONG)
                     .color(ink)
                     .truncate_fade()
+                    .grow(1.0)
+                    .min_w(0.0)
                     .a11y_hidden(),
             );
+        if !channel.members_visible {
+            name = name.child(
+                el().help("You can't see who is in this channel")
+                    .label("Members not visible")
+                    .child(icon(&icons::EYE_OFF, 13.0).color(t.faint)),
+            );
+        }
         if current {
             name = name.fill(t.accent.alpha(0.16));
         }
@@ -510,9 +527,6 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 .transition(Transition::opacity());
             for member in &channel.members {
                 members = members.child(member_row(s, t, member, current));
-            }
-            if !channel.members_visible {
-                members = members.child(faint(t, "Members not visible").pl(10.0).py(2.0));
             }
             node = node.child(members);
         }
