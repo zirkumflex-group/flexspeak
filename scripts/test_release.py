@@ -69,5 +69,30 @@ class HomebrewReleaseTests(unittest.TestCase):
             self.assertEqual(digest, release.sha256(self.root / name))
 
 
+class OpusBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.work = Path(self.directory.name)
+        (self.work / f"opus-{release.OPUS_VERSION}.tar.gz").write_bytes(b"source")
+        (self.work / f"opus-{release.OPUS_VERSION}").mkdir()
+
+    def build(self):
+        env = {"FLEXSPEAK_OPUS_DIR": str(self.work)}
+        with patch.object(release, "sha256", return_value=release.OPUS_SHA256), \
+                patch.object(release, "run") as run:
+            run.side_effect = lambda *args, **kwargs: (self.work / "install").mkdir(exist_ok=True)
+            release.build_opus(env)
+        self.assertEqual(env["OPUS_LIB_DIR"], str(self.work / "install"))
+        return run.call_count
+
+    def test_cached_opus_build_is_reused_until_its_settings_change(self):
+        self.assertEqual(self.build(), 3)
+        self.assertEqual(self.build(), 0)
+        stamp = self.work / "install/flexspeak-build.json"
+        stamp.write_text(stamp.read_text().replace(release.OPUS_VERSION, "0.0.0"))
+        self.assertEqual(self.build(), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
