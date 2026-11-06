@@ -528,6 +528,8 @@ mod tests {
         assert_eq!(rt.state.ui.address.text, "ts.zirkumflex.io");
     }
 
+    // The switches exist only where WebRTC processing is built (Mac and Windows).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn processing_switches_apply_while_idle_and_lock_during_a_session() {
         let mut rt = runtime(settings_page, (900.0, 2000.0));
