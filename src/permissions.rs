@@ -76,7 +76,7 @@ pub async fn request(
                         || objc2_core_graphics::CGRequestScreenCaptureAccess()
                 })
                 .await?;
-                Ok(if allowed { "Screen recording access allowed." } else { "Enable Native Voice (Flexspeak) in System Settings → Privacy & Security → Screen & System Audio Recording. macOS may ask you to restart the app." }.into())
+                Ok(if allowed { "Screen recording access allowed." } else { "Enable Flexspeak in System Settings → Privacy & Security → Screen & System Audio Recording. macOS may ask you to restart the app." }.into())
             }
             Kind::SystemAudio => {
                 let device = output_device.ok_or_else(||anyhow::anyhow!("Choose a playback device in the Devices step or Audio settings, then request system-audio access again."))?;

@@ -152,7 +152,7 @@ impl Recording {
             .into_iter()
             .map(|(name, timing)| Operation { name, timing })
             .collect();
-        operations.sort_by(|a, b| b.timing.cpu.cmp(&a.timing.cpu));
+        operations.sort_by_key(|operation| std::cmp::Reverse(operation.timing.cpu));
         let summary = TraceSummary {
             duration,
             process_cpu,
@@ -397,7 +397,9 @@ impl Serialize for ExportEvents<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         let pid = std::process::id();
         let mut events = serializer.serialize_seq(None)?;
-        events.serialize_element(&json!({"name":"process_name","ph":"M","pid":pid,"tid":0,"args":{"name":"Native Voice"}}))?;
+        events.serialize_element(
+            &json!({"name":"process_name","ph":"M","pid":pid,"tid":0,"args":{"name":"Flexspeak"}}),
+        )?;
         for event in &self.0.events {
             match *event {
                 TraceEvent::Span {

@@ -97,7 +97,6 @@ mod native {
     use crate::streaming::{MAX_CANDIDATES, protocol};
     use anyhow::{anyhow, bail, ensure};
     use futures::StreamExt;
-    use iced::widget::image::Handle;
     use libwebrtc::{
         MediaType,
         audio_stream::native::NativeAudioStream,
@@ -344,7 +343,11 @@ mod native {
         );
         surface.publish(
             generation,
-            Handle::from_rgba(display_width, display_height, rgba),
+            crate::streaming::Image {
+                width: display_width,
+                height: display_height,
+                pixels: rgba,
+            },
             (frame.rotation as i32 as f32).to_radians(),
         );
         Ok(())
@@ -507,7 +510,7 @@ mod native {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             source.capture_frame(&frame);
-                            if let Some(frame) = surface.take() && let Handle::Rgba { width, height, pixels, .. } = frame.handle {
+                            if let Some(crate::streaming::Image { width, height, pixels }) = surface.take() {
                                 ensure!((width, height) == (320, 180), "Unexpected decoded dimensions");
                                 let offset = ((height / 2 * width + width / 2) * 4) as usize;
                                 let data: &[u8] = pixels.as_ref();

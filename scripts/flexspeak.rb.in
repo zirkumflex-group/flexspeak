@@ -21,7 +21,7 @@ cask "flexspeak" do
 
   url "https://api.github.com/repos/zirkumflex-group/flexspeak/releases/assets/${ARM_ID}",
       using: FlexspeakPrivateDownloadStrategy
-  name "Flexspeak (Native Voice)"
+  name "Flexspeak"
   desc "Native TeamSpeak-compatible voice client"
   homepage "https://github.com/zirkumflex-group/flexspeak"
 
@@ -29,7 +29,7 @@ cask "flexspeak" do
   depends_on macos: :sonoma
   container type: :dmg
 
-  app "Native Voice.app"
+  app "Flexspeak.app"
 
   caveats "Requires macOS 14.2 or later. This internal build is ad-hoc signed, not notarized."
 end

@@ -31,7 +31,7 @@ env PATH="/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:$PATH" \
     --target x86_64-pc-windows-msvc --target-dir target/windows --locked
 ```
 
-The executable is `target/windows/x86_64-pc-windows-msvc/release/teamspeak-native.exe` before packaging. `OPUS_LIB_DIR` points to the installation prefix containing `lib/opus.lib`, not to the `lib` directory itself.
+The executable is `target/windows/x86_64-pc-windows-msvc/release/flexspeak.exe` before packaging. `OPUS_LIB_DIR` points to the installation prefix containing `lib/opus.lib`, not to the `lib` directory itself.
 
 ## Validation and delivery
 

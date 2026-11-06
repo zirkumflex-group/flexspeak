@@ -1,8 +1,8 @@
 [package]
-name = "teamspeak-native"
+name = "flexspeak"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.99"
 description = "A minimal native TeamSpeak voice client"
 
 [workspace]
@@ -19,15 +19,13 @@ crossbeam-queue = "0.3"
 directories = "6"
 futures = "0.3"
 global-hotkey = "0.9"
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "tokio", "x11", "wayland", "canvas", "image-without-codecs"] }
-# Access explicit GPU image allocation without enabling Iced's unused image codecs.
-iced_runtime = "0.14"
+rune = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50" }
 rubato = { version = "0.16.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
-tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tsclientlib = { path = "vendor/tsclientlib", default-features = false, features = ["audio"] }
@@ -54,4 +52,7 @@ strip = "debuginfo"
 # macOS 27 rejects misaligned LINKEDIT pools in stripped procedural-macro dylibs.
 # Keep build-time plugins loadable; the application remains optimized and stripped.
 strip = "none"
+
+[build-dependencies]
+embed-resource = "3"
 

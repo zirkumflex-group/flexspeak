@@ -152,7 +152,7 @@ def build():
     }, indent=2) + "\n")
     if os.name == "nt":
         run("cargo", "build", "--release", "--locked", "--target", "x86_64-pc-windows-msvc", env=env)
-        executable = ROOT / "target/x86_64-pc-windows-msvc/release/teamspeak-native.exe"
+        executable = ROOT / "target/x86_64-pc-windows-msvc/release/flexspeak.exe"
         run(executable, "--help")
         shutil.copy2(executable, stage / "Flexspeak.exe")
         shutil.copy2(executable, OUTPUT / "Flexspeak-windows-x64.exe")
@@ -162,14 +162,14 @@ def build():
         shutil.copy2(stage / "THIRD-PARTY-LICENSES.txt", OUTPUT)
     elif sys.platform == "darwin":
         run("sh", "scripts/macos-app.sh", "release", env=env)
-        app = stage / "Native Voice.app"
-        shutil.copytree(ROOT / "dist/Native Voice.app", app)
+        app = stage / "Flexspeak.app"
+        shutil.copytree(ROOT / "dist/Flexspeak.app", app)
         resources = app / "Contents/Resources"
         resources.mkdir(exist_ok=True)
         shutil.copy2(stage / "THIRD-PARTY-LICENSES.txt", resources)
         run("codesign", "--force", "--sign", "-", app)
         run("codesign", "--verify", "--strict", app)
-        binary = app / "Contents/MacOS/teamspeak-native"
+        binary = app / "Contents/MacOS/flexspeak"
         dependencies = run("otool", "-L", binary, capture_output=True, text=True).stdout
         if any(path in dependencies for path in ("/opt/homebrew/", "/usr/local/")):
             raise ValueError("App links to a Homebrew library instead of being standalone")
@@ -181,10 +181,11 @@ def build():
         run("hdiutil", "verify", dmg)
     else:
         run("cargo", "build", "--release", "--locked", env=env)
-        executable = ROOT / "target/release/teamspeak-native"
+        executable = ROOT / "target/release/flexspeak"
         run(executable, "--help")
         shutil.copy2(executable, stage / "flexspeak")
         shutil.copy2(ROOT / "scripts/flexspeak.desktop", stage)
+        shutil.copy2(ROOT / "assets/icon/flexspeak.svg", stage)
         run("desktop-file-validate", stage / "flexspeak.desktop")
         package_linux(stage, version, number)
 

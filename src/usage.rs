@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use iced::{Color, Point, Rectangle, Renderer, Theme, mouse, widget::canvas};
+use rune::{Color, Shape, shape::LineCap};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tsclientlib::{ConnectionStats, PacketStat, data::ConnectionClientData};
 
@@ -140,7 +140,6 @@ pub struct MetricHistory {
     now: Instant,
     pub percentiles: Option<Percentiles>,
     pub upper_bound: f64,
-    cache: canvas::Cache,
 }
 
 impl MetricHistory {
@@ -150,7 +149,6 @@ impl MetricHistory {
             now,
             percentiles: None,
             upper_bound: 1.0,
-            cache: canvas::Cache::new(),
         }
     }
 
@@ -181,16 +179,10 @@ impl MetricHistory {
             })
         };
         self.upper_bound = sorted.last().copied().unwrap_or(0.0).max(1.0) * 1.1;
-        self.cache.clear();
     }
 
     pub fn len(&self) -> usize {
         self.samples.len()
-    }
-
-    pub fn release_graphics(&mut self) {
-        // clear() retains geometry for reuse; replacing the cache drops it.
-        self.cache = canvas::Cache::new();
     }
 
     pub fn buffer_bytes(&self) -> usize {
@@ -198,68 +190,49 @@ impl MetricHistory {
     }
 }
 
-pub struct HistoryChart<'a> {
-    pub history: &'a MetricHistory,
-    pub color: Color,
-}
-
-impl<Message> canvas::Program<Message> for HistoryChart<'_> {
-    type State = ();
-
-    fn draw(
-        &self,
-        _: &(),
-        renderer: &Renderer,
-        _: &Theme,
-        bounds: Rectangle,
-        _: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        vec![self.history.cache.draw(renderer, bounds.size(), |frame| {
-            let width = (frame.width() - 4.0).max(1.0);
-            let height = (frame.height() - 4.0).max(1.0);
-            for fraction in [0.0, 0.5, 1.0] {
-                let y = 2.0 + height * fraction;
-                frame.stroke(
-                    &canvas::Path::line(Point::new(2.0, y), Point::new(2.0 + width, y)),
-                    canvas::Stroke::default().with_color(Color::from_rgba(0.65, 0.7, 0.85, 0.15)),
-                );
-            }
-            let mut latest = None;
-            let path = canvas::Path::new(|builder| {
-                let mut previous_at = None;
-                for (at, value) in &self.history.samples {
-                    let age = self
-                        .history
-                        .now
-                        .saturating_duration_since(*at)
-                        .as_secs_f32();
-                    let point = Point::new(
-                        2.0 + width * (1.0 - age / HISTORY_WINDOW.as_secs_f32()).clamp(0.0, 1.0),
-                        2.0 + height * (1.0 - (*value / self.history.upper_bound) as f32),
-                    );
-                    // Show missing measurements as gaps, rather than inventing
-                    // a trend across a sleep or suspended UI interval.
-                    if previous_at.is_some_and(|previous| {
-                        at.saturating_duration_since(previous) <= Duration::from_secs(3)
-                    }) {
-                        builder.line_to(point);
-                    } else {
-                        builder.move_to(point);
-                    }
-                    previous_at = Some(*at);
-                    latest = Some(point);
-                }
+impl MetricHistory {
+    /// Five minutes of readings as a line over a translucent area, `width` × `height` points.
+    /// Missing measurements stay gaps rather than inventing a trend across a sleep.
+    pub fn chart(&self, width: f32, height: f32, color: Color, grid: Color) -> Shape {
+        let inner_w = (width - 4.0).max(1.0);
+        let inner_h = (height - 4.0).max(1.0);
+        let mut shape = Shape::new();
+        for fraction in [0.0, 0.5, 1.0] {
+            let y = 2.0 + inner_h * fraction;
+            shape = shape.line([2.0, y], [2.0 + inner_w, y], 1.0, LineCap::Butt, grid);
+        }
+        let baseline = 2.0 + inner_h;
+        let mut runs: Vec<Vec<[f32; 2]>> = Vec::new();
+        let mut previous_at: Option<Instant> = None;
+        for (at, value) in &self.samples {
+            let age = self.now.saturating_duration_since(*at).as_secs_f32();
+            let point = [
+                2.0 + inner_w * (1.0 - age / HISTORY_WINDOW.as_secs_f32()).clamp(0.0, 1.0),
+                2.0 + inner_h * (1.0 - (*value / self.upper_bound) as f32),
+            ];
+            let joined = previous_at.is_some_and(|previous| {
+                at.saturating_duration_since(previous) <= Duration::from_secs(3)
             });
-            frame.stroke(
-                &path,
-                canvas::Stroke::default()
-                    .with_width(1.5)
-                    .with_color(self.color),
-            );
-            if let Some(point) = latest {
-                frame.fill(&canvas::Path::circle(point, 2.0), self.color);
+            match runs.last_mut() {
+                Some(run) if joined => run.push(point),
+                _ => runs.push(vec![point]),
             }
-        })]
+            previous_at = Some(*at);
+        }
+        for run in &runs {
+            if run.len() > 1 {
+                let mut area = Vec::with_capacity(run.len() + 2);
+                area.push([run[0][0], baseline]);
+                area.extend_from_slice(run);
+                area.push([run[run.len() - 1][0], baseline]);
+                shape = shape.fill(area, color.alpha(0.12));
+                shape = shape.stroke(run.clone(), 1.6, color);
+            }
+        }
+        if let Some(point) = runs.last().and_then(|run| run.last()) {
+            shape = shape.line(*point, *point, 5.0, LineCap::Round, color);
+        }
+        shape
     }
 }
 

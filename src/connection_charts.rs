@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use iced::{Color, Point, Rectangle, Renderer, Theme, mouse, widget::canvas};
+use rune::{Color, Shape, shape::LineCap};
 
 use crate::usage::{ConnectionUsage, Health};
 
@@ -47,19 +47,9 @@ impl Metric {
     }
 }
 
-pub fn health_color(health: Health) -> Color {
-    match health {
-        Health::Good => Color::from_rgb8(115, 210, 151),
-        Health::Fair => Color::from_rgb8(234, 187, 99),
-        Health::Poor => Color::from_rgb8(244, 119, 139),
-        Health::Unknown => Color::from_rgb8(145, 154, 178),
-    }
-}
-
 pub struct ConnectionHistory {
     samples: VecDeque<(Instant, ConnectionUsage)>,
     now: Instant,
-    caches: [canvas::Cache; 4],
 }
 
 impl ConnectionHistory {
@@ -67,7 +57,6 @@ impl ConnectionHistory {
         Self {
             samples: VecDeque::new(),
             now: Instant::now(),
-            caches: std::array::from_fn(|_| canvas::Cache::new()),
         }
     }
 
@@ -86,9 +75,6 @@ impl ConnectionHistory {
         {
             self.samples.pop_front();
         }
-        for cache in &self.caches {
-            cache.clear();
-        }
     }
 
     pub fn buffer_bytes(&self) -> usize {
@@ -96,113 +82,98 @@ impl ConnectionHistory {
     }
 }
 
-pub struct ConnectionChart<'a> {
-    pub history: &'a ConnectionHistory,
-    pub metric: Metric,
+/// Colours a chart paints with.
+pub struct ChartPaint {
+    pub grid: Color,
+    pub band: Color,
+    pub health: fn(Health) -> Color,
 }
 
-impl<Message> canvas::Program<Message> for ConnectionChart<'_> {
-    type State = ();
-
-    fn draw(
-        &self,
-        _: &(),
-        renderer: &Renderer,
-        _: &Theme,
-        bounds: Rectangle,
-        _: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        vec![
-            self.history.caches[self.metric as usize].draw(renderer, bounds.size(), |frame| {
-                let width = (frame.width() - 4.0).max(1.0);
-                let height = (frame.height() - 4.0).max(1.0);
-                let upper = self
-                    .history
-                    .samples
-                    .iter()
-                    .filter_map(|(_, sample)| {
-                        self.metric.value(*sample).map(|value| {
-                            value
-                                + if matches!(self.metric, Metric::Ping) {
-                                    sample
-                                        .ping_deviation_ms
-                                        .filter(|v| v.is_finite() && *v >= 0.0)
-                                        .unwrap_or(0.0)
-                                } else {
-                                    0.0
-                                }
-                        })
-                    })
-                    .fold(self.metric.minimum_scale(), f64::max)
-                    * 1.05;
-                let y = |value: f64| 2.0 + height * (1.0 - (value / upper).clamp(0.0, 1.0) as f32);
-                for fraction in [0.0, 0.5, 1.0] {
-                    let y = 2.0 + height * fraction;
-                    frame.stroke(
-                        &canvas::Path::line(Point::new(2.0, y), Point::new(width + 2.0, y)),
-                        canvas::Stroke::default()
-                            .with_color(Color::from_rgba(0.65, 0.7, 0.85, 0.10)),
+impl ConnectionHistory {
+    /// The last minute of `metric` as a line `width` × `height` points: health-coloured
+    /// segments, a translucent ping-variation band, and gaps where readings are missing.
+    pub fn chart(&self, metric: Metric, width: f32, height: f32, paint: &ChartPaint) -> Shape {
+        let mut shape = Shape::new();
+        let inner_w = (width - 4.0).max(1.0);
+        let inner_h = (height - 4.0).max(1.0);
+        let deviation = |sample: &ConnectionUsage| {
+            sample
+                .ping_deviation_ms
+                .filter(|v| v.is_finite() && *v >= 0.0)
+        };
+        let upper = self
+            .samples
+            .iter()
+            .filter_map(|(_, sample)| {
+                metric.value(*sample).map(|value| {
+                    value
+                        + if matches!(metric, Metric::Ping) {
+                            deviation(sample).unwrap_or(0.0)
+                        } else {
+                            0.0
+                        }
+                })
+            })
+            .fold(metric.minimum_scale(), f64::max)
+            * 1.05;
+        let y = |value: f64| 2.0 + inner_h * (1.0 - (value / upper).clamp(0.0, 1.0) as f32);
+        for fraction in [0.0, 0.5, 1.0] {
+            let gy = 2.0 + inner_h * fraction;
+            shape = shape.line(
+                [2.0, gy],
+                [inner_w + 2.0, gy],
+                1.0,
+                LineCap::Butt,
+                paint.grid,
+            );
+        }
+        struct SamplePoint {
+            at: Instant,
+            point: [f32; 2],
+            band: Option<(f32, f32)>,
+        }
+        let mut previous: Option<SamplePoint> = None;
+        for (at, sample) in &self.samples {
+            let Some(value) = metric.value(*sample) else {
+                previous = None;
+                continue;
+            };
+            let age = self.now.saturating_duration_since(*at).as_secs_f32();
+            let x = 2.0 + inner_w * (1.0 - age / WINDOW.as_secs_f32()).clamp(0.0, 1.0);
+            let point = [x, y(value)];
+            let band = if matches!(metric, Metric::Ping) {
+                deviation(sample)
+                    .map(|deviation| (y(value + deviation), y((value - deviation).max(0.0))))
+            } else {
+                None
+            };
+            let color = (paint.health)(metric.health(*sample));
+            if let Some(old) = previous
+                && at.saturating_duration_since(old.at) <= Duration::from_secs(15)
+            {
+                if let (Some((old_top, old_bottom)), Some((top, bottom))) = (old.band, band) {
+                    shape = shape.fill(
+                        vec![
+                            [old.point[0], old_top],
+                            [x, top],
+                            [x, bottom],
+                            [old.point[0], old_bottom],
+                        ],
+                        paint.band,
                     );
                 }
-                struct SamplePoint {
-                    at: Instant,
-                    point: Point,
-                    band: Option<(f32, f32)>,
-                }
-                let mut previous: Option<SamplePoint> = None;
-                for (at, sample) in &self.history.samples {
-                    let Some(value) = self.metric.value(*sample) else {
-                        previous = None;
-                        continue;
-                    };
-                    let age = self
-                        .history
-                        .now
-                        .saturating_duration_since(*at)
-                        .as_secs_f32();
-                    let x = 2.0 + width * (1.0 - age / WINDOW.as_secs_f32()).clamp(0.0, 1.0);
-                    let point = Point::new(x, y(value));
-                    let band = if matches!(self.metric, Metric::Ping) {
-                        sample
-                            .ping_deviation_ms
-                            .filter(|v| v.is_finite() && *v >= 0.0)
-                            .map(|deviation| {
-                                (y(value + deviation), y((value - deviation).max(0.0)))
-                            })
-                    } else {
-                        None
-                    };
-                    let color = health_color(self.metric.health(*sample));
-                    if let Some(old) = previous
-                        && at.saturating_duration_since(old.at) <= Duration::from_secs(15)
-                    {
-                        if let (Some((old_top, old_bottom)), Some((top, bottom))) = (old.band, band)
-                        {
-                            let area = canvas::Path::new(|path| {
-                                path.move_to(Point::new(old.point.x, old_top));
-                                path.line_to(Point::new(x, top));
-                                path.line_to(Point::new(x, bottom));
-                                path.line_to(Point::new(old.point.x, old_bottom));
-                                path.close();
-                            });
-                            frame.fill(&area, Color::from_rgba(0.75, 0.54, 0.96, 0.20));
-                        }
-                        frame.stroke(
-                            &canvas::Path::line(old.point, point),
-                            canvas::Stroke::default().with_width(1.8).with_color(color),
-                        );
-                    } else {
-                        // A lone sample stays visible; missing readings and long gaps never get joined.
-                        frame.fill(&canvas::Path::circle(point, 1.5), color);
-                    }
-                    previous = Some(SamplePoint {
-                        at: *at,
-                        point,
-                        band,
-                    });
-                }
-            }),
-        ]
+                shape = shape.line(old.point, point, 1.8, LineCap::Round, color);
+            } else {
+                // A lone sample stays visible; missing readings and long gaps never get joined.
+                shape = shape.line(point, point, 3.0, LineCap::Round, color);
+            }
+            previous = Some(SamplePoint {
+                at: *at,
+                point,
+                band,
+            });
+        }
+        shape
     }
 }
 

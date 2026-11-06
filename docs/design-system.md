@@ -1,49 +1,82 @@
 # Flexspeak design system
 
-The implementation lives in [`src/appearance.rs`](../src/appearance.rs). Use its shared constructors and styles rather than adjusting individual buttons.
+The interface is built with [Rune](https://github.com/anomalyco/rune) and rune-kit. Tokens live in [`src/ui/theme.rs`](../src/ui/theme.rs) and the shared building blocks in [`src/ui/widgets.rs`](../src/ui/widgets.rs). Use those constructors rather than styling individual elements.
+
+## Principles
+
+Flexspeak should read as a desktop app, not a web page: compact controls, flat grouped surfaces, labels beside their controls, and effects only where they carry state. The page title lives in the header, never repeated as a heading in the page.
 
 ## Surfaces
 
 | Token | Color | Use |
 | --- | --- | --- |
-| `CANVAS` | `#10141c` | Main window background |
-| `SIDEBAR` | `#171e29` | Sidebar, navigation, footer, inset chart rows |
-| `SURFACE` | `#1e2836` | Content cards and secondary controls |
-| `RAISED` | `#29364a` | Active navigation, menus, floating details |
-| `OUTLINE` | `#334258` | One-pixel borders and separators |
-| `TEXT` | `#e6edf7` | Primary text |
-| `MUTED` | `#9baac1` | Supporting text and disabled field values |
-| `ACCENT` | `#85a7ff` | Primary actions, focus and selection |
+| `canvas` | `#1c1d20` | Window background |
+| `chrome` | `#232427` | Header, sidebar and footer |
+| `surface` | `#26272b` | Groups and cards |
+| `raised` | `#34353a` | Controls, selected navigation |
+| `hairline` | white 8% | Dividers and group edges |
+| `text` / `muted` / `faint` | `#ebebee` / `#a0a1a8` / `#75767e` | Primary, supporting and tertiary text |
+| `accent` | `#8ea8ff` | Default buttons, focus, selection, the current channel |
+| `good` / `fair` / `poor` / `unknown` | `#6fdc9a` / `#f2c46b` / `#ff7a8a` / `#8c95ab` | Health, and nothing else |
+| `live` | `#ff7a3d` | Streams, sharing and trace recording; used sparingly |
+| `cpu` / `ram` | `#46cfe0` / `#a98ff8` | Resource charts and bars |
 
-All rectangular UI uses **0 corner radius**. System window decoration, icons and health dots are separate from widget borders.
+rune-kit components (fields, pickers, switches, checkboxes, dialogs, scroll bars) are themed from the same palette by `Theme::kit`.
 
-## Buttons
+## Shape
 
-Sizes are logical pixels, independent of display scaling.
+Content surfaces are flat: a `surface` fill and a 1 pt `hairline` edge (`widgets::card`, `widgets::group`). There are no drop shadows or halos on content; elevation belongs to things that float above the window (menus, popovers, dialogs). Recessed **wells** (`widgets::well`) hold charts and code-like details.
 
-| Size | Height | Text | Icon | Horizontal padding | Use |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Standard | 36 | 14 | 16 | 12 per side | Voice controls, settings, dialogs, navigation, trace actions |
-| Compact | 28 | 12 | — | 8 per side | Small disclosure controls |
-| Channel row | 32 | 13 | 16 | 8 per side | Clickable channel heading; square hover border |
-| Icon only | 36 × 36 | — | 18 | Centered | Top-right utilities, sidebar audio/connection controls, narrow navigation |
+| Radius | Points | Use |
+| --- | ---: | --- |
+| `CARD` | 10 | Groups, cards and dialogs |
+| `CONTROL` | 6 | Buttons, fields, icon buttons |
+| `ROW` | 6 | Channel and member rows |
+| `PILL` | full | Status pills |
 
-- `label_button` and `icon_button` share the same standard geometry and vertically centered content. Width follows the label, with equal side padding.
-- `icon_only_button` centers its glyph in a standard square target. It needs a descriptive tooltip and uses the active navigation style for the selected page.
-- `compact_button` handles small disclosures. Channel headings use `CHANNEL_ROW_HEIGHT` and `channel_row`, with a separate disclosure target; clicking the name joins the channel.
-- `primary_button` accepts composed content, such as a client row, while retaining standard height and alignment.
-- Primary, secondary and danger variants change appearance, not geometry. Rectangular borders use zero radius; filled and outlined actions have the same one-pixel border width.
-- Related controls use an 8-pixel gap. Disconnect, mute and deafen form one icon-only row above the sidebar server name, with state styling and tooltips.
-- Do not override per-button padding or text size to fit a label. Use the shared size or let a row wrap.
+## Type
 
-## Layout and feedback
+Inter, bundled by Rune. `DISPLAY` 22/650 (onboarding only), `TITLE` 17 for a pane title, `HEADING` 13/600 for group titles and the header, `BODY` 13, `LABEL` 13 for controls, `SMALL` 11.5 and `CAPTION` 11 for supporting text, `OVERLINE` 11/600 for sidebar section labels (sentence case). Numbers use tabular figures (`VALUE`, `BIG_VALUE`, `NUMERIC`). Button labels use title case.
 
-Use cards to group one task: connection, audio, shortcuts, or a set of measurements. Page insets are 24–28 pixels; card insets are 12–20 pixels, depending on density. Headings use 18–30 pixels, body text 13–14, and supporting labels 10–12.
+## Controls
 
-The header has a one-pixel bottom border and utility controls for performance mode, Statistics and Settings. A back-to-server icon appears in utility pages; Voice and Streaming tabs are removed. There is no duplicate product wordmark. The left side contains channel navigation, separated into channel groups with indented client rows, no avatars or user counts, and mute/deafen icons only when applicable. Health dots precede client names; hovering explains degraded/missing metrics. The connected right pane is for streaming; expandable peer measurements are in Statistics. The channel tree reserves 16 logical pixels before its scrollbar. Disconnected, a single saved-server card is centered with an icon-only plug button for Connect. The fixed footer places own connection health at the left, then a single row of four small line charts (loss in/out, ping, idle), with process resources stacked at the right. Footer charts are 20 logical pixels high with a compact label/value row above and a minimum width of 110 logical pixels each. The graph strip expands into available space, then scrolls horizontally when its 476-pixel minimum width does not fit; the health indicator and process resources remain fixed. The strip reserves a thin scrollbar within its 44-pixel height; the connected footer uses 8-pixel vertical and 14-pixel horizontal padding. It stays outside scrolling content on every normal-mode tab. The overall-health tooltip lists only degraded metrics; each chart tooltip explains its own reading, health and history. Stale or unavailable data must not appear healthy. Performance mode omits the paused connection graphs and places resources above the health indicator to fit the 440×320 window.
+| Control | Size | Notes |
+| --- | --- | --- |
+| `button` | 28 high, 12 side padding | Optional 14 pt leading icon. Variants: Primary, Secondary, Danger, Ghost, Active. Sized to its label, never stretched across a card |
+| `icon_button` | 28 × 28, 16 pt icon | Always has a help tooltip, which also names it for screen readers |
+| Fields | 28 high | rune-kit `TextInput` |
+| Pickers | 28 high | rune-kit `Select` |
 
-Health colors are semantic: green Good, amber Fair, red Poor, neutral Unknown. Idle time is neutral. Connection histories use continuous lines and a translucent ping-variation band, with gaps for missing data. Static surfaces and cached charts add no animation loop or audio-callback work.
+Primary is the default action of a view (Connect, Save, Continue) and is the window's default button where it makes sense. Disabled controls keep their geometry and fade to 42%. Related controls use an 8 point gap; a group's actions align to its trailing edge. Controls show a keyboard-only focus ring in the accent colour.
 
-The earlier native Mac preview was checked for matching standard-button heights and centered text/icons, the voice toolbar's common right edge, and the inset Joined/Join controls. Final Clippy, formatting and the macOS release build passed. Changes remain local; the active voice session was not restarted.
+## Forms
 
-The normal window minimum is 760×560 logical pixels; performance mode uses 440×320. First-run setup uses a centered, scrollable card with fixed Back/Continue controls and five steps. The new layout is validated through code and tests; computer-use visual testing remains stopped at the user’s request.
+Settings-style content uses `widgets::group` with `widgets::form_row`: the label (and an optional one-line explanation) leads, the control trails at `FORM_CONTROL` (300 pt) width, and rows are separated by inset hairlines. A `group_title` sits above each group and an optional `group_note` below it. Rows wrap the control under its label when the window is narrow. Keep explanatory text to one short sentence; longer detail belongs in a tooltip.
+
+## Layout
+
+The header (52 pt) is also the macOS titlebar: the traffic lights sit centred in it and the header drags the window. It holds the back button on utility pages, the page or server title, the performance-mode switch, and Statistics/Settings. Escape returns to the server. Onboarding and performance mode have no header; a band across the top drags the window there, and onboarding's steps sit directly on the window.
+
+Disconnected, a single saved-server card is centred with a Connect button. Connected, the 260 pt sidebar holds the server, the voice panel (mute, deafen, disconnect and the microphone meter) and the channel tree; streaming fills the right. Channel rows are 26 pt with a separate disclosure chevron; members are indented with a health dot and mute icons only when muted.
+
+The footer is fixed on every normal page: own health pill on the left, then four 20 pt connection charts (at least 110 pt each; the strip scrolls sideways below that), then CPU, RAM and footprint in tabular figures. Performance mode stacks the readings above the health pill to fit the 440 × 320 window.
+
+## Motion
+
+Springs, not curves: `QUICK` (0.22 s) for hover, `SETTLE` (0.38 s, slight bounce) for panels, `READING` (0.45 s) for colours following data, such as health. Readings that change every second or faster (meters, resource figures, Statistics bars) step without a spring, so a call or an open Statistics page does not keep the window drawing. Nothing animates on the first frame, and Reduce Motion is honoured by Rune.
+
+- Pages swap with a short cross-fade.
+- The saved-server card fades in on launch.
+- The voice panel's edge turns green while you are heard, easing only as that starts or stops.
+- Pulsing dots mark work in progress: connecting, pending server audio, live streams, recording.
+- Members, stream rows, viewer requests and peer details fade in and out as they appear and leave.
+
+Idle windows draw nothing; only the 1 s usage tick (10 s in performance mode) and pulse loops (sampled at 12 fps, shown only for short-lived work) request frames.
+
+## Charts
+
+Charts are Rune vector shapes sized from layout. Connection charts show 60 s with health-coloured segments, a translucent ping-variation band and gaps for missing data. CPU/RAM history shows 5 min as a line over a 12% area fill, with the latest reading marked. Stale or unavailable data never appears healthy.
+
+## Previews
+
+`flexspeak --snap out.png --scene <name>` renders a screen headlessly with demo data (`--list-scenes`, `--size 760x560`, `--at 1.5`). `src/ui/scenes.rs` defines the scenes, and its tests build each one at the normal and compact minimum sizes.

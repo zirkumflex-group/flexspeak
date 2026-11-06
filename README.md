@@ -1,8 +1,8 @@
-# Native Voice
+# Flexspeak
 
 GitHub project: **Flexspeak**. [Download the latest private Windows/macOS/Linux release](https://github.com/zirkumflex-group/flexspeak/releases/latest), or follow the [Homebrew, Omarchy and automatic-release guide](docs/releases.md). Every successful push to `main` publishes updated packages; pull requests use a separate fast Linux check.
 
-A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses Iced; audio uses CPAL and native libopus; connectivity and incoming jitter buffering use a vendored [ReSpeak/tsclientlib](https://github.com/ReSpeak/tsclientlib) based on `ee3bc6f45a7137db7793ba5593a321df400d53e5`, with a narrow TS6 streaming-notification hook.
+A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses [Rune](https://github.com/anomalyco/rune) and rune-kit, pinned to a `dev` revision in `Cargo.toml`; audio uses CPAL and native libopus; connectivity and incoming jitter buffering use a vendored [ReSpeak/tsclientlib](https://github.com/ReSpeak/tsclientlib) based on `ee3bc6f45a7137db7793ba5593a321df400d53e5`, with a narrow TS6 streaming-notification hook.
 
 ## Included
 
@@ -26,7 +26,7 @@ The prefilled server address is `ts.zirkumflex.io`; it remains editable. The mic
 
 ## Run
 
-Requires Rust 1.92 or newer, a C/C++ toolchain, CMake, and Git. `Cargo.lock` is checked in; use `--locked` for reproducible dependency resolution. The first build downloads the pinned protocol repository and its declarations submodule automatically.
+Requires Rust 1.99 or newer (pinned in `rust-toolchain.toml`; Rune tracks current stable), a C/C++ toolchain, CMake, and Git. `Cargo.lock` is checked in; use `--locked` for reproducible dependency resolution. The first build downloads the pinned protocol repository and its declarations submodule automatically.
 
 ### macOS
 
@@ -39,12 +39,12 @@ For predictable microphone permissions, use the application bundle:
 
 ```sh
 sh scripts/macos-app.sh
-open "dist/Native Voice.app"
+open "dist/Flexspeak.app"
 ```
 
 Pass `debug` to the script for a faster development build. The bundle is locally ad-hoc signed and includes the microphone usage description. It is not notarized for public distribution. The CPAL version in this project requires macOS 14.2 or later.
 
-Click **Allow** when macOS asks for microphone access. If denied, enable Native Voice in System Settings → Privacy & Security → Microphone, then restart the app. When running from a terminal, the permission may belong to that terminal instead.
+Click **Allow** when macOS asks for microphone access. If denied, enable Flexspeak in System Settings → Privacy & Security → Microphone, then restart the app. When running from a terminal, the permission may belong to that terminal instead.
 
 ### Linux
 
@@ -57,7 +57,7 @@ cargo run --locked
 
 ### Windows
 
-The portable Windows x64 build is packaged as `dist/NativeVoice-Windows-x64.zip`. Extract it and open `NativeVoice.exe`. See [Windows build details and validation](docs/windows-build.md).
+Releases include a portable Windows x64 package, `Flexspeak-windows-x64.zip`. Extract it and open `Flexspeak.exe`. See [Windows build details and validation](docs/windows-build.md).
 
 Install Rust's MSVC toolchain, Visual Studio C++ Build Tools, Git, and CMake. Then run:
 
@@ -68,6 +68,8 @@ cargo run --locked
 libopus links statically. The binding finds an installed libopus using pkg-config where available, or builds its bundled copy with CMake. To choose an installed build explicitly, set `OPUS_LIB_DIR` to the directory containing its `lib/` directory. Use a current libopus installation if codec-version consistency between machines matters; the bundled fallback is older. For CMake 4 with older bundled sources, set `CMAKE_POLICY_VERSION_MINIMUM=3.5` in the environment.
 
 ## First voice session
+
+Run `flexspeak --snap out.png --scene connected` (or `home`, `setup`, `devices`, `statistics`, `settings`, `performance`, `password`, `alert`) to render a screen headlessly with demo data; `--list-scenes` lists them.
 
 A missing settings file opens setup for your username, one saved server, permissions, devices and global shortcuts. Finish saves the profile; existing valid settings go straight to the saved-server card. Use its plug button to connect. While connected, the channel tree stays on the left and streaming occupies the right. Settings and Statistics are available from the header.
 
@@ -87,7 +89,7 @@ If AirPods or other Bluetooth headphones are missing, connect them to this compu
 
 The default global toggles are **Ctrl+Shift+M** for mute/unmute and **Ctrl+Shift+D** for deafen/undeafen. Change them in **Settings → Save settings**. The same JSON file stores the server address, nickname and playback volume. Use **Copy settings path** to locate it; edit/copy the file and use **Reload JSON** while disconnected, or restart the app. On native Wayland, global shortcuts are currently unavailable and the app reports that limitation.
 
-The **Volume** slider in **Settings → Audio**, below Playback, changes only Native Voice's output (0–100%), including a live session or local audio test. Save in Settings to retain it. Setting volume to zero does not mute your microphone. See [controls, JSON format and validation](docs/controls-and-settings.md) and [the example JSON](settings.example.json).
+The **Volume** slider in **Settings → Audio**, below Playback, changes only Flexspeak's output (0–100%), including a live session or local audio test. Save in Settings to retain it. Setting volume to zero does not mute your microphone. See [controls, JSON format and validation](docs/controls-and-settings.md) and [the example JSON](settings.example.json).
 
 ## Streaming
 
@@ -153,9 +155,9 @@ Recording adds timing and buffer overhead; compare normal usage with recording d
 
 ### Memory optimization
 
-GPU rendering now disables Iced's full-viewport 4× triangle MSAA buffers, which otherwise retain their larger capacity after resizing. Text and standard widgets keep their own smoothing; canvas edges can look more jagged. Audio and codec settings are unchanged.
+The interface moved from Iced to Rune after the measurements below, so they describe the Iced build and need repeating. Rune draws with one instanced pipeline and analytic anti-aliasing, so there are no MSAA targets; an idle window presents no frames, and video frames go to the GPU through `rune::Pixels` without a UI-thread copy.
 
-On the tested Apple M4 Mac, disconnected Statistics-tab comparisons reduced physical footprint from about 220 MiB to 154–167 MiB at the default window size, and from 372 MiB to 201 MiB when enlarged. RSS—the RAM number inside the app—stayed around 101–105 MiB because it does not include all owned GPU memory. These are optimized release measurements, not debug-build overhead. Idle CPU remained below 0.6% of one core in these samples.
+On the tested Apple M4 Mac (Iced build), disconnected Statistics-tab comparisons reduced physical footprint from about 220 MiB to 154–167 MiB at the default window size, and from 372 MiB to 201 MiB when enlarged. RSS—the RAM number inside the app—stayed around 101–105 MiB because it does not include all owned GPU memory. These are optimized release measurements, not debug-build overhead. Idle CPU remained below 0.6% of one core in these samples.
 
 Software rendering had a lower footprint at the default size but used more CPU and became substantially more memory-intensive when enlarged, so GPU rendering remains the default. See the [measurements, reproduction steps, and limitations](docs/memory-optimization-results.md) and the [Rust/dependency research and tradeoffs](docs/memory-optimization-research.md). Other operating systems, lower-density displays, and active voice workloads were not benchmarked in this comparison.
 
@@ -171,7 +173,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --check
 ```
 
-`--probe` connects muted/deafened, reports server state, then disconnects. It never opens a microphone or plays audio. Set `RUST_LOG=teamspeak_native=debug,tsclientlib=debug` for connection diagnostics; avoid distributing logs containing private server details.
+`--probe` connects muted/deafened, reports server state, then disconnects. It never opens a microphone or plays audio. Set `RUST_LOG=flexspeak=debug,tsclientlib=debug` for connection diagnostics; avoid distributing logs containing private server details.
 
 ## Data and scope
 

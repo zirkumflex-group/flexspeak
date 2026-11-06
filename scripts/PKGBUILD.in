@@ -14,6 +14,7 @@ sha256sums=('@SHA256@')
 package() {
     install -Dm755 "$srcdir/flexspeak" "$pkgdir/usr/bin/flexspeak"
     install -Dm644 "$srcdir/flexspeak.desktop" "$pkgdir/usr/share/applications/flexspeak.desktop"
+    install -Dm644 "$srcdir/flexspeak.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/flexspeak.svg"
     install -Dm644 "$srcdir/THIRD-PARTY-LICENSES.txt" "$pkgdir/usr/share/licenses/flexspeak/THIRD-PARTY-LICENSES.txt"
     install -Dm644 -t "$pkgdir/usr/share/doc/flexspeak" \
         "$srcdir/README.md" "$srcdir/BUILD-INFO.json" "$srcdir/settings.example.json"

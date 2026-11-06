@@ -43,7 +43,7 @@ The receiving UI reports the server version, negotiated video codec/parameters, 
 
 - Only one receiver is active. Watching and publishing are mutually exclusive. Native decoding runs on a separate worker so peer setup does not block the voice loop.
 - The native frame callback queue and application display slot each keep the latest frame. Superseded frames are dropped, not queued for later display.
-- The renderer explicitly uploads the next image before replacing the visible picture. It retains the displayed GPU allocation and permits only one upload in flight, including across a stop/restart. This avoids the blank frames caused by Iced's asynchronous upload of larger images; failed or late uploads cannot clear or revive the current picture.
+- Decoded frames replace one `rune::Pixels` image from the decoder thread. Rune uploads only the newest image on the next drawn frame (same-size frames reuse their atlas slot), so the UI thread never copies pixels and the old picture stays until the new one is on the GPU. The view is woken only when the picture first appears or changes size or rotation. Ending a session releases the image; an old generation cannot publish into a new one.
 - Display conversion is capped at 1280×720 and approximately 30 FPS. The incoming stream may be decoded at a larger resolution/rate; the diagnostics report its actual decoded size/FPS.
 - Signaling commands, pending ICE candidates and control queues have explicit size/count bounds. Stream IDs and current-channel membership scope incoming messages and Watch requests. Old receiver generations cannot replace a newer picture.
 - Only displayed metrics are copied from WebRTC statistics; raw SDP, ICE credentials, client addresses and video contents are not saved by the receiver.
