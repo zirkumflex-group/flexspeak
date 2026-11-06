@@ -277,11 +277,14 @@ mod tests {
                 // Enough streams to overflow the pane, whether or not this platform can share.
                 let base = rt.state.streaming.catalog[0].clone();
                 for id in 0..12 {
-                    rt.state.streaming.catalog.push(crate::streaming::StreamInfo {
-                        id: format!("extra-{id}"),
-                        name: format!("Screen {id}"),
-                        ..base.clone()
-                    });
+                    rt.state
+                        .streaming
+                        .catalog
+                        .push(crate::streaming::StreamInfo {
+                            id: format!("extra-{id}"),
+                            name: format!("Screen {id}"),
+                            ..base.clone()
+                        });
                 }
             }
             if name == "channels" {
