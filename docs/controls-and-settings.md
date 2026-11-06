@@ -83,6 +83,16 @@ Design validation: 41 tests passed (one explicit network test skipped), and fina
 
 CPU, RAM and the platform-specific memory detail stay in the bottom bar while the server view, Statistics, Settings or the channel tree scroll. RAM here means resident memory (RSS). These are the same process readings used by Statistics, refreshed every second in normal mode and every ten seconds in performance mode; the bar adds no separate sampling timer.
 
+## Appearance
+
+Settings opens with **Color Scheme** (System, Light or Dark) and **Themes**. Five themes ship with the app — Flexspeak (blue), Grove (green), Ocean (teal), Ember (orange) and Iris (violet) — and each has a light and a dark palette. Each theme card shows two swatches: press the light one to use that theme while the window is light, and the dark one for while it is dark. The two choices are independent, so Grove can be the light theme and Ember the dark one. System follows the computer's appearance: on macOS the app's effective appearance (including Auto), on Windows the app mode in Personalisation, and on Linux GNOME's `color-scheme`, read once at launch. macOS and Windows are checked with each usage tick, so a change shows within a second (ten in performance mode).
+
+Like the footer choice, appearance applies and saves immediately without saving other unsaved Settings edits. It is stored as an optional `appearance` object and left out of the file while it is the default:
+
+```json
+"appearance": { "scheme": "system", "light_theme": "grove", "dark_theme": "ember" }
+```
+
 ## Errors and rate limiting
 
 Connection, audio, command, settings, trace and streaming failures use a shared Rune modal with Close/Enter/Escape dismissal; the window behind it is inert and Tab stays inside. Repeats are grouped and dismissed incidents stay suppressed until a retry or relevant recovery. Wrong channel passwords stay in the password dialog; missing telemetry remains a status/tooltip.

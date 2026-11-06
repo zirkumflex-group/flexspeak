@@ -14,6 +14,7 @@ mod resume;
 mod settings;
 mod shortcuts;
 mod streaming;
+mod system_appearance;
 mod ui;
 mod updater;
 mod usage;
@@ -125,6 +126,10 @@ struct App {
     subscribe_all: Arc<AtomicBool>,
     /// Saved straight to settings when toggled, not held until the Settings page saves.
     footer_hidden: bool,
+    /// Saved straight to settings when changed, like `footer_hidden`.
+    appearance: settings::Appearance,
+    /// Whether the system is in dark mode, refreshed with each usage tick.
+    system_dark: bool,
     window_restore: Option<(f32, f32)>,
     window_size: (f32, f32),
     next_usage_tick: Instant,
@@ -225,6 +230,7 @@ enum Message {
     ToggleChannel(u64),
     ToggleSubscribeAll,
     ToggleFooter,
+    Appearance(settings::Appearance),
     ToggleClient(u16),
     Backend(client::Event),
     Close,
@@ -262,6 +268,7 @@ impl App {
         };
         let mut app = Self::with_devices(devices, error);
         app.handle = handle;
+        app.system_dark = system_appearance::is_dark().unwrap_or(true);
         match settings::path() {
             Ok(path) => app.load_settings(path),
             Err(error) => app.alerts.raise(Source::SettingsLoad, format!("{error:#}")),
@@ -337,6 +344,8 @@ impl App {
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
+            appearance: settings::Appearance::default(),
+            system_dark: true,
             window_restore: None,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -513,6 +522,7 @@ impl App {
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
         self.updater.auto_download = saved.auto_download_updates;
+        self.appearance = saved.appearance;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -528,6 +538,7 @@ impl App {
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
             auto_download_updates: self.updater.auto_download,
+            appearance: self.appearance,
         }
     }
 
@@ -537,6 +548,15 @@ impl App {
         self.save_preference(
             |saved| saved.footer_hidden = hidden,
             "The footer choice applies for now but was not saved",
+        );
+    }
+
+    /// Changes the colour scheme or themes and stores only that choice.
+    fn set_appearance(&mut self, appearance: settings::Appearance) {
+        self.appearance = appearance;
+        self.save_preference(
+            |saved| saved.appearance = appearance,
+            "The appearance choice applies for now but was not saved",
         );
     }
 
@@ -1300,6 +1320,7 @@ impl App {
             Message::ToggleFooter => self.set_footer_hidden(!self.footer_hidden),
             Message::Updater(event) => return self.update_software(event),
             Message::Resume => return self.resume(),
+            Message::Appearance(appearance) => self.set_appearance(appearance),
             Message::ToggleSubscribeAll => {
                 self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
             }
@@ -1894,6 +1915,28 @@ mod tests {
                 .unwrap()
                 .auto_download_updates
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appearance_choices_save_alone_and_survive_a_restart() {
+        let (mut app, root) = setup_fixture("appearance");
+        let path = root.join("settings.json");
+        settings::save(&path, &settings::Settings::default()).unwrap();
+        app.load_settings(path.clone());
+        app.nickname = "Unsaved draft".into();
+        let chosen = settings::Appearance {
+            scheme: settings::ColorScheme::Light,
+            light_theme: settings::ThemeName::Ocean,
+            dark_theme: settings::ThemeName::Ember,
+        };
+        let _ = app.update(Message::Appearance(chosen));
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert_eq!(stored.appearance, chosen);
+        assert_eq!(stored.nickname, settings::Settings::default().nickname);
+        let (mut restarted, _) = setup_fixture("appearance-restart");
+        restarted.load_settings(path);
+        assert_eq!(restarted.appearance, chosen);
         std::fs::remove_dir_all(root).unwrap();
     }
 

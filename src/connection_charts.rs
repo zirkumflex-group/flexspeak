@@ -86,7 +86,20 @@ impl ConnectionHistory {
 pub struct ChartPaint {
     pub grid: Color,
     pub band: Color,
-    pub health: fn(Health) -> Color,
+    /// Good, fair, poor and unknown.
+    pub health: [Color; 4],
+}
+
+impl ChartPaint {
+    fn health(&self, health: Health) -> Color {
+        let [good, fair, poor, unknown] = self.health;
+        match health {
+            Health::Good => good,
+            Health::Fair => fair,
+            Health::Poor => poor,
+            Health::Unknown => unknown,
+        }
+    }
 }
 
 impl ConnectionHistory {
@@ -147,7 +160,7 @@ impl ConnectionHistory {
             } else {
                 None
             };
-            let color = (paint.health)(metric.health(*sample));
+            let color = paint.health(metric.health(*sample));
             if let Some(old) = previous
                 && at.saturating_duration_since(old.at) <= Duration::from_secs(15)
             {

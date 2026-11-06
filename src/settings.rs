@@ -26,6 +26,96 @@ pub struct Settings {
     /// New releases download in the background; installing still waits for Restart.
     #[serde(skip_serializing_if = "is_true")]
     pub auto_download_updates: bool,
+    /// Saved straight away when changed, like `footer_hidden`.
+    #[serde(skip_serializing_if = "Appearance::is_default")]
+    pub appearance: Appearance,
+}
+
+/// Whether the window follows the system's light or dark appearance or keeps one.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ColorScheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ColorScheme {
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+}
+
+/// The supplied colour themes. Each has a light and a dark palette.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeName {
+    #[default]
+    Flexspeak,
+    Grove,
+    Ocean,
+    Ember,
+    Iris,
+}
+
+impl ThemeName {
+    pub const ALL: [Self; 5] = [
+        Self::Flexspeak,
+        Self::Grove,
+        Self::Ocean,
+        Self::Ember,
+        Self::Iris,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Flexspeak => "Flexspeak",
+            Self::Grove => "Grove",
+            Self::Ocean => "Ocean",
+            Self::Ember => "Ember",
+            Self::Iris => "Iris",
+        }
+    }
+}
+
+/// The colour scheme, and the theme used while the window is light and while it is dark.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Appearance {
+    pub scheme: ColorScheme,
+    pub light_theme: ThemeName,
+    pub dark_theme: ThemeName,
+}
+
+impl Appearance {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether the window is dark, given whether the system currently is.
+    pub fn is_dark(&self, system_dark: bool) -> bool {
+        match self.scheme {
+            ColorScheme::System => system_dark,
+            ColorScheme::Light => false,
+            ColorScheme::Dark => true,
+        }
+    }
+
+    /// The theme in use for that appearance.
+    pub fn theme(&self, dark: bool) -> ThemeName {
+        if dark {
+            self.dark_theme
+        } else {
+            self.light_theme
+        }
+    }
 }
 
 fn is_true(value: &bool) -> bool {
@@ -43,6 +133,7 @@ impl Default for Settings {
             output_device_id: None,
             footer_hidden: false,
             auto_download_updates: true,
+            appearance: Appearance::default(),
         }
     }
 }
@@ -138,6 +229,11 @@ mod tests {
             output_device_id: Some("output-id".into()),
             footer_hidden: true,
             auto_download_updates: false,
+            appearance: Appearance {
+                scheme: ColorScheme::Light,
+                light_theme: ThemeName::Grove,
+                dark_theme: ThemeName::Iris,
+            },
         };
         settings.validate()?;
         assert_eq!(
@@ -158,6 +254,14 @@ mod tests {
         );
         assert!(serde_json::to_string(&settings)?.contains(r#""auto_download_updates":false"#));
         assert!(serde_json::from_str::<Settings>(r#"{"nicknmae":"Alex"}"#).is_err());
+        let themed: Settings =
+            serde_json::from_str(r#"{"appearance":{"scheme":"dark","dark_theme":"ember"}}"#)?;
+        assert_eq!(themed.appearance.light_theme, ThemeName::Flexspeak);
+        assert_eq!(themed.appearance.theme(true), ThemeName::Ember);
+        assert!(
+            !serde_json::to_string(&Settings::default())?.contains("appearance"),
+            "the default appearance stays out of the file"
+        );
         assert!(
             Settings {
                 playback_volume_percent: 101,

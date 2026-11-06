@@ -1,6 +1,6 @@
 //! First-run setup: five steps in one centred card, with fixed Back / Continue controls.
 
-use rune::{Color, Cx, El, Transition, col, el, row, text};
+use rune::{Cx, El, Transition, col, el, row, text};
 use rune_kit::Kit;
 
 use super::settings;
@@ -29,7 +29,7 @@ fn stepper(t: &Theme, step: Step) -> El {
                         .fill(if current || done {
                             t.accent
                         } else {
-                            Color::WHITE.alpha(0.08)
+                            t.wash(0.08)
                         })
                         .motion(motion::SETTLE)
                         .a11y_hidden(),

@@ -69,7 +69,7 @@ libopus links statically. The binding finds an installed libopus using pkg-confi
 
 ## First voice session
 
-Run `flexspeak --snap out.png --scene connected` (or `home`, `setup`, `devices`, `footer-hidden`, `statistics`, `settings`, `performance`, `password`, `alert`, and the `update-*` notice and Settings states) to render a screen headlessly with demo data; `--list-scenes` lists them.
+Run `flexspeak --snap out.png --scene connected` (or `home`, `setup`, `devices`, `footer-hidden`, `statistics`, `settings`, `settings-light`, `themes`, `connected-light`, `performance`, `password`, `alert`, and the `update-*` notice and Settings states) to render a screen headlessly with demo data; `--list-scenes` lists them.
 
 A missing settings file opens setup for your username, one saved server, permissions, devices and global shortcuts. Finish saves the profile; existing valid settings go straight to the saved-server card. Use its plug button to connect. While connected, the channel tree stays on the left and streaming occupies the right. Settings and Statistics are available from the header.
 

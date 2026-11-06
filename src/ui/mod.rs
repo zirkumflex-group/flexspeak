@@ -257,6 +257,12 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
                 Message::UsageTick
             },
         );
+        // Following the system's appearance costs one cheap query per tick.
+        if s.appearance.scheme == crate::settings::ColorScheme::System
+            && let Some(dark) = crate::system_appearance::is_dark()
+        {
+            s.system_dark = dark;
+        }
         s.next_usage_tick = now
             + if compact {
                 usage::COMPACT_REFRESH_INTERVAL
@@ -303,9 +309,15 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
+/// The palette for the chosen scheme and theme.
+pub fn theme(s: &App) -> Theme {
+    let dark = s.appearance.is_dark(s.system_dark);
+    Theme::new(s.appearance.theme(dark), dark)
+}
+
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let _trace = crate::profiler::scope(crate::profiler::Category::Ui, "ui.view");
-    let t = Theme::new();
+    let t = theme(s);
     let k = t.kit();
     let mut layer = Vec::new();
     let compact = s.performance_mode.load(Ordering::Relaxed);
