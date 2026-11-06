@@ -3,24 +3,61 @@
 
 use std::time::{Duration, Instant};
 
-use crate::{App, Tab, alerts::Source, client, onboarding, settings, usage};
+use crate::permissions::{Kind, Status};
+use crate::{
+    App, Tab,
+    alerts::Source,
+    audio_processing, client, onboarding, settings, transmission,
+    updater::{self, Build, Phase, Progress, Retry},
+    usage,
+};
 
 type Scene = (&'static str, fn(&mut App));
 
 pub const SCENES: &[Scene] = &[
     ("setup", setup),
     ("devices", devices),
+    ("permissions-not-asked", permissions_not_asked),
+    ("permissions-allowed", permissions_allowed),
+    ("permissions-denied", permissions_denied),
+    ("permissions-mixed", permissions_mixed),
+    ("permissions-windows", permissions_windows),
     ("home", home),
     ("connected", connected),
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
+    ("settings-permissions", settings_permissions),
+    ("settings-light", settings_light),
+    ("themes", themes),
+    ("connected-light", connected_light),
+    ("audio-processing", audio_processing_page),
+    ("push-to-talk", push_to_talk_page),
+    ("push-to-talk-connected", push_to_talk_connected),
     ("performance", performance),
     ("password", password),
     ("alert", alert),
+    ("update-available", update_available),
+    ("update-downloading", update_downloading),
+    ("update-ready", update_ready),
+    ("update-installing", update_installing),
+    ("update-download-failed", update_download_failed),
+    ("update-install-failed", update_install_failed),
+    ("update-settings", update_settings),
+    ("update-settings-downloading", update_settings_downloading),
+    ("update-check-failed", update_check_failed),
 ];
 
+/// Scenes keep a fixed scheme, so previews don't depend on the machine's appearance.
+fn dark(s: &mut App) {
+    s.appearance = settings::Appearance {
+        scheme: settings::ColorScheme::Dark,
+        ..Default::default()
+    };
+}
+
 fn saved(s: &mut App) {
+    dark(s);
     s.onboarding = None;
     s.saved = Some(settings::Settings {
         server_address: "ts.zirkumflex.io".into(),
@@ -34,6 +71,7 @@ fn saved(s: &mut App) {
 }
 
 fn setup(s: &mut App) {
+    dark(s);
     s.begin_setup();
     s.nickname = "Jan".into();
     s.onboarding = Some(onboarding::Step::Server);
@@ -45,6 +83,41 @@ fn setup(s: &mut App) {
 fn devices(s: &mut App) {
     setup(s);
     s.onboarding = Some(onboarding::Step::Devices);
+}
+
+/// The setup step with the OS reporting `status` for microphone, screen and system audio.
+fn permissions_step(s: &mut App, status: [Status; 3]) {
+    setup(s);
+    s.onboarding = Some(onboarding::Step::Permissions);
+    s.permissions.status = status;
+}
+
+fn permissions_not_asked(s: &mut App) {
+    permissions_step(s, [Status::NotDetermined; 3]);
+}
+
+fn permissions_allowed(s: &mut App) {
+    permissions_step(s, [Status::Granted; 3]);
+}
+
+fn permissions_denied(s: &mut App) {
+    permissions_step(s, [Status::Denied; 3]);
+    s.permissions.messages[Kind::Microphone.index()] = Some(
+        "Microphone access is off. Enable it in System Settings → Privacy & Security → Microphone."
+            .into(),
+    );
+}
+
+fn permissions_mixed(s: &mut App) {
+    permissions_step(s, [Status::Granted, Status::Denied, Status::NotDetermined]);
+}
+
+/// What Windows reports: only the microphone has a privacy switch.
+fn permissions_windows(s: &mut App) {
+    permissions_step(
+        s,
+        [Status::Denied, Status::NotRequired, Status::NotRequired],
+    );
 }
 
 fn home(s: &mut App) {
@@ -67,6 +140,7 @@ fn connected(s: &mut App) {
     s.connected = true;
     s.muted = false;
     s.level = 0.3;
+    s.transmitting = true;
     s.state.can_talk = true;
     s.state.server = "Zirkumflex".into();
     s.state.server_version = "6.0.0".into();
@@ -183,6 +257,70 @@ fn settings_page(s: &mut App) {
     s.tab = Tab::Settings;
 }
 
+/// Settings with a mix of answers, to show the same live status outside setup.
+fn settings_permissions(s: &mut App) {
+    settings_page(s);
+    s.permissions.status = [Status::Granted, Status::Denied, Status::NotDetermined];
+}
+
+fn settings_light(s: &mut App) {
+    settings_page(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+/// Different themes for light and dark, in dark.
+fn themes(s: &mut App) {
+    settings_page(s);
+    s.appearance.light_theme = settings::ThemeName::Grove;
+    s.appearance.dark_theme = settings::ThemeName::Ember;
+}
+
+fn connected_light(s: &mut App) {
+    connected(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+    s.appearance.light_theme = settings::ThemeName::Ocean;
+}
+
+/// Settings with every microphone effect on and voice activation chosen.
+fn audio_processing_page(s: &mut App) {
+    settings_page(s);
+    s.audio_processing = audio_processing::Settings {
+        noise_suppression: true,
+        suppression_level: audio_processing::SuppressionLevel::High,
+        automatic_gain: true,
+        echo_cancellation: true,
+    };
+    s.transmission = transmission::Settings {
+        mode: transmission::Mode::VoiceActivation,
+        voice_threshold_db: -45,
+        ..transmission::Settings::default()
+    };
+}
+
+/// Settings with push-to-talk chosen and its key set.
+fn push_to_talk_page(s: &mut App) {
+    settings_page(s);
+    s.transmission = transmission::Settings {
+        mode: transmission::Mode::PushToTalk,
+        ptt_release_ms: 200,
+        ..transmission::Settings::default()
+    };
+    s.keybinds.push_to_talk = "Ctrl+Shift+Space".into();
+    s.keybind_draft.push_to_talk = "Ctrl+Shift+Space".into();
+    s.sync_fields();
+}
+
+/// Connected in push-to-talk with the key up: the voice panel waits instead of lighting up.
+fn push_to_talk_connected(s: &mut App) {
+    connected(s);
+    s.transmission = transmission::Settings {
+        mode: transmission::Mode::PushToTalk,
+        ..transmission::Settings::default()
+    };
+    s.transmitting = false;
+    s.talking = [2].into();
+}
+
 fn performance(s: &mut App) {
     connected(s);
     s.performance_mode
@@ -200,6 +338,105 @@ fn alert(s: &mut App) {
         Source::Connection,
         "The server did not answer within 10 seconds. Check the address and your network, then try again.",
     );
+}
+
+const RUNNING: Build = Build {
+    major: 0,
+    minor: 1,
+    patch: 0,
+    number: 6,
+};
+
+/// A release build that has found build 7. Nothing is fetched; the scene only sets state.
+fn with_update(s: &mut App, phase: Phase) {
+    let mut u = updater::Updater::new(Some(RUNNING), Ok(updater::Package::MacApp), true);
+    u.release = Some(updater::Release {
+        tag: "v0.1.0-build.7".into(),
+        build: Build {
+            number: 7,
+            ..RUNNING
+        },
+        asset: updater::Asset {
+            name: updater::MACOS_DMG.into(),
+            url: String::new(),
+            size: 25_237_970,
+            digest: None,
+        },
+        checksums_url: String::new(),
+    });
+    u.phase = phase;
+    s.updater = u;
+}
+
+fn downloading() -> Phase {
+    Phase::Downloading(Progress {
+        received: 12_118_000,
+        total: Some(25_237_970),
+        bytes_per_second: Some(3_420_000.0),
+    })
+}
+
+fn update_available(s: &mut App) {
+    home(s);
+    with_update(s, Phase::Available);
+}
+
+fn update_downloading(s: &mut App) {
+    connected(s);
+    with_update(s, downloading());
+}
+
+fn update_ready(s: &mut App) {
+    connected(s);
+    with_update(s, Phase::Ready);
+}
+
+fn update_installing(s: &mut App) {
+    connected(s);
+    with_update(s, Phase::Installing);
+}
+
+fn update_download_failed(s: &mut App) {
+    home(s);
+    with_update(
+        s,
+        Phase::Failed {
+            retry: Retry::Download,
+            detail: "The download ended after 12118000 of 25237970 bytes.".into(),
+        },
+    );
+}
+
+fn update_install_failed(s: &mut App) {
+    home(s);
+    with_update(
+        s,
+        Phase::Failed {
+            retry: Retry::Install,
+            detail: "Cannot update /Applications/Flexspeak.app: Permission denied (os error 13). Check that you can write to /Applications.".into(),
+        },
+    );
+}
+
+/// Settings with a downloaded build waiting and the notice closed.
+fn update_settings(s: &mut App) {
+    settings_page(s);
+    with_update(s, Phase::Ready);
+    s.updater.dismissed = true;
+}
+
+fn update_settings_downloading(s: &mut App) {
+    settings_page(s);
+    with_update(s, downloading());
+    s.updater.auto_download = false;
+    s.updater.dismissed = true;
+}
+
+/// A failed check stays on the Settings page; nothing pops up.
+fn update_check_failed(s: &mut App) {
+    settings_page(s);
+    s.updater = updater::Updater::new(Some(RUNNING), Ok(updater::Package::MacApp), false);
+    s.updater.check_error = Some("error sending request for url (https://api.github.com/repos/zirkumflex-group/flexspeak/releases/latest): dns error".into());
 }
 
 #[cfg(test)]
@@ -255,6 +492,31 @@ mod tests {
     }
 
     #[test]
+    fn theme_swatches_choose_a_theme_for_one_mode_and_scheme_cards_switch_modes() {
+        let mut rt = runtime(settings_page, (900.0, 790.0));
+        // Nothing to store to: the choices apply without a settings file to write.
+        rt.state.saved = None;
+        rt.frame(1.0 / 60.0);
+        let press = |rt: &mut Runtime<App>, label: &str| {
+            let (x, y) = rt.find(label).unwrap_or_else(|| panic!("no {label}"));
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+        };
+        press(&mut rt, "Grove-dark");
+        assert_eq!(rt.state.appearance.dark_theme, settings::ThemeName::Grove);
+        assert_eq!(
+            rt.state.appearance.light_theme,
+            settings::ThemeName::Flexspeak
+        );
+        press(&mut rt, "Iris-light");
+        assert_eq!(rt.state.appearance.light_theme, settings::ThemeName::Iris);
+        press(&mut rt, "scheme-Light");
+        assert_eq!(rt.state.appearance.scheme, settings::ColorScheme::Light);
+        assert!(!super::super::theme(&rt.state).dark);
+    }
+
+    #[test]
     fn typing_in_a_locked_field_is_reverted_while_connected() {
         let mut rt = runtime(settings_page, (900.0, 790.0));
         rt.state.session = Some(tokio::sync::mpsc::channel(1).0);
@@ -264,6 +526,37 @@ mod tests {
         rt.state.sync_fields();
         assert_eq!(rt.state.address, "ts.zirkumflex.io");
         assert_eq!(rt.state.ui.address.text, "ts.zirkumflex.io");
+    }
+
+    // The switches exist only where WebRTC processing is built (Mac and Windows).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn processing_switches_apply_while_idle_and_lock_during_a_session() {
+        let mut rt = runtime(settings_page, (900.0, 2000.0));
+        for _ in 0..10 {
+            rt.frame(1.0 / 30.0);
+        }
+        let (x, y) = rt
+            .find("echo-cancellation-switch")
+            .expect("echo cancellation switch");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(
+            rt.state.audio_processing.echo_cancellation,
+            crate::audio_processing::AVAILABLE
+        );
+        let before = rt.state.audio_processing;
+        rt.state.session = Some(tokio::sync::mpsc::channel(1).0);
+        for _ in 0..10 {
+            rt.frame(1.0 / 30.0);
+        }
+        if let Some((x, y)) = rt.find("echo-cancellation-switch") {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.audio_processing, before);
     }
 
     /// The connected scene with enough streams to overflow the pane, whether or not this

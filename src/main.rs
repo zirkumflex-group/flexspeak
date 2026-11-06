@@ -2,18 +2,25 @@
 
 mod alerts;
 mod audio;
+mod audio_processing;
 mod client;
 mod command_flow;
 mod connection_charts;
 mod icons;
 mod memory;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod native_audio;
 mod onboarding;
 mod permissions;
 mod profiler;
+mod resume;
 mod settings;
 mod shortcuts;
 mod streaming;
+mod system_appearance;
+mod transmission;
 mod ui;
+mod updater;
 mod usage;
 mod window_icon;
 
@@ -24,7 +31,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 use tokio::sync::mpsc;
@@ -118,11 +125,19 @@ struct App {
     alerts: Alerts,
     settings_message: Option<String>,
     playback_volume: Arc<audio::PlaybackVolume>,
+    audio_processing: audio_processing::Settings,
+    transmission: transmission::Settings,
+    ptt: Arc<AtomicBool>,
+    transmitting: bool,
     performance_mode: Arc<AtomicBool>,
     channel_health_visible: Arc<AtomicBool>,
     subscribe_all: Arc<AtomicBool>,
     /// Saved straight to settings when toggled, not held until the Settings page saves.
     footer_hidden: bool,
+    /// Saved straight to settings when changed, like `footer_hidden`.
+    appearance: settings::Appearance,
+    /// Whether the system is in dark mode, refreshed with each usage tick.
+    system_dark: bool,
     window_restore: Option<(f32, f32)>,
     window_size: (f32, f32),
     next_usage_tick: Instant,
@@ -173,6 +188,12 @@ struct App {
     trace_summary: Option<profiler::TraceSummary>,
     trace_path: Option<PathBuf>,
     trace_saving: bool,
+    updater: updater::Updater,
+    /// Where to return after an update's restart, until it has been reached.
+    resume: Option<resume::Resume>,
+    resume_started: bool,
+    /// The password last used to join a channel, so an update's restart can rejoin it.
+    channel_secret: Option<(u64, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,10 +215,13 @@ enum Message {
     Shortcut(shortcuts::Action),
     MuteKeybind(String),
     DeafenKeybind(String),
+    PttKeybind(String),
     SaveSettings,
     ReloadSettings,
     CopySettingsPath,
     PlaybackVolume(u8),
+    AudioProcessing(audio_processing::Settings),
+    Transmission(transmission::Settings),
     PerformanceMode(bool),
     Address(String),
     Nickname(String),
@@ -217,6 +241,7 @@ enum Message {
     ToggleChannel(u64),
     ToggleSubscribeAll,
     ToggleFooter,
+    Appearance(settings::Appearance),
     ToggleClient(u16),
     Backend(client::Event),
     Close,
@@ -238,6 +263,9 @@ enum Message {
     StopTrace,
     TraceSaved(Result<PathBuf, String>),
     CopyTracePath,
+    Updater(updater::Event),
+    /// Returns to where the app was before an update's restart.
+    Resume,
 }
 
 impl App {
@@ -251,11 +279,12 @@ impl App {
         };
         let mut app = Self::with_devices(devices, error);
         app.handle = handle;
+        app.system_dark = system_appearance::is_dark().unwrap_or(true);
         match settings::path() {
             Ok(path) => app.load_settings(path),
             Err(error) => app.alerts.raise(Source::SettingsLoad, format!("{error:#}")),
         }
-        let (mut shortcuts, events) = shortcuts::Shortcuts::new();
+        let (mut shortcuts, events) = shortcuts::Shortcuts::new(app.ptt.clone());
         if app.onboarding.is_none() {
             app.shortcut_error = shortcuts
                 .configure(&app.keybinds)
@@ -271,7 +300,23 @@ impl App {
             app.shortcut_error =
                 Some("Global shortcuts require X11; native Wayland is not supported.".into());
         }
+        let auto_download = app.updater.auto_download;
+        app.updater = updater::Updater::new(
+            updater::Build::running(),
+            updater::Package::detect(),
+            auto_download,
+        );
+        if app.updater.unsupported().is_none() {
+            updater::clean_up();
+            app.updater.next_check = Some(Instant::now() + updater::FIRST_CHECK_DELAY);
+        }
+        if app.onboarding.is_none()
+            && let Some(path) = &app.settings_path
+        {
+            app.resume = resume::take(&resume::path(path), SystemTime::now());
+        }
         app.sync_page_visibility();
+        app.permissions.refresh();
         app.shortcuts = Some(shortcuts);
         ui::forward_shortcuts(app.handle.clone(), events);
         app.sync_fields();
@@ -306,10 +351,16 @@ impl App {
             alerts,
             settings_message: None,
             playback_volume: Arc::new(audio::PlaybackVolume::default()),
+            audio_processing: audio_processing::Settings::default(),
+            transmission: transmission::Settings::default(),
+            ptt: Arc::new(AtomicBool::new(false)),
+            transmitting: false,
             performance_mode: Arc::new(AtomicBool::new(false)),
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
+            appearance: settings::Appearance::default(),
+            system_dark: true,
             window_restore: None,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -359,6 +410,11 @@ impl App {
             trace_summary: None,
             trace_path: None,
             trace_saving: false,
+            // Previews and tests never check; `new` enables real builds.
+            updater: updater::Updater::new(None, Err(String::new()), true),
+            resume: None,
+            resume_started: false,
+            channel_secret: None,
         }
     }
 
@@ -426,6 +482,18 @@ impl App {
         self.sync_page_visibility();
     }
 
+    /// Settings and the setup step show live status; re-read it while either is open, so a
+    /// change made in the OS's privacy settings appears on return without a restart.
+    fn refresh_visible_permissions(&mut self) {
+        let showing = match self.onboarding {
+            Some(step) => step == onboarding::Step::Permissions,
+            None => self.tab == Tab::Settings,
+        };
+        if showing {
+            self.permissions.refresh();
+        }
+    }
+
     fn sync_page_visibility(&self) {
         let normal = self.onboarding.is_none() && !self.performance_mode.load(Ordering::Relaxed);
         self.streaming
@@ -465,9 +533,13 @@ impl App {
         self.nickname = saved.nickname;
         self.playback_volume
             .set_percent(saved.playback_volume_percent);
+        self.audio_processing = saved.audio_processing;
+        self.transmission = saved.transmission;
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
+        self.updater.auto_download = saved.auto_download_updates;
+        self.appearance = saved.appearance;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -475,23 +547,46 @@ impl App {
             server_address: self.address.trim().into(),
             nickname: self.nickname.trim().into(),
             playback_volume_percent: self.playback_volume.percent(),
+            audio_processing: self.audio_processing,
+            transmission: self.transmission,
             keybinds: shortcuts::Keybinds {
                 toggle_mute: self.keybind_draft.toggle_mute.trim().into(),
                 toggle_deafen: self.keybind_draft.toggle_deafen.trim().into(),
+                push_to_talk: self.keybind_draft.push_to_talk.trim().into(),
             },
             input_device_id: self.input.as_ref().map(|device| device.id.clone()),
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
+            auto_download_updates: self.updater.auto_download,
+            appearance: self.appearance,
         }
     }
 
     /// Hides or shows the footer and stores only that choice, leaving unsaved edits alone.
     fn set_footer_hidden(&mut self, hidden: bool) {
         self.footer_hidden = hidden;
+        self.save_preference(
+            |saved| saved.footer_hidden = hidden,
+            "The footer choice applies for now but was not saved",
+        );
+    }
+
+    /// Changes the colour scheme or themes and stores only that choice.
+    fn set_appearance(&mut self, appearance: settings::Appearance) {
+        self.appearance = appearance;
+        self.save_preference(
+            |saved| saved.appearance = appearance,
+            "The appearance choice applies for now but was not saved",
+        );
+    }
+
+    /// Stores one choice that applies at once in the saved settings, leaving other unsaved edits
+    /// alone. Before setup has saved anything, the choice is kept for the first save.
+    fn save_preference(&mut self, change: impl FnOnce(&mut settings::Settings), failed: &str) {
         let Some(mut saved) = self.saved.clone() else {
             return;
         };
-        saved.footer_hidden = hidden;
+        change(&mut saved);
         let result = self
             .settings_path
             .as_deref()
@@ -502,11 +597,118 @@ impl App {
                 self.saved = Some(saved);
                 self.alerts.recover(Source::SettingsSave);
             }
-            Err(error) => self.alerts.raise(
-                Source::SettingsSave,
-                format!("The footer choice applies for now but was not saved: {error:#}"),
-            ),
+            Err(error) => self
+                .alerts
+                .raise(Source::SettingsSave, format!("{failed}: {error:#}")),
         }
+    }
+
+    fn update_software(&mut self, event: updater::Event) -> Task {
+        if let updater::Event::AutoDownload(on) = event {
+            self.save_preference(
+                |saved| saved.auto_download_updates = on,
+                "The update choice applies for now but was not saved",
+            );
+        }
+        let wrap = |event| Message::Updater(event);
+        match self.updater.handle(event, Instant::now()) {
+            updater::Effect::None => Task::none(),
+            updater::Effect::Check { running, package } => {
+                Task::perform(updater::check(running, package), move |result| {
+                    wrap(updater::Event::Checked(result))
+                })
+            }
+            updater::Effect::Download {
+                generation,
+                release,
+                package,
+                cancel,
+            } => Task::stream(move |emit| {
+                let result =
+                    updater::block_on(updater::download(&release, package, &cancel, |progress| {
+                        emit(wrap(updater::Event::Progress {
+                            generation,
+                            progress,
+                        }))
+                    }));
+                wrap(updater::Event::Downloaded { generation, result })
+            }),
+            updater::Effect::Install { staged, package } => Task::perform(
+                async move { updater::install(&staged, package) },
+                move |result| wrap(updater::Event::Installed(result)),
+            ),
+            // Leave as the window's close button does, so a session ends cleanly first.
+            updater::Effect::Exit => {
+                if let Some(path) = self.settings_path.as_deref().map(resume::path)
+                    && let Err(error) =
+                        resume::save(&path, &self.resume_snapshot(), SystemTime::now())
+                {
+                    tracing::warn!(
+                        "The update restarts without returning to this session: {error}"
+                    );
+                }
+                self.update(Message::Close)
+            }
+        }
+    }
+
+    /// The page, session and channel to return to after an update's restart.
+    fn resume_snapshot(&self) -> resume::Resume {
+        let in_session = self.connected && !self.loopback && !self.stopping;
+        let channel = self
+            .state
+            .current
+            .as_ref()
+            .map(|channel| channel.id)
+            .filter(|_| in_session);
+        resume::Resume {
+            written_at: 0,
+            page: match self.tab {
+                Tab::Home => resume::Page::Home,
+                Tab::Statistics => resume::Page::Statistics,
+                Tab::Settings => resume::Page::Settings,
+            },
+            performance_mode: self.performance_mode.load(Ordering::Relaxed),
+            server_address: in_session.then(|| self.address.clone()),
+            server_password: if in_session {
+                self.password.clone()
+            } else {
+                String::new()
+            },
+            channel,
+            channel_password: self
+                .channel_secret
+                .as_ref()
+                .filter(|(id, _)| Some(*id) == channel)
+                .map(|(_, password)| password.clone())
+                .unwrap_or_default(),
+            muted: self.muted,
+            deafened: self.deafened,
+        }
+    }
+
+    fn resume(&mut self) -> Task {
+        let Some(resume) = self.resume.clone() else {
+            return Task::none();
+        };
+        let mut tasks = vec![self.update(Message::ShowTab(match resume.page {
+            resume::Page::Home => Tab::Home,
+            resume::Page::Statistics => Tab::Statistics,
+            resume::Page::Settings => Tab::Settings,
+        }))];
+        if resume.performance_mode {
+            tasks.push(self.update(Message::PerformanceMode(true)));
+        }
+        // Only the saved server is reconnected; Connect always uses it.
+        let saved = self.saved.as_ref().map(|saved| &saved.server_address);
+        if resume.server_address.is_some() && resume.server_address.as_ref() == saved {
+            self.password = resume.server_password;
+            tasks.push(self.update(Message::Connect));
+        }
+        if self.session.is_none() {
+            self.resume = None;
+        }
+        Task::batch(tasks)
     }
 
     fn save_settings(&mut self) -> bool {
@@ -574,6 +776,22 @@ impl App {
         {
             return Task::none();
         }
+        if self.transmission.mode == transmission::Mode::PushToTalk
+            && (!shortcuts::supported()
+                || !self
+                    .shortcuts
+                    .as_ref()
+                    .is_some_and(shortcuts::Shortcuts::has_ptt))
+        {
+            self.alerts.raise(Source::Shortcuts, "Push-to-talk needs a working global shortcut. Apply one in Settings, or choose another transmission mode. Native Wayland is not supported.");
+            return Task::none();
+        }
+        if self.transmission.mode == transmission::Mode::VoiceActivation
+            && !audio_processing::AVAILABLE
+        {
+            self.alerts.raise(Source::Audio, "Speech detection is available on Mac and Windows. Choose continuous transmission or push-to-talk.");
+            return Task::none();
+        }
         let (Some(input), Some(output)) = (self.input.clone(), self.output.clone()) else {
             self.alerts.raise(
                 Source::Audio,
@@ -588,6 +806,9 @@ impl App {
         }
         let config = client::Config {
             playback_volume: self.playback_volume.clone(),
+            audio_processing: self.audio_processing,
+            transmission: self.transmission,
+            ptt: self.ptt.clone(),
             performance_mode: self.performance_mode.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
             subscribe_all: self.subscribe_all.clone(),
@@ -599,6 +820,8 @@ impl App {
             input,
             output,
         };
+        self.ptt.store(false, Ordering::Release);
+        self.transmitting = false;
         for source in [
             Source::Connection,
             Source::Audio,
@@ -664,6 +887,7 @@ impl App {
                     self.onboarding_error = None;
                     if let Some(next) = step.next() {
                         self.onboarding = Some(next);
+                        self.refresh_visible_permissions();
                     } else if self.save_settings() {
                         self.onboarding = None;
                         self.tab = Tab::Home;
@@ -678,6 +902,7 @@ impl App {
                 {
                     self.onboarding = Some(previous);
                     self.onboarding_error = None;
+                    self.refresh_visible_permissions();
                 }
             }
             Message::TestHotkeys => {
@@ -714,6 +939,7 @@ impl App {
                         Ok(message) => message,
                         Err(error) => error,
                     });
+                    self.permissions.refresh();
                 }
             }
             Message::OpenPermissionSettings(kind) => {
@@ -740,10 +966,27 @@ impl App {
                 match action {
                     shortcuts::Action::Mute => self.toggle_mute(),
                     shortcuts::Action::Deafen => self.toggle_deafen(),
+                    shortcuts::Action::PushToTalk(_) => {}
                 }
             }
             Message::PlaybackVolume(percent) => {
                 self.playback_volume.set_percent(percent);
+                self.settings_message = None;
+            }
+            Message::AudioProcessing(options) => {
+                if self.session.is_none() && audio_processing::AVAILABLE {
+                    self.audio_processing = options;
+                    self.settings_message = None;
+                }
+            }
+            Message::Transmission(settings) => {
+                if self.session.is_none() && settings.validate().is_ok() {
+                    self.transmission = settings;
+                    self.settings_message = None;
+                }
+            }
+            Message::PttKeybind(value) => {
+                self.keybind_draft.push_to_talk = value;
                 self.settings_message = None;
             }
             Message::MuteKeybind(value) => {
@@ -838,6 +1081,7 @@ impl App {
                 }
                 self.tab = tab;
                 self.sync_page_visibility();
+                self.refresh_visible_permissions();
                 if tab != Tab::Home {
                     self.streaming.sharing.stop_capture();
                     self.streaming.clear_picture();
@@ -984,6 +1228,7 @@ impl App {
                 }
             }
             Message::UsageTick => {
+                self.refresh_visible_permissions();
                 if self.performance_mode.load(Ordering::Relaxed) {
                     return Task::none();
                 }
@@ -1119,6 +1364,7 @@ impl App {
                     && self.can_request_join(id)
                     && self.command(client::Command::Join(id, self.channel_password.clone()))
                 {
+                    self.channel_secret = Some((id, self.channel_password.clone()));
                     self.password_error = None;
                     self.password_channel = None;
                     self.channel_password.clear();
@@ -1130,6 +1376,9 @@ impl App {
                 self.channel_password.clear();
             }
             Message::ToggleFooter => self.set_footer_hidden(!self.footer_hidden),
+            Message::Updater(event) => return self.update_software(event),
+            Message::Resume => return self.resume(),
+            Message::Appearance(appearance) => self.set_appearance(appearance),
             Message::ToggleSubscribeAll => {
                 self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
             }
@@ -1176,6 +1425,17 @@ impl App {
                 }
                 client::Event::Connected(detail) => {
                     self.connected = true;
+                    // A new session starts muted; restore the microphone as it was.
+                    if let Some(resume) = self.resume.as_mut() {
+                        let (muted, deafened) = (resume.muted, resume.deafened);
+                        (resume.muted, resume.deafened) = (true, false);
+                        if !self.loopback && !muted {
+                            self.toggle_mute();
+                        }
+                        if !self.loopback && deafened {
+                            self.toggle_deafen();
+                        }
+                    }
                     self.alerts.recover(Source::Connection);
                     self.alerts.recover(Source::Audio);
                     self.detail = detail;
@@ -1208,6 +1468,19 @@ impl App {
                     self.collapsed_channels
                         .retain(|id| state.channels.iter().any(|channel| channel.id == *id));
                     self.state = state;
+                    if self.connected
+                        && !self.state.channels.is_empty()
+                        && let Some(resume) = self.resume.take()
+                        && let Some(id) = resume.channel
+                        && self.state.current.as_ref().map(|channel| channel.id) != Some(id)
+                        && self.can_request_join(id)
+                    {
+                        self.alerts.begin(Source::Join);
+                        if !resume.channel_password.is_empty() {
+                            self.channel_secret = Some((id, resume.channel_password.clone()));
+                        }
+                        self.command(client::Command::Join(id, resume.channel_password));
+                    }
                     if self
                         .password_channel
                         .is_some_and(|id| !self.can_request_join(id))
@@ -1238,6 +1511,7 @@ impl App {
                     }
                     self.streaming.update(event);
                 }
+                client::Event::Transmitting(value) => self.transmitting = value,
                 client::Event::Meter {
                     level,
                     sent,
@@ -1295,6 +1569,8 @@ impl App {
                     }
                 }
                 client::Event::Stopped(error) => {
+                    self.ptt.store(false, Ordering::Release);
+                    self.transmitting = false;
                     self.streaming.reset();
                     self.clear_client_details();
                     self.client_usage.clear();
@@ -1303,6 +1579,7 @@ impl App {
                     self.password_channel = None;
                     self.channel_password.clear();
                     self.session = None;
+                    self.resume = None;
                     self.connected = false;
                     self.stopping = false;
                     self.level = 0.0;
@@ -1385,7 +1662,11 @@ impl App {
         if !self.connected || self.stopping {
             "Inactive"
         } else if self.loopback {
-            "Local test only"
+            match (self.transmission.mode, self.transmitting) {
+                (transmission::Mode::PushToTalk, false) => "Local test: hold push-to-talk",
+                (transmission::Mode::VoiceActivation, false) => "Local test: waiting for speech",
+                _ => "Local test only",
+            }
         } else if self.deafened {
             "Muted (deafened)"
         } else if self.muted {
@@ -1393,7 +1674,12 @@ impl App {
         } else if !self.state.can_talk {
             "Blocked by server"
         } else {
-            "Unmuted"
+            match (self.transmission.mode, self.transmitting) {
+                (transmission::Mode::PushToTalk, false) => "Waiting for push-to-talk",
+                (transmission::Mode::VoiceActivation, false) => "Waiting for speech",
+                (transmission::Mode::Continuous, _) => "Unmuted",
+                _ => "Transmitting",
+            }
         }
     }
 
@@ -1620,6 +1906,7 @@ mod tests {
         app.keybind_draft = shortcuts::Keybinds {
             toggle_mute: "F8".into(),
             toggle_deafen: "F9".into(),
+            ..shortcuts::Keybinds::default()
         };
         std::fs::write(&root, "not a directory").unwrap();
         let _ = app.update(Message::SetupNext);
@@ -1673,6 +1960,154 @@ mod tests {
         let _ = restarted.update(Message::ToggleFooter);
         assert!(!settings::load(&path).unwrap().unwrap().footer_hidden);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_update_downloads_save_at_once_and_survive_a_restart() {
+        let (mut app, root) = setup_fixture("auto-update");
+        let path = root.join("settings.json");
+        settings::save(&path, &settings::Settings::default()).unwrap();
+        app.load_settings(path.clone());
+        assert!(app.updater.auto_download, "on by default");
+        app.nickname = "Unsaved draft".into();
+        let _ = app.update(Message::Updater(updater::Event::AutoDownload(false)));
+        assert!(!app.updater.auto_download);
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert!(!stored.auto_download_updates);
+        assert_eq!(stored.nickname, "Flexspeak", "drafts stay unsaved");
+        let (mut restarted, _) = setup_fixture("auto-update-restart");
+        restarted.load_settings(path.clone());
+        assert!(!restarted.updater.auto_download);
+        assert!(!restarted.edited_settings().auto_download_updates);
+        let _ = restarted.update(Message::Updater(updater::Event::AutoDownload(true)));
+        assert!(
+            settings::load(&path)
+                .unwrap()
+                .unwrap()
+                .auto_download_updates
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appearance_choices_save_alone_and_survive_a_restart() {
+        let (mut app, root) = setup_fixture("appearance");
+        let path = root.join("settings.json");
+        settings::save(&path, &settings::Settings::default()).unwrap();
+        app.load_settings(path.clone());
+        app.nickname = "Unsaved draft".into();
+        let chosen = settings::Appearance {
+            scheme: settings::ColorScheme::Light,
+            light_theme: settings::ThemeName::Ocean,
+            dark_theme: settings::ThemeName::Ember,
+        };
+        let _ = app.update(Message::Appearance(chosen));
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert_eq!(stored.appearance, chosen);
+        assert_eq!(stored.nickname, settings::Settings::default().nickname);
+        let (mut restarted, _) = setup_fixture("appearance-restart");
+        restarted.load_settings(path);
+        assert_eq!(restarted.appearance, chosen);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_finished_update_install_records_the_session_then_closes() {
+        let (mut app, root) = setup_fixture("resume-write");
+        let path = root.join("settings.json");
+        settings::save(&path, &settings::Settings::default()).unwrap();
+        app.load_settings(path.clone());
+        let (sender, _commands) = mpsc::channel(8);
+        app.session = Some(sender);
+        app.connected = true;
+        app.muted = false;
+        app.password = "server secret".into();
+        app.state.current = Some(client::Channel {
+            id: 9,
+            ..client::Channel::default()
+        });
+        app.channel_secret = Some((9, "channel secret".into()));
+        app.tab = Tab::Statistics;
+        app.updater = updater::Updater::new(
+            updater::Build::parse_tag("v0.1.0-build.6"),
+            Ok(updater::Package::MacApp),
+            true,
+        );
+        app.updater.phase = updater::Phase::Installing;
+        let _ = app.update(Message::Updater(updater::Event::Installed(Ok(()))));
+        assert!(app.closing && app.stopping, "the session ends before exit");
+        let saved = resume::take(&resume::path(&path), SystemTime::now()).unwrap();
+        assert_eq!(saved.server_address.as_deref(), Some("ts.zirkumflex.io"));
+        assert_eq!(saved.server_password, "server secret");
+        assert_eq!(saved.channel, Some(9));
+        assert_eq!(saved.channel_password, "channel secret");
+        assert_eq!((saved.muted, saved.deafened), (false, false));
+        assert_eq!(saved.page, resume::Page::Statistics);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn after_an_update_the_app_rejoins_its_channel_with_the_same_microphone() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.saved = Some(settings::Settings::default());
+        app.resume = Some(resume::Resume {
+            page: resume::Page::Settings,
+            server_address: Some("ts.zirkumflex.io".into()),
+            server_password: "server secret".into(),
+            channel: Some(4),
+            channel_password: "channel secret".into(),
+            muted: false,
+            deafened: true,
+            ..resume::Resume::default()
+        });
+        // Without devices the reconnect can't start, so the resume ends there, on its page.
+        let _ = app.update(Message::Resume);
+        assert_eq!(app.tab, Tab::Settings);
+        assert_eq!(app.password, "server secret");
+        assert!(app.resume.is_none());
+
+        // With a session under way: controls on connect, then one join once channels arrive.
+        app.resume = Some(resume::Resume {
+            channel: Some(4),
+            channel_password: "channel secret".into(),
+            muted: false,
+            deafened: true,
+            ..resume::Resume::default()
+        });
+        let (sender, mut commands) = mpsc::channel(8);
+        app.session = Some(sender);
+        let _ = app.update(Message::Backend(client::Event::Connected(String::new())));
+        assert!(!app.muted && app.deafened);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Mute(false))
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Deafen(true))
+        ));
+        let lobby = client::Channel {
+            id: 1,
+            join_access: client::JoinAccess::Allowed,
+            ..client::Channel::default()
+        };
+        let room = client::Channel {
+            id: 4,
+            has_password: true,
+            join_access: client::JoinAccess::Allowed,
+            ..client::Channel::default()
+        };
+        let _ = app.update(Message::Backend(client::Event::State(client::Snapshot {
+            channels: vec![lobby.clone(), room],
+            current: Some(lobby),
+            ..client::Snapshot::default()
+        })));
+        match commands.try_recv() {
+            Ok(client::Command::Join(4, password)) => assert_eq!(password, "channel secret"),
+            other => panic!("expected a join, got {other:?}"),
+        }
+        assert!(app.resume.is_none(), "only once");
+        assert_eq!(app.channel_secret, Some((4, "channel secret".into())));
     }
 
     #[test]
@@ -2061,6 +2496,76 @@ mod tests {
         assert_eq!(app.nickname, "Portable name");
         assert_eq!(worker_volume.percent(), 42);
         assert!(app.password.is_empty() && app.channel_password.is_empty());
+    }
+
+    #[test]
+    fn processing_settings_are_saved_but_cannot_change_under_an_active_session() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let chosen = audio_processing::Settings {
+            noise_suppression: true,
+            automatic_gain: true,
+            echo_cancellation: true,
+            ..crate::audio_processing::Settings::default()
+        };
+        let _ = app.update(Message::AudioProcessing(chosen));
+        assert_eq!(
+            app.audio_processing,
+            if audio_processing::AVAILABLE {
+                chosen
+            } else {
+                audio_processing::Settings::default()
+            }
+        );
+        app.apply_settings(settings::Settings {
+            audio_processing: chosen,
+            ..settings::Settings::default()
+        });
+        assert_eq!(app.edited_settings().audio_processing, chosen);
+        let (sender, _commands) = mpsc::channel(1);
+        app.session = Some(sender);
+        app.muted = true;
+        app.deafened = true;
+        let _ = app.update(Message::AudioProcessing(
+            audio_processing::Settings::default(),
+        ));
+        assert_eq!(app.audio_processing, chosen);
+        assert!(app.muted && app.deafened);
+    }
+
+    #[test]
+    fn transmission_ui_preserves_safety_gates_and_requires_a_ptt_binding() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let settings = transmission::Settings {
+            mode: transmission::Mode::PushToTalk,
+            ptt_release_ms: 75,
+            voice_threshold_db: -35,
+        };
+        let _ = app.update(Message::Transmission(settings));
+        assert_eq!(app.edited_settings().transmission, settings);
+        let _ = app.start(false);
+        assert!(app.session.is_none());
+        assert_eq!(app.alerts.current().unwrap().source, Source::Shortcuts);
+        app.ptt.store(false, Ordering::Release);
+        let _ = app.update(Message::Shortcut(shortcuts::Action::PushToTalk(true)));
+        assert!(
+            !app.ptt.load(Ordering::Acquire),
+            "Delayed UI messages must not reopen a released key"
+        );
+        let (sender, _commands) = mpsc::channel(1);
+        app.session = Some(sender);
+        app.connected = true;
+        app.state.can_talk = true;
+        app.muted = false;
+        assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
+        app.transmitting = true;
+        assert_eq!(app.microphone_status(), "Transmitting");
+        app.performance_mode.store(true, Ordering::Relaxed);
+        let _ = app.update(Message::Backend(client::Event::Transmitting(false)));
+        assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
+        app.muted = true;
+        assert_eq!(app.microphone_status(), "Muted");
+        let _ = app.update(Message::Transmission(transmission::Settings::default()));
+        assert_eq!(app.transmission, settings);
     }
 
     #[test]

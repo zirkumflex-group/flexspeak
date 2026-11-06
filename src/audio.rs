@@ -3,14 +3,18 @@ use std::{
     fmt,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use crate::audio_processing::{self, Processor, Timed, callback_time, sample_time};
 use crate::profiler::{self, Category};
 use anyhow::{Context, Result, bail};
-use audiopus::{Application, Bitrate, Channels, SampleRate, coder::Encoder};
+use audiopus::{
+    Application, Bitrate, Channels, SampleRate,
+    coder::{Encoder, GenericCtl},
+};
 use cpal::{
     Device, FromSample, Sample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -27,6 +31,117 @@ pub const FRAME: usize = 960;
 const BLOCK: usize = 480;
 /// Meter reading (the square root of the microphone level) above which you count as speaking.
 pub const SPEAKING_METER: f32 = 0.08;
+
+struct Capture {
+    samples: ArrayQueue<(u64, Timed<f32>)>,
+    generation: AtomicU64,
+    level: AtomicU32,
+    discontinuity: Arc<AtomicBool>,
+}
+
+impl Capture {
+    fn enabled(&self) -> bool {
+        self.generation.load(Ordering::Acquire) & 1 != 0
+    }
+
+    fn clear(&self, enabled: bool) {
+        let previous = self.generation.load(Ordering::Acquire);
+        self.generation.store(
+            (previous.wrapping_add(2) & !1) | u64::from(enabled),
+            Ordering::Release,
+        );
+        while self.samples.pop().is_some() {}
+        self.level.store(0.0_f32.to_bits(), Ordering::Relaxed);
+    }
+
+    fn pop(&self) -> Option<Timed<f32>> {
+        let current = self.generation.load(Ordering::Acquire);
+        for _ in 0..self.samples.len() {
+            let (generation, sample) = self.samples.pop()?;
+            if generation == current && current & 1 != 0 {
+                return Some(sample);
+            }
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+struct ResampleClock {
+    input: usize,
+    output: usize,
+}
+
+impl ResampleClock {
+    fn advance(
+        &mut self,
+        at: Option<Instant>,
+        input: usize,
+        output: usize,
+        from: u32,
+        delay: usize,
+    ) -> Option<Instant> {
+        let at = sample_time(at, self.output, RATE as u32)
+            .and_then(|at| at.checked_sub(Duration::from_secs_f64(self.input as f64 / from as f64)))
+            .and_then(|at| at.checked_sub(Duration::from_secs_f64(delay as f64 / RATE as f64)));
+        self.input += input;
+        self.output += output;
+        at
+    }
+}
+
+struct Reference {
+    samples: Arc<ArrayQueue<Timed<[f32; 2]>>>,
+    converter: RateConverter,
+    clock: ResampleClock,
+    device_rate: u32,
+}
+
+impl Reference {
+    fn new(rate: u32) -> Result<Self> {
+        Ok(Self {
+            samples: Arc::new(ArrayQueue::new(rate as usize / 4)),
+            converter: RateConverter::new(rate, RATE as u32, 2, rate as usize / 100)?,
+            clock: ResampleClock::default(),
+            device_rate: rate,
+        })
+    }
+
+    fn reset(&mut self) {
+        while self.samples.pop().is_some() {}
+        self.converter.reset();
+        self.clock = ResampleClock::default();
+    }
+
+    fn process(&mut self, processor: &mut Processor) -> Result<()> {
+        let frames = self.converter.input[0].len();
+        for _ in 0..self.samples.len() / frames {
+            let mut at = None;
+            for i in 0..frames {
+                let sample = self
+                    .samples
+                    .pop()
+                    .expect("Only the worker consumes reference audio");
+                anyhow::ensure!(
+                    sample.at.is_some(),
+                    "Echo cancellation cannot read playback timing. Disable it or choose another playback device."
+                );
+                if i == 0 {
+                    at = sample.at;
+                }
+                self.converter.input[0][i] = sample.value[0];
+                self.converter.input[1][i] = sample.value[1];
+            }
+            let delay = self.converter.output_delay();
+            let (samples, count) = self.converter.process()?;
+            let at = self
+                .clock
+                .advance(at, frames, count, self.device_rate, delay);
+            processor.render(samples, count, at)?;
+        }
+        Ok(())
+    }
+}
 
 pub struct PlaybackVolume(AtomicU8);
 
@@ -174,6 +289,12 @@ impl RateConverter {
         }
     }
 
+    fn output_delay(&self) -> usize {
+        self.resampler
+            .as_ref()
+            .map_or(0, |resampler| resampler.output_delay())
+    }
+
     fn buffer_bytes(&self) -> usize {
         self.input
             .iter()
@@ -186,11 +307,18 @@ impl RateConverter {
 pub struct AudioEngine {
     _input_stream: Stream,
     _output_stream: Stream,
-    capture: Arc<ArrayQueue<f32>>,
+    capture: Arc<Capture>,
     playback: Arc<ArrayQueue<[f32; 2]>>,
     errors: Arc<ArrayQueue<String>>,
-    enabled: Arc<AtomicBool>,
-    level: Arc<AtomicU32>,
+    processor: Processor,
+    voice_gate: crate::transmission::VoiceGate,
+    packet_boundary: crate::transmission::PacketBoundary,
+    last_frame: Option<Instant>,
+    reference: Option<Reference>,
+    input_clock: ResampleClock,
+    input_device_rate: u32,
+    input_len: usize,
+    input_at: Option<Instant>,
     input_rate: RateConverter,
     output_rate: RateConverter,
     pcm: VecDeque<f32>,
@@ -207,18 +335,30 @@ impl AudioEngine {
         input: &DeviceChoice,
         output: &DeviceChoice,
         volume: Arc<PlaybackVolume>,
+        processing: audio_processing::Settings,
+        transmission: crate::transmission::Settings,
     ) -> Result<Self> {
+        let voice_gate = crate::transmission::VoiceGate::new(transmission)?;
         let input_device = find_device(input, true)?;
         let output_device = find_device(output, false)?;
         let input_config =
             config(&input_device, true).context("No usable microphone configuration")?;
         let output_config =
             config(&output_device, false).context("No usable playback configuration")?;
-        let capture = Arc::new(ArrayQueue::new(input_config.sample_rate() as usize / 4));
+        let processor = Processor::new(processing)?;
+        let discontinuity = Arc::new(AtomicBool::new(false));
+        let capture = Arc::new(Capture {
+            samples: ArrayQueue::new(input_config.sample_rate() as usize / 4),
+            generation: AtomicU64::new(0),
+            level: AtomicU32::new(0.0_f32.to_bits()),
+            discontinuity: discontinuity.clone(),
+        });
+        let reference = processing
+            .echo_cancellation
+            .then(|| Reference::new(output_config.sample_rate()))
+            .transpose()?;
         let playback = Arc::new(ArrayQueue::new(output_config.sample_rate() as usize / 4));
         let errors = Arc::new(ArrayQueue::new(4));
-        let enabled = Arc::new(AtomicBool::new(false));
-        let level = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
 
         macro_rules! input_stream {
             ($t:ty) => {
@@ -227,8 +367,7 @@ impl AudioEngine {
                     &input_config,
                     capture.clone(),
                     errors.clone(),
-                    enabled.clone(),
-                    level.clone(),
+                    processing.echo_cancellation,
                 )
             };
         }
@@ -249,6 +388,10 @@ impl AudioEngine {
                     playback.clone(),
                     errors.clone(),
                     volume.clone(),
+                    reference
+                        .as_ref()
+                        .map(|reference| reference.samples.clone()),
+                    discontinuity.clone(),
                 )
             };
         }
@@ -285,8 +428,15 @@ impl AudioEngine {
             capture,
             playback,
             errors,
-            enabled,
-            level,
+            processor,
+            voice_gate,
+            packet_boundary: crate::transmission::PacketBoundary::default(),
+            last_frame: None,
+            reference,
+            input_clock: ResampleClock::default(),
+            input_device_rate: input_config.sample_rate(),
+            input_len: 0,
+            input_at: None,
             input_rate,
             output_rate,
             pcm: VecDeque::new(),
@@ -299,14 +449,29 @@ impl AudioEngine {
         })
     }
 
-    pub fn set_capture(&mut self, enabled: bool) {
-        if self.enabled.swap(enabled, Ordering::Relaxed) != enabled {
-            while self.capture.pop().is_some() {}
-            self.pcm.clear();
-            self.monitor.clear();
-            self.input_rate.reset();
-            self.level.store(0.0_f32.to_bits(), Ordering::Relaxed);
+    pub fn set_capture(&mut self, enabled: bool) -> Result<()> {
+        if self.capture.enabled() != enabled {
+            self.reset_capture(enabled)?;
         }
+        Ok(())
+    }
+
+    fn reset_capture(&mut self, enabled: bool) -> Result<()> {
+        self.packet_boundary.end();
+        self.capture.clear(enabled);
+        self.pcm.clear();
+        self.monitor.clear();
+        self.input_rate.reset();
+        self.input_clock = ResampleClock::default();
+        self.input_len = 0;
+        self.input_at = None;
+        self.processor.reset()?;
+        self.voice_gate.reset()?;
+        self.last_frame = None;
+        if let Some(reference) = &mut self.reference {
+            reference.reset();
+        }
+        Ok(())
     }
 
     pub fn set_codec(&mut self, codec: CodecType, quality: u8) -> Result<()> {
@@ -351,15 +516,28 @@ impl AudioEngine {
     }
 
     pub fn level(&self) -> f32 {
-        f32::from_bits(self.level.load(Ordering::Relaxed))
+        f32::from_bits(self.capture.level.load(Ordering::Relaxed))
+    }
+
+    pub fn transmitting(&self) -> bool {
+        self.capture.enabled()
+            && self.voice_gate.active()
+            && self
+                .last_frame
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
     }
 
     pub fn buffer_bytes(&self) -> usize {
-        self.capture.capacity() * std::mem::size_of::<f32>()
+        self.capture.samples.capacity() * std::mem::size_of::<(u64, Timed<f32>)>()
             + self.playback.capacity() * std::mem::size_of::<[f32; 2]>()
             + (self.pcm.capacity() + self.monitor.capacity()) * std::mem::size_of::<f32>()
             + self.input_rate.buffer_bytes()
             + self.output_rate.buffer_bytes()
+            + self.voice_gate.buffer_bytes()
+            + self.reference.as_ref().map_or(0, |reference| {
+                reference.samples.capacity() * std::mem::size_of::<Timed<[f32; 2]>>()
+                    + reference.converter.buffer_bytes()
+            })
     }
 
     /// Codec work and resampling happen on the worker, never in an OS audio callback.
@@ -373,30 +551,74 @@ impl AudioEngine {
         if let Some(error) = self.errors.pop() {
             bail!("Audio device failed: {error}. Refresh devices and reconnect.");
         }
+        if self.capture.discontinuity.swap(false, Ordering::AcqRel) {
+            self.reset_capture(self.capture.enabled())?;
+        }
+        if let Some(reference) = &mut self.reference {
+            reference.process(&mut self.processor)?;
+        }
         let mut packets = Vec::new();
-        while self.capture.len() >= self.input_rate.input[0].len() {
-            for sample in &mut self.input_rate.input[0] {
-                *sample = self.capture.pop().unwrap_or_default();
+        self.packet_boundary.flush(&mut packets);
+        for _ in 0..self.capture.samples.len() {
+            let Some(sample) = self.capture.pop() else {
+                break;
+            };
+            anyhow::ensure!(
+                !self.processor.echo_enabled() || sample.at.is_some(),
+                "Echo cancellation cannot read microphone timing. Disable it or choose another microphone."
+            );
+            if self.input_len == 0 {
+                self.input_at = sample.at;
             }
+            self.input_rate.input[0][self.input_len] = sample.value;
+            self.input_len += 1;
+            if self.input_len < self.input_rate.input[0].len() {
+                continue;
+            }
+            let delay = self.input_rate.output_delay();
             let (samples, count) = self.input_rate.process()?;
-            if loopback {
-                self.monitor.extend(samples[0][..count].iter().copied());
-                while self.monitor.len() > RATE / 4 {
-                    self.monitor.pop_front();
-                }
-            } else {
-                self.pcm.extend(samples[0][..count].iter().copied());
-            }
+            let at = self.input_clock.advance(
+                self.input_at,
+                self.input_len,
+                count,
+                self.input_device_rate,
+                delay,
+            );
+            self.input_len = 0;
+            self.processor
+                .capture(&samples[0][..count], at, &mut self.pcm)?;
         }
         while self.pcm.len() >= FRAME {
             let mut frame = [0.0; FRAME];
             for sample in &mut frame {
                 *sample = self.pcm.pop_front().unwrap_or_default();
             }
-            let mut encoded = [0; 1275];
-            let count = self.encoder.encode_float(&frame, &mut encoded)?;
-            packets.push(encoded[..count].to_vec());
+            self.voice_gate.process(frame)?;
+            self.last_frame = Some(Instant::now());
+            while let Some(frame) = self.voice_gate.pop() {
+                if loopback {
+                    self.monitor.extend(frame);
+                    while self.monitor.len() > RATE / 4 {
+                        self.monitor.pop_front();
+                    }
+                } else {
+                    if self.packet_boundary.begin(&mut packets) {
+                        self.encoder.reset_state()?;
+                    }
+                    let mut encoded = [0; 1275];
+                    let count = self.encoder.encode_float(&frame, &mut encoded)?;
+                    packets.push(encoded[..count].to_vec());
+                }
+            }
+            if !self.voice_gate.active() {
+                self.packet_boundary.end();
+                self.packet_boundary.flush(&mut packets);
+            }
         }
+        if !self.transmitting() {
+            self.packet_boundary.end();
+        }
+        self.packet_boundary.flush(&mut packets);
         // Keep only ~20 ms of device audio queued, so stop/mute stays responsive.
         for _ in 0..4 {
             if self.playback.len() >= self.output_target {
@@ -439,35 +661,61 @@ pub(crate) fn report_stream_error(error: cpal::Error, errors: &ArrayQueue<String
 fn make_input<T>(
     device: &Device,
     config: &SupportedStreamConfig,
-    queue: Arc<ArrayQueue<f32>>,
+    capture: Arc<Capture>,
     errors: Arc<ArrayQueue<String>>,
-    enabled: Arc<AtomicBool>,
-    level: Arc<AtomicU32>,
+    echo: bool,
 ) -> Result<Stream>
 where
     T: SizedSample,
     f32: FromSample<T>,
 {
     let channels = config.channels() as usize;
+    let rate = config.sample_rate();
+    let failure = capture.discontinuity.clone();
     Ok(device.build_input_stream(
         config.config(),
-        move |data: &[T], _| {
+        move |data: &[T], info| {
             let _trace = profiler::scope(Category::AudioCallbacks, "audio.capture_callback");
-            if !enabled.load(Ordering::Relaxed) {
+            let generation = capture.generation.load(Ordering::Acquire);
+            if generation & 1 == 0 {
                 return;
             }
+            let timestamp = info.timestamp();
+            let at = if echo {
+                callback_time(timestamp.capture, timestamp.callback, Instant::now())
+            } else {
+                None
+            };
             let mut peak = 0.0_f32;
-            for frame in data.chunks_exact(channels) {
+            for (index, frame) in data.chunks_exact(channels).enumerate() {
                 let mono =
                     frame.iter().map(|&v| f32::from_sample(v)).sum::<f32>() / channels as f32;
                 peak = peak.max(mono.abs());
-                if queue.push(mono).is_err() {
+                if capture
+                    .samples
+                    .push((
+                        generation,
+                        Timed {
+                            value: mono,
+                            at: sample_time(at, index, rate),
+                        },
+                    ))
+                    .is_err()
+                {
+                    capture.discontinuity.store(true, Ordering::Release);
                     break;
                 }
             }
-            level.store(peak.to_bits(), Ordering::Relaxed);
+            if capture.generation.load(Ordering::Acquire) == generation {
+                capture.level.store(peak.to_bits(), Ordering::Relaxed);
+            }
         },
-        move |error| report_stream_error(error, &errors),
+        move |error| {
+            if error.kind() == cpal::ErrorKind::Xrun {
+                failure.store(true, Ordering::Release);
+            }
+            report_stream_error(error, &errors);
+        },
         Some(Duration::from_secs(5)),
     )?)
 }
@@ -478,23 +726,70 @@ fn make_output<T>(
     queue: Arc<ArrayQueue<[f32; 2]>>,
     errors: Arc<ArrayQueue<String>>,
     volume: Arc<PlaybackVolume>,
+    reference: Option<Arc<ArrayQueue<Timed<[f32; 2]>>>>,
+    discontinuity: Arc<AtomicBool>,
 ) -> Result<Stream>
 where
     T: SizedSample + FromSample<f32>,
+    f32: FromSample<T>,
 {
     let channels = config.channels() as usize;
+    let rate = config.sample_rate();
+    let failure = discontinuity.clone();
     let mut gain = volume.gain();
     // Smooth live volume changes over about 5 ms to avoid abrupt sample jumps.
     let gain_step = 1.0 / (config.sample_rate() as f32 * 0.005);
     Ok(device.build_output_stream(
         config.config(),
-        move |data: &mut [T], _| {
+        move |data: &mut [T], info| {
             let _trace = profiler::scope(Category::AudioCallbacks, "audio.playback_callback");
+            let observed = reference.as_ref().map(|_| Instant::now());
             write_playback(data, channels, &queue, &mut gain, volume.gain(), gain_step);
+            if let Some(reference) = &reference {
+                let timestamp = info.timestamp();
+                let at = callback_time(timestamp.playback, timestamp.callback, observed.unwrap());
+                record_playback(data, channels, rate, at, reference, &discontinuity);
+            }
         },
-        move |error| report_stream_error(error, &errors),
+        move |error| {
+            if error.kind() == cpal::ErrorKind::Xrun {
+                failure.store(true, Ordering::Release);
+            }
+            report_stream_error(error, &errors);
+        },
         Some(Duration::from_secs(5)),
     )?)
+}
+
+fn record_playback<T: SizedSample>(
+    data: &[T],
+    channels: usize,
+    rate: u32,
+    at: Option<Instant>,
+    reference: &ArrayQueue<Timed<[f32; 2]>>,
+    discontinuity: &AtomicBool,
+) where
+    f32: FromSample<T>,
+{
+    // Copy actual submitted samples, including gain, quantization, mono and underflow.
+    for (index, frame) in data.chunks_exact(channels).enumerate() {
+        let left = f32::from_sample(frame[0]);
+        let right = if channels == 1 {
+            left
+        } else {
+            f32::from_sample(frame[1])
+        };
+        if reference
+            .push(Timed {
+                value: [left, right],
+                at: sample_time(at, index, rate),
+            })
+            .is_err()
+        {
+            discontinuity.store(true, Ordering::Release);
+            break;
+        }
+    }
 }
 
 fn write_playback<T: SizedSample + FromSample<f32>>(
@@ -524,6 +819,118 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
 mod tests {
     use super::*;
     use audiopus::coder::Decoder;
+
+    #[test]
+    fn capture_generations_reject_inflight_audio_after_mute_and_resume() {
+        let capture = Capture {
+            samples: ArrayQueue::new(8),
+            generation: AtomicU64::new(0),
+            level: AtomicU32::new(0),
+            discontinuity: Arc::new(AtomicBool::new(false)),
+        };
+        capture.clear(true);
+        let before_mute = capture.generation.load(Ordering::Acquire);
+        capture.clear(false);
+        capture
+            .samples
+            .push((
+                before_mute,
+                Timed {
+                    value: 0.9,
+                    at: None,
+                },
+            ))
+            .ok()
+            .unwrap();
+        assert!(capture.pop().is_none());
+        capture.clear(true);
+        capture
+            .samples
+            .push((
+                before_mute,
+                Timed {
+                    value: 0.8,
+                    at: None,
+                },
+            ))
+            .ok()
+            .unwrap();
+        let current = capture.generation.load(Ordering::Acquire);
+        capture
+            .samples
+            .push((
+                current,
+                Timed {
+                    value: 0.2,
+                    at: None,
+                },
+            ))
+            .ok()
+            .unwrap();
+        assert_eq!(capture.pop().unwrap().value, 0.2);
+        assert!(capture.pop().is_none());
+    }
+
+    #[test]
+    fn echo_reference_matches_quantized_output_after_volume_layout_and_underflow() {
+        let now = Instant::now();
+        for channels in [1, 2, 6] {
+            let playback = ArrayQueue::new(3);
+            playback.push([0.8, -0.2]).unwrap();
+            playback.push([0.4, 0.6]).unwrap();
+            let mut submitted = vec![0_i16; channels * 3];
+            write_playback(&mut submitted, channels, &playback, &mut 0.0, 0.5, 0.25);
+            let reference = ArrayQueue::new(3);
+            let dropped = AtomicBool::new(false);
+            record_playback(&submitted, channels, 48000, Some(now), &reference, &dropped);
+            for (index, actual) in submitted.chunks_exact(channels).enumerate() {
+                let sample = reference.pop().unwrap();
+                let left = f32::from_sample(actual[0]);
+                let right = if channels == 1 {
+                    left
+                } else {
+                    f32::from_sample(actual[1])
+                };
+                assert_eq!(sample.value, [left, right]);
+                assert_eq!(sample.at, sample_time(Some(now), index, 48000));
+                if index == 2 {
+                    assert_eq!(sample.value, [0.0; 2]);
+                }
+            }
+            assert!(!dropped.load(Ordering::Relaxed));
+            let small = ArrayQueue::new(1);
+            record_playback(&submitted, channels, 48000, Some(now), &small, &dropped);
+            assert!(
+                dropped.load(Ordering::Relaxed),
+                "Overflow must request a DSP reset"
+            );
+        }
+    }
+
+    #[test]
+    fn resampled_timestamps_include_filter_delay_and_variable_frame_counts() -> Result<()> {
+        let start = Instant::now();
+        for rate in [44100, 48000, 96000] {
+            let mut converter = RateConverter::new(rate, 48000, 1, rate as usize / 100)?;
+            let mut clock = ResampleClock::default();
+            let mut produced = 0;
+            for block in 0..100 {
+                let delay = converter.output_delay();
+                let (_, count) = converter.process()?;
+                let first = start + Duration::from_millis(block * 10);
+                let at = clock
+                    .advance(Some(first), rate as usize / 100, count, rate, delay)
+                    .unwrap();
+                let expected = sample_time(Some(start), produced, 48000).unwrap()
+                    - Duration::from_secs_f64(delay as f64 / 48000.0);
+                assert!(
+                    at.max(expected).duration_since(at.min(expected)) <= Duration::from_nanos(1)
+                );
+                produced += count;
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn buffer_glitches_do_not_end_audio_or_crowd_out_device_failures() {

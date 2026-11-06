@@ -1,6 +1,6 @@
 //! The window shell, the saved-server home, the connected sidebar and performance mode.
 
-use rune::{Color, Cx, El, Transition, col, el, icon, row, text};
+use rune::{Cx, El, Transition, col, el, icon, row, text};
 use rune_kit::{Kit, Switch};
 
 use super::theme::{Theme, motion, radius, size, ty};
@@ -338,7 +338,8 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     ));
     let speaking = s.microphone_meter_level();
     // Lit while you are heard; it eases in and out only as that changes, not with every reading.
-    let talking = speaking > crate::audio::SPEAKING_METER;
+    // Push-to-talk and voice activation keep it dark while their gate is closed.
+    let talking = speaking > crate::audio::SPEAKING_METER && s.transmitting;
     let mut panel = col()
         .key("voice")
         .w_full()
@@ -474,8 +475,8 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             name = name
                 .focusable(true)
                 .cursor(rune::Cursor::Pointer)
-                .hover(Color::WHITE.alpha(0.05))
-                .press(Color::WHITE.alpha(0.09))
+                .hover(t.wash(0.05))
+                .press(t.wash(0.09))
                 .on_press_tx(send(Message::Join(channel.id)));
         }
         let disclosure = el()
@@ -492,7 +493,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             .radius(6.0)
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
-            .hover(Color::WHITE.alpha(0.06))
+            .hover(t.wash(0.06))
             .on_press_tx(send(Message::ToggleChannel(channel.id)))
             .child(
                 icon(&icons::CHEVRON_RIGHT, 12.0)
@@ -675,12 +676,16 @@ pub fn shortcut_hint(s: &App, t: &Theme) -> El {
             },
         )
     } else {
-        faint(
-            t,
-            format!(
-                "Global: {} · mute/unmute   |   {} · deafen/undeafen",
-                s.keybinds.toggle_mute, s.keybinds.toggle_deafen
-            ),
-        )
+        let mut hint = format!(
+            "Global: {} · mute/unmute   |   {} · deafen/undeafen",
+            s.keybinds.toggle_mute, s.keybinds.toggle_deafen
+        );
+        if !s.keybinds.push_to_talk.trim().is_empty() {
+            hint.push_str(&format!(
+                "   |   {} · hold to talk",
+                s.keybinds.push_to_talk
+            ));
+        }
+        faint(t, hint)
     }
 }

@@ -9,10 +9,12 @@ A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses [R
 - Editable server address, nickname, and optional server password.
 - Native microphone/playback device detection and selection.
 - Local microphone-to-speaker test, disconnected from TeamSpeak.
+- Opt-in WebRTC microphone noise suppression, automatic gain and experimental echo cancellation on Mac/Windows.
 - Opus microphone transmission and incoming voice playback.
 - A channel/client tree with health dots, conditional mute/deafen icons, clickable channel headings and password prompts.
 - Mute, deafen, microphone level, sent/received audio packet counters.
-- Editable global mute/deafen shortcuts and an app-only playback volume slider.
+- Editable global mute/deafen/push-to-talk shortcuts and an app-only playback volume slider.
+- Continuous, push-to-talk and speech-triggered voice transmission, with release-delay and voice-threshold controls. Speech detection requires Mac/Windows; global PTT also supports Linux X11.
 - A Settings tab with portable JSON for server address, nickname, volume and keybinds.
 - A Statistics tab with CPU/RAM usage, five-minute history graphs, and P50/P90/P99.
 - Live upload/download rates, session traffic totals, packet loss in/out, ping variation, idle time, and server-reported file-transfer rates.
@@ -22,7 +24,7 @@ A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses [R
 - Dismissible error modals, duplicate suppression, acknowledged audio controls and adaptive server-command pacing. See [error handling](docs/error-handling.md).
 - Cancel/disconnect and visible network/audio errors. Temporary network interruptions use the protocol library's reconnect behavior.
 
-The prefilled server address is `ts.zirkumflex.io`; it remains editable. The microphone starts muted on every connection. Unmuting transmits continuously until you mute, deafen, disconnect, or lose permission to speak. Use headphones: this prototype does not yet include echo cancellation, noise suppression, automatic gain control, voice activation, or push-to-talk.
+The prefilled server address is `ts.zirkumflex.io`; it remains editable. The microphone starts muted on every connection. **Settings → Audio → Voice Transmission** selects continuous transmission (the existing/default behavior), push-to-talk, or voice activation. Push-to-talk has a 0–500 ms release delay; voice activation combines speech detection with an adjustable volume threshold. Mute, deafen and server permissions always override these modes. Mac/Windows users can also enable noise suppression with Low/Moderate/High/Very high strength, automatic microphone gain and experimental echo cancellation. Effects default to off. The headphone test previews the selected transmission mode and suppression/gain; echo cancellation runs only in calls. See [audio controls and platform limits](docs/controls-and-settings.md#audio-processing-options).
 
 ## Run
 
@@ -69,7 +71,7 @@ libopus links statically. The binding finds an installed libopus using pkg-confi
 
 ## First voice session
 
-Run `flexspeak --snap out.png --scene connected` (or `home`, `setup`, `devices`, `footer-hidden`, `statistics`, `settings`, `performance`, `password`, `alert`) to render a screen headlessly with demo data; `--list-scenes` lists them.
+Run `flexspeak --snap out.png --scene connected` (or `home`, `setup`, `devices`, `footer-hidden`, `statistics`, `settings`, `settings-light`, `themes`, `connected-light`, `performance`, `password`, `alert`, and the `update-*` notice and Settings states) to render a screen headlessly with demo data; `--list-scenes` lists them.
 
 A missing settings file opens setup for your username, one saved server, permissions, devices and global shortcuts. Finish saves the profile; existing valid settings go straight to the saved-server card. Use its plug button to connect. While connected, the channel tree stays on the left and streaming occupies the right. Settings and Statistics are available from the header.
 

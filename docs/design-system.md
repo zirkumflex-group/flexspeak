@@ -8,6 +8,12 @@ Flexspeak should read as a desktop app, not a web page: compact controls, flat g
 
 ## Surfaces
 
+Every token comes from one of ten palettes: five themes (Flexspeak, Grove, Ocean, Ember, Iris), each light and dark, chosen in Settings › Color Scheme and Themes. `Theme::new(name, dark)` builds one; views take the current one from `ui::theme(s)` and never name colours themselves. Themes change the tinted neutrals and the accent; status, live and chart colours are shared, with darker variants for light palettes. Hover, press and track overlays use `wash(alpha)`, which is white on dark palettes and black on light ones, and wells use `recess`.
+
+Each palette keeps primary text at 7:1 or better, muted text and the accent (including on its own 16% selection tint, and white on accent buttons) at 4.5:1, and faint text and status colours at 3:1 against cards and chrome. Check a new or changed palette against those ratios before shipping it.
+
+The Flexspeak dark palette:
+
 | Token | Color | Use |
 | --- | --- | --- |
 | `canvas` | `#1c1d20` | Window background |

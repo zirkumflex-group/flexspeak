@@ -7,15 +7,11 @@ use super::widgets::{card, faint, well};
 use crate::connection_charts::{ChartPaint, ConnectionHistory, Metric};
 use crate::{App, usage};
 
-fn health_ink(health: usage::Health) -> Color {
-    Theme::new().health(health)
-}
-
 fn paint(t: &Theme) -> ChartPaint {
     ChartPaint {
-        grid: Color::WHITE.alpha(0.05),
+        grid: t.wash(0.05),
         band: t.ram.alpha(0.22),
-        health: health_ink,
+        health: [t.good, t.fair, t.poor, t.unknown],
     }
 }
 
@@ -27,13 +23,14 @@ fn width(cx: &mut Cx<App>, key: &str) -> f32 {
 
 pub fn history(
     cx: &mut Cx<App>,
+    t: &Theme,
     key: &str,
     history: &usage::MetricHistory,
     color: Color,
     height: f32,
 ) -> El {
     let w = width(cx, key);
-    canvas(history.chart(w, height, color, Color::WHITE.alpha(0.05)))
+    canvas(history.chart(w, height, color, t.wash(0.05)))
         .key(key.to_owned())
         .w_full()
         .h(height)

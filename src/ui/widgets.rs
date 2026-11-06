@@ -42,8 +42,8 @@ fn skin(t: &Theme, v: Variant) -> Skin {
             top: t.bevel_top,
             bottom: t.bevel_bottom,
             ink: t.text,
-            hover: Color::WHITE.alpha(0.05),
-            press: Color::WHITE.alpha(0.09),
+            hover: t.wash(0.05),
+            press: t.wash(0.09),
         },
         Variant::Danger => Skin {
             fill: t.poor.alpha(0.13),
@@ -58,8 +58,8 @@ fn skin(t: &Theme, v: Variant) -> Skin {
             top: Color::TRANSPARENT,
             bottom: Color::TRANSPARENT,
             ink: t.muted,
-            hover: Color::WHITE.alpha(0.06),
-            press: Color::WHITE.alpha(0.10),
+            hover: t.wash(0.06),
+            press: t.wash(0.10),
         },
         Variant::Active => Skin {
             fill: t.accent.alpha(0.16),
@@ -220,7 +220,7 @@ pub fn well(t: &Theme) -> El {
     col()
         .w_full()
         .radius(radius::ROW)
-        .fill(Color::BLACK.alpha(0.18))
+        .fill(t.recess)
         .border(1.0, t.hairline)
 }
 
@@ -312,7 +312,7 @@ pub fn speaking_dot(t: &Theme, talking: bool) -> El {
 
 /// A level from 0 to 1. Readings arrive about ten times a second, so the bar steps to each one
 /// rather than springing: a spring would keep the window drawing for the whole call.
-pub fn meter(_t: &Theme, key: &str, level: f32, color: Color) -> El {
+pub fn meter(t: &Theme, key: &str, level: f32, color: Color) -> El {
     let level = level.clamp(0.0, 1.0);
     el().key(key.to_owned())
         .role("progressbar")
@@ -320,7 +320,7 @@ pub fn meter(_t: &Theme, key: &str, level: f32, color: Color) -> El {
         .w_full()
         .h(4.0)
         .radius(2.0)
-        .fill(Color::WHITE.alpha(0.08))
+        .fill(t.wash(0.08))
         .clip_rounded(2.0)
         .child(
             el().key("fill")
@@ -332,39 +332,94 @@ pub fn meter(_t: &Theme, key: &str, level: f32, color: Color) -> El {
         )
 }
 
+/// The values a [`slider`] covers. `step` snaps dragging; `key_step` is one arrow-key press.
+#[derive(Clone, Copy)]
+pub struct Range {
+    pub min: i32,
+    pub max: i32,
+    pub step: i32,
+    pub key_step: i32,
+}
+
+impl Range {
+    pub const PERCENT: Range = Range {
+        min: 0,
+        max: 100,
+        step: 1,
+        key_step: 5,
+    };
+
+    fn fraction(self, value: i32) -> f32 {
+        ((value - self.min) as f32 / (self.max - self.min).max(1) as f32).clamp(0.0, 1.0)
+    }
+
+    fn snap(self, value: f32) -> i32 {
+        let steps = ((value - self.min as f32) / self.step as f32).round() as i32;
+        (self.min + steps * self.step).clamp(self.min, self.max)
+    }
+}
+
 /// A 0–100 slider whose value travels with the pointer and the arrow keys.
 pub fn percent_slider(
     t: &Theme,
     key: &str,
     label: &str,
     value: u8,
+    current: fn(&App) -> u8,
     on_change: fn(u8) -> Message,
 ) -> El {
-    let fraction = f32::from(value) / 100.0;
+    slider(
+        t,
+        key,
+        label,
+        i32::from(value),
+        format!("{value}%"),
+        Range::PERCENT,
+        move |s| i32::from(current(s)),
+        move |value| on_change(value.clamp(0, 100) as u8),
+    )
+}
+
+/// A stepped slider whose value travels with the pointer and the arrow keys. `current` reads
+/// the live value back from the app, so a drag or key repeat starts from what is applied.
+#[allow(clippy::too_many_arguments)]
+pub fn slider(
+    t: &Theme,
+    key: &str,
+    label: &str,
+    value: i32,
+    spoken: String,
+    range: Range,
+    current: impl Fn(&App) -> i32 + Copy + 'static,
+    on_change: impl Fn(i32) -> Message + Copy + 'static,
+) -> El {
+    let fraction = range.fraction(value);
     let knob = 16.0;
     let height = 22.0;
-    let to_value =
-        move |x: f32, w: f32| ((x - knob / 2.0) / (w - knob).max(1.0)).clamp(0.0, 1.0) * 100.0;
+    let to_value = move |x: f32, w: f32| {
+        let share = ((x - knob / 2.0) / (w - knob).max(1.0)).clamp(0.0, 1.0);
+        range.snap(range.min as f32 + share * (range.max - range.min) as f32)
+    };
     el().key(key.to_owned())
         .role("slider")
         .label(label.to_owned())
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
-        .range_value(f64::from(value), 0.0, 100.0)
-        .range_step(1.0)
-        .a11y_value(format!("{value}%"))
+        .range_value(f64::from(value), f64::from(range.min), f64::from(range.max))
+        .range_step(f64::from(range.step))
+        .a11y_value(spoken)
         .w_full()
         .h(height)
         .cursor(rune::Cursor::Pointer)
         .on_step(move |s: &mut App, steps, tx| {
-            let next = (i32::from(s.playback_volume.percent()) + steps * 5).clamp(0, 100) as u8;
+            let next = (current(s) + steps * range.key_step).clamp(range.min, range.max);
             dispatch(s, tx, on_change(next));
         })
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
-            let next = to_value(d.x, d.w).round() as u8;
+            let next = to_value(d.x, d.w);
             match d.phase {
                 Phase::Down => {
-                    d.data = f32::from(s.playback_volume.percent());
+                    d.data = current(s) as f32;
                     dispatch(s, tx, on_change(next));
                 }
                 Phase::Move => {
@@ -373,7 +428,7 @@ pub fn percent_slider(
                 }
                 Phase::Up => {
                     if d.cancelled() {
-                        dispatch(s, tx, on_change(d.data as u8));
+                        dispatch(s, tx, on_change(d.data as i32));
                     }
                 }
             }
@@ -384,7 +439,7 @@ pub fn percent_slider(
                 .w_full()
                 .h(4.0)
                 .radius(2.0)
-                .fill(Color::WHITE.alpha(0.08))
+                .fill(t.wash(0.08))
                 .a11y_hidden(),
         )
         .child(
@@ -412,7 +467,7 @@ pub fn percent_slider(
                         .mt((height - knob) / 2.0)
                         .ml(-knob * fraction)
                         .radius(knob / 2.0)
-                        .fill(t.text)
+                        .fill(t.knob)
                         .border_gradient(1.0, Color::WHITE, Color::BLACK.alpha(0.15))
                         .box_shadow(super::theme::shadow(0.0, 1.0, 4.0, Color::BLACK.alpha(0.5)))
                         .motion(motion::QUICK),

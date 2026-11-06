@@ -15,6 +15,7 @@ mod settings;
 mod statistics;
 mod streams;
 mod theme;
+mod updates;
 mod widgets;
 
 use std::{sync::atomic::Ordering, time::Instant};
@@ -26,6 +27,9 @@ use crate::{App, Message, Tab, client, shortcuts, usage};
 
 pub use theme::Theme;
 
+/// A [`Task::Stream`] job: interim messages go to the callback, the result is the last one.
+pub type StreamJob = dyn FnOnce(&dyn Fn(Message)) -> Message + Send;
+
 /// What an update asks the window or a worker thread to do after it returns.
 pub enum Task {
     None,
@@ -36,6 +40,9 @@ pub enum Task {
     Resize((f32, f32)),
     /// Blocking work for a worker thread; its message returns to the UI thread.
     Perform(Box<dyn FnOnce() -> Message + Send>),
+    /// Blocking work for a worker thread that reports along the way: it gets a sender for
+    /// interim messages (download progress) and returns its final one.
+    Stream(Box<StreamJob>),
     /// A session's backend events, forwarded until the worker closes the channel.
     Events(mpsc::Receiver<client::Event>),
 }
@@ -71,6 +78,12 @@ impl Task {
     }
 }
 
+impl Task {
+    pub fn stream(job: impl FnOnce(&dyn Fn(Message)) -> Message + Send + 'static) -> Self {
+        Self::Stream(Box::new(job))
+    }
+}
+
 /// Text fields whose keyboard focus an update can request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -85,6 +98,7 @@ pub struct UiState {
     pub channel_password: TextEdit,
     pub mute_key: TextEdit,
     pub deafen_key: TextEdit,
+    pub ptt_key: TextEdit,
     /// The device or source picker whose list is open.
     pub open: Option<&'static str>,
 }
@@ -98,6 +112,7 @@ impl Default for UiState {
             channel_password: TextEdit::new("").secure(),
             mute_key: TextEdit::new(""),
             deafen_key: TextEdit::new(""),
+            ptt_key: TextEdit::new(""),
             open: None,
         }
     }
@@ -119,6 +134,7 @@ impl App {
         mirror(&mut self.ui.channel_password, &self.channel_password);
         mirror(&mut self.ui.mute_key, &self.keybind_draft.toggle_mute);
         mirror(&mut self.ui.deafen_key, &self.keybind_draft.toggle_deafen);
+        mirror(&mut self.ui.ptt_key, &self.keybind_draft.push_to_talk);
     }
 }
 
@@ -158,6 +174,26 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
                     if let Some(handle) = handle {
                         handle.update(move |s, tx| dispatch(s, tx, message));
                     }
+                });
+            if let Err(error) = spawned {
+                s.alerts.raise(
+                    crate::alerts::Source::Worker,
+                    format!("Could not start a background task: {error}"),
+                );
+            }
+        }
+        Task::Stream(job) => {
+            let handle = s.handle.clone();
+            let spawned = std::thread::Builder::new()
+                .name("flexspeak-task".into())
+                .spawn(move || {
+                    let deliver = |message: Message| {
+                        if let Some(handle) = &handle {
+                            handle.update(move |s, tx| dispatch(s, tx, message));
+                        }
+                    };
+                    let message = job(&deliver);
+                    deliver(message);
                 });
             if let Err(error) = spawned {
                 s.alerts.raise(
@@ -224,6 +260,12 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
                 Message::UsageTick
             },
         );
+        // Following the system's appearance costs one cheap query per tick.
+        if s.appearance.scheme == crate::settings::ColorScheme::System
+            && let Some(dark) = crate::system_appearance::is_dark()
+        {
+            s.system_dark = dark;
+        }
         s.next_usage_tick = now
             + if compact {
                 usage::COMPACT_REFRESH_INTERVAL
@@ -232,7 +274,20 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
             };
         changed = true;
     }
-    tx.wake_after(s.next_usage_tick.saturating_duration_since(now));
+    if s.resume.is_some() && !s.resume_started {
+        s.resume_started = true;
+        dispatch(s, tx, Message::Resume);
+        changed = true;
+    }
+    if s.updater.next_check.is_some_and(|at| now >= at) {
+        dispatch(s, tx, Message::Updater(crate::updater::Event::Check));
+        changed = true;
+    }
+    let wake = match s.updater.next_check {
+        Some(check) => s.next_usage_tick.min(check),
+        None => s.next_usage_tick,
+    };
+    tx.wake_after(wake.saturating_duration_since(now));
     if s.streaming.sync_frame() {
         changed = true;
     }
@@ -257,9 +312,15 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
+/// The palette for the chosen scheme and theme.
+pub fn theme(s: &App) -> Theme {
+    let dark = s.appearance.is_dark(s.system_dark);
+    Theme::new(s.appearance.theme(dark), dark)
+}
+
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let _trace = crate::profiler::scope(crate::profiler::Category::Ui, "ui.view");
-    let t = Theme::new();
+    let t = theme(s);
     let k = t.kit();
     let mut layer = Vec::new();
     let compact = s.performance_mode.load(Ordering::Relaxed);
@@ -270,6 +331,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     } else {
         home::normal(s, cx, &t, &k, &mut layer)
     };
+    // Under any dialog, whose scrim then covers it too.
+    layer.extend(updates::notice(s, &t));
     modals::build(s, &t, &k, &mut layer);
     let base = el()
         .key("window")

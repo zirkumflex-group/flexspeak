@@ -280,6 +280,7 @@ fn history_card(
         .child(faint(t, format!("Scale 0–{}", format(history.upper_bound))))
         .child(charts::history(
             cx,
+            t,
             &format!("{key}-history"),
             history,
             color,
@@ -344,8 +345,8 @@ fn client_connections(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                 header = header
                     .focusable(true)
                     .cursor(rune::Cursor::Pointer)
-                    .hover(Color::WHITE.alpha(0.04))
-                    .press(Color::WHITE.alpha(0.08))
+                    .hover(t.wash(0.04))
+                    .press(t.wash(0.08))
                     .on_press_tx(send(Message::ToggleClient(member.id)));
             }
             clients = clients.child(header);
@@ -474,7 +475,7 @@ fn bars(
                     el().w_full()
                         .h(6.0)
                         .radius(3.0)
-                        .fill(Color::WHITE.alpha(0.06))
+                        .fill(t.wash(0.06))
                         .child(el().h_full().w_frac(fraction).radius(3.0).fill(entry.color)),
                 )
                 .child(faint(t, entry.detail)),

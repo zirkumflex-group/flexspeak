@@ -1,5 +1,6 @@
 """Build native release packages and generate the private Homebrew cask."""
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -31,7 +32,8 @@ def sha256(path):
 
 
 def build_opus(env):
-    work = ROOT / "target/release-opus"
+    # CI points this outside target/ so it can be cached apart from Cargo's artifacts.
+    work = Path(env.get("FLEXSPEAK_OPUS_DIR") or ROOT / "target/release-opus")
     work.mkdir(parents=True, exist_ok=True)
     archive = work / f"opus-{OPUS_VERSION}.tar.gz"
     if not archive.exists():
@@ -44,18 +46,24 @@ def build_opus(env):
     if not source.exists():
         with tarfile.open(archive) as file:
             file.extractall(work, filter="data")
+    install = work / "install"
     options = []
     if os.name == "nt":
         options = ["-G", "Visual Studio 17 2022", "-A", "x64"]
     elif sys.platform == "darwin":
         options = ["-DCMAKE_OSX_DEPLOYMENT_TARGET=14.2"]
-    run("cmake", "-S", source, "-B", work / "build", *options,
-        "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_INSTALL_PREFIX={work / 'install'}",
-        "-DBUILD_SHARED_LIBS=OFF", "-DOPUS_STATIC_RUNTIME=ON",
-        "-DOPUS_BUILD_TESTING=OFF", "-DOPUS_BUILD_PROGRAMS=OFF", env=env)
-    run("cmake", "--build", work / "build", "--config", "Release", "--parallel", "3", env=env)
-    run("cmake", "--install", work / "build", "--config", "Release", env=env)
-    env.update(OPUS_NO_PKG="1", OPUS_LIB_DIR=str(work / "install"))
+    options += ["-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_INSTALL_PREFIX={install}",
+                "-DBUILD_SHARED_LIBS=OFF", "-DOPUS_STATIC_RUNTIME=ON",
+                "-DOPUS_BUILD_TESTING=OFF", "-DOPUS_BUILD_PROGRAMS=OFF"]
+    stamp = install / "flexspeak-build.json"
+    settings = json.dumps({"version": OPUS_VERSION, "options": options})
+    if not stamp.is_file() or stamp.read_text() != settings:
+        shutil.rmtree(install, ignore_errors=True)
+        run("cmake", "-S", source, "-B", work / "build", *options, env=env)
+        run("cmake", "--build", work / "build", "--config", "Release", "--parallel", "3", env=env)
+        run("cmake", "--install", work / "build", "--config", "Release", env=env)
+        stamp.write_text(settings)
+    env.update(OPUS_NO_PKG="1", OPUS_LIB_DIR=str(install))
     return source
 
 
@@ -137,6 +145,7 @@ def build():
                NATIVE_VOICE_BUILD_NUMBER=str(number),
                CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=+crt-static")
     opus_source = build_opus(env)
+    cargo_target = ROOT / env.get("CARGO_TARGET_DIR", "target")
     OUTPUT.mkdir(parents=True, exist_ok=True)
     stage = ROOT / "target/release-package"
     if stage.exists():
@@ -144,15 +153,24 @@ def build():
     stage.mkdir()
     shutil.copy2(ROOT / "settings.example.json", stage)
     shutil.copy2(ROOT / "README.md", stage)
-    write_notices(stage / "THIRD-PARTY-LICENSES.txt", opus_source)
     (stage / "BUILD-INFO.json").write_text(json.dumps({
         "version": version, "build": number, "commit": env.get("GITHUB_SHA") or
         run("git", "rev-parse", "HEAD", capture_output=True, text=True).stdout.strip(),
         "platform": sys.platform, "architecture": platform.machine(), "opus": OPUS_VERSION,
     }, indent=2) + "\n")
+    # Collecting license files walks every dependency's source tree, which takes
+    # most of a minute on Windows; do it while Cargo compiles.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        notices = pool.submit(write_notices, stage / "THIRD-PARTY-LICENSES.txt", opus_source)
+        if os.name == "nt":
+            run("cargo", "build", "--release", "--locked", "--target", "x86_64-pc-windows-msvc", env=env)
+        elif sys.platform == "darwin":
+            run("sh", "scripts/macos-app.sh", "release", env=env)
+        else:
+            run("cargo", "build", "--release", "--locked", env=env)
+        notices.result()
     if os.name == "nt":
-        run("cargo", "build", "--release", "--locked", "--target", "x86_64-pc-windows-msvc", env=env)
-        executable = ROOT / "target/x86_64-pc-windows-msvc/release/flexspeak.exe"
+        executable = cargo_target / "x86_64-pc-windows-msvc/release/flexspeak.exe"
         run(executable, "--help")
         shutil.copy2(executable, stage / "Flexspeak.exe")
         shutil.copy2(executable, OUTPUT / "Flexspeak-windows-x64.exe")
@@ -161,7 +179,6 @@ def build():
                 archive.write(path, path.name)
         shutil.copy2(stage / "THIRD-PARTY-LICENSES.txt", OUTPUT)
     elif sys.platform == "darwin":
-        run("sh", "scripts/macos-app.sh", "release", env=env)
         app = stage / "Flexspeak.app"
         shutil.copytree(ROOT / "dist/Flexspeak.app", app)
         resources = app / "Contents/Resources"
@@ -180,8 +197,7 @@ def build():
             "-format", "UDZO", dmg)
         run("hdiutil", "verify", dmg)
     else:
-        run("cargo", "build", "--release", "--locked", env=env)
-        executable = ROOT / "target/release/flexspeak"
+        executable = cargo_target / "release/flexspeak"
         run(executable, "--help")
         shutil.copy2(executable, stage / "flexspeak")
         shutil.copy2(ROOT / "scripts/flexspeak.desktop", stage)

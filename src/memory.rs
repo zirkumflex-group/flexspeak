@@ -17,11 +17,19 @@ impl TrackedAllocator {
     }
 
     fn add(&self, bytes: usize) {
+        #[cfg(test)]
+        thread_delta(bytes as i64);
         let live = self
             .live
             .fetch_add(bytes as u64, Ordering::Relaxed)
             .saturating_add(bytes as u64);
         self.peak.fetch_max(live, Ordering::Relaxed);
+    }
+
+    fn sub(&self, bytes: usize) {
+        #[cfg(test)]
+        thread_delta(-(bytes as i64));
+        self.live.fetch_sub(bytes as u64, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> HeapUsage {
@@ -54,7 +62,7 @@ unsafe impl GlobalAlloc for TrackedAllocator {
         unsafe {
             System.dealloc(ptr, layout);
         }
-        self.live.fetch_sub(layout.size() as u64, Ordering::Relaxed);
+        self.sub(layout.size());
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         let result = unsafe { System.realloc(ptr, layout, size) };
@@ -62,8 +70,7 @@ unsafe impl GlobalAlloc for TrackedAllocator {
             if size >= layout.size() {
                 self.add(size - layout.size());
             } else {
-                self.live
-                    .fetch_sub((layout.size() - size) as u64, Ordering::Relaxed);
+                self.sub(layout.size() - size);
             }
         }
         result
@@ -81,6 +88,26 @@ pub struct HeapUsage {
 
 pub fn snapshot() -> HeapUsage {
     ALLOCATOR.snapshot()
+}
+
+// Tests run in parallel, so a test that bounds its own allocations counts only its thread's.
+// The const-initialised cell needs no allocation and no destructor, and `try_with` never panics.
+#[cfg(test)]
+thread_local! {
+    static THREAD_LIVE: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn thread_delta(bytes: i64) {
+    let _ = THREAD_LIVE.try_with(|live| live.set(live.get() + bytes));
+}
+
+/// Bytes this thread has allocated and not freed (test builds only).
+#[cfg(test)]
+pub fn thread_live() -> i64 {
+    THREAD_LIVE
+        .try_with(std::cell::Cell::get)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
