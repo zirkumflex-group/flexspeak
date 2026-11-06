@@ -108,7 +108,7 @@ def package_linux(stage, version, number):
     work = ROOT / "target/arch-package"
     if work.exists():
         shutil.rmtree(work)
-    work.mkdir()
+    work.mkdir(parents=True)
     shutil.copy2(archive, work)
     recipe = (ROOT / "scripts/PKGBUILD.in").read_text()
     (work / "PKGBUILD").write_text(recipe.replace("@VERSION@", f"{version}.r{number}")
@@ -150,7 +150,7 @@ def build():
     stage = ROOT / "target/release-package"
     if stage.exists():
         shutil.rmtree(stage)
-    stage.mkdir()
+    stage.mkdir(parents=True)
     shutil.copy2(ROOT / "settings.example.json", stage)
     shutil.copy2(ROOT / "README.md", stage)
     (stage / "BUILD-INFO.json").write_text(json.dumps({
