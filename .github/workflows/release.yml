@@ -39,20 +39,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
-      # A ReFS Dev Drive avoids NTFS/Defender overhead on Cargo's many small files.
-      # The target dir is a subdirectory: the volume root holds System Volume
-      # Information, which rust-cache's pruning and tar cannot handle.
-      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
-        if: runner.os == 'Windows'
-        with:
-          drive-size: 12GB
-          # Beside the checkout, on the same drive, so cache archives keep plain paths.
-          mount-path: ${{ github.workspace }}/../dev-drive
-          env-mapping: CARGO_TARGET_DIR,{{ DEV_DRIVE }}/target
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-${{ matrix.platform }}
-          workspaces: ${{ env.CARGO_TARGET_DIR && format('. -> {0}', env.CARGO_TARGET_DIR) || '. -> target' }}
       # rust-cache prunes unknown directories under target/, so Opus lives (and is cached) elsewhere.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
