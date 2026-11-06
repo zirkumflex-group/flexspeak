@@ -14,7 +14,7 @@ brew tap zirkumflex-group/flexspeak
 brew install --cask zirkumflex-group/flexspeak/flexspeak
 ```
 
-The cask installs **Native Voice.app**, the client's current application name, on Apple Silicon Macs using a DMG with a verified SHA-256 checksum. macOS 14.2 or later is required. The token stays in your environment, not in the cask or download URL; use a token with read-only Contents access to `flexspeak` and `homebrew-flexspeak` if configuring a dedicated token.
+The cask installs **Flexspeak.app** on Apple Silicon Macs using a DMG with a verified SHA-256 checksum. macOS 14.2 or later is required. The token stays in your environment, not in the cask or download URL; use a token with read-only Contents access to `flexspeak` and `homebrew-flexspeak` if configuring a dedicated token.
 
 To update, authenticate as above if your shell no longer has the token, then:
 

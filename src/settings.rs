@@ -26,7 +26,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             server_address: "ts.zirkumflex.io".into(),
-            nickname: "Native Voice".into(),
+            nickname: "Flexspeak".into(),
             playback_volume_percent: 100,
             keybinds: Keybinds::default(),
             input_device_id: None,
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn save_replaces_complete_settings_and_failed_load_preserves_the_file() -> Result<()> {
         let root = std::env::temp_dir().join(format!(
-            "nativevoice-settings-test-{}-{}",
+            "flexspeak-settings-test-{}-{}",
             std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
         ));

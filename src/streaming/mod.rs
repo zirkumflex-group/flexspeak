@@ -7,7 +7,6 @@ mod session;
 pub use publish_media::request_system_audio_access;
 pub use publish_media::sources as share_sources;
 
-use iced::widget::image::Handle;
 pub(crate) use rtc::Output as MediaEvent;
 pub use session::Session;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
@@ -93,8 +92,6 @@ pub struct View {
     pub notice: String,
     pub stats: Stats,
     pub frame: Option<Frame>,
-    allocation: Option<iced_runtime::image::Allocation>,
-    uploading: Option<(u64, u64)>,
     pub ui_updates: u64,
     pub surface: Arc<Surface>,
     pub visible: Arc<AtomicBool>,
@@ -118,8 +115,6 @@ impl View {
     pub fn clear_picture(&mut self) {
         self.surface.end(self.generation);
         self.frame = None;
-        self.allocation = None;
-        // Keep the in-flight slot occupied until its callback arrives, even across a restart.
     }
     pub fn update(&mut self, event: Event) {
         match event {
@@ -153,55 +148,48 @@ impl View {
             _ => {}
         }
     }
-    pub fn take_frame(&mut self) -> Option<Frame> {
-        if self.uploading.is_none()
-            && self.active()
-            && let Some(frame) = self.surface.take()
-            && frame.generation == self.generation
-            && self
-                .frame
-                .as_ref()
-                .is_none_or(|previous| frame.sequence > previous.sequence)
-        {
-            self.uploading = Some((frame.generation, frame.sequence));
-            return Some(frame);
+    /// Notes the newest frame the decoder showed. Pixels reach the GPU without the UI thread;
+    /// this only tracks what the view describes. True when the picture appeared or changed shape.
+    pub fn sync_frame(&mut self) -> bool {
+        if !self.active() {
+            return false;
         }
-        None
-    }
-    pub fn frame_uploaded(
-        &mut self,
-        frame: Frame,
-        result: Result<iced_runtime::image::Allocation, iced_runtime::image::Error>,
-    ) -> Option<bool> {
-        if self.uploading != Some((frame.generation, frame.sequence)) {
-            return None;
+        let Some(frame) = self.surface.latest() else {
+            return false;
+        };
+        if frame.generation != self.generation {
+            return false;
         }
-        self.uploading = None;
-        if frame.generation != self.generation
-            || !self.active()
-            || !self.surface.is_active(frame.generation)
-        {
-            return None;
+        let previous = self.frame;
+        if previous.is_some_and(|previous| frame.sequence <= previous.sequence) {
+            return false;
         }
-        match result {
-            Ok(allocation) => {
-                // Retain the previous image until the renderer guarantees the next is drawable.
-                self.allocation = Some(allocation);
-                self.frame = Some(frame);
-                self.ui_updates += 1;
-                Some(true)
-            }
-            Err(_) => Some(false),
-        }
+        self.ui_updates += frame.sequence - previous.map_or(0, |previous| previous.sequence);
+        self.frame = Some(frame);
+        previous.is_none_or(|previous| {
+            (previous.width, previous.height, previous.rotation)
+                != (frame.width, frame.height, frame.rotation)
+        })
     }
 }
 
-#[derive(Debug, Clone)]
+/// Decoded RGBA, rows top first. Only the native receivers (macOS, Windows) produce one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// What the view knows about the picture; the pixels themselves live in [`Surface::pixels`].
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Frame {
-    pub handle: Handle,
     pub generation: u64,
     pub sequence: u64,
     pub rotation: f32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Default)]
@@ -210,54 +198,97 @@ struct SurfaceState {
     active: bool,
     sequence: u64,
     frame: Option<Frame>,
+    #[cfg(test)]
+    image: Option<Image>,
     audio: std::collections::VecDeque<[f32; 2]>,
     audio_disabled: bool,
 }
 
 /// One latest frame, never a queue of image buffers. Old sessions cannot publish into new ones.
 #[derive(Default)]
-pub struct Surface(Mutex<SurfaceState>);
+pub struct Surface {
+    state: Mutex<SurfaceState>,
+    pixels: rune::Pixels,
+    waker: Mutex<Option<rune::Waker>>,
+}
 
 impl Surface {
-    fn is_active(&self, generation: u64) -> bool {
-        let state = self.0.lock().unwrap();
-        state.active && state.generation == generation
+    /// The image the stream view draws. Publishing replaces it in place.
+    pub fn pixels(&self) -> &rune::Pixels {
+        &self.pixels
+    }
+    /// Wakes the window when the picture first appears or changes shape.
+    pub fn set_waker(&self, waker: rune::Waker) {
+        *self.waker.lock().unwrap() = Some(waker);
+    }
+    fn release_pixels(&self) {
+        if self.pixels.size() != (0, 0) {
+            self.pixels.set(0, 0, Vec::new());
+        }
     }
     pub fn begin(&self) -> u64 {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         state.generation += 1;
         state.active = true;
         state.sequence = 0;
         state.frame = None;
         state.audio.clear();
-        state.generation
+        let generation = state.generation;
+        drop(state);
+        self.release_pixels();
+        generation
     }
     pub fn end(&self, generation: u64) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if state.generation == generation {
             state.active = false;
             state.frame = None;
             state.audio.clear();
+            drop(state);
+            self.release_pixels();
         }
     }
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
-    pub fn publish(&self, generation: u64, handle: Handle, rotation: f32) {
-        let mut state = self.0.lock().unwrap();
-        if state.active && state.generation == generation {
-            state.sequence += 1;
-            state.frame = Some(Frame {
-                handle,
-                generation,
-                sequence: state.sequence,
-                rotation,
-            });
+    pub fn publish(&self, generation: u64, image: Image, rotation: f32) {
+        let mut state = self.state.lock().unwrap();
+        if !state.active || state.generation != generation {
+            return;
+        }
+        state.sequence += 1;
+        let frame = Frame {
+            generation,
+            sequence: state.sequence,
+            rotation,
+            width: image.width,
+            height: image.height,
+        };
+        let reshaped = state.frame.is_none_or(|previous| {
+            (previous.width, previous.height, previous.rotation)
+                != (frame.width, frame.height, frame.rotation)
+        });
+        state.frame = Some(frame);
+        #[cfg(test)]
+        {
+            state.image = Some(image.clone());
+        }
+        // Hold the lock while replacing the pixels, so a concurrent `end` cannot be overtaken.
+        self.pixels.set(image.width, image.height, image.pixels);
+        drop(state);
+        if reshaped && let Some(waker) = self.waker.lock().unwrap().as_ref() {
+            waker();
         }
     }
-    pub fn take(&self) -> Option<Frame> {
-        self.0.lock().unwrap().frame.take()
+    /// The newest frame's description, if a session is showing one.
+    pub fn latest(&self) -> Option<Frame> {
+        self.state.lock().unwrap().frame
+    }
+    /// The newest decoded image, once. Test builds keep a copy for checking decoded pixels.
+    #[cfg(test)]
+    pub fn take(&self) -> Option<Image> {
+        self.state.lock().unwrap().image.take()
     }
     pub fn set_audio_enabled(&self, enabled: bool) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         state.audio_disabled = !enabled;
         if !enabled {
             state.audio.clear();
@@ -265,11 +296,11 @@ impl Surface {
     }
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn publish_audio(&self, generation: u64, pcm: &[i16]) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if !state.active || state.generation != generation || state.audio_disabled {
             return;
         }
-        for frame in pcm.chunks_exact(2) {
+        for frame in pcm.as_chunks::<2>().0 {
             if state.audio.len() == 3840 {
                 state.audio.pop_front();
             }
@@ -279,11 +310,11 @@ impl Surface {
         }
     }
     pub fn mix_audio(&self, stereo: &mut [f32]) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if !state.active || state.audio_disabled {
             return;
         }
-        for frame in stereo.chunks_exact_mut(2) {
+        for frame in stereo.as_chunks_mut::<2>().0 {
             let Some([left, right]) = state.audio.pop_front() else {
                 break;
             };
@@ -301,7 +332,7 @@ mod tests {
         let surface = Surface::default();
         let first = surface.begin();
         surface.publish_audio(first, &vec![16384; 20000]);
-        assert_eq!(surface.0.lock().unwrap().audio.len(), 3840);
+        assert_eq!(surface.state.lock().unwrap().audio.len(), 3840);
         let mut mixed = [0.25, -0.25];
         surface.mix_audio(&mut mixed);
         assert_eq!(mixed, [0.75, 0.25]);
@@ -321,60 +352,68 @@ mod tests {
         assert_eq!(silent, [0.0; 2]);
     }
     #[test]
-    fn uploading_a_frame_keeps_the_previous_picture_visible() {
+    fn the_view_tracks_the_newest_frame_and_only_wakes_for_shape_changes() {
         let mut view = View::default();
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = wakes.clone();
+        view.surface.set_waker(Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
         view.generation = view.surface.begin();
         view.phase = Some(Phase::Receiving);
-        let previous = Frame {
-            handle: Handle::from_rgba(1, 1, vec![255, 0, 0, 255]),
-            generation: view.generation,
-            sequence: 0,
-            rotation: 0.0,
+        let image = |w: u32, h: u32| Image {
+            width: w,
+            height: h,
+            pixels: vec![255; (w * h * 4) as usize],
         };
-        view.frame = Some(previous.clone());
-        view.surface.publish(
-            view.generation,
-            Handle::from_rgba(1280, 720, vec![255; 1280 * 720 * 4]),
-            0.0,
-        );
-        let uploading = view.take_frame().unwrap();
-        assert_eq!(view.frame.as_ref().unwrap().handle, previous.handle);
-        assert_eq!(view.ui_updates, 0);
+        assert!(!view.sync_frame(), "No picture before the first frame");
+        view.surface.publish(view.generation, image(4, 2), 0.0);
+        assert!(view.sync_frame(), "The first frame shows the picture");
+        assert_eq!(view.surface.pixels().size(), (4, 2));
         for _ in 0..3 {
-            view.surface
-                .publish(view.generation, previous.handle.clone(), 0.0);
+            view.surface.publish(view.generation, image(4, 2), 0.0);
         }
         assert!(
-            view.take_frame().is_none(),
-            "Only one upload may be pending"
+            !view.sync_frame(),
+            "Same-shape frames redraw without the view"
         );
-        view.frame_uploaded(uploading, Err(iced_runtime::image::Error::OutOfMemory));
-        assert_eq!(view.frame.as_ref().unwrap().handle, previous.handle);
-        let newest = view.take_frame().unwrap();
-        assert_eq!(newest.sequence, 4, "Skipped frames must not form a backlog");
+        assert_eq!(view.ui_updates, 4);
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        view.surface.publish(view.generation, image(2, 4), 0.0);
+        assert!(view.sync_frame());
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 2);
         view.clear_picture();
-        view.frame_uploaded(newest, Err(iced_runtime::image::Error::OutOfMemory));
-        assert!(view.frame.is_none() && view.allocation.is_none());
-        assert!(view.uploading.is_none());
+        assert!(view.frame.is_none());
+        assert_eq!(view.surface.pixels().size(), (0, 0));
+        view.surface.publish(view.generation, image(4, 2), 0.0);
+        assert!(
+            !view.sync_frame(),
+            "A closed session cannot bring the picture back"
+        );
     }
 
     #[test]
     fn latest_frame_replaces_backlog_and_rejects_closed_or_old_sessions() {
         let surface = Surface::default();
-        let frame = || Handle::from_rgba(1, 1, vec![0, 0, 0, 255]);
+        let frame = || Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 255],
+        };
         let first = surface.begin();
         surface.publish(first, frame(), 0.0);
         surface.publish(first, frame(), 0.0);
-        assert_eq!(surface.take().unwrap().sequence, 2);
+        assert_eq!(surface.latest().unwrap().sequence, 2);
+        assert!(surface.take().is_some());
         assert!(surface.take().is_none());
         let second = surface.begin();
         surface.publish(first, frame(), 0.0);
         surface.end(first);
         surface.publish(second, frame(), 0.0);
-        assert_eq!(surface.take().unwrap().generation, second);
+        assert_eq!(surface.latest().unwrap().generation, second);
         surface.end(second);
         surface.publish(second, frame(), 0.0);
-        assert!(surface.take().is_none());
+        assert!(surface.latest().is_none());
     }
 
     #[test]

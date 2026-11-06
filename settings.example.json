@@ -1,6 +1,6 @@
 {
   "server_address": "ts.zirkumflex.io",
-  "nickname": "Native Voice",
+  "nickname": "Flexspeak",
   "playback_volume_percent": 100,
   "keybinds": {
     "toggle_mute": "Ctrl+Shift+M",

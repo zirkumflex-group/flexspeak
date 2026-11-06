@@ -85,7 +85,7 @@ CPU, RAM and the platform-specific memory detail stay in the bottom bar while th
 
 ## Errors and rate limiting
 
-Connection, audio, command, settings, trace and streaming failures use a shared Iced modal with Close/Enter/Escape dismissal. Repeats are grouped and dismissed incidents stay suppressed until a retry or relevant recovery. Wrong channel passwords stay in the password dialog; missing telemetry remains a status/tooltip.
+Connection, audio, command, settings, trace and streaming failures use a shared Rune modal with Close/Enter/Escape dismissal; the window behind it is inert and Tab stays inside. Repeats are grouped and dismissed incidents stay suppressed until a retry or relevant recovery. Wrong channel passwords stay in the password dialog; missing telemetry remains a status/tooltip.
 
 Server commands share a bounded scheduler with acknowledgement tracking. Rapid mute/deafen changes retain only the latest unsent state while applying local protection immediately. Pending/unconfirmed server state is shown separately. Flood responses pause optional work, use a 10–60 second cooldown and a single acknowledged recovery probe, and lower the command rate. Server permissions and thresholds are unchanged. See [error lifetime, pacing and validation](error-handling.md).
 
@@ -102,7 +102,7 @@ The portable format is shown in [`settings.example.json`](../settings.example.js
 ```json
 {
   "server_address": "ts.zirkumflex.io",
-  "nickname": "Native Voice",
+  "nickname": "Flexspeak",
   "playback_volume_percent": 100,
   "keybinds": {
     "toggle_mute": "Ctrl+Shift+M",

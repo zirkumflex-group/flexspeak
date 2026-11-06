@@ -860,7 +860,7 @@ pub fn probe(address: &str) -> Result<()> {
         .build()?
         .block_on(async {
             let mut connection = Connection::build(address.to_owned())
-                .name("Native Voice Check")
+                .name("Flexspeak Check")
                 .identity(load_identity()?)
                 .input_muted(true)
                 .output_muted(true)
@@ -943,7 +943,7 @@ mod tests {
     async fn server_tree_probe_stays_muted_in_lobby() -> Result<()> {
         let address = std::env::var("NATIVE_VOICE_TEST_SERVER")?;
         let mut connection = Connection::build(address)
-            .name("Native Voice Tree Check")
+            .name("Flexspeak Tree Check")
             .identity(Identity::create())
             .channel_id(ChannelId(1))
             .input_muted(true)

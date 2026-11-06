@@ -27,7 +27,7 @@ class HomebrewReleaseTests(unittest.TestCase):
             self.assertIn(f'releases/assets/{asset["id"]}"', cask)
             self.assertIn(asset["digest"].removeprefix("sha256:"), cask)
         self.assertNotIn("${", cask)
-        self.assertIn('app "Native Voice.app"', cask)
+        self.assertIn('app "Flexspeak.app"', cask)
         self.assertIn("depends_on arch: :arm64", cask)
 
     def test_missing_duplicate_or_corrupt_assets_never_replace_cask(self):

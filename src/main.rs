@@ -1,21 +1,19 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod alerts;
-mod appearance;
 mod audio;
 mod client;
 mod command_flow;
 mod connection_charts;
 mod icons;
 mod memory;
-mod modal;
 mod onboarding;
 mod permissions;
 mod profiler;
 mod settings;
 mod shortcuts;
-mod statistics_charts;
 mod streaming;
+mod ui;
 mod usage;
 
 use std::{
@@ -28,32 +26,21 @@ use std::{
     time::Instant,
 };
 
-use iced::{
-    Element, Length, Size, Subscription, Task,
-    widget::{
-        canvas, checkbox, column, container, opaque, pick_list, progress_bar, row, rule, slider,
-        stack, text, text_input, tooltip,
-    },
-    window,
-};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 
 use alerts::{Alerts, Source};
-use appearance::{
-    compact_button, icon_button, label_button, primary_button as button, scroll_area as scrollable,
-};
-use connection_charts::{ConnectionChart, ConnectionHistory, Metric, health_color};
+use connection_charts::ConnectionHistory;
 use icons::Icon;
+use ui::Task;
 
-const NORMAL_MIN_SIZE: Size = Size::new(760.0, 560.0);
-const COMPACT_MIN_SIZE: Size = Size::new(440.0, 320.0);
+const NORMAL_MIN_SIZE: (f32, f32) = (760.0, 560.0);
+const COMPACT_MIN_SIZE: (f32, f32) = (440.0, 320.0);
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "teamspeak_native=info,tsclientlib=warn,tsproto=warn".into()),
+                .unwrap_or_else(|_| "flexspeak=info,tsclientlib=warn,tsproto=warn".into()),
         )
         .init();
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -95,7 +82,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("--help" | "-h") => {
             println!(
-                "Native Voice\n\nNo arguments       Open the native client\n--list-devices     List audio inputs and outputs\n--probe ADDRESS    Connect muted, report server state, disconnect\n--identity-path    Print the local identity file path\n--settings-path    Print the portable settings JSON path"
+                "Flexspeak\n\nNo arguments       Open the client\n--list-devices     List audio inputs and outputs\n--probe ADDRESS    Connect muted, report server state, disconnect\n--identity-path    Print the local identity file path\n--settings-path    Print the portable settings JSON path"
             );
             return Ok(());
         }
@@ -107,25 +94,12 @@ fn main() -> anyhow::Result<()> {
             println!("{}", settings::path()?.display());
             return Ok(());
         }
+        // Rune's headless preview tooling (`--snap`, `--scene`, `--tree`, …) reads the rest.
+        Some(other) if ui::is_tool_flag(other) => {}
         Some(other) => anyhow::bail!("Unknown argument '{other}'. Use --help."),
         None => {}
     }
-    iced::application(App::new, App::update, App::view)
-        // Avoid full-viewport 4x MSAA targets retained after a window shrinks.
-        // Text and widgets retain their own smoothing; canvas edges may alias.
-        .antialiasing(false)
-        .title("Flexspeak")
-        .theme(appearance::theme())
-        .font(icons::FONT_BYTES)
-        .window(window::Settings {
-            min_size: Some(NORMAL_MIN_SIZE),
-            ..Default::default()
-        })
-        .window_size((900.0, 790.0))
-        .centered()
-        .exit_on_close_request(false)
-        .subscription(App::subscription)
-        .run()?;
+    ui::run();
     Ok(())
 }
 
@@ -145,8 +119,11 @@ struct App {
     playback_volume: Arc<audio::PlaybackVolume>,
     performance_mode: Arc<AtomicBool>,
     channel_health_visible: Arc<AtomicBool>,
-    performance_request: u64,
-    window_restore: Option<WindowLayout>,
+    window_restore: Option<(f32, f32)>,
+    window_size: (f32, f32),
+    next_usage_tick: Instant,
+    handle: Option<rune::AppHandle<App>>,
+    ui: ui::UiState,
     address: String,
     nickname: String,
     password: String,
@@ -192,14 +169,6 @@ struct App {
     trace_saving: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct WindowLayout {
-    // shortcut: retain current bounds; track pre-maximize bounds for exact unzoom restoration.
-    size: Size,
-    maximized: bool,
-    mode: window::Mode,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Home,
@@ -224,7 +193,6 @@ enum Message {
     CopySettingsPath,
     PlaybackVolume(u8),
     PerformanceMode(bool),
-    PerformanceWindow(u64, window::Id, WindowLayout),
     Address(String),
     Nickname(String),
     Password(String),
@@ -258,11 +226,6 @@ enum Message {
     StartSharing,
     StopSharing,
     DecideViewer(u16, bool),
-    VideoTick,
-    VideoFrameReady(
-        streaming::Frame,
-        Result<iced_runtime::image::Allocation, iced_runtime::image::Error>,
-    ),
     RecordTrace,
     StopTrace,
     TraceSaved(Result<PathBuf, String>),
@@ -270,7 +233,7 @@ enum Message {
 }
 
 impl App {
-    fn new() -> (Self, Task<Message>) {
+    fn new(handle: Option<rune::AppHandle<App>>) -> Self {
         let (devices, error) = match audio::devices() {
             Ok(devices) => (devices, None),
             Err(error) => (
@@ -279,6 +242,7 @@ impl App {
             ),
         };
         let mut app = Self::with_devices(devices, error);
+        app.handle = handle;
         match settings::path() {
             Ok(path) => app.load_settings(path),
             Err(error) => app.alerts.raise(Source::SettingsLoad, format!("{error:#}")),
@@ -301,8 +265,9 @@ impl App {
         }
         app.sync_page_visibility();
         app.shortcuts = Some(shortcuts);
-        let task = Task::run(UnboundedReceiverStream::new(events), Message::Shortcut);
-        (app, task)
+        ui::forward_shortcuts(app.handle.clone(), events);
+        app.sync_fields();
+        app
     }
 
     fn with_devices(devices: audio::Devices, error: Option<String>) -> Self {
@@ -335,13 +300,16 @@ impl App {
             playback_volume: Arc::new(audio::PlaybackVolume::default()),
             performance_mode: Arc::new(AtomicBool::new(false)),
             channel_health_visible: Arc::new(AtomicBool::new(true)),
-            performance_request: 0,
             window_restore: None,
+            window_size: (900.0, 790.0),
+            next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
+            handle: None,
+            ui: ui::UiState::default(),
             input: devices.input.clone(),
             output: devices.output.clone(),
             devices,
             address: "ts.zirkumflex.io".into(),
-            nickname: "Native Voice".into(),
+            nickname: "Flexspeak".into(),
             password: String::new(),
             channel_password: String::new(),
             password_channel: None,
@@ -381,37 +349,6 @@ impl App {
             trace_path: None,
             trace_saving: false,
         }
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
-            iced::window::close_requests().map(|_| Message::Close),
-            if self.password_channel.is_some() {
-                iced::event::listen_with(|event, _, _| {
-                    modal::escape_released(&event).then_some(Message::CancelChannelPassword)
-                })
-            } else if self.alerts.current().is_some() {
-                iced::event::listen_with(|event, _, _| {
-                    modal::dismiss_released(&event).then_some(Message::DismissError)
-                })
-            } else {
-                Subscription::none()
-            },
-            if self.performance_mode.load(Ordering::Relaxed) {
-                iced::time::every(usage::COMPACT_REFRESH_INTERVAL)
-                    .map(|_| Message::CompactUsageTick)
-            } else {
-                iced::time::every(usage::REFRESH_INTERVAL).map(|_| Message::UsageTick)
-            },
-            if self.tab == Tab::Home
-                && self.streaming.active()
-                && !self.performance_mode.load(Ordering::Relaxed)
-            {
-                iced::time::every(std::time::Duration::from_millis(33)).map(|_| Message::VideoTick)
-            } else {
-                Subscription::none()
-            },
-        ])
     }
 
     fn command(&mut self, command: client::Command) -> bool {
@@ -593,7 +530,7 @@ impl App {
         Ok(())
     }
 
-    fn start(&mut self, loopback: bool) -> Task<Message> {
+    fn start(&mut self, loopback: bool) -> Task {
         if self.session.is_some()
             || self.permissions.pending.is_some()
             || (!loopback && self.onboarding.is_some())
@@ -661,7 +598,7 @@ impl App {
         match client::start(config, loopback) {
             Ok((sender, events)) => {
                 self.session = Some(sender);
-                Task::run(ReceiverStream::new(events), Message::Backend)
+                Task::Events(events)
             }
             Err(error) => {
                 self.alerts.raise(
@@ -673,7 +610,7 @@ impl App {
         }
     }
 
-    fn update(&mut self, message: Message) -> Task<Message> {
+    fn update(&mut self, message: Message) -> Task {
         let _trace = profiler::scope(profiler::Category::Ui, "ui.update");
         match message {
             Message::SetupNext => {
@@ -808,7 +745,7 @@ impl App {
             }
             Message::CopySettingsPath => {
                 if let Some(path) = &self.settings_path {
-                    return iced::clipboard::write(path.display().to_string());
+                    return Task::Copy(path.display().to_string());
                 }
             }
             Message::PerformanceMode(enabled) => {
@@ -819,7 +756,6 @@ impl App {
                     return Task::none();
                 }
                 self.sync_page_visibility();
-                self.performance_request = self.performance_request.wrapping_add(1);
                 if enabled && self.expanded_client.is_some() {
                     self.select_client(None);
                 }
@@ -831,63 +767,27 @@ impl App {
                     self.client_history = ConnectionHistory::new();
                     self.connection_usage = usage::ConnectionUsage::default();
                 }
-                let request = self.performance_request;
                 // Prime CPU timing for the new sampling interval in either mode.
                 self.process_monitor = usage::ProcessMonitor::new();
                 self.process_usage = self.process_monitor.sample();
-                let trace = if enabled {
-                    self.cpu_history.release_graphics();
-                    self.ram_history.release_graphics();
-                    self.stop_trace()
-                } else {
-                    self.cpu_history.push(Instant::now(), None);
-                    self.ram_history.push(Instant::now(), None);
-                    Task::none()
-                };
-                return Task::batch([
-                    trace,
-                    window::latest().and_then(move |id| {
-                        window::size(id).then(move |size| {
-                            window::is_maximized(id).then(move |maximized| {
-                                window::mode(id).map(move |mode| {
-                                    Message::PerformanceWindow(
-                                        request,
-                                        id,
-                                        WindowLayout {
-                                            size,
-                                            maximized,
-                                            mode,
-                                        },
-                                    )
-                                })
-                            })
-                        })
-                    }),
-                ]);
-            }
-            Message::PerformanceWindow(request, id, layout) => {
-                // A newer switch action supersedes an outstanding window query.
-                if self.performance_request != request {
-                    return Task::none();
+                self.next_usage_tick = Instant::now()
+                    + if enabled {
+                        usage::COMPACT_REFRESH_INTERVAL
+                    } else {
+                        usage::REFRESH_INTERVAL
+                    };
+                if enabled {
+                    // Keep the first restore size if a switch is repeated before it lands.
+                    self.window_restore.get_or_insert(self.window_size);
+                    return Task::batch([self.stop_trace(), Task::Resize(COMPACT_MIN_SIZE)]);
                 }
-                if self.performance_mode.load(Ordering::Relaxed) {
-                    self.window_restore.get_or_insert(layout);
-                    return window::set_min_size(id, Some(COMPACT_MIN_SIZE))
-                        .chain(window::set_mode(id, window::Mode::Windowed))
-                        .chain(window::maximize(id, false))
-                        .chain(window::resize(id, COMPACT_MIN_SIZE));
-                }
-                if let Some(layout) = self.window_restore.take() {
-                    return window::set_min_size(id, Some(NORMAL_MIN_SIZE))
-                        .chain(window::resize(
-                            id,
-                            Size::new(
-                                layout.size.width.max(NORMAL_MIN_SIZE.width),
-                                layout.size.height.max(NORMAL_MIN_SIZE.height),
-                            ),
-                        ))
-                        .chain(window::maximize(id, layout.maximized))
-                        .chain(window::set_mode(id, layout.mode));
+                self.cpu_history.push(Instant::now(), None);
+                self.ram_history.push(Instant::now(), None);
+                if let Some(size) = self.window_restore.take() {
+                    return Task::Resize((
+                        size.0.max(NORMAL_MIN_SIZE.0),
+                        size.1.max(NORMAL_MIN_SIZE.1),
+                    ));
                 }
             }
             Message::ShowTab(tab) => {
@@ -902,23 +802,6 @@ impl App {
                 if tab != Tab::Home {
                     self.streaming.sharing.stop_capture();
                     self.streaming.clear_picture();
-                }
-            }
-            Message::VideoTick => {
-                if let Some(frame) = self.streaming.take_frame() {
-                    return iced_runtime::image::allocate(frame.handle.clone())
-                        .map(move |result| Message::VideoFrameReady(frame.clone(), result));
-                }
-            }
-            Message::VideoFrameReady(frame, result) => {
-                let detail = result.as_ref().err().map(ToString::to_string);
-                match self.streaming.frame_uploaded(frame, result) {
-                    Some(true) => self.alerts.recover(Source::StreamFrame),
-                    Some(false) => self.alerts.raise(
-                        Source::StreamFrame,
-                        detail.unwrap_or_else(|| "Could not display the video frame".into()),
-                    ),
-                    None => {}
                 }
             }
             Message::RefreshStreams => {
@@ -1053,7 +936,7 @@ impl App {
             }
             Message::CopyTracePath => {
                 if let Some(path) = &self.trace_path {
-                    return iced::clipboard::write(path.display().to_string());
+                    return Task::Copy(path.display().to_string());
                 }
             }
             Message::CompactUsageTick => {
@@ -1187,7 +1070,7 @@ impl App {
                         .any(|channel| channel.id == id && channel.has_password)
                     {
                         self.password_channel = Some(id);
-                        return iced::widget::operation::focus("channel-password");
+                        return Task::Focus(ui::Field::ChannelPassword);
                     }
                     self.command(client::Command::Join(id, String::new()));
                 }
@@ -1228,7 +1111,7 @@ impl App {
             Message::Close => {
                 self.streaming.sharing.stop_capture();
                 if self.session.is_none() {
-                    return iced::exit();
+                    return Task::Exit;
                 }
                 self.closing = true;
                 self.command(client::Command::Stop);
@@ -1333,7 +1216,7 @@ impl App {
                         self.channel_password.clear();
                         self.password_error =
                             Some("The channel password was missing or incorrect.".into());
-                        return iced::widget::operation::focus("channel-password");
+                        return Task::Focus(ui::Field::ChannelPassword);
                     }
                 }
                 client::Event::Usage {
@@ -1396,7 +1279,7 @@ impl App {
                         self.alerts.raise(source, detail);
                     }
                     if self.closing {
-                        return iced::exit();
+                        return Task::Exit;
                     }
                 }
             },
@@ -1404,110 +1287,7 @@ impl App {
         Task::none()
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let _trace = profiler::scope(profiler::Category::Ui, "ui.view");
-        let content = if let Some(step) = self.onboarding {
-            self.onboarding_view(step)
-        } else if self.performance_mode.load(Ordering::Relaxed) {
-            self.performance_view()
-        } else {
-            self.normal_view()
-        };
-        let blocked = self.password_channel.is_some() || self.alerts.current().is_some();
-        let content = modal::shield(content, blocked);
-        if let Some(channel) = self
-            .password_channel
-            .and_then(|id| self.state.channels.iter().find(|channel| channel.id == id))
-        {
-            let mut fields = column![
-                text(format!("Join {}", channel.name)).size(22),
-                text("This channel is password protected.").size(13),
-                text_input("Channel password", &self.channel_password)
-                    .style(appearance::input)
-                    .id("channel-password")
-                    .secure(true)
-                    .on_input(Message::ChannelPassword)
-                    .on_submit(Message::SubmitChannelPassword)
-                    .padding(12),
-            ]
-            .spacing(14);
-            if let Some(error) = &self.password_error {
-                fields = fields.push(
-                    text(error)
-                        .size(12)
-                        .color(iced::Color::from_rgb8(255, 130, 150)),
-                );
-            }
-            let dialog = container(
-                fields.push(
-                    row![
-                        label_button("Cancel")
-                            .on_press(Message::CancelChannelPassword)
-                            .style(appearance::secondary),
-                        label_button("Join").on_press(Message::SubmitChannelPassword),
-                    ]
-                    .spacing(appearance::CONTROL_GAP),
-                ),
-            )
-            .padding(24)
-            .width(Length::Fill)
-            .max_width(400)
-            .style(appearance::card);
-            stack![
-                content,
-                opaque(
-                    container(dialog)
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill)
-                        .padding(20)
-                        .style(|_| container::Style {
-                            background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.65).into()),
-                            ..container::Style::default()
-                        })
-                )
-            ]
-            .into()
-        } else if let Some(incident) = self.alerts.current() {
-            let overlay = iced::widget::responsive(|size| {
-                let dialog = container(
-                    column![
-                        text(incident.source.title()).size(20),
-                        container(
-                            scrollable(text(&incident.detail).size(13)).height(Length::Shrink)
-                        )
-                        .max_height((size.height - 180.0).clamp(48.0, 240.0)),
-                        text(if incident.reports > 1 {
-                            format!("{} reports of this issue", incident.reports)
-                        } else {
-                            String::new()
-                        })
-                        .size(11)
-                        .color(appearance::MUTED),
-                        label_button("Close · Enter / Esc").on_press(Message::DismissError),
-                    ]
-                    .spacing(12),
-                )
-                .padding(20)
-                .width(Length::Fill)
-                .max_width(520)
-                .style(appearance::card);
-                opaque(
-                    container(dialog)
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill)
-                        .padding(16)
-                        .style(|_| container::Style {
-                            background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.65).into()),
-                            ..Default::default()
-                        }),
-                )
-            });
-            stack![content, overlay].into()
-        } else {
-            stack![content].into()
-        }
-    }
-
+    // ---- view-independent helpers ----
     fn clear_client_details(&mut self) {
         self.expanded_client = None;
         self.client_history = ConnectionHistory::new();
@@ -1526,546 +1306,6 @@ impl App {
         self.clear_client_details();
         self.expanded_client = id;
     }
-
-    fn onboarding_view(&self, step: onboarding::Step) -> Element<'_, Message> {
-        let busy = self.session.is_some() || self.permissions.pending.is_some();
-        let mut steps = row![].spacing(12);
-        for item in onboarding::Step::ALL {
-            steps = steps.push(
-                text(format!("{}. {}", item.index() + 1, item.title()))
-                    .size(11)
-                    .color(if item == step {
-                        appearance::ACCENT
-                    } else {
-                        appearance::MUTED
-                    }),
-            );
-        }
-        let fields: Element<'_, Message> = match step {
-            onboarding::Step::Username => column![
-                text("What should other people call you?").size(14),
-                text_input("Username",&self.nickname).style(appearance::input).padding(12)
-                    .on_input(Message::Nickname).on_submit(Message::SetupNext),
-            ].spacing(14).into(),
-            onboarding::Step::Server => column![
-                text("Save the server you want to connect to. You can edit it later in Settings.").size(14),
-                text_input("voice.example.org:9987",&self.address).style(appearance::input).padding(12)
-                    .on_input(Message::Address).on_submit(Message::SetupNext),
-                text("Server password (optional · kept only for this session)").size(12).color(appearance::MUTED),
-                text_input("Server password",&self.password).style(appearance::input).padding(12).secure(true)
-                    .on_input(Message::Password),
-            ].spacing(14).into(),
-            onboarding::Step::Permissions => self.permission_settings_view(),
-            onboarding::Step::Devices => column![
-                text("Choose your microphone and playback device, then test them locally. No server connection is made.").size(14),
-                self.audio_settings_view(),
-                text(if self.loopback { &self.status } else { "Stop the local test before continuing. You can also test devices later in Settings." }).size(12).color(appearance::MUTED),
-            ].spacing(16).into(),
-            onboarding::Step::Hotkeys => self.shortcut_settings_view(),
-        };
-        let mut content = column![
-            text("Welcome to Flexspeak").size(28),
-            steps.wrap(),
-            rule::horizontal(1),
-            text(step.title()).size(22),
-            scrollable(
-                container(fields)
-                    .padding(iced::Padding {
-                        right: 12.0,
-                        ..Default::default()
-                    })
-                    .width(Length::Fill)
-            )
-            .height(Length::Fill),
-        ]
-        .spacing(16)
-        .height(Length::Fill);
-        if let Some(error) = &self.onboarding_error {
-            content = content.push(
-                text(error)
-                    .size(13)
-                    .color(iced::Color::from_rgb8(255, 130, 150)),
-            );
-        }
-        content = content.push(
-            row![
-                label_button("Back")
-                    .on_press_maybe(
-                        (!busy && step.previous().is_some()).then_some(Message::SetupBack)
-                    )
-                    .style(appearance::secondary),
-                iced::widget::space::horizontal(),
-                label_button(if step == onboarding::Step::Hotkeys {
-                    "Finish setup"
-                } else {
-                    "Continue"
-                })
-                .on_press_maybe((!busy).then_some(Message::SetupNext)),
-            ]
-            .spacing(12)
-            .align_y(iced::Alignment::Center),
-        );
-        container(
-            container(content)
-                .padding(24)
-                .max_width(720)
-                .max_height(700)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(appearance::card),
-        )
-        .padding(24)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
-    }
-
-    fn permission_settings_view(&self) -> Element<'_, Message> {
-        let enabled = self.permissions.pending.is_none() && self.session.is_none();
-        let mut content = column![
-            text("Access is controlled by your operating system. Choose what to enable; you can continue setup and change permissions later.").size(13).color(appearance::MUTED),
-        ].spacing(16);
-        if cfg!(target_os = "macos") {
-            content = content.push(
-                text("In macOS privacy settings, this build is listed as Native Voice.")
-                    .size(12)
-                    .color(appearance::MUTED),
-            );
-        }
-        for kind in permissions::Kind::ALL {
-            let request_label = if cfg!(windows) && kind == permissions::Kind::Microphone {
-                "Open privacy settings"
-            } else if cfg!(target_os = "macos") {
-                "Request access"
-            } else {
-                "Review access"
-            };
-            let mut section = column![
-                text(kind.title()).size(16),
-                text(kind.detail()).size(12),
-                row![
-                    label_button(request_label)
-                        .on_press_maybe(enabled.then_some(Message::RequestPermission(kind)))
-                        .style(appearance::secondary),
-                    label_button("OS settings")
-                        .on_press_maybe(
-                            (enabled && cfg!(any(target_os = "macos", windows)))
-                                .then_some(Message::OpenPermissionSettings(kind))
-                        )
-                        .style(appearance::secondary),
-                ]
-                .spacing(8)
-                .wrap(),
-            ]
-            .spacing(8);
-            if let Some(message) = &self.permissions.messages[kind.index()] {
-                section = section.push(text(message).size(12).color(appearance::MUTED));
-            }
-            content = content.push(section);
-        }
-        if self.session.is_some() {
-            content = content
-                .push(text("Disconnect or stop the local test before requesting access.").size(12));
-        }
-        content.into()
-    }
-
-    fn normal_view(&self) -> Element<'_, Message> {
-        let mut header = row![]
-            .spacing(appearance::CONTROL_GAP)
-            .align_y(iced::Alignment::Center);
-        if self.tab != Tab::Home {
-            header = header.push(
-                tooltip(
-                    appearance::icon_only_button(Icon::Server)
-                        .on_press(Message::ShowTab(Tab::Home))
-                        .style(appearance::secondary),
-                    text("Back to server").size(12),
-                    tooltip::Position::Bottom,
-                )
-                .style(appearance::floating)
-                .padding(8),
-            );
-        }
-        header = header
-            .push(iced::widget::space::horizontal())
-            .push(self.performance_switch(false))
-            .push(container(rule::vertical(1)).height(24));
-        for (tab, icon, label) in [
-            (Tab::Statistics, Icon::ChartLine, "Statistics"),
-            (Tab::Settings, Icon::Settings, "Settings"),
-        ] {
-            header = header.push(
-                tooltip(
-                    appearance::icon_only_button(icon)
-                        .on_press(Message::ShowTab(if self.tab == tab {
-                            Tab::Home
-                        } else {
-                            tab
-                        }))
-                        .style(if self.tab == tab {
-                            appearance::active_nav
-                        } else {
-                            appearance::nav
-                        }),
-                    text(label).size(12),
-                    tooltip::Position::Bottom,
-                )
-                .padding(8)
-                .gap(8)
-                .style(appearance::floating),
-            );
-        }
-        column![
-            container(header)
-                .padding([14, 24])
-                .style(appearance::chrome),
-            rule::horizontal(1),
-            match self.tab {
-                Tab::Home => self.home_view(),
-                Tab::Statistics => self.statistics_view(),
-                Tab::Settings => self.settings_view(),
-            },
-            self.resource_bar(),
-        ]
-        .height(Length::Fill)
-        .width(Length::Fill)
-        .into()
-    }
-
-    fn streaming_view(&self) -> Element<'_, Message> {
-        let connected = self.connected && !self.loopback && !self.stopping;
-        let supported = connected && self.state.server_version.starts_with("6.");
-        let mut content = column![
-            icons::label(Icon::MonitorPlay, "Streams", 24),
-            text("Share your screen or watch a stream in this channel")
-                .size(13)
-                .color(appearance::MUTED),
-        ]
-        .spacing(18);
-        if !connected {
-            content = content.push(
-                container(
-                    column![
-                        text("Connect to a server first").size(18),
-                        text("Join a channel in Voice, then return here to share or watch.")
-                            .size(14)
-                    ]
-                    .spacing(10),
-                )
-                .padding(20)
-                .width(Length::Fill)
-                .style(appearance::card),
-            );
-        } else {
-            content = content.push(
-                row![
-                    column![
-                        text(&self.state.server).size(16),
-                        text(format!(
-                            "Server {} · {}",
-                            self.state.server_version,
-                            self.state
-                                .current
-                                .as_ref()
-                                .map_or("No channel", |channel| channel.name.as_str())
-                        ))
-                        .size(12)
-                        .color(appearance::MUTED)
-                    ]
-                    .width(Length::Fill)
-                    .spacing(4),
-                    label_button("Refresh streams")
-                        .on_press_maybe(supported.then_some(Message::RefreshStreams))
-                        .style(appearance::secondary),
-                ]
-                .spacing(12)
-                .align_y(iced::Alignment::Center),
-            );
-            if !supported {
-                content = content.push(text("This server does not advertise TeamSpeak 6. Server-channel streaming is unavailable.").size(14));
-            } else if !streaming::AVAILABLE {
-                content = content
-                    .push(text("Native screen sharing is available on Mac and Windows.").size(14));
-            }
-            if supported && streaming::AVAILABLE {
-                let sharing = &self.streaming.sharing;
-                let status = &sharing.status;
-                let mut controls = column![text("Share your screen").size(18)].spacing(12);
-                if status.active {
-                    controls = controls
-                        .push(text(&status.detail).size(14))
-                        .push(
-                            label_button("Stop sharing")
-                                .on_press(Message::StopSharing)
-                                .style(appearance::danger),
-                        )
-                        .push(
-                            text(format!(
-                                "{} / {} viewers · {} captured video frames · {} audio blocks",
-                                status.viewers.len(),
-                                streaming::publishing::MAX_VIEWERS,
-                                status.video_frames,
-                                status.audio_frames
-                            ))
-                            .size(12),
-                        )
-                        .push(
-                            progress_bar(0.0..=1.0, status.audio_level.min(1.0))
-                                .girth(8)
-                                .style(appearance::meter),
-                        );
-                    for (_, name, ready) in &status.viewers {
-                        controls = controls.push(
-                            text(format!(
-                                "{} · {}",
-                                name,
-                                if *ready { "Connected" } else { "Connecting…" }
-                            ))
-                            .size(13),
-                        );
-                    }
-                    for (id, name) in &status.requests {
-                        controls = controls.push(
-                            row![
-                                text(format!("{} wants to watch", name)).width(Length::Fill),
-                                label_button("Allow").on_press_maybe(
-                                    (status.viewers.len() < streaming::publishing::MAX_VIEWERS)
-                                        .then_some(Message::DecideViewer(*id, true))
-                                ),
-                                label_button("Deny")
-                                    .on_press(Message::DecideViewer(*id, false))
-                                    .style(appearance::secondary),
-                            ]
-                            .spacing(8)
-                            .align_y(iced::Alignment::Center),
-                        );
-                    }
-                } else {
-                    controls = controls
-                        .push(
-                            row![
-                                pick_list(
-                                    sharing.sources.clone(),
-                                    sharing.selected.clone(),
-                                    Message::ShareSource
-                                )
-                                .style(appearance::device_picker)
-                                .menu_style(appearance::device_menu)
-                                .placeholder("Select a screen or window")
-                                .width(Length::Fill),
-                                label_button(if sharing.loading {
-                                    "Loading…"
-                                } else {
-                                    "Choose source"
-                                })
-                                .on_press_maybe(
-                                    (!sharing.loading).then_some(Message::RefreshShareSources)
-                                )
-                                .style(appearance::secondary),
-                            ]
-                            .spacing(10),
-                        )
-                        .push(
-                            checkbox(sharing.audio)
-                                .label("Share system audio")
-                                .style(appearance::check)
-                                .on_toggle(Message::ShareAudio),
-                        );
-                    if sharing.audio {
-                        controls = controls.push(pick_list(self.devices.outputs.clone(),sharing.audio_device.clone().or_else(|| self.devices.output.clone()),Message::ShareAudioOutput).style(appearance::device_picker).menu_style(appearance::device_menu).placeholder("System audio output").width(Length::Fill))
-                            .push(text("Shares all sound on this output, including calls and notifications—even when sharing one window. Your voice microphone remains separate.").size(12).color(appearance::MUTED));
-                    }
-                    controls = controls.push(label_button("Start sharing").on_press_maybe(sharing.selected.is_some().then_some(Message::StartSharing)))
-                        .push(text("Up to 720p / 30 FPS · approve each viewer · leaving this view stops sharing.").size(12).color(appearance::MUTED));
-                    if !status.detail.is_empty() {
-                        controls = controls.push(text(&status.detail).size(13));
-                    }
-                }
-                content = content.push(
-                    container(controls)
-                        .padding(20)
-                        .width(Length::Fill)
-                        .style(appearance::card),
-                );
-            }
-            let active_stream = self
-                .streaming
-                .stream
-                .as_ref()
-                .filter(|_| self.streaming.active());
-            if let Some(stream) = active_stream {
-                let phase = self.streaming.phase.unwrap_or(streaming::Phase::Stopped);
-                let mut player = column![
-                    row![
-                        text(&stream.name).size(18).width(Length::Fill),
-                        label_button("Stop watching")
-                            .on_press(Message::StopWatching)
-                            .style(appearance::danger)
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Alignment::Center),
-                    text(phase.label()).size(14),
-                    text(&self.streaming.detail)
-                        .size(12)
-                        .color(appearance::MUTED),
-                ]
-                .spacing(10);
-                if let Some(frame) = &self.streaming.frame {
-                    player = player.push(
-                        iced::widget::image(frame.handle.clone())
-                            .rotation(iced::Radians(frame.rotation))
-                            .content_fit(iced::ContentFit::Contain)
-                            .width(Length::Fill)
-                            .height(400),
-                    );
-                } else if self.streaming.active() {
-                    player = player.push(
-                        container(
-                            text("Waiting for decoded video…")
-                                .size(14)
-                                .color(appearance::MUTED),
-                        )
-                        .center_x(Length::Fill)
-                        .center_y(240)
-                        .style(appearance::inset),
-                    );
-                }
-                let stats = &self.streaming.stats;
-                if stats.packets > 0 || self.streaming.ui_updates > 0 {
-                    player = player.push(
-                        text(format!(
-                            "{} · {}×{} · {:.1} decoded FPS",
-                            if stats.codec.is_empty() {
-                                "Negotiating codec"
-                            } else {
-                                &stats.codec
-                            },
-                            stats.width,
-                            stats.height,
-                            stats.fps
-                        ))
-                        .size(13),
-                    );
-                    player = player.push(
-                        text(format!(
-                            "{} RTP packets · {} decoded frames · {} UI updates · {} received",
-                            stats.packets,
-                            stats.decoded_frames,
-                            self.streaming.ui_updates,
-                            usage::format_bytes(stats.bytes as f64)
-                        ))
-                        .size(12),
-                    );
-                    player = player.push(
-                        text(format!(
-                            "Decoder: {} · ICE: {}",
-                            stats.decoder, stats.ice_path
-                        ))
-                        .size(11)
-                        .color(appearance::MUTED),
-                    );
-                    if !stats.codec_parameters.is_empty() {
-                        player = player.push(
-                            text(&stats.codec_parameters)
-                                .size(10)
-                                .color(appearance::MUTED),
-                        );
-                    }
-                    if !stats.publisher_version.is_empty() {
-                        player = player.push(
-                            text(format!("Publisher: {}", stats.publisher_version))
-                                .size(11)
-                                .color(appearance::MUTED),
-                        );
-                    }
-                }
-                content = content.push(
-                    container(player)
-                        .padding(20)
-                        .width(Length::Fill)
-                        .style(appearance::card),
-                );
-            }
-            let mut available_streams = self
-                .streaming
-                .catalog
-                .iter()
-                .filter(|stream| active_stream.is_none_or(|active| active.id != stream.id))
-                .peekable();
-            if available_streams.peek().is_some() || active_stream.is_none() {
-                content = content.push(text("Streams in your channel").size(18));
-            }
-            if available_streams.peek().is_none() && active_stream.is_none() {
-                content = content.push(text("No active streams found. Start a share here or ask someone in this channel to share.").size(13).color(appearance::MUTED));
-            }
-            for stream in available_streams {
-                let publisher = self
-                    .state
-                    .current_members()
-                    .iter()
-                    .find(|member| member.id == stream.publisher)
-                    .map_or("Publisher", |member| member.name.as_str());
-                content = content.push(
-                    container(
-                        row![
-                            column![
-                                text(&stream.name).size(15),
-                                text(format!(
-                                    "{publisher} · {} viewers{}",
-                                    stream.viewers,
-                                    if stream.has_audio {
-                                        " · includes audio"
-                                    } else {
-                                        ""
-                                    }
-                                ))
-                                .size(12)
-                                .color(appearance::MUTED)
-                            ]
-                            .spacing(5)
-                            .width(Length::Fill),
-                            label_button(if stream.server_relayed {
-                                "Server relay unavailable"
-                            } else {
-                                "Watch"
-                            })
-                            .on_press_maybe(
-                                (supported
-                                    && streaming::AVAILABLE
-                                    && !stream.server_relayed
-                                    && !self.streaming.active())
-                                .then_some(())
-                                .filter(|_| !self.streaming.sharing.status.active)
-                                .map(|_| Message::WatchStream(stream.id.clone()))
-                            )
-                        ]
-                        .spacing(12)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .padding(16)
-                    .width(Length::Fill)
-                    .style(appearance::card),
-                );
-            }
-        }
-        content = content.push(text("Stream audio follows playback volume and deafen. Opening Settings or Statistics, switching channels or entering performance mode stops watching and sharing.").size(11).color(appearance::MUTED));
-        scrollable(content.padding(28).max_width(1200))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
-
-    fn performance_switch(&self, enabled: bool) -> Element<'_, Message> {
-        checkbox(enabled)
-            .label("Performance mode")
-            .size(16)
-            .text_size(if enabled { 14 } else { 12 })
-            .on_toggle(Message::PerformanceMode)
-            .style(appearance::check)
-            .into()
-    }
-
     fn footer_connection_status(&self) -> (usage::Health, &'static str, String) {
         if self.connected && !self.loopback && !self.stopping && self.state.current.is_some() {
             if self.performance_mode.load(Ordering::Relaxed) {
@@ -2095,117 +1335,6 @@ impl App {
             (usage::Health::Unknown, label, self.status.clone())
         }
     }
-
-    fn resource_bar(&self) -> Element<'_, Message> {
-        let compact = self.performance_mode.load(Ordering::Relaxed);
-        let show_connection = !compact
-            && self.connected
-            && !self.loopback
-            && !self.stopping
-            && self.state.current.is_some();
-        let cpu = self.process_usage.cpu_percent.map_or_else(
-            || "measuring…".into(),
-            |value| usage::format_cpu_percent(f64::from(value)),
-        );
-        let (health, label, detail) = self.footer_connection_status();
-        let status = tooltip(
-            container(
-                row![text("●").size(10), text(label).size(12)]
-                    .spacing(7)
-                    .align_y(iced::Alignment::Center),
-            )
-            .padding([5, 9])
-            .style(move |theme| container::Style {
-                text_color: Some(health_color(health)),
-                ..appearance::inset(theme)
-            }),
-            container(text(detail).size(12)).max_width(340),
-            tooltip::Position::Top,
-        )
-        .padding(10)
-        .gap(8)
-        .style(appearance::floating);
-        let size = if compact { 11 } else { 12 };
-        let ram = format!("RAM {}", usage::format_mib(self.process_usage.memory_bytes));
-        let footprint = format!(
-            "{} {}",
-            usage::MEMORY_DETAIL_LABEL,
-            usage::format_mib(self.process_usage.memory_detail_bytes)
-        );
-        let readings: Element<'_, Message> = if show_connection {
-            column![
-                icons::label(Icon::Cpu, format!("CPU {cpu}"), 11),
-                icons::label(Icon::Memory, ram, 11),
-                text(footprint).size(10).color(appearance::MUTED),
-            ]
-            .spacing(2)
-            .width(150)
-            .into()
-        } else {
-            row![
-                icons::label(Icon::Cpu, format!("CPU {cpu}"), size),
-                icons::label(Icon::Memory, ram, size),
-                text(footprint).size(size),
-            ]
-            .spacing(if compact { 12 } else { 24 })
-            .align_y(iced::Alignment::Center)
-            .wrap()
-            .into()
-        };
-        let content: Element<'_, Message> = if compact {
-            column![readings, status].spacing(7).into()
-        } else if show_connection {
-            row![
-                status,
-                iced::widget::responsive(|size| {
-                    let minimum = 4.0 * appearance::CONNECTION_CHART_MIN_WIDTH
-                        + 3.0 * appearance::CONNECTION_CHART_GAP as f32;
-                    scrollable(
-                        container(connection_health_view(
-                            self.connection_usage,
-                            &self.connection_history,
-                            true,
-                        ))
-                        .width(size.width.max(minimum)),
-                    )
-                    .direction(iced::widget::scrollable::Direction::Horizontal(
-                        iced::widget::scrollable::Scrollbar::new()
-                            .width(3)
-                            .scroller_width(3)
-                            .spacing(3),
-                    ))
-                    .width(Length::Fill)
-                    .height(44)
-                    .into()
-                })
-                .height(44),
-                container(rule::vertical(1)).height(38),
-                readings,
-            ]
-            .spacing(16)
-            .align_y(iced::Alignment::Center)
-            .into()
-        } else {
-            row![status, iced::widget::space::horizontal(), readings]
-                .spacing(20)
-                .align_y(iced::Alignment::Center)
-                .into()
-        };
-        column![
-            rule::horizontal(1),
-            container(content)
-                .padding(if show_connection {
-                    iced::Padding::from([8, 14])
-                } else {
-                    iced::Padding::from(if compact { 12 } else { 14 })
-                })
-                .width(Length::Fill)
-                .style(appearance::chrome)
-        ]
-        .width(Length::Fill)
-        .into()
-    }
-
     fn microphone_status(&self) -> &'static str {
         if !self.connected || self.stopping {
             "Inactive"
@@ -2264,432 +1393,6 @@ impl App {
                 .iter()
                 .any(|channel| channel.id == id && channel.join_access.can_request())
     }
-
-    fn shortcut_hint(&self) -> Element<'_, Message> {
-        if let Some(error) = &self.shortcut_error {
-            text(if shortcuts::supported() {
-                "Global shortcuts unavailable. Configure them in Settings.".into()
-            } else {
-                format!("Global shortcuts unavailable: {error}")
-            })
-            .size(11)
-            .color(iced::Color::from_rgb8(255, 130, 150))
-            .into()
-        } else {
-            text(format!(
-                "Global: {} · mute/unmute   |   {} · deafen/undeafen",
-                self.keybinds.toggle_mute, self.keybinds.toggle_deafen
-            ))
-            .size(11)
-            .color(appearance::MUTED)
-            .into()
-        }
-    }
-
-    fn shortcut_settings_view(&self) -> Element<'_, Message> {
-        column![
-            text("Global keybinds").size(18),
-            text("Mute/unmute and deafen/undeafen each use one toggle. Test to apply now; finish setup or Save to keep them.")
-                .size(12)
-                .color(appearance::MUTED),
-            row![
-                column![
-                    text("Toggle microphone mute").size(12),
-                    text_input("Ctrl+Shift+M", &self.keybind_draft.toggle_mute)
-                        .style(appearance::input)
-                        .on_input(Message::MuteKeybind)
-                        .padding(11)
-                ]
-                .spacing(8)
-                .width(Length::Fill),
-                column![
-                    text("Toggle deafen").size(12),
-                    text_input("Ctrl+Shift+D", &self.keybind_draft.toggle_deafen)
-                        .style(appearance::input)
-                        .on_input(Message::DeafenKeybind)
-                        .padding(11)
-                ]
-                .spacing(8)
-                .width(Length::Fill),
-            ]
-            .spacing(16),
-            label_button("Test shortcuts").on_press(Message::TestHotkeys).style(appearance::secondary),
-            self.shortcut_hint(),
-            text(match self.last_shortcut {
-                Some(shortcuts::Action::Mute) => "Detected: mute / unmute",
-                Some(shortcuts::Action::Deafen) => "Detected: deafen / undeafen",
-                None => "After applying, press each shortcut. You can test them while disconnected.",
-            }).size(12),
-        ]
-        .spacing(14).into()
-    }
-
-    fn settings_view(&self) -> Element<'_, Message> {
-        let idle = self.session.is_none();
-        let connection = column![
-            text("Saved server").size(18),
-            row![
-                column![
-                    icons::label(Icon::Server, "Server address", 12),
-                    text_input("hostname:9987 or IP address", &self.address)
-                        .style(appearance::input)
-                        .on_input_maybe(idle.then_some(Message::Address))
-                        .padding(11)
-                ]
-                .spacing(8)
-                .width(Length::Fill),
-                column![
-                    text("Nickname").size(12),
-                    text_input("Nickname", &self.nickname)
-                        .style(appearance::input)
-                        .on_input_maybe(idle.then_some(Message::Nickname))
-                        .padding(11)
-                ]
-                .spacing(8)
-                .width(Length::Fill),
-            ]
-            .spacing(16),
-            text("Server password (optional · not saved)").size(12),
-            text_input("Server password", &self.password)
-                .style(appearance::input)
-                .secure(true)
-                .on_input_maybe(idle.then_some(Message::Password))
-                .padding(11),
-        ]
-        .spacing(14);
-        let mut content = column![
-            text("Settings").size(28),
-            text("Your connection, audio and controls.").size(13).color(appearance::MUTED),
-            container(connection).padding(20).width(Length::Fill).style(appearance::card),
-            container(column![text("Audio").size(18), self.audio_settings_view()].spacing(16)).padding(20).width(Length::Fill).style(appearance::card),
-            container(self.permission_settings_view()).padding(20).width(Length::Fill).style(appearance::card),
-            container(self.shortcut_settings_view()).padding(20).width(Length::Fill).style(appearance::card),
-            row![
-                label_button("Save settings").on_press(Message::SaveSettings),
-                label_button("Reload JSON").on_press_maybe(idle.then_some(Message::ReloadSettings)).style(appearance::secondary),
-                label_button("Copy settings path").on_press_maybe(self.settings_path.as_ref().map(|_| Message::CopySettingsPath)).style(appearance::secondary),
-            ].spacing(appearance::CONTROL_GAP).align_y(iced::Alignment::Center).wrap(),
-            text("Save writes your portable settings. After editing the JSON externally, disconnect and Reload JSON.").size(12).color(appearance::MUTED),
-        ].spacing(18);
-        if let Some(path) = &self.settings_path {
-            content = content.push(text(path.display().to_string()).size(11));
-        }
-        if let Some(message) = &self.settings_message {
-            content = content.push(text(message).size(13));
-        }
-        content = content.push(text(match self.last_shortcut {
-            Some(shortcuts::Action::Mute) => "Last shortcut received: mute/unmute",
-            Some(shortcuts::Action::Deafen) => "Last shortcut received: deafen/undeafen",
-            None => "You can test shortcuts while disconnected; the last detected action appears here.",
-        }).size(12));
-        scrollable(content.padding(28).max_width(920))
-            .height(Length::Fill)
-            .into()
-    }
-
-    fn performance_view(&self) -> Element<'_, Message> {
-        let in_channel = self.connected && !self.loopback && !self.stopping;
-        let connection = if self.stopping {
-            "Disconnecting…"
-        } else if self.connected {
-            if self.loopback {
-                "Local microphone test"
-            } else {
-                "Connected"
-            }
-        } else {
-            &self.status
-        };
-        let channel = self
-            .state
-            .current
-            .as_ref()
-            .filter(|_| in_channel)
-            .map_or("—", |channel| channel.name.as_str());
-        let playback = if !self.connected || self.stopping {
-            "Inactive"
-        } else if self.deafened {
-            "Deafened"
-        } else {
-            "On"
-        };
-        let info = column![
-            text(format!("Connection: {connection}")).size(14),
-            icons::label(
-                Icon::Server,
-                format!(
-                    "Server: {}",
-                    if in_channel {
-                        &self.state.server
-                    } else {
-                        "—"
-                    }
-                ),
-                14
-            ),
-            icons::label(Icon::Channel, format!("Channel: {channel}"), 14),
-            icons::label(
-                self.microphone_icon(),
-                format!("Microphone: {}", self.microphone_status()),
-                14
-            ),
-            icons::label(self.playback_icon(), format!("Playback: {playback}"), 14),
-        ]
-        .spacing(6);
-        column![
-            container(
-                column![
-                    self.performance_switch(true),
-                    scrollable(info.width(Length::Fill))
-                        .height(Length::Fill)
-                        .width(Length::Fill),
-                    self.shortcut_hint(),
-                    text(format!(
-                        "Updates every {} s · CPU: 100% = one core",
-                        usage::COMPACT_REFRESH_INTERVAL.as_secs()
-                    ))
-                    .size(11),
-                ]
-                .spacing(8)
-                .width(Length::Fill)
-                .height(Length::Fill)
-            )
-            .padding(16)
-            .height(Length::Fill)
-            .width(Length::Fill),
-            self.resource_bar(),
-        ]
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn audio_settings_view(&self) -> Element<'_, Message> {
-        let busy = self.session.is_some();
-        let volume = self.playback_volume.percent();
-        column![
-            row![
-                column![
-                    icons::label(Icon::Mic, "Microphone", 13),
-                    pick_list(self.devices.inputs.clone(), self.input.as_ref(), Message::Input).style(appearance::device_picker).menu_style(appearance::device_menu)
-                        .placeholder(if self.devices.inputs.is_empty() {"No microphone detected"} else {"Select a microphone"}).width(Length::Fill).padding(10),
-                    text(if busy {
-                        format!("Input activity · {}", self.microphone_status())
-                    } else {
-                        "Input activity · start a local test".into()
-                    }).size(12),
-                    progress_bar(0.0..=1.0, self.microphone_meter_level()).girth(8).style(appearance::meter),
-                ].spacing(6).width(Length::Fill),
-                column![
-                    icons::label(self.playback_icon(), "Playback", 13),
-                    pick_list(self.devices.outputs.clone(), self.output.as_ref(), Message::Output).style(appearance::device_picker).menu_style(appearance::device_menu)
-                        .placeholder(if self.devices.outputs.is_empty() {"No playback device detected"} else {"Select a playback device"}).width(Length::Fill).padding(10),
-                    icons::label(if volume == 0 { Icon::VolumeOff } else { Icon::Volume }, format!("Volume · {volume}%"), 12),
-                    slider(0..=100, volume, Message::PlaybackVolume).step(1).style(appearance::volume),
-                ].spacing(6).width(Length::Fill),
-            ].spacing(16),
-            row![
-                label_button("Refresh devices").on_press_maybe((!busy).then_some(Message::Refresh)).style(appearance::secondary),
-                icon_button(Icon::Mic, if busy && self.loopback { "Stop microphone test" } else { "Test microphone locally" })
-                    .on_press_maybe(if self.stopping { None } else if busy && self.loopback { Some(Message::Stop) } else if !busy { Some(Message::TestAudio) } else { None })
-                    .style(if busy && self.loopback { appearance::danger } else { appearance::secondary }),
-            ].spacing(appearance::CONTROL_GAP).align_y(iced::Alignment::Center).wrap(),
-            text("Use headphones for the local test. Disconnect to change audio devices; volume updates live.").size(12),
-        ].spacing(12).into()
-    }
-
-    fn home_view(&self) -> Element<'_, Message> {
-        if self.connected && !self.loopback {
-            return row![
-                container(
-                    column![
-                        self.sidebar_controls(),
-                        rule::horizontal(1),
-                        row![
-                            Icon::Server.view(18),
-                            text(&self.state.server).size(16).width(Length::Fill)
-                        ]
-                        .spacing(8),
-                        text("CHANNELS").size(10).color(appearance::MUTED),
-                        scrollable(
-                            container(self.channel_tree_view())
-                                .padding(iced::Padding {
-                                    right: 16.0,
-                                    ..Default::default()
-                                })
-                                .width(Length::Fill)
-                        )
-                        .height(Length::Fill)
-                        .width(Length::Fill),
-                    ]
-                    .spacing(12)
-                    .height(Length::Fill)
-                )
-                .padding(12)
-                .width(280)
-                .height(Length::Fill)
-                .style(appearance::chrome),
-                rule::vertical(1),
-                self.streaming_view(),
-            ]
-            .height(Length::Fill)
-            .width(Length::Fill)
-            .into();
-        }
-        let busy = self.session.is_some();
-        let mut card = column![text("Saved server").size(12).color(appearance::MUTED)].spacing(18);
-        if let Some(saved) = &self.saved {
-            let label = if self.stopping {
-                "Stopping…"
-            } else if busy && self.loopback {
-                "Stop microphone test"
-            } else if busy {
-                "Cancel connection"
-            } else {
-                "Connect to server"
-            };
-            let action = if busy {
-                Message::Stop
-            } else {
-                Message::Connect
-            };
-            let connect = tooltip(
-                appearance::icon_only_button(if busy {
-                    Icon::Disconnect
-                } else {
-                    Icon::Connect
-                })
-                .on_press_maybe(
-                    (!self.stopping && self.permissions.pending.is_none()).then_some(action),
-                )
-                .style(if busy {
-                    appearance::danger
-                } else {
-                    appearance::primary
-                }),
-                text(label).size(12),
-                tooltip::Position::Bottom,
-            )
-            .padding(8)
-            .gap(8)
-            .style(appearance::floating);
-            card = card
-                .push(
-                    row![
-                        column![
-                            text(&saved.server_address).size(24),
-                            text(format!("Connect as {}", saved.nickname))
-                                .size(13)
-                                .color(appearance::MUTED)
-                        ]
-                        .spacing(6)
-                        .width(Length::Fill),
-                        connect,
-                    ]
-                    .spacing(20)
-                    .align_y(iced::Alignment::Center),
-                )
-                .push(text(&self.status).size(13).color(appearance::MUTED));
-        } else {
-            card = card
-                .push(text("No saved server yet").size(24))
-                .push(text("Open Settings to configure your server and username.").size(13))
-                .push(label_button("Open settings").on_press(Message::ShowTab(Tab::Settings)));
-        }
-        container(
-            container(card)
-                .padding(28)
-                .width(Length::Fill)
-                .max_width(600)
-                .style(appearance::card),
-        )
-        .padding(28)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
-    }
-
-    fn sidebar_controls(&self) -> Element<'_, Message> {
-        let enabled = self.connected && !self.loopback && !self.stopping;
-        let mut controls = row![].spacing(appearance::CONTROL_GAP);
-        for (icon, label, message, active, enabled) in [
-            (
-                Icon::Disconnect,
-                "Disconnect",
-                Message::Stop,
-                false,
-                !self.stopping,
-            ),
-            (
-                self.microphone_icon(),
-                if self.muted {
-                    "Unmute microphone"
-                } else {
-                    "Mute microphone"
-                },
-                Message::Mute,
-                self.muted || self.deafened,
-                enabled,
-            ),
-            (
-                self.playback_icon(),
-                if self.deafened { "Undeafen" } else { "Deafen" },
-                Message::Deafen,
-                self.deafened,
-                enabled,
-            ),
-        ] {
-            controls = controls.push(
-                tooltip(
-                    appearance::icon_only_button(icon)
-                        .on_press_maybe(enabled.then_some(message))
-                        .style(if icon == Icon::Disconnect {
-                            appearance::danger
-                        } else if active {
-                            appearance::active_nav
-                        } else {
-                            appearance::secondary
-                        }),
-                    text(label).size(12),
-                    tooltip::Position::Bottom,
-                )
-                .padding(8)
-                .gap(6)
-                .style(appearance::floating),
-            );
-        }
-        let mut content = column![
-            controls,
-            text(format!(
-                "Mic: {} · {}",
-                self.microphone_status(),
-                if self.deafened {
-                    "Deafened"
-                } else {
-                    "Sound on"
-                }
-            ))
-            .size(11)
-            .color(appearance::MUTED)
-        ]
-        .spacing(6);
-        if self.controls_pending
-            || self
-                .server_controls
-                .is_none_or(|state| state.muted != self.muted || state.deafened != self.deafened)
-        {
-            content = content.push(
-                text(if self.controls_pending {
-                    "Server audio update pending"
-                } else {
-                    "Server audio state unconfirmed"
-                })
-                .size(11)
-                .color(appearance::MUTED),
-            );
-        }
-        content.into()
-    }
-
     fn member_health(
         &self,
         member: &client::Member,
@@ -2710,194 +1413,13 @@ impl App {
             (quality.health(), quality.health_tooltip())
         }
     }
-
-    fn client_connections_view(&self) -> Element<'_, Message> {
-        let mut clients = column![text("Channel connections").size(16)].spacing(8);
-        let mut count = 0;
-        if let Some(channel) = &self.state.current {
-            for member in channel.members.iter().filter(|member| !member.is_self) {
-                count += 1;
-                let expanded = self.expanded_client == Some(member.id);
-                let quality = self.client_quality(member.id, Instant::now());
-                let (health, detail) = self.member_health(member, true);
-                let header = row![
-                    connection_indicator(health, detail),
-                    text(&member.name).size(14).width(Length::Fill),
-                    text(if expanded { "▾" } else { "▸" }).size(13),
-                ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center);
-                clients = clients.push(
-                    button(header)
-                        .width(Length::Fill)
-                        .style(appearance::secondary)
-                        .on_press_maybe(
-                            (!self.stopping).then_some(Message::ToggleClient(member.id)),
-                        ),
-                );
-                if expanded {
-                    clients =
-                        clients.push(connection_health_view(quality, &self.client_history, false));
-                    clients = clients.push(
-                        text(match self.client_usage.get(&member.id) {
-                            Some(Err(error)) => *error,
-                            Some(Ok(_)) => {
-                                "Server snapshot · refreshes are staggered across your channel"
-                            }
-                            None => "Waiting for a connection-health sample…",
-                        })
-                        .size(11),
-                    );
-                }
-            }
-        }
-        if count == 0 {
-            clients = clients.push(text("No other clients in your channel.").size(12));
-        }
-        clients.into()
-    }
-
     fn client_quality(&self, id: u16, now: Instant) -> usage::ConnectionUsage {
         self.client_usage
             .get(&id)
             .and_then(|result| result.as_ref().ok())
             .map_or_else(usage::ConnectionUsage::default, |sample| sample.sample(now))
     }
-
-    fn channel_tree_view(&self) -> Element<'_, Message> {
-        let mut tree = column![].spacing(12);
-        let mut hidden_below = None;
-        for channel in &self.state.channels {
-            if hidden_below.is_some_and(|depth| channel.depth > depth) {
-                continue;
-            }
-            hidden_below = None;
-            let collapsed = self.collapsed_channels.contains(&channel.id);
-            if collapsed {
-                hidden_below = Some(channel.depth);
-            }
-            let current = self
-                .state
-                .current
-                .as_ref()
-                .is_some_and(|value| value.id == channel.id);
-            let hint = if current {
-                "Current channel"
-            } else {
-                match channel.join_access {
-                    client::JoinAccess::Denied => "You do not have permission to join this channel",
-                    client::JoinAccess::UnsupportedCodec => {
-                        "This channel uses an unsupported audio codec"
-                    }
-                    _ if channel.has_password => "Click to join · a password will be requested",
-                    _ => "Click to join this channel",
-                }
-            };
-            let name = button(
-                row![
-                    Icon::Volume.view(16),
-                    text(&channel.name)
-                        .size(13)
-                        .font(iced::font::Font {
-                            weight: iced::font::Weight::Bold,
-                            ..Default::default()
-                        })
-                        .width(Length::Fill),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            )
-            .height(appearance::CHANNEL_ROW_HEIGHT)
-            .width(Length::Fill)
-            .padding([0, 8])
-            .on_press_maybe(
-                ((!self.stopping && current) || self.can_request_join(channel.id))
-                    .then_some(Message::Join(channel.id)),
-            )
-            .style(move |theme, status| appearance::channel_row(theme, status, current));
-            let header = row![
-                compact_button(if collapsed { "▸" } else { "▾" })
-                    .on_press(Message::ToggleChannel(channel.id))
-                    .style(appearance::nav)
-                    .width(24)
-                    .height(appearance::CHANNEL_ROW_HEIGHT),
-                tooltip(name, text(hint).size(12), tooltip::Position::Top)
-                    .padding(8)
-                    .gap(6)
-                    .style(appearance::floating),
-            ]
-            .spacing(2)
-            .align_y(iced::Alignment::Center);
-            let mut node = column![header].spacing(2);
-            if !collapsed {
-                for member in &channel.members {
-                    let mic_muted = member.mic_muted
-                        || (member.is_self && self.microphone_icon() == Icon::MicOff);
-                    let sound_muted = member.sound_muted || (member.is_self && self.deafened);
-                    let name = if member.is_self {
-                        format!("{} (you)", member.name)
-                    } else {
-                        member.name.clone()
-                    };
-                    let (health, detail) = self.member_health(member, current);
-                    let mut entry = row![
-                        connection_indicator(health, detail),
-                        text(name).size(13).width(Length::Fill),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center);
-                    for (muted, icon, label) in [
-                        (mic_muted, Icon::MicOff, "Microphone muted"),
-                        (sound_muted, Icon::HeadphoneOff, "Sound muted"),
-                    ] {
-                        if muted {
-                            entry = entry.push(
-                                tooltip(
-                                    icon.view(14).color(appearance::MUTED),
-                                    text(label).size(12),
-                                    tooltip::Position::Top,
-                                )
-                                .padding(8)
-                                .style(appearance::floating),
-                            );
-                        }
-                    }
-                    node = node.push(
-                        container(container(entry).padding([4, 8]).width(Length::Fill).style(
-                            move |_| container::Style {
-                                background: member.is_self.then_some(appearance::SURFACE.into()),
-                                ..Default::default()
-                            },
-                        ))
-                        .padding(iced::Padding {
-                            left: 26.0,
-                            ..Default::default()
-                        }),
-                    );
-                }
-                if !channel.members_visible {
-                    node = node.push(
-                        container(
-                            text("Members not visible")
-                                .size(10)
-                                .color(appearance::MUTED),
-                        )
-                        .padding(iced::Padding {
-                            left: 34.0,
-                            ..Default::default()
-                        }),
-                    );
-                }
-            }
-            tree = tree.push(container(node).padding(iced::Padding {
-                left: channel.depth.min(8) as f32 * 12.0,
-                ..iced::Padding::default()
-            }));
-        }
-        tree.into()
-    }
-
-    fn stop_trace(&mut self) -> Task<Message> {
+    fn stop_trace(&mut self) -> Task {
         let Some(recording) = self.recording.take() else {
             return Task::none();
         };
@@ -2914,353 +1436,6 @@ impl App {
             Message::TraceSaved,
         )
     }
-
-    fn statistics_view(&self) -> Element<'_, Message> {
-        let mut content = column![
-            text("Usage & Statistics").size(28),
-            text(&self.status).size(13),
-            self.usage_view(),
-        ]
-        .spacing(10);
-        if self.connected && !self.loopback {
-            content = content
-                .push(
-                    text(format!(
-                        "Voice packets · sent {} · received {}",
-                        self.sent, self.received
-                    ))
-                    .size(12),
-                )
-                .push(text(&self.detail).size(11).color(appearance::MUTED))
-                .push(self.client_connections_view());
-        }
-        content = content.push(rule::horizontal(1)).push(text("Traces & CPU breakdown").size(22))
-            .push(text("Record up to 30 seconds of timings and resource counters. Audio, messages and passwords are excluded.").size(12));
-        content = content.push(if let Some(recording) = &self.recording {
-            label_button(format!(
-                "Stop & save trace · {} s",
-                recording.started.elapsed().as_secs()
-            ))
-            .on_press(Message::StopTrace)
-            .style(appearance::danger)
-        } else {
-            label_button(if self.trace_saving {
-                "Saving trace…"
-            } else {
-                "Record 30 s trace"
-            })
-            .on_press_maybe((!self.trace_saving).then_some(Message::RecordTrace))
-        });
-        if let Some(path) = &self.trace_path {
-            content = content
-                .push(
-                    row![
-                        text(format!(
-                            "Saved {}",
-                            path.file_name().unwrap_or_default().to_string_lossy()
-                        ))
-                        .size(12),
-                        label_button("Copy trace path")
-                            .on_press(Message::CopyTracePath)
-                            .style(appearance::secondary)
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Alignment::Center),
-                )
-                .push(text("The JSON trace opens in Perfetto or a Chrome trace viewer.").size(12));
-        }
-        if let Some(summary) = &self.trace_summary {
-            content = content.push(statistics_charts::trace(summary));
-        } else if self.recording.is_none() {
-            content = content.push(text("Record a trace to measure CPU time in UI, networking, audio processing and audio callbacks.").size(13));
-        }
-        content = content
-            .push(rule::horizontal(1))
-            .push(statistics_charts::memory(
-                self.process_usage.memory_bytes,
-                self.heap_usage,
-                self.audio_buffer_bytes,
-                self.cpu_history.buffer_bytes()
-                    + self.ram_history.buffer_bytes()
-                    + self.connection_history.buffer_bytes()
-                    + self.client_history.buffer_bytes(),
-                profiler::buffer_bytes(),
-            ));
-        scrollable(content.padding(28).max_width(1200))
-            .height(Length::Fill)
-            .into()
-    }
-
-    fn usage_view(&self) -> Element<'_, Message> {
-        let quality = self.connection_usage;
-        let network = self.network_usage;
-        let percent =
-            |value: Option<f32>| value.map_or_else(|| "—".into(), |value| format!("{value:.1} %"));
-        let rate = |value: f64| format!("{}/s", usage::format_bytes(value));
-        let file_rate =
-            |value: Option<u64>| value.map_or_else(|| "—".into(), |value| rate(value as f64));
-        let ping = quality.ping_text();
-        let histories = row![
-            history_card(
-                "App CPU",
-                self.process_usage.cpu_percent.map_or_else(
-                    || "—".into(),
-                    |value| usage::format_cpu_percent(f64::from(value))
-                ),
-                &self.cpu_history,
-                true,
-                None,
-            ),
-            history_card(
-                "RAM (RSS)",
-                usage::format_mib(self.process_usage.memory_bytes),
-                &self.ram_history,
-                false,
-                Some((
-                    usage::MEMORY_DETAIL_LABEL,
-                    usage::format_mib(self.process_usage.memory_detail_bytes)
-                )),
-            ),
-        ]
-        .spacing(24);
-        column![
-            histories,
-            row![
-                metric("Upload", rate(network.upload_per_second)),
-                metric("Download", rate(network.download_per_second)),
-                metric("Packet loss (in)", percent(quality.packet_loss_in)),
-                metric("Packet loss (out)", percent(quality.packet_loss_out)),
-                metric("Ping", ping),
-                metric("Idle time", quality.idle_seconds.map_or_else(|| "—".into(), usage::format_idle)),
-            ].spacing(12),
-            row![
-                metric("File transfer (in)", file_rate(quality.file_download_per_second)),
-                metric("File transfer (out)", file_rate(quality.file_upload_per_second)),
-                metric("Session sent", usage::format_bytes(network.uploaded as f64)),
-                metric("Session received", usage::format_bytes(network.downloaded as f64)),
-            ].spacing(12),
-            text("CPU: 100% = one core · Memory counters overlap; do not add them · Traffic: TeamSpeak estimate · Local: 1 s / server: 5 s · — unavailable").size(10),
-        ].spacing(8).max_width(1200).into()
-    }
-}
-
-fn connection_indicator(health: usage::Health, detail: String) -> Element<'static, Message> {
-    tooltip(
-        container(text("●").size(10).color(health_color(health)))
-            .width(16)
-            .center_y(20),
-        container(
-            column![
-                text(if health == usage::Health::Unknown {
-                    "Unknown"
-                } else {
-                    health.label()
-                })
-                .size(12),
-                text(detail).size(12),
-            ]
-            .spacing(4),
-        )
-        .max_width(300),
-        tooltip::Position::Top,
-    )
-    .padding(8)
-    .gap(6)
-    .style(appearance::floating)
-    .into()
-}
-
-fn connection_health_view(
-    quality: usage::ConnectionUsage,
-    history: &ConnectionHistory,
-    compact: bool,
-) -> Element<'_, Message> {
-    let percent =
-        |value: Option<f32>| value.map_or_else(|| "—".into(), |value| format!("{value:.1}%"));
-    let mut content = column![].spacing(8);
-    let mut strip = row![]
-        .spacing(appearance::CONNECTION_CHART_GAP)
-        .width(Length::Fill);
-    for (metric, label, value, health, status, explanation) in [
-        (
-            Metric::LossIn,
-            "Packet loss (in)",
-            percent(quality.packet_loss_in),
-            usage::Health::loss(quality.packet_loss_in),
-            None,
-            "Server → this client. Good: below 1%; Fair: 1–5%; Poor: 5% or more.",
-        ),
-        (
-            Metric::LossOut,
-            "Packet loss (out)",
-            percent(quality.packet_loss_out),
-            usage::Health::loss(quality.packet_loss_out),
-            None,
-            "This client → server. Good: below 1%; Fair: 1–5%; Poor: 5% or more.",
-        ),
-        (
-            Metric::Ping,
-            "Ping",
-            quality.ping_text(),
-            usage::Health::ping(quality.ping_ms, quality.ping_deviation_ms),
-            None,
-            "Round-trip latency ± variation. Fair: 100 ms or variation 20 ms; Poor: 200 ms or variation 50 ms.",
-        ),
-        (
-            Metric::Idle,
-            "Idle time",
-            quality
-                .idle_seconds
-                .map_or_else(|| "—".into(), usage::format_idle),
-            usage::Health::Unknown,
-            quality
-                .idle_seconds
-                .map(|seconds| if seconds < 60 { "Active" } else { "Idle" }),
-            "Time since voice activity. Being idle is not a connection problem.",
-        ),
-    ] {
-        let color = health_color(health);
-        let status = status.unwrap_or(health.label());
-        let heading = if compact {
-            row![
-                text(match metric {
-                    Metric::LossIn => "Loss ↓",
-                    Metric::LossOut => "Loss ↑",
-                    Metric::Ping => "Ping",
-                    Metric::Idle => "Idle",
-                })
-                .size(10)
-                .color(appearance::MUTED)
-                .width(Length::Fill),
-                text(value).size(11).color(color),
-            ]
-            .spacing(4)
-        } else {
-            row![
-                text(label).size(12).width(Length::Fill),
-                text(status).size(10).color(color),
-                text(value).size(13),
-            ]
-            .spacing(8)
-        };
-        let reading = column![
-            heading.align_y(iced::Alignment::Center),
-            canvas(ConnectionChart { history, metric })
-                .width(Length::Fill)
-                .height(if compact { 20 } else { 32 }),
-        ]
-        .spacing(3);
-        let chart = tooltip(
-            container(reading)
-                .padding(if compact { 0 } else { 7 })
-                .width(Length::Fill)
-                .style(appearance::inset),
-            container(
-                column![
-                    text(format!("{label} · {status}")).size(12),
-                    text(explanation).size(12),
-                    text("Last 60 s · auto-scaled · shaded band: ping variation").size(10),
-                ]
-                .spacing(4),
-            )
-            .max_width(300),
-            if compact {
-                tooltip::Position::Top
-            } else {
-                tooltip::Position::Bottom
-            },
-        )
-        .padding(8)
-        .gap(8)
-        .style(appearance::floating);
-        if compact {
-            strip = strip.push(chart);
-        } else {
-            content = content.push(chart);
-        }
-    }
-    if compact {
-        return strip.into();
-    }
-    content =
-        content.push(text("Last 60 s → · auto-scaled · shaded band: ping variation").size(10));
-    container(content)
-        .padding(12)
-        .width(Length::Fill)
-        .style(appearance::card)
-        .into()
-}
-
-fn metric(label: &'static str, value: String) -> Element<'static, Message> {
-    column![text(label).size(11), text(value).size(16)]
-        .spacing(2)
-        .width(Length::Fill)
-        .into()
-}
-
-fn history_card<'a>(
-    label: &'static str,
-    current: String,
-    history: &'a usage::MetricHistory,
-    cpu: bool,
-    memory_detail: Option<(&'static str, String)>,
-) -> Element<'a, Message> {
-    let format = |value: f64| {
-        if cpu {
-            usage::format_cpu_percent(value)
-        } else {
-            usage::format_bytes(value)
-        }
-    };
-    let values = history.percentiles.map_or_else(
-        || "P50 —   ·   P90 —   ·   P99 —".into(),
-        |p| {
-            format!(
-                "P50 {}   ·   P90 {}   ·   P99 {}",
-                format(p.p50),
-                format(p.p90),
-                format(p.p99)
-            )
-        },
-    );
-    let color = if cpu {
-        iced::Color::from_rgb8(50, 193, 215)
-    } else {
-        iced::Color::from_rgb8(163, 142, 246)
-    };
-    let mut heading = row![
-        if cpu { Icon::Cpu } else { Icon::Memory }.view(16),
-        text(format!("{label}   {current}")).size(14)
-    ]
-    .spacing(12)
-    .align_y(iced::Alignment::Center);
-    if let Some((detail_label, value)) = memory_detail {
-        heading = heading
-            .push(iced::widget::space::horizontal())
-            .push(text(format!("{detail_label}   {value}")).size(14));
-    }
-    container(
-        column![
-            heading,
-            text(format!("Scale 0–{}", format(history.upper_bound))).size(10),
-            canvas(usage::HistoryChart { history, color })
-                .width(Length::Fill)
-                .height(86),
-            text(values).size(11),
-            text(format!(
-                "{}Last 5 min · {} samples",
-                if cpu { "" } else { "RSS history · " },
-                history.len()
-            ))
-            .size(10),
-        ]
-        .spacing(3)
-        .width(Length::Fill),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(appearance::card)
-    .into()
 }
 
 impl Drop for App {
@@ -3898,32 +2073,24 @@ mod tests {
     }
 
     #[test]
-    fn outdated_window_queries_cannot_overwrite_the_restore_size() {
+    fn performance_mode_restores_the_previous_window_size_once() {
         let mut app = App::with_devices(audio::Devices::default(), None);
-        let id = window::Id::unique();
-        let layout = WindowLayout {
-            size: Size::new(1200.0, 900.0),
-            maximized: true,
-            mode: window::Mode::Windowed,
-        };
-        let _ = app.update(Message::PerformanceMode(true));
-        let stale_request = app.performance_request;
-        let _ = app.update(Message::PerformanceMode(false));
-        let _ = app.update(Message::PerformanceMode(true));
-        let _ = app.update(Message::PerformanceWindow(stale_request, id, layout));
-        assert!(app.window_restore.is_none());
-        let _ = app.update(Message::PerformanceWindow(
-            app.performance_request,
-            id,
-            layout,
+        app.window_size = (1200.0, 900.0);
+        assert!(matches!(
+            app.update(Message::PerformanceMode(true)),
+            Task::Batch(tasks) if matches!(tasks.last(), Some(Task::Resize(COMPACT_MIN_SIZE)))
         ));
-        assert_eq!(app.window_restore.unwrap().size, layout.size);
-        let _ = app.update(Message::PerformanceMode(false));
-        let _ = app.update(Message::PerformanceWindow(
-            app.performance_request,
-            id,
-            layout,
+        app.window_size = COMPACT_MIN_SIZE;
+        assert!(matches!(
+            app.update(Message::PerformanceMode(false)),
+            Task::Resize((1200.0, 900.0))
         ));
         assert!(app.window_restore.is_none());
+        app.window_size = (500.0, 400.0);
+        let _ = app.update(Message::PerformanceMode(true));
+        assert!(matches!(
+            app.update(Message::PerformanceMode(false)),
+            Task::Resize(NORMAL_MIN_SIZE)
+        ));
     }
 }

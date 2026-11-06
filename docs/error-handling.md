@@ -1,6 +1,6 @@
 # Errors and server command pacing
 
-The native Iced error dialog replaces persistent error blocks for connection/audio failures, server command rejection, join failures, settings load/save/reload, shortcut registration, trace recording/export and streaming failures. It uses existing widgets and the app's square styles; no dialog dependency was added.
+The native Rune error dialog (rune-kit `Dialog`) replaces persistent error blocks for connection/audio failures, server command rejection, join failures, settings load/save/reload, shortcut registration, trace recording/export and streaming failures. Return presses Close and Escape dismisses it; the window behind it is inert while it is open.
 
 ## Error lifetime
 

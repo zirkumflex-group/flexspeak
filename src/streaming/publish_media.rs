@@ -678,7 +678,6 @@ mod native {
     mod tests {
         use super::*;
         use crate::streaming::{Surface, rtc};
-        use iced::widget::image::Handle;
         use libwebrtc::video_frame::VideoBuffer;
         #[test]
         fn system_audio_keeps_stereo_and_surround_center_without_invalid_samples() {
@@ -693,8 +692,8 @@ mod native {
         #[test]
         fn capture_conversion_preserves_bgra_channels_padding_and_bounds() {
             let mut pixels = vec![0_u8; 24 * 4];
-            for row in pixels.chunks_exact_mut(24) {
-                for pixel in row[..16].chunks_exact_mut(4) {
+            for row in pixels.as_chunks_mut::<24>().0 {
+                for pixel in row[..16].as_chunks_mut::<4>().0 {
                     pixel.copy_from_slice(&[0, 0, 255, 255]);
                 }
             }
@@ -797,7 +796,7 @@ mod native {
                             let mut data = Vec::with_capacity(960);
                             for i in 0..480 { let sample = (((count*480+i) as f64 * 440.0 * std::f64::consts::TAU/48000.0).sin()*8000.0) as i16; data.extend([sample,sample]); }
                             audio.capture_frame(&AudioFrame {data:Cow::Owned(data),sample_rate:48000,num_channels:2,samples_per_channel:480}).await?;
-                            if let Some(frame) = surface.take() && let Handle::Rgba {pixels,..} = frame.handle {
+                            if let Some(crate::streaming::Image { pixels, .. }) = surface.take() {
                                 let pixels: &[u8] = pixels.as_ref(); distinct.insert(pixels[(90*320+160)*4],()); decoded_video += 1;
                             }
                             let mut pcm = [0.0_f32;960]; surface.mix_audio(&mut pcm);

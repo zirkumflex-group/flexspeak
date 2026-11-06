@@ -402,7 +402,7 @@ impl AudioEngine {
             }
             let mut stereo = [0.0; BLOCK * 2];
             if loopback {
-                for frame in stereo.chunks_exact_mut(2) {
+                for frame in stereo.as_chunks_mut::<2>().0 {
                     let sample = self.monitor.pop_front().unwrap_or_default();
                     frame.fill(sample);
                 }
@@ -412,7 +412,7 @@ impl AudioEngine {
                     surface.mix_audio(&mut stereo);
                 }
             }
-            for (i, frame) in stereo.chunks_exact(2).enumerate() {
+            for (i, frame) in stereo.as_chunks::<2>().0.iter().enumerate() {
                 self.output_rate.input[0][i] = frame[0];
                 self.output_rate.input[1][i] = frame[1];
             }
@@ -584,7 +584,9 @@ mod tests {
         assert_eq!(gain, 0.0);
         assert!(
             output
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .all(|frame| frame[0] == frame[1] && (0.0..=1.0).contains(&frame[0]))
         );
         assert!(output.windows(2).all(|pair| pair[1] <= pair[0]));
