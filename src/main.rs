@@ -13,6 +13,7 @@ mod profiler;
 mod settings;
 mod shortcuts;
 mod streaming;
+mod system_appearance;
 mod ui;
 mod usage;
 mod window_icon;
@@ -123,6 +124,10 @@ struct App {
     subscribe_all: Arc<AtomicBool>,
     /// Saved straight to settings when toggled, not held until the Settings page saves.
     footer_hidden: bool,
+    /// Saved straight to settings when changed, like `footer_hidden`.
+    appearance: settings::Appearance,
+    /// Whether the system is in dark mode, refreshed with each usage tick.
+    system_dark: bool,
     window_restore: Option<(f32, f32)>,
     window_size: (f32, f32),
     next_usage_tick: Instant,
@@ -217,6 +222,7 @@ enum Message {
     ToggleChannel(u64),
     ToggleSubscribeAll,
     ToggleFooter,
+    Appearance(settings::Appearance),
     ToggleClient(u16),
     Backend(client::Event),
     Close,
@@ -251,6 +257,7 @@ impl App {
         };
         let mut app = Self::with_devices(devices, error);
         app.handle = handle;
+        app.system_dark = system_appearance::is_dark().unwrap_or(true);
         match settings::path() {
             Ok(path) => app.load_settings(path),
             Err(error) => app.alerts.raise(Source::SettingsLoad, format!("{error:#}")),
@@ -310,6 +317,8 @@ impl App {
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
+            appearance: settings::Appearance::default(),
+            system_dark: true,
             window_restore: None,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -468,6 +477,7 @@ impl App {
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
+        self.appearance = saved.appearance;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -482,16 +492,29 @@ impl App {
             input_device_id: self.input.as_ref().map(|device| device.id.clone()),
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
+            appearance: self.appearance,
         }
     }
 
     /// Hides or shows the footer and stores only that choice, leaving unsaved edits alone.
     fn set_footer_hidden(&mut self, hidden: bool) {
         self.footer_hidden = hidden;
+        self.store_choice("footer", |saved| saved.footer_hidden = hidden);
+    }
+
+    /// Changes the colour scheme or themes and stores only that choice.
+    fn set_appearance(&mut self, appearance: settings::Appearance) {
+        self.appearance = appearance;
+        self.store_choice("appearance", |saved| saved.appearance = appearance);
+    }
+
+    /// Writes one interface choice into the saved settings, leaving unsaved edits alone.
+    /// Before setup finishes there is no file yet; the choice is saved with the rest.
+    fn store_choice(&mut self, what: &str, apply: impl FnOnce(&mut settings::Settings)) {
         let Some(mut saved) = self.saved.clone() else {
             return;
         };
-        saved.footer_hidden = hidden;
+        apply(&mut saved);
         let result = self
             .settings_path
             .as_deref()
@@ -504,7 +527,7 @@ impl App {
             }
             Err(error) => self.alerts.raise(
                 Source::SettingsSave,
-                format!("The footer choice applies for now but was not saved: {error:#}"),
+                format!("The {what} choice applies for now but was not saved: {error:#}"),
             ),
         }
     }
@@ -1130,6 +1153,7 @@ impl App {
                 self.channel_password.clear();
             }
             Message::ToggleFooter => self.set_footer_hidden(!self.footer_hidden),
+            Message::Appearance(appearance) => self.set_appearance(appearance),
             Message::ToggleSubscribeAll => {
                 self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
             }
@@ -1672,6 +1696,28 @@ mod tests {
         assert!(restarted.footer_hidden);
         let _ = restarted.update(Message::ToggleFooter);
         assert!(!settings::load(&path).unwrap().unwrap().footer_hidden);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appearance_choices_save_alone_and_survive_a_restart() {
+        let (mut app, root) = setup_fixture("appearance");
+        let path = root.join("settings.json");
+        settings::save(&path, &settings::Settings::default()).unwrap();
+        app.load_settings(path.clone());
+        app.nickname = "Unsaved draft".into();
+        let chosen = settings::Appearance {
+            scheme: settings::ColorScheme::Light,
+            light_theme: settings::ThemeName::Ocean,
+            dark_theme: settings::ThemeName::Ember,
+        };
+        let _ = app.update(Message::Appearance(chosen));
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert_eq!(stored.appearance, chosen);
+        assert_eq!(stored.nickname, settings::Settings::default().nickname);
+        let (mut restarted, _) = setup_fixture("appearance-restart");
+        restarted.load_settings(path);
+        assert_eq!(restarted.appearance, chosen);
         std::fs::remove_dir_all(root).unwrap();
     }
 

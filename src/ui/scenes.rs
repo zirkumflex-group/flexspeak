@@ -15,12 +15,24 @@ pub const SCENES: &[Scene] = &[
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
+    ("settings-light", settings_light),
+    ("themes", themes),
+    ("connected-light", connected_light),
     ("performance", performance),
     ("password", password),
     ("alert", alert),
 ];
 
+/// Scenes keep a fixed scheme, so previews don't depend on the machine's appearance.
+fn dark(s: &mut App) {
+    s.appearance = settings::Appearance {
+        scheme: settings::ColorScheme::Dark,
+        ..Default::default()
+    };
+}
+
 fn saved(s: &mut App) {
+    dark(s);
     s.onboarding = None;
     s.saved = Some(settings::Settings {
         server_address: "ts.zirkumflex.io".into(),
@@ -34,6 +46,7 @@ fn saved(s: &mut App) {
 }
 
 fn setup(s: &mut App) {
+    dark(s);
     s.begin_setup();
     s.nickname = "Jan".into();
     s.onboarding = Some(onboarding::Step::Server);
@@ -183,6 +196,24 @@ fn settings_page(s: &mut App) {
     s.tab = Tab::Settings;
 }
 
+fn settings_light(s: &mut App) {
+    settings_page(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+/// Different themes for light and dark, in dark.
+fn themes(s: &mut App) {
+    settings_page(s);
+    s.appearance.light_theme = settings::ThemeName::Grove;
+    s.appearance.dark_theme = settings::ThemeName::Ember;
+}
+
+fn connected_light(s: &mut App) {
+    connected(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+    s.appearance.light_theme = settings::ThemeName::Ocean;
+}
+
 fn performance(s: &mut App) {
     connected(s);
     s.performance_mode
@@ -252,6 +283,31 @@ mod tests {
         });
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.tab, Tab::Home);
+    }
+
+    #[test]
+    fn theme_swatches_choose_a_theme_for_one_mode_and_scheme_cards_switch_modes() {
+        let mut rt = runtime(settings_page, (900.0, 790.0));
+        // Nothing to store to: the choices apply without a settings file to write.
+        rt.state.saved = None;
+        rt.frame(1.0 / 60.0);
+        let press = |rt: &mut Runtime<App>, label: &str| {
+            let (x, y) = rt.find(label).unwrap_or_else(|| panic!("no {label}"));
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+        };
+        press(&mut rt, "Grove-dark");
+        assert_eq!(rt.state.appearance.dark_theme, settings::ThemeName::Grove);
+        assert_eq!(
+            rt.state.appearance.light_theme,
+            settings::ThemeName::Flexspeak
+        );
+        press(&mut rt, "Iris-light");
+        assert_eq!(rt.state.appearance.light_theme, settings::ThemeName::Iris);
+        press(&mut rt, "scheme-Light");
+        assert_eq!(rt.state.appearance.scheme, settings::ColorScheme::Light);
+        assert!(!super::super::theme(&rt.state).dark);
     }
 
     #[test]

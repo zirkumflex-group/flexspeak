@@ -42,8 +42,8 @@ fn skin(t: &Theme, v: Variant) -> Skin {
             top: t.bevel_top,
             bottom: t.bevel_bottom,
             ink: t.text,
-            hover: Color::WHITE.alpha(0.05),
-            press: Color::WHITE.alpha(0.09),
+            hover: t.wash(0.05),
+            press: t.wash(0.09),
         },
         Variant::Danger => Skin {
             fill: t.poor.alpha(0.13),
@@ -58,8 +58,8 @@ fn skin(t: &Theme, v: Variant) -> Skin {
             top: Color::TRANSPARENT,
             bottom: Color::TRANSPARENT,
             ink: t.muted,
-            hover: Color::WHITE.alpha(0.06),
-            press: Color::WHITE.alpha(0.10),
+            hover: t.wash(0.06),
+            press: t.wash(0.10),
         },
         Variant::Active => Skin {
             fill: t.accent.alpha(0.16),
@@ -220,7 +220,7 @@ pub fn well(t: &Theme) -> El {
     col()
         .w_full()
         .radius(radius::ROW)
-        .fill(Color::BLACK.alpha(0.18))
+        .fill(t.recess)
         .border(1.0, t.hairline)
 }
 
@@ -312,7 +312,7 @@ pub fn speaking_dot(t: &Theme, talking: bool) -> El {
 
 /// A level from 0 to 1. Readings arrive about ten times a second, so the bar steps to each one
 /// rather than springing: a spring would keep the window drawing for the whole call.
-pub fn meter(_t: &Theme, key: &str, level: f32, color: Color) -> El {
+pub fn meter(t: &Theme, key: &str, level: f32, color: Color) -> El {
     let level = level.clamp(0.0, 1.0);
     el().key(key.to_owned())
         .role("progressbar")
@@ -320,7 +320,7 @@ pub fn meter(_t: &Theme, key: &str, level: f32, color: Color) -> El {
         .w_full()
         .h(4.0)
         .radius(2.0)
-        .fill(Color::WHITE.alpha(0.08))
+        .fill(t.wash(0.08))
         .clip_rounded(2.0)
         .child(
             el().key("fill")
@@ -384,7 +384,7 @@ pub fn percent_slider(
                 .w_full()
                 .h(4.0)
                 .radius(2.0)
-                .fill(Color::WHITE.alpha(0.08))
+                .fill(t.wash(0.08))
                 .a11y_hidden(),
         )
         .child(
@@ -412,7 +412,7 @@ pub fn percent_slider(
                         .mt((height - knob) / 2.0)
                         .ml(-knob * fraction)
                         .radius(knob / 2.0)
-                        .fill(t.text)
+                        .fill(t.knob)
                         .border_gradient(1.0, Color::WHITE, Color::BLACK.alpha(0.15))
                         .box_shadow(super::theme::shadow(0.0, 1.0, 4.0, Color::BLACK.alpha(0.5)))
                         .motion(motion::QUICK),

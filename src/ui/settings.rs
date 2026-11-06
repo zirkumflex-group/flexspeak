@@ -1,14 +1,15 @@
 //! Settings, and the sections onboarding reuses: audio, permissions and shortcuts.
 
-use rune::{Cx, El, TextEdit, col, el, row, text};
+use rune::{Color, Cx, El, TextEdit, col, el, icon, row, text};
 use rune_kit::Kit;
 
-use super::theme::{Theme, size, ty};
+use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
     Variant, button, field, form_row, group, group_note, group_title, labelled, meter,
     percent_slider, picker, scroll_page,
 };
-use super::{home, icons};
+use super::{home, icons, send};
+use crate::settings::{Appearance, ColorScheme, ThemeName};
 use crate::{App, Message, permissions, shortcuts};
 
 /// A trailing control at the form's control width.
@@ -118,6 +119,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
         .self_center()
         .padding(size::PAGE)
         .gap(8.0)
+        .child(appearance(s, t).key("appearance"))
         .child(group_title(t, "Server"))
         .child(server)
         .child(group_title(t, "Audio"))
@@ -141,6 +143,236 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
         );
     }
     scroll_page(k, "settings-scroll", content)
+}
+
+/// The colour scheme, then a theme for light and one for dark. Choices apply and save at once.
+pub fn appearance(s: &App, t: &Theme) -> El {
+    let current = s.appearance;
+    let schemes = row()
+        .w_full()
+        .gap(12.0)
+        .flex_wrap()
+        .role("radiogroup")
+        .label("Color scheme")
+        .children(
+            ColorScheme::ALL
+                .into_iter()
+                .map(|scheme| scheme_card(t, current, scheme)),
+        );
+    // An empty sixth cell keeps the last row's cards the width of the others.
+    let themes = row()
+        .w_full()
+        .gap(12.0)
+        .flex_wrap()
+        .children(
+            ThemeName::ALL
+                .into_iter()
+                .map(|name| theme_card(t, current, name)),
+        )
+        .child(theme_cell().key("spacer").py(0.0).h(0.0).a11y_hidden());
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(group_title(t, "Color Scheme"))
+        .child(schemes)
+        .child(group_title(t, "Themes"))
+        .child(themes)
+        .child(group_note(
+            t,
+            "Pick one theme for light and one for dark. System switches between them with your computer.",
+        ))
+}
+
+fn scheme_card(t: &Theme, current: Appearance, scheme: ColorScheme) -> El {
+    let selected = current.scheme == scheme;
+    let light = Theme::new(current.light_theme, false);
+    let dark = Theme::new(current.dark_theme, true);
+    let preview = match scheme {
+        ColorScheme::Light => mini_window(&light),
+        ColorScheme::Dark => mini_window(&dark),
+        ColorScheme::System => row()
+            .w_full()
+            .h_full()
+            .child(mini_window(&light).w_frac(0.5))
+            .child(mini_window(&dark).w_frac(0.5)),
+    };
+    let mut card = col()
+        .key(format!("scheme-{}", scheme.title()))
+        .role("radio")
+        .label(scheme.title())
+        .checked(selected)
+        .grow(1.0)
+        .w(0.0)
+        .min_w(150.0)
+        .padding(8.0)
+        .gap(8.0)
+        .radius(radius::CARD)
+        .fill(t.surface)
+        .border(1.0, if selected { t.accent } else { t.hairline })
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .hover(t.wash(0.04))
+        .press(t.wash(0.08))
+        .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
+        .motion(motion::QUICK)
+        .on_press_tx(send(Message::Appearance(Appearance { scheme, ..current })))
+        .child(
+            el().w_full()
+                .h(76.0)
+                .radius(radius::CONTROL)
+                .clip_rounded(radius::CONTROL)
+                .border(1.0, t.hairline)
+                .child(preview)
+                .a11y_hidden(),
+        )
+        .child(
+            text(scheme.title())
+                .font(if selected { ty::BODY_STRONG } else { ty::BODY })
+                .color(if selected { t.text } else { t.muted })
+                .self_center(),
+        );
+    if selected {
+        card = card.outline(1.0, 0.0, t.accent);
+    }
+    card
+}
+
+/// A window in miniature, painted with `p`: sidebar, a heading and two lines, and a composer.
+fn mini_window(p: &Theme) -> El {
+    let line = |w: f32, c: Color| el().w(w).h(5.0).radius(2.5).fill(c);
+    let sidebar = col()
+        .w_frac(0.26)
+        .h_full()
+        .padding(7.0)
+        .gap(5.0)
+        .fill(p.chrome)
+        .child(el().w_full().h(7.0).radius(3.5).fill(p.raised))
+        .child(el().w_full().h(5.0).radius(2.5).fill(p.accent.alpha(0.35)))
+        .child(el().w_full().h(5.0).radius(2.5).fill(p.wash(0.08)))
+        .child(el().w_frac(0.7).h(5.0).radius(2.5).fill(p.wash(0.08)));
+    let main = col()
+        .grow(1.0)
+        .h_full()
+        .padding(8.0)
+        .gap(5.0)
+        .fill(p.canvas)
+        .child(line(46.0, p.wash(0.16)))
+        .child(line(64.0, p.wash(0.08)))
+        .child(line(38.0, p.wash(0.08)))
+        .child(el().grow(1.0))
+        .child(
+            row()
+                .w_full()
+                .h(14.0)
+                .px(4.0)
+                .radius(7.0)
+                .fill(p.surface)
+                .border(1.0, p.hairline)
+                .center_y()
+                .child(el().grow(1.0))
+                .child(el().size(7.0, 7.0).radius(3.5).fill(p.accent)),
+        );
+    row()
+        .h_full()
+        .grow(1.0)
+        .w_full()
+        .fill(p.canvas)
+        .child(sidebar)
+        .child(el().w(1.0).h_full().fill(p.hairline))
+        .child(main)
+}
+
+/// One cell of the theme grid: three to a row, two or one as the window narrows.
+fn theme_cell() -> El {
+    col()
+        .grow(1.0)
+        .w(0.0)
+        .min_w(170.0)
+        .padding(size::CARD_PAD)
+        .border(1.0, Color::TRANSPARENT)
+}
+
+fn theme_card(t: &Theme, current: Appearance, name: ThemeName) -> El {
+    theme_cell()
+        .key(format!("theme-{}", name.title()))
+        .gap(12.0)
+        .radius(radius::CARD)
+        .fill(t.surface)
+        .border(1.0, t.hairline)
+        .child(
+            row()
+                .w_full()
+                .gap(18.0)
+                .justify_center()
+                .py(4.0)
+                .child(orb(t, current, name, false))
+                .child(orb(t, current, name, true)),
+        )
+        .child(text(name.title()).font(ty::BODY_STRONG).color(t.text))
+}
+
+/// A swatch of `name`'s light or dark palette. Pressing it uses that theme for that mode.
+fn orb(t: &Theme, current: Appearance, name: ThemeName, dark: bool) -> El {
+    const SIZE: f32 = 52.0;
+    let p = Theme::new(name, dark);
+    let selected = current.theme(dark) == name;
+    let mode = if dark { "dark" } else { "light" };
+    let help = format!("Use {} in {mode} mode", name.title());
+    let next = if dark {
+        Appearance {
+            dark_theme: name,
+            ..current
+        }
+    } else {
+        Appearance {
+            light_theme: name,
+            ..current
+        }
+    };
+    let mut e = el()
+        .key(format!("{}-{mode}", name.title()))
+        .role("radio")
+        .label(help.clone())
+        .help(help)
+        .checked(selected)
+        .size(SIZE, SIZE)
+        .radius(SIZE / 2.0)
+        .fill(p.surface)
+        .radial_gradient(
+            [0.62, 0.32],
+            SIZE * 0.78,
+            [
+                (0.0, p.accent),
+                (0.45, p.accent.alpha(0.55)),
+                (1.0, p.accent.alpha(0.0)),
+            ],
+        )
+        .border(1.0, p.hairline)
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .hover(t.wash(0.08))
+        .press(t.wash(0.14))
+        .focus_ring(2.0, 3.0, t.accent.alpha(0.7))
+        .motion(motion::QUICK)
+        .on_press_tx(send(Message::Appearance(next)));
+    if selected {
+        e = e.outline(2.0, 3.0, t.accent).child(
+            el().key("badge")
+                .absolute(SIZE - 16.0, SIZE - 16.0)
+                .size(20.0, 20.0)
+                .radius(10.0)
+                .center()
+                .fill(t.surface)
+                .border(1.0, t.hairline)
+                .child(
+                    icon(if dark { &icons::MOON } else { &icons::SUN }, 12.0)
+                        .color(t.text)
+                        .a11y_hidden(),
+                )
+                .a11y_hidden(),
+        );
+    }
+    e
 }
 
 pub fn audio(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
