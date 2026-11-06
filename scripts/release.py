@@ -12,6 +12,7 @@ from string import Template
 import subprocess
 import sys
 import tarfile
+import time
 import tomllib
 import urllib.request
 import zipfile
@@ -31,15 +32,30 @@ def sha256(path):
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
+def download(url, destination, attempts=5):
+    """Fetch through a temporary name, so an interrupted download is never mistaken for
+    the finished file, and retry the transient TLS resets hosted runners see."""
+    partial = destination.with_name(destination.name + ".part")
+    for attempt in range(1, attempts + 1):
+        try:
+            urllib.request.urlretrieve(url, partial)
+            partial.replace(destination)
+            return
+        except OSError as error:
+            partial.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+            print(f"Download failed ({error}); retrying {url}", file=sys.stderr)
+            time.sleep(5 * attempt)
+
+
 def build_opus(env):
     # CI points this outside target/ so it can be cached apart from Cargo's artifacts.
     work = Path(env.get("FLEXSPEAK_OPUS_DIR") or ROOT / "target/release-opus")
     work.mkdir(parents=True, exist_ok=True)
     archive = work / f"opus-{OPUS_VERSION}.tar.gz"
     if not archive.exists():
-        urllib.request.urlretrieve(
-            f"https://downloads.xiph.org/releases/opus/{archive.name}", archive
-        )
+        download(f"https://downloads.xiph.org/releases/opus/{archive.name}", archive)
     if sha256(archive) != OPUS_SHA256:
         raise ValueError("Opus source checksum mismatch")
     source = work / f"opus-{OPUS_VERSION}"
