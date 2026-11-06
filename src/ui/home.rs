@@ -553,6 +553,13 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
             .grow(1.0)
             .min_w(0.0),
         );
+    if s.is_streaming(member) {
+        entry = entry.child(
+            el().help("Sharing a stream")
+                .label("Sharing a stream")
+                .child(icon(&icons::SCREEN_SHARE, 13.0).color(t.live)),
+        );
+    }
     for (muted, glyph, help) in [
         (mic_muted, &icons::MIC_OFF, "Microphone muted"),
         (sound_muted, &icons::HEADPHONE_OFF, "Sound muted"),

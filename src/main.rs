@@ -1401,6 +1401,15 @@ impl App {
                 .iter()
                 .any(|channel| channel.id == id && channel.join_access.can_request())
     }
+    /// Whether the member is sharing a stream; the catalog only covers your current channel.
+    fn is_streaming(&self, member: &client::Member) -> bool {
+        (member.is_self && self.streaming.sharing.status.live)
+            || self
+                .streaming
+                .catalog
+                .iter()
+                .any(|stream| stream.publisher == member.id)
+    }
     fn member_health(
         &self,
         member: &client::Member,
