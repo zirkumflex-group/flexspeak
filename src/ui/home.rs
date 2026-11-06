@@ -271,14 +271,15 @@ fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
         .padding(12.0)
         .gap(12.0)
         .child(server)
-        .child(voice_controls(s, t))
         .child(divider(t))
         .child(overline(t, "Channels").ml(6.0))
+        // The channel list takes the free height, so the voice controls sit at the bottom.
         .child(scroll_page(
             k,
             "channel-scroll",
             channel_tree(s, t).pr(10.0).pb(8.0),
         ))
+        .child(voice_controls(s, t))
 }
 
 fn voice_controls(s: &App, t: &Theme) -> El {
