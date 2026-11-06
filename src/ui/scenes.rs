@@ -12,6 +12,7 @@ pub const SCENES: &[Scene] = &[
     ("devices", devices),
     ("home", home),
     ("connected", connected),
+    ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
     ("performance", performance),
@@ -147,6 +148,15 @@ fn connected(s: &mut App) {
         has_audio: true,
         server_relayed: false,
     }];
+}
+
+/// The hidden footer under load: CPU red, footprint amber.
+fn footer_hidden(s: &mut App) {
+    connected(s);
+    s.footer_hidden = true;
+    s.process_usage.cpu_percent = Some(64.0);
+    s.process_usage.memory_bytes = Some(812 * 1024 * 1024);
+    s.process_usage.memory_detail_bytes = Some(590 * 1024 * 1024);
 }
 
 fn statistics(s: &mut App) {

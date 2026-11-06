@@ -121,6 +121,8 @@ struct App {
     performance_mode: Arc<AtomicBool>,
     channel_health_visible: Arc<AtomicBool>,
     subscribe_all: Arc<AtomicBool>,
+    /// Saved straight to settings when toggled, not held until the Settings page saves.
+    footer_hidden: bool,
     window_restore: Option<(f32, f32)>,
     window_size: (f32, f32),
     next_usage_tick: Instant,
@@ -214,6 +216,7 @@ enum Message {
     Join(u64),
     ToggleChannel(u64),
     ToggleSubscribeAll,
+    ToggleFooter,
     ToggleClient(u16),
     Backend(client::Event),
     Close,
@@ -306,6 +309,7 @@ impl App {
             performance_mode: Arc::new(AtomicBool::new(false)),
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
+            footer_hidden: false,
             window_restore: None,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -463,6 +467,7 @@ impl App {
             .set_percent(saved.playback_volume_percent);
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
+        self.footer_hidden = saved.footer_hidden;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -476,6 +481,31 @@ impl App {
             },
             input_device_id: self.input.as_ref().map(|device| device.id.clone()),
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
+            footer_hidden: self.footer_hidden,
+        }
+    }
+
+    /// Hides or shows the footer and stores only that choice, leaving unsaved edits alone.
+    fn set_footer_hidden(&mut self, hidden: bool) {
+        self.footer_hidden = hidden;
+        let Some(mut saved) = self.saved.clone() else {
+            return;
+        };
+        saved.footer_hidden = hidden;
+        let result = self
+            .settings_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Settings path is unavailable"))
+            .and_then(|path| settings::save(path, &saved));
+        match result {
+            Ok(()) => {
+                self.saved = Some(saved);
+                self.alerts.recover(Source::SettingsSave);
+            }
+            Err(error) => self.alerts.raise(
+                Source::SettingsSave,
+                format!("The footer choice applies for now but was not saved: {error:#}"),
+            ),
         }
     }
 
@@ -1099,6 +1129,7 @@ impl App {
                 self.password_error = None;
                 self.channel_password.clear();
             }
+            Message::ToggleFooter => self.set_footer_hidden(!self.footer_hidden),
             Message::ToggleSubscribeAll => {
                 self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
             }
@@ -1617,6 +1648,30 @@ mod tests {
         });
         assert!(app.input.is_none());
         assert!(app.output.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hiding_the_footer_saves_only_that_choice_and_survives_a_restart() {
+        let (mut app, root) = setup_fixture("footer");
+        let path = root.join("settings.json");
+        let saved = settings::Settings {
+            nickname: "Saved name".into(),
+            ..Default::default()
+        };
+        settings::save(&path, &saved).unwrap();
+        app.load_settings(path.clone());
+        app.nickname = "Unsaved draft".into();
+        let _ = app.update(Message::ToggleFooter);
+        assert!(app.footer_hidden);
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert!(stored.footer_hidden);
+        assert_eq!(stored.nickname, "Saved name", "drafts stay unsaved");
+        let (mut restarted, _) = setup_fixture("footer-restart");
+        restarted.load_settings(path.clone());
+        assert!(restarted.footer_hidden);
+        let _ = restarted.update(Message::ToggleFooter);
+        assert!(!settings::load(&path).unwrap().unwrap().footer_hidden);
         std::fs::remove_dir_all(root).unwrap();
     }
 
