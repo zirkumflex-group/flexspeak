@@ -6,6 +6,7 @@
 
 mod charts;
 mod footer;
+mod fx;
 mod home;
 pub mod icons;
 mod modals;
@@ -400,6 +401,7 @@ pub fn run() {
             traffic_lights: Some((20.0, 19.0)),
             drag_regions: true,
         })
+        .compositor(fx::Effects::default())
         .keep_running()
         .on_close(on_close)
         .run();

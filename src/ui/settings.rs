@@ -313,7 +313,14 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
             }
             false
         })
-        .child(sidebar(s, t, k, page, searching, &found, narrow))
+        .child(sidebar(
+            t,
+            search_field(s, t, k, cx.is_reduced_motion()),
+            page,
+            searching,
+            &found,
+            narrow,
+        ))
         .child(el().w(1.0).h_full().fill(t.hairline).a11y_hidden())
         .child(main)
         .modal(true, |s: &mut App| {
@@ -321,11 +328,13 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
             s.sync_fields();
         });
     layer.push(
+        // The app stays in view behind Settings, frosted rather than only dimmed.
         el().key("settings-scrim")
             .absolute(0.0, 0.0)
             .w_full()
             .h_full()
-            .fill(k.c.scrim)
+            .backdrop_blur(18.0)
+            .fill(Color::BLACK.alpha(if t.dark { 0.38 } else { 0.16 }))
             .token_motion(k.motion.overlay)
             .a11y_hidden(),
     );
@@ -343,9 +352,8 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
 }
 
 fn sidebar(
-    s: &App,
     t: &Theme,
-    k: &Kit,
+    search: El,
     page: SettingsPage,
     searching: bool,
     found: &[bool],
@@ -380,17 +388,19 @@ fn sidebar(
         .fill(t.chrome)
         .padding(10.0)
         .gap(6.0)
-        .child(search_field(s, t, k))
+        .child(search)
         .child(nav)
 }
 
-fn search_field(s: &App, t: &Theme, k: &Kit) -> El {
+/// The search field, in a ring of flowing liquid metal.
+fn search_field(s: &App, t: &Theme, k: &Kit, reduced_motion: bool) -> El {
+    const RING: f32 = 3.5;
     let mut input = TextInput::new(&s.ui.settings_search)
         .placeholder("Search")
         .label("Search settings")
         .leading_icon(&icons::SEARCH)
         .width(None)
-        .height(size::CONTROL + 2.0)
+        .height(size::CONTROL)
         .on_edit(|s: &mut App| &mut s.ui.settings_search)
         .on_change(|s: &mut App, tx: &mut Tx| {
             let value = s.ui.settings_search.text.clone();
@@ -415,10 +425,22 @@ fn search_field(s: &App, t: &Theme, k: &Kit) -> El {
                 .a11y_hidden(),
         );
     }
-    el().key("settings-search")
-        .w_full()
-        .pb(6.0)
-        .child(input.build(k))
+    let corner = radius::CONTROL + RING;
+    el().key("settings-search").w_full().pb(6.0).child(
+        el().w_full()
+            .padding(RING)
+            .radius(corner)
+            .child(
+                super::fx::liquid_metal_ring(RING, reduced_motion)
+                    .key("search-metal")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .radius(corner)
+                    .a11y_hidden(),
+            )
+            .child(input.build(k)),
+    )
 }
 
 fn nav_item(t: &Theme, page: SettingsPage, active: bool, found: bool) -> El {
