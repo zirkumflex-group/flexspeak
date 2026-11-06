@@ -291,9 +291,9 @@ pub fn health_dot(t: &Theme, health: Health, help: impl Into<String>) -> El {
 /// A ring that fills and glows softly while the client is heard.
 pub fn speaking_dot(t: &Theme, talking: bool) -> El {
     let (ring, fill, glow) = if talking {
-        (t.good, t.good, t.good.alpha(0.55))
+        (t.accent, t.accent, t.accent.alpha(0.6))
     } else {
-        (t.faint.alpha(0.7), t.good.alpha(0.0), t.good.alpha(0.0))
+        (t.faint.alpha(0.7), t.accent.alpha(0.0), t.accent.alpha(0.0))
     };
     el().w(12.0)
         .h(20.0)
