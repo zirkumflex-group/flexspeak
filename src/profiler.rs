@@ -515,15 +515,16 @@ mod tests {
         );
         assert!(scope(Category::Ui, "after_stop").is_none());
         struct HeapWatchingSink {
-            baseline: u64,
-            largest_extra: u64,
+            baseline: i64,
+            largest_extra: i64,
             written: usize,
         }
         impl std::io::Write for HeapWatchingSink {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
                 self.largest_extra = self
                     .largest_extra
-                    .max(crate::memory::snapshot().live.saturating_sub(self.baseline));
+                    // This thread only: other tests allocate in parallel.
+                    .max(crate::memory::thread_live() - self.baseline);
                 self.written += bytes.len();
                 Ok(bytes.len())
             }
@@ -532,7 +533,7 @@ mod tests {
             }
         }
         let mut sink = HeapWatchingSink {
-            baseline: crate::memory::snapshot().live,
+            baseline: crate::memory::thread_live(),
             largest_extra: 0,
             written: 0,
         };

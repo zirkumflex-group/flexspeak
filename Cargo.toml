@@ -19,11 +19,15 @@ crossbeam-queue = "0.3"
 directories = "6"
 futures = "0.3"
 global-hotkey = "0.9"
+# Update checks and downloads. TLS through rustls on ring: no extra C toolchain on any platform.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
 rune = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50" }
 rubato = { version = "0.16.2", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
@@ -45,7 +49,8 @@ libwebrtc = "=0.3.54"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
-lto = "thin"
+# No cross-crate LTO: thin LTO made every release rebuild of this crate ~4x slower
+# (≈3 extra CI minutes per runner). Its runtime benefit was never measured; Opus is C.
 strip = "debuginfo"
 
 [profile.release.build-override]
@@ -54,5 +59,8 @@ strip = "debuginfo"
 strip = "none"
 
 [build-dependencies]
+cc = "1"
 embed-resource = "3"
+# Keep this aligned with the helper used by the pinned libwebrtc dependency.
+webrtc-sys-build = "=0.3.21"
 

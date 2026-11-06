@@ -5,16 +5,16 @@
 //! narrows the panel to the rows that match across all categories.
 
 use rune::{Color, Cx, El, Icon, TextEdit, Tx, col, el, icon, row, text};
-use rune_kit::{Kit, TextInput};
+use rune_kit::{Kit, Switch, TextInput};
 
 use super::theme::{Theme, motion, radius, shadow, size, ty};
 use super::widgets::{
-    Variant, button, divider, field, form_row, group, group_note, group_title, icon_button,
-    labelled, meter, muted, percent_slider, picker, scroll_page,
+    Range, Variant, button, divider, field, form_row, group, group_note, group_title, icon_button,
+    labelled, meter, muted, percent_slider, picker, scroll_page, slider,
 };
-use super::{dispatch, home, icons, send};
+use super::{dispatch, home, icons, send, updates};
 use crate::settings::{Appearance, ColorScheme, ThemeName};
-use crate::{App, Message, SettingsPage, permissions, shortcuts};
+use crate::{App, Message, SettingsPage, audio_processing, permissions, shortcuts, transmission};
 
 /// A trailing control at the form's control width.
 fn trailing(e: El) -> El {
@@ -127,6 +127,7 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
         SettingsPage::Audio => &icons::AUDIO_LINES,
         SettingsPage::Shortcuts => &icons::KEYBOARD,
         SettingsPage::Permissions => &icons::SHIELD,
+        SettingsPage::Updates => &icons::DOWNLOAD,
         SettingsPage::File => &icons::FILE_TEXT,
     }
 }
@@ -142,7 +143,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
             SettingsPage::Permissions,
         ],
     ),
-    (Some("Storage"), &[SettingsPage::File]),
+    (Some("App"), &[SettingsPage::Updates, SettingsPage::File]),
 ];
 
 fn sections(
@@ -167,9 +168,34 @@ fn sections(
                 t,
                 "Disconnect to change devices; volume applies immediately. Use headphones for the microphone test.",
             )),
+            Section::boxed(
+                "processing",
+                "Microphone Processing",
+                "audio voice filter",
+                processing_rows(s, t, k, layer),
+            ),
+            Section::boxed(
+                "transmission",
+                "Voice Transmission",
+                "audio talk send",
+                transmission_rows(s, t, k, layer),
+            )
+            .note(group_note(
+                t,
+                "Stop the microphone test or disconnect to change processing and transmission. Save to keep them.",
+            )),
         ],
         SettingsPage::Shortcuts => vec![shortcut_section(s, t, k)],
         SettingsPage::Permissions => vec![permission_section(s, t)],
+        SettingsPage::Updates => vec![
+            Section::open(
+                "updates",
+                "Updates",
+                "update upgrade version release download install restart automatic",
+                vec![item("", updates::settings(s, t, k))],
+            )
+            .note(updates::note(t)),
+        ],
         SettingsPage::File => vec![file_section(s, t)],
     }
 }
@@ -1035,12 +1061,25 @@ fn orb(t: &Theme, current: Appearance, name: ThemeName, dark: bool) -> El {
     e
 }
 
-/// Devices, levels and the microphone test, as one group. Onboarding shows it too.
+/// Devices and the microphone test, then processing and transmission. Onboarding shows it.
 pub fn audio(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
-    group(
-        t,
-        audio_rows(s, cx, t, k, layer).into_iter().map(|row| row.el),
-    )
+    let rows = |rows: Vec<Row>| rows.into_iter().map(|row| row.el);
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(group(t, rows(audio_rows(s, cx, t, k, layer))).key("devices"))
+        .child(group_note(
+            t,
+            "Disconnect to change devices; volume applies immediately. Use headphones for the microphone test.",
+        ))
+        .child(group_title(t, "Microphone Processing"))
+        .child(group(t, rows(processing_rows(s, t, k, layer))).key("processing"))
+        .child(group_title(t, "Voice Transmission"))
+        .child(group(t, rows(transmission_rows(s, t, k, layer))).key("transmission"))
+        .child(group_note(
+            t,
+            "Stop the microphone test or disconnect to change processing and transmission. Save to keep them.",
+        ))
 }
 
 fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
@@ -1129,6 +1168,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
                     "volume",
                     "Playback volume",
                     volume,
+                    |s| s.playback_volume.percent(),
                     Message::PlaybackVolume,
                 )),
             ),
@@ -1173,22 +1213,302 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
     ]
 }
 
+/// The OS's current answer as a tinted pill, so the row reads at a glance.
+fn status_pill(t: &Theme, status: permissions::Status) -> El {
+    use permissions::Status;
+    let (glyph, color) = match status {
+        Status::Granted => (&icons::CHECK, t.good),
+        Status::Denied => (&icons::CLOSE, t.poor),
+        Status::NotDetermined => (&icons::LOCK, t.fair),
+        Status::NotRequired => (&icons::CHECK, t.muted),
+        Status::Unknown => (&icons::LOCK, t.faint),
+    };
+    row()
+        .h(22.0)
+        .px(8.0)
+        .gap(5.0)
+        .center_y()
+        .radius(11.0)
+        .fill(color.alpha(0.14))
+        .label(status.label())
+        .child(rune::icon(glyph, 12.0).color(color).a11y_hidden())
+        .child(
+            text(status.label())
+                .font(ty::LABEL)
+                .color(color)
+                .a11y_hidden(),
+        )
+}
+
+/// A compact switch at a row's trailing edge; the row's label names it.
+fn switch(
+    key: &'static str,
+    label: &str,
+    on: bool,
+    enabled: bool,
+    k: &Kit,
+    flip: fn(&App, bool) -> Message,
+) -> El {
+    Switch::new(on)
+        .label(label)
+        .hide_label()
+        .disabled(!enabled)
+        .on_toggle_tx(move |s: &mut App, tx| {
+            let message = flip(s, !on);
+            super::dispatch(s, tx, message);
+        })
+        .build(k)
+        .key(key)
+}
+
+/// A processing change built from the applied options; `update` refuses it during a session.
+fn processing_with(s: &App, change: impl FnOnce(&mut audio_processing::Settings)) -> Message {
+    let mut next = s.audio_processing;
+    change(&mut next);
+    Message::AudioProcessing(next)
+}
+
+fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
+    if !audio_processing::AVAILABLE {
+        return vec![item(
+            "noise suppression echo cancellation gain",
+            form_row(
+                t,
+                "Noise suppression and echo cancellation",
+                Some("Available on Mac and Windows. Saved effects are not applied here."),
+                el(),
+            ),
+        )];
+    }
+    let options = s.audio_processing;
+    let editable = s.session.is_none();
+    let levels: Vec<String> = audio_processing::SuppressionLevel::ALL
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let rows = [
+        form_row(
+            t,
+            "Noise suppression",
+            Some("Reduces steady background noise such as fans and typing."),
+            switch(
+                "noise-suppression-switch",
+                "Noise suppression",
+                options.noise_suppression,
+                editable,
+                k,
+                |s, on| processing_with(s, |o| o.noise_suppression = on),
+            ),
+        )
+        .key("noise-suppression"),
+        form_row(
+            t,
+            "Suppression level",
+            Some("Higher levels remove more noise and some voice."),
+            picker(
+                k,
+                s,
+                "suppression-level",
+                levels,
+                Some(options.suppression_level.to_string().as_str()),
+                "Choose…",
+                editable && options.noise_suppression,
+                size::FORM_CONTROL,
+                move |index| {
+                    Message::AudioProcessing(audio_processing::Settings {
+                        suppression_level: audio_processing::SuppressionLevel::ALL[index],
+                        ..options
+                    })
+                },
+                layer,
+            ),
+        )
+        .key("suppression-level"),
+        form_row(
+            t,
+            "Automatic gain",
+            Some("Evens out your microphone level."),
+            switch(
+                "automatic-gain-switch",
+                "Automatic gain",
+                options.automatic_gain,
+                editable,
+                k,
+                |s, on| processing_with(s, |o| o.automatic_gain = on),
+            ),
+        )
+        .key("automatic-gain"),
+        form_row(
+            t,
+            "Echo cancellation",
+            Some("Experimental. Removes Flexspeak’s playback from your microphone in calls."),
+            switch(
+                "echo-cancellation-switch",
+                "Echo cancellation",
+                options.echo_cancellation,
+                editable,
+                k,
+                |s, on| processing_with(s, |o| o.echo_cancellation = on),
+            ),
+        )
+        .key("echo-cancellation"),
+    ];
+    let terms = [
+        "noise suppression background fans typing",
+        "noise suppression level strength",
+        "automatic gain control volume loudness",
+        "echo cancellation playback feedback",
+    ];
+    rows.into_iter()
+        .zip(terms)
+        .map(|(e, terms)| item(terms, e))
+        .collect()
+}
+
+fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
+    let settings = s.transmission;
+    let editable = s.session.is_none();
+    let modes: Vec<String> = transmission::Mode::ALL
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let ptt_key = s.keybinds.push_to_talk.trim();
+    let detail: String = match settings.mode {
+        transmission::Mode::Continuous => "Sends whenever you are unmuted.".into(),
+        transmission::Mode::PushToTalk if !shortcuts::supported() => {
+            "Global shortcuts are unavailable here. Choose another mode.".into()
+        }
+        transmission::Mode::PushToTalk if ptt_key.is_empty() => {
+            "Set a push-to-talk key under Keyboard Shortcuts.".into()
+        }
+        transmission::Mode::PushToTalk => format!("Hold {ptt_key} to talk while unmuted."),
+        transmission::Mode::VoiceActivation if !audio_processing::AVAILABLE => {
+            "Speech detection needs Mac or Windows. Choose another mode.".into()
+        }
+        transmission::Mode::VoiceActivation => {
+            "Sends when speech is detected above the threshold.".into()
+        }
+    };
+    let mut rows = vec![
+        form_row(
+            t,
+            "Transmission",
+            Some(detail.as_str()),
+            picker(
+                k,
+                s,
+                "transmission-mode",
+                modes,
+                Some(settings.mode.to_string().as_str()),
+                "Choose…",
+                editable,
+                size::FORM_CONTROL,
+                move |index| {
+                    Message::Transmission(transmission::Settings {
+                        mode: transmission::Mode::ALL[index],
+                        ..settings
+                    })
+                },
+                layer,
+            ),
+        )
+        .key("transmission-mode"),
+    ];
+    match settings.mode {
+        transmission::Mode::Continuous => {}
+        transmission::Mode::PushToTalk => rows.push(
+            form_row(
+                t,
+                format!("Release delay · {} ms", settings.ptt_release_ms),
+                Some("Keeps sending briefly after you let go."),
+                trailing(locked(
+                    editable,
+                    slider(
+                        t,
+                        "ptt-release",
+                        "Push-to-talk release delay",
+                        i32::from(settings.ptt_release_ms),
+                        format!("{} milliseconds", settings.ptt_release_ms),
+                        Range {
+                            min: 0,
+                            max: 500,
+                            step: 25,
+                            key_step: 25,
+                        },
+                        |s| i32::from(s.transmission.ptt_release_ms),
+                        move |value| {
+                            Message::Transmission(transmission::Settings {
+                                ptt_release_ms: value.clamp(0, 500) as u16,
+                                ..settings
+                            })
+                        },
+                    ),
+                )),
+            )
+            .key("ptt-release"),
+        ),
+        transmission::Mode::VoiceActivation => rows.push(
+            form_row(
+                t,
+                format!("Voice threshold · {} dBFS", settings.voice_threshold_db),
+                Some("Move right to require a louder voice."),
+                trailing(locked(
+                    editable,
+                    slider(
+                        t,
+                        "voice-threshold",
+                        "Voice activation threshold",
+                        i32::from(settings.voice_threshold_db),
+                        format!("{} decibels", settings.voice_threshold_db),
+                        Range {
+                            min: -60,
+                            max: 0,
+                            step: 1,
+                            key_step: 2,
+                        },
+                        |s| i32::from(s.transmission.voice_threshold_db),
+                        move |value| {
+                            Message::Transmission(transmission::Settings {
+                                voice_threshold_db: value.clamp(-60, 0) as i16,
+                                ..settings
+                            })
+                        },
+                    ),
+                )),
+            )
+            .key("voice-threshold"),
+        ),
+    }
+    rows.into_iter()
+        .map(|e| {
+            item(
+                "transmission mode push to talk voice activation threshold release delay continuous",
+                e,
+            )
+        })
+        .collect()
+}
+
+/// A control that `update` would refuse right now: shown at 42% and not interactive.
+fn locked(editable: bool, control: El) -> El {
+    if editable {
+        control
+    } else {
+        control.dim(0.42).disabled(true)
+    }
+}
+
 /// Operating-system access, with its note. Onboarding shows it too.
 pub fn permissions(s: &App, t: &Theme) -> El {
     permission_section(s, t).render(t, "").unwrap_or_else(el)
 }
 
 fn permission_section(s: &App, t: &Theme) -> Section {
+    use permissions::Status;
     let enabled = s.permissions.pending.is_none() && s.session.is_none();
     let mut rows = Vec::new();
     for kind in permissions::Kind::ALL {
-        let request_label = if cfg!(windows) && kind == permissions::Kind::Microphone {
-            "Open Privacy Settings"
-        } else if cfg!(target_os = "macos") {
-            "Request Access"
-        } else {
-            "Review Access"
-        };
+        let status = s.permissions.status[kind.index()];
         let pending = s.permissions.pending == Some(kind);
         let detail = match &s.permissions.messages[kind.index()] {
             Some(message) => format!("{} {message}", kind.detail()),
@@ -1198,16 +1518,25 @@ fn permission_section(s: &App, t: &Theme) -> Section {
         if pending {
             controls = controls.child(super::widgets::pulse(t.accent));
         }
-        controls = controls.child(button(
-            t,
-            "request",
-            request_label,
-            None,
-            Variant::Secondary,
-            enabled.then_some(Message::RequestPermission(kind)),
-        ));
-        if cfg!(any(target_os = "macos", windows)) {
-            controls = controls.child(super::widgets::icon_button(
+        controls = controls.child(status_pill(t, status));
+        // Once denied, the OS won't ask again: the switch lives in its privacy settings.
+        let give = match status {
+            Status::NotDetermined | Status::Unknown => Some(Message::RequestPermission(kind)),
+            Status::Denied => Some(Message::OpenPermissionSettings(kind)),
+            Status::Granted | Status::NotRequired => None,
+        };
+        if let Some(give) = give {
+            controls = controls.child(button(
+                t,
+                "request",
+                "Give Access",
+                None,
+                Variant::Primary,
+                enabled.then_some(give),
+            ));
+        }
+        if cfg!(any(target_os = "macos", windows)) && status != Status::NotRequired {
+            controls = controls.child(icon_button(
                 t,
                 "os-settings",
                 &icons::SETTINGS,
@@ -1217,14 +1546,18 @@ fn permission_section(s: &App, t: &Theme) -> Section {
             ));
         }
         rows.push(item(
-            format!("{} {detail} access privacy", kind.title()),
+            format!(
+                "{} {detail} {} access privacy",
+                kind.title(),
+                status.label()
+            ),
             form_row(t, kind.title(), Some(detail.as_str()), controls)
                 .key(format!("permission-{}", kind.index())),
         ));
     }
     let mut note = String::from("Your operating system controls access; you can change it later.");
     if cfg!(target_os = "macos") {
-        note.push_str(" This build appears as Flexspeak in Privacy & Security.");
+        note.push_str(" This build appears as Flexspeak in Privacy & Security. macOS may ask you to reopen the app after allowing screen recording.");
     }
     if s.session.is_some() {
         note.push_str(" Disconnect or stop the local test before requesting access.");
@@ -1251,6 +1584,8 @@ fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
     let detected = match s.last_shortcut {
         Some(shortcuts::Action::Mute) => "Detected mute / unmute",
         Some(shortcuts::Action::Deafen) => "Detected deafen / undeafen",
+        Some(shortcuts::Action::PushToTalk(true)) => "Detected push-to-talk pressed",
+        Some(shortcuts::Action::PushToTalk(false)) => "Detected push-to-talk released",
         None => "Press a shortcut after testing to check it",
     };
     Section::boxed(
@@ -1285,6 +1620,21 @@ fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
                         |s| &mut s.ui.deafen_key,
                         "Ctrl+Shift+D",
                         Message::DeafenKeybind,
+                    ),
+                ),
+            ),
+            item(
+                "push to talk ptt hold transmit",
+                form_row(
+                    t,
+                    "Push to talk",
+                    Some("Held, not toggled. Used in push-to-talk mode."),
+                    key_field(
+                        k,
+                        &s.ui.ptt_key,
+                        |s| &mut s.ui.ptt_key,
+                        "Ctrl+Shift+Space",
+                        Message::PttKeybind,
                     ),
                 ),
             ),

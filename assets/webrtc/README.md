@@ -5,6 +5,9 @@
 
 Source artifact: <https://github.com/livekit/rust-sdks/releases/download/webrtc-a545de4/webrtc-mac-arm64-release.zip>.
 
-The macOS bundle includes these WebRTC and bundled dependency notices. Refresh
-this file when updating the native SDK; other platforms currently keep the voice
-client and do not link the experimental receiver.
+Mac and Windows packages include these WebRTC and bundled dependency notices.
+The same native artifact supplies streaming, microphone APM processing and VAD.
+`native/audio.cpp` exposes suppression levels and VAD through a fixed-frame C
+interface; its build uses the pinned helper above. Refresh these notices and
+the matching build-helper pin when updating the SDK. Linux currently retains
+the voice client without native WebRTC processing or streaming.

@@ -8,9 +8,10 @@ on:
 permissions:
   contents: read
 
-# Keep every push queued, and serialize release/tap updates.
+# Keep every push queued, and serialize release/tap updates. Manual build-only
+# runs on other branches get their own queue so they never delay a release.
 concurrency:
-  group: release-main
+  group: release-${{ github.ref == 'refs/heads/main' && 'main' || github.ref }}
   queue: max
 
 jobs:
@@ -38,14 +39,33 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      # A ReFS Dev Drive avoids NTFS/Defender overhead on Cargo's many small files.
+      # The target dir is a subdirectory: the volume root holds System Volume
+      # Information, which rust-cache's pruning and tar cannot handle.
+      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        if: runner.os == 'Windows'
+        with:
+          drive-size: 12GB
+          # Beside the checkout, on the same drive, so cache archives keep plain paths.
+          mount-path: ${{ github.workspace }}/../dev-drive
+          env-mapping: CARGO_TARGET_DIR,{{ DEV_DRIVE }}/target
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-${{ matrix.platform }}
-          cache-directories: target/release-opus
+          workspaces: ${{ env.CARGO_TARGET_DIR && format('. -> {0}', env.CARGO_TARGET_DIR) || '. -> target' }}
+      # rust-cache prunes unknown directories under target/, so Opus lives (and is cached) elsewhere.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/opus
+            !${{ runner.temp }}/opus/build
+          key: opus-${{ matrix.platform }}-${{ hashFiles('scripts/release.py') }}
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libxkbcommon-dev libwayland-dev desktop-file-utils
       - name: Build and package
+        env:
+          FLEXSPEAK_OPUS_DIR: ${{ runner.temp }}/opus
         run: python scripts/release.py build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
