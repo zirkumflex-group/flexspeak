@@ -255,6 +255,20 @@ mod tests {
         assert_eq!(rt.state.ui.address.text, "ts.zirkumflex.io");
     }
 
+    /// The connected scene with enough streams to overflow the pane, whether or not this
+    /// platform shows the share card.
+    fn crowded_streams(s: &mut App) {
+        connected(s);
+        let base = s.streaming.catalog[0].clone();
+        for id in 0..12 {
+            s.streaming.catalog.push(crate::streaming::StreamInfo {
+                id: format!("extra-{id}"),
+                name: format!("Screen {id}"),
+                ..base.clone()
+            });
+        }
+    }
+
     /// Every scrolling page must move its content under the wheel at a small window size.
     #[test]
     fn long_pages_scroll_under_the_wheel() {
@@ -267,26 +281,17 @@ mod tests {
                 "statistics-scroll",
                 "record-trace",
             ),
-            ("streams", connected, "streams-scroll", "refresh-streams"),
+            (
+                "streams",
+                crowded_streams,
+                "streams-scroll",
+                "refresh-streams",
+            ),
             ("channels", connected, "channel-scroll", "channels"),
             ("setup", devices, "setup-scroll", "refresh-devices"),
         ];
         for (name, scene, viewport, probe) in cases {
             let mut rt = runtime(scene, (760.0, 420.0));
-            if name == "streams" {
-                // Enough streams to overflow the pane, whether or not this platform can share.
-                let base = rt.state.streaming.catalog[0].clone();
-                for id in 0..12 {
-                    rt.state
-                        .streaming
-                        .catalog
-                        .push(crate::streaming::StreamInfo {
-                            id: format!("extra-{id}"),
-                            name: format!("Screen {id}"),
-                            ..base.clone()
-                        });
-                }
-            }
             if name == "channels" {
                 // Enough channels to overflow the sidebar.
                 let base = rt.state.state.channels[0].clone();
