@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::{App, Tab, alerts::Source, client, onboarding, settings, usage};
+use crate::{App, SettingsPage, Tab, alerts::Source, client, onboarding, settings, usage};
 
 type Scene = (&'static str, fn(&mut App));
 
@@ -15,6 +15,18 @@ pub const SCENES: &[Scene] = &[
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
+    ("settings-appearance", settings_appearance),
+    ("settings-audio", settings_audio),
+    ("settings-picker", settings_picker),
+    ("server-add", server_add),
+    ("server-edit", server_edit),
+    ("home-connecting", home_connecting),
+    ("settings-shortcuts", settings_shortcuts),
+    ("settings-permissions", settings_permissions),
+    ("settings-file", settings_file),
+    ("settings-search", settings_search),
+    ("settings-empty-search", settings_empty_search),
+    ("settings-connected", settings_connected),
     ("settings-light", settings_light),
     ("themes", themes),
     ("connected-light", connected_light),
@@ -34,11 +46,23 @@ fn dark(s: &mut App) {
 fn saved(s: &mut App) {
     dark(s);
     s.onboarding = None;
+    let servers = vec![
+        settings::Server {
+            name: "Zirkumflex".into(),
+            address: "ts.zirkumflex.io".into(),
+        },
+        settings::Server {
+            name: "Friday Squad".into(),
+            address: "voice.friday.gg:9988".into(),
+        },
+        settings::Server::new("ts3.example.org"),
+    ];
     s.saved = Some(settings::Settings {
-        server_address: "ts.zirkumflex.io".into(),
+        servers: servers.clone(),
         nickname: "Jan".into(),
         ..settings::Settings::default()
     });
+    s.servers = servers;
     s.address = "ts.zirkumflex.io".into();
     s.nickname = "Jan".into();
     s.alerts = Default::default();
@@ -192,18 +216,98 @@ fn statistics(s: &mut App) {
 }
 
 fn settings_page(s: &mut App) {
+    settings_at(s, SettingsPage::Server);
+}
+
+fn settings_at(s: &mut App, page: SettingsPage) {
     saved(s);
-    s.tab = Tab::Settings;
+    s.settings_path = Some("/Users/jan/Library/Application Support/Flexspeak/settings.json".into());
+    s.open_settings(page);
+}
+
+fn settings_appearance(s: &mut App) {
+    settings_at(s, SettingsPage::Appearance);
+}
+
+fn settings_audio(s: &mut App) {
+    settings_at(s, SettingsPage::Audio);
+}
+
+/// Adding a server, from the home card's + or Settings.
+fn server_add(s: &mut App) {
+    settings_page(s);
+    let _ = s.update(crate::Message::AddServer);
+    let _ = s.update(crate::Message::ServerAddress("eu.voicehub.net".into()));
+    let _ = s.update(crate::Message::ServerName("Voice Hub EU".into()));
+    s.sync_fields();
+}
+
+fn server_edit(s: &mut App) {
+    settings_page(s);
+    let _ = s.update(crate::Message::EditServer(1));
+    s.sync_fields();
+}
+
+/// Connecting to the second server: the others wait for it.
+fn home_connecting(s: &mut App) {
+    home(s);
+    s.address = "voice.friday.gg:9988".into();
+    s.session = Some(tokio::sync::mpsc::channel(1).0);
+    s.status = "Connecting to voice.friday.gg:9988…".into();
+}
+
+/// The microphone menu open inside the window: it draws above the panel.
+fn settings_picker(s: &mut App) {
+    settings_audio(s);
+    s.ui.open = Some("input-device");
+}
+
+fn settings_shortcuts(s: &mut App) {
+    settings_at(s, SettingsPage::Shortcuts);
+    s.keybind_draft.toggle_mute = "Ctrl+Shift+M".into();
+    s.keybind_draft.toggle_deafen = "Ctrl+Shift+D".into();
+    s.sync_fields();
+}
+
+fn settings_permissions(s: &mut App) {
+    settings_at(s, SettingsPage::Permissions);
+}
+
+fn settings_file(s: &mut App) {
+    settings_at(s, SettingsPage::File);
+    s.settings_message = Some("Settings saved".into());
+}
+
+/// A query that finds rows in several categories.
+fn settings_search(s: &mut App) {
+    settings_at(s, SettingsPage::Server);
+    s.settings_query = "mic".into();
+    s.sync_fields();
+}
+
+fn settings_empty_search(s: &mut App) {
+    settings_at(s, SettingsPage::Server);
+    s.settings_query = "bluetooth".into();
+    s.sync_fields();
+}
+
+/// Settings over the connected server, with the server fields locked.
+fn settings_connected(s: &mut App) {
+    connected(s);
+    // A session locks the server fields; the dropped receiver is never read in a preview.
+    s.session = Some(tokio::sync::mpsc::channel(1).0);
+    s.settings_path = Some("/Users/jan/Library/Application Support/Flexspeak/settings.json".into());
+    s.open_settings(SettingsPage::Server);
 }
 
 fn settings_light(s: &mut App) {
-    settings_page(s);
+    settings_audio(s);
     s.appearance.scheme = settings::ColorScheme::Light;
 }
 
 /// Different themes for light and dark, in dark.
 fn themes(s: &mut App) {
-    settings_page(s);
+    settings_appearance(s);
     s.appearance.light_theme = settings::ThemeName::Grove;
     s.appearance.dark_theme = settings::ThemeName::Ember;
 }
@@ -285,9 +389,153 @@ mod tests {
         assert_eq!(rt.state.tab, Tab::Home);
     }
 
+    fn press(rt: &mut Runtime<App>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key}"));
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        for _ in 0..20 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn key(rt: &mut Runtime<App>, key: rune::Key, cmd: bool) {
+        rt.key(rune::KeyEvent {
+            key,
+            mods: rune::Mods {
+                cmd,
+                ..Default::default()
+            },
+        });
+        for _ in 0..20 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    #[test]
+    fn settings_opens_over_home_switches_categories_and_closes() {
+        let mut rt = runtime(home, (900.0, 790.0));
+        press(&mut rt, "Settings");
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Server));
+        assert_eq!(rt.state.tab, Tab::Home, "Settings floats over the page");
+        assert!(rt.find("settings-window").is_some());
+        press(&mut rt, "nav-Audio");
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Audio));
+        assert!(rt.find("refresh-devices").is_some());
+        press(&mut rt, "close-settings");
+        assert_eq!(rt.state.settings_page, None);
+        // It reopens on the category it was left on, from ⌘, too.
+        key(&mut rt, rune::Key::Command(','), true);
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Audio));
+        key(&mut rt, rune::Key::Escape, false);
+        assert_eq!(rt.state.settings_page, None);
+        assert_eq!(rt.state.tab, Tab::Home);
+    }
+
+    #[test]
+    fn settings_closes_when_pressed_outside_the_panel() {
+        let mut rt = runtime(settings_page, (1200.0, 900.0));
+        for _ in 0..20 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt.pointer_down(6.0, 450.0);
+        rt.pointer_up(6.0, 450.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.settings_page, None);
+    }
+
+    #[test]
+    fn search_narrows_to_matching_rows_and_escape_clears_it_before_closing() {
+        let mut rt = runtime(settings_page, (900.0, 790.0));
+        press(&mut rt, "nav-Shortcuts");
+        // `/` jumps to the search field from anywhere in the window.
+        key(&mut rt, rune::Key::Text("/".into()), false);
+        assert!(rt.state.ui.settings_search.focused);
+        for c in ["d", "e", "a", "f"] {
+            key(&mut rt, rune::Key::Text(c.into()), false);
+        }
+        assert_eq!(rt.state.settings_query, "deaf");
+        assert!(rt.find("results").is_some());
+        assert!(
+            rt.find("shortcuts").is_some(),
+            "the deafen shortcut matches"
+        );
+        assert!(rt.find("connection").is_none(), "server rows don't");
+        key(&mut rt, rune::Key::Escape, false);
+        assert_eq!(rt.state.settings_query, "");
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Shortcuts));
+        key(&mut rt, rune::Key::Escape, false);
+        assert_eq!(rt.state.settings_page, None);
+    }
+
+    #[test]
+    fn a_search_finds_every_category_by_name_and_says_when_nothing_matches() {
+        let mut rt = runtime(settings_page, (900.0, 790.0));
+        let search = |rt: &mut Runtime<App>, query: &str| {
+            key(rt, rune::Key::Escape, false);
+            if rt.state.settings_page.is_none() {
+                key(rt, rune::Key::Command(','), true);
+            }
+            if !rt.state.ui.settings_search.focused {
+                key(rt, rune::Key::Text("/".into()), false);
+            }
+            key(rt, rune::Key::Text(query.into()), false);
+            assert_eq!(rt.state.settings_query, query);
+        };
+        search(&mut rt, "ember");
+        assert!(rt.find("themes").is_some());
+        assert!(rt.find("Ember-dark").is_some());
+        search(&mut rt, "permissions");
+        assert!(rt.find("permission-0").is_some());
+        search(&mut rt, "bluetooth");
+        assert!(rt.find("no-results").is_some());
+    }
+
+    #[test]
+    fn escape_closes_the_server_dialog_before_the_settings_window() {
+        let mut rt = runtime(server_edit, (900.0, 790.0));
+        assert!(rt.find("server-editor-dialog").is_some());
+        key(&mut rt, rune::Key::Escape, false);
+        assert!(rt.state.server_editor.is_none());
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Server));
+        press(&mut rt, "edit-server-2");
+        assert_eq!(rt.state.server_editor.as_ref().unwrap().index, Some(2));
+    }
+
+    #[test]
+    fn each_home_row_connects_to_its_own_server() {
+        let mut rt = runtime(home, (900.0, 790.0));
+        assert!(rt.find("server-2").is_some());
+        // The card fades in before it takes presses.
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        // The + opens Settings on the server list with a new server.
+        press(&mut rt, "add-server");
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Server));
+        assert_eq!(rt.state.server_editor.as_ref().unwrap().index, None);
+        key(&mut rt, rune::Key::Escape, false);
+        key(&mut rt, rune::Key::Escape, false);
+        assert_eq!(rt.state.settings_page, None);
+        press(&mut rt, "connect-1");
+        assert_eq!(rt.state.address, "voice.friday.gg:9988");
+    }
+
+    #[test]
+    fn settings_stays_closed_during_setup_and_performance_mode() {
+        let mut app = App::with_devices(crate::audio::Devices::default(), None);
+        setup(&mut app);
+        let _ = app.update(crate::Message::OpenSettings(SettingsPage::Audio));
+        assert_eq!(app.settings_page, None);
+        home(&mut app);
+        app.performance_mode
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = app.update(crate::Message::OpenSettings(SettingsPage::Audio));
+        assert_eq!(app.settings_page, None);
+    }
+
     #[test]
     fn theme_swatches_choose_a_theme_for_one_mode_and_scheme_cards_switch_modes() {
-        let mut rt = runtime(settings_page, (900.0, 790.0));
+        let mut rt = runtime(settings_appearance, (900.0, 790.0));
         // Nothing to store to: the choices apply without a settings file to write.
         rt.state.saved = None;
         rt.frame(1.0 / 60.0);
@@ -341,7 +589,12 @@ mod tests {
     fn long_pages_scroll_under_the_wheel() {
         type Case = (&'static str, fn(&mut App), &'static str, &'static str);
         let cases: [Case; 5] = [
-            ("settings", settings_page, "settings-scroll", "save"),
+            (
+                "settings",
+                settings_audio,
+                "settings-scroll",
+                "refresh-devices",
+            ),
             (
                 "statistics",
                 statistics,

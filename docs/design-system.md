@@ -61,9 +61,13 @@ Settings-style content uses `widgets::group` with `widgets::form_row`: the label
 
 ## Layout
 
-The header (52 pt) is also the macOS titlebar: the traffic lights sit centred in it and the header drags the window. It holds the back button on utility pages, the page or server title, the performance-mode switch, and Statistics/Settings. Escape returns to the server. Onboarding and performance mode have no header; a band across the top drags the window there, and onboarding's steps sit directly on the window.
+The header (52 pt) is also the macOS titlebar: the traffic lights sit centred in it and the header drags the window. It holds the back button on utility pages, the page or server title, the performance-mode switch, and Statistics/Settings. Escape returns to the server.
 
-Disconnected, a single saved-server card is centred with a Connect button. Connected, the 260 pt sidebar holds the server, the voice panel (mute, deafen, disconnect and the microphone meter) and the channel tree; streaming fills the right. Channel rows are 26 pt with a separate disclosure chevron; members are indented with a health dot and mute icons only when muted.
+### Settings window
+
+Settings is a modal panel over the window (`settings::window`), not a page: a `scrim`, then a panel up to 1040 × 800 pt with a 28 pt margin (16 pt below a 900 pt window), a `CARD`-plus radius of 12, a hairline edge and the window's two-layer floating shadow. The sidebar (232 pt, 204 pt when narrow) is `chrome` and holds the search field and categories grouped under caption headings; the selected category has a `raised` fill and strong label. The content side is `canvas`, with a 52 pt header (breadcrumb, save confirmation, **Save**, close) over a scrolling column of sections at most 700 pt wide. Each section is a `group_title`, a `group` of `form_row`s (or open content such as the appearance cards) and an optional `group_note`. Rows carry search terms; a query keeps the rows it matches, or a whole section when it names it, and dims categories without a match. Menus opened inside the window draw above it. Onboarding and performance mode have no header; a band across the top drags the window there, and onboarding's steps sit directly on the window.
+
+Disconnected, a saved-servers card (at most 560 pt wide) is centred: one 52 pt row per server, each a `wash(0.03)` tile with a hairline edge, a server icon, name over address, and its own Connect. The server in use gets an `accent` tint and border; the list scrolls past 300 pt. Connected, the 260 pt sidebar holds the server, the voice panel (mute, deafen, disconnect and the microphone meter) and the channel tree; streaming fills the right. Channel rows are 26 pt with a separate disclosure chevron; members are indented with a health dot and mute icons only when muted.
 
 The footer is fixed on every normal page: own health pill on the left, then four 20 pt connection charts (at least 110 pt each; the strip scrolls sideways below that), then CPU, RAM and footprint in tabular figures. Performance mode stacks the readings above the health pill to fit the 440 × 320 window.
 

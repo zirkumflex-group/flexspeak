@@ -13,7 +13,8 @@ A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses [R
 - A channel/client tree with health dots, conditional mute/deafen icons, clickable channel headings and password prompts.
 - Mute, deafen, microphone level, sent/received audio packet counters.
 - Editable global mute/deafen shortcuts and an app-only playback volume slider.
-- A Settings tab with portable JSON for server address, nickname, volume and keybinds.
+- A list of saved servers, connected one at a time.
+- A searchable Settings window (⌘,) with portable JSON for servers, nickname, volume and keybinds.
 - A Statistics tab with CPU/RAM usage, five-minute history graphs, and P50/P90/P99.
 - Live upload/download rates, session traffic totals, packet loss in/out, ping variation, idle time, and server-reported file-transfer rates.
 - Own connection health and compact line charts in the fixed footer; current-channel clients have collapsed health labels and expandable details in Voice (subject to server permissions).
@@ -69,9 +70,9 @@ libopus links statically. The binding finds an installed libopus using pkg-confi
 
 ## First voice session
 
-Run `flexspeak --snap out.png --scene connected` (or `home`, `setup`, `devices`, `footer-hidden`, `statistics`, `settings`, `settings-light`, `themes`, `connected-light`, `performance`, `password`, `alert`) to render a screen headlessly with demo data; `--list-scenes` lists them.
+Run `flexspeak --snap out.png --scene connected` (or `home`, `setup`, `devices`, `footer-hidden`, `statistics`, `settings`, `settings-appearance`, `settings-audio`, `settings-shortcuts`, `settings-permissions`, `settings-file`, `settings-search`, `settings-empty-search`, `settings-connected`, `server-add`, `server-edit`, `home-connecting`, `settings-light`, `themes`, `connected-light`, `performance`, `password`, `alert`) to render a screen headlessly with demo data; `--list-scenes` lists them.
 
-A missing settings file opens setup for your username, one saved server, permissions, devices and global shortcuts. Finish saves the profile; existing valid settings go straight to the saved-server card. Use its plug button to connect. While connected, the channel tree stays on the left and streaming occupies the right. Settings and Statistics are available from the header.
+A missing settings file opens setup for your username, one saved server, permissions, devices and global shortcuts. Finish saves the profile; existing valid settings go straight to your saved servers. Each has its own Connect button; one server is connected at a time. Add, edit or remove servers with the card's **+** or **Settings → Server**. While connected, the channel tree stays on the left and streaming occupies the right. Settings and Statistics are available from the header.
 
 
 1. In **Settings → Audio**, select your microphone and headphones/speakers.
@@ -87,7 +88,7 @@ If AirPods or other Bluetooth headphones are missing, connect them to this compu
 
 ## Controls and saved settings
 
-The default global toggles are **Ctrl+Shift+M** for mute/unmute and **Ctrl+Shift+D** for deafen/undeafen. Change them in **Settings → Save settings**. The same JSON file stores the server address, nickname and playback volume. Use **Copy settings path** to locate it; edit/copy the file and use **Reload JSON** while disconnected, or restart the app. On native Wayland, global shortcuts are currently unavailable and the app reports that limitation.
+The default global toggles are **Ctrl+Shift+M** for mute/unmute and **Ctrl+Shift+D** for deafen/undeafen. Change them in **Settings → Shortcuts**, then **Save**. The same JSON file stores the server address, nickname and playback volume. Use **Settings → Settings File → Copy Path** to locate it; edit/copy the file and use **Reload** there while disconnected, or restart the app. On native Wayland, global shortcuts are currently unavailable and the app reports that limitation.
 
 The **Volume** slider in **Settings → Audio**, below Playback, changes only Flexspeak's output (0–100%), including a live session or local audio test. Save in Settings to retain it. Setting volume to zero does not mute your microphone. See [controls, JSON format and validation](docs/controls-and-settings.md) and [the example JSON](settings.example.json).
 

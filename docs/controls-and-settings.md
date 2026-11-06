@@ -2,7 +2,7 @@
 
 ## First launch
 
-When `settings.json` does not exist, the app opens a five-step setup: username, one saved server, OS permissions, audio devices/local testing, and hotkeys. It writes the configuration only after **Finish setup** succeeds. Closing an unfinished setup leaves no default file behind, so the next launch starts setup again. A valid existing configuration skips setup. A malformed or unreadable file is preserved and opens Settings with an error instead of being replaced by onboarding.
+When `settings.json` does not exist, the app opens a five-step setup: username, one saved server, OS permissions, audio devices/local testing, and hotkeys. It writes the configuration only after **Finish setup** succeeds. Closing an unfinished setup leaves no default file behind, so the next launch starts setup again. A valid existing configuration skips setup. A malformed or unreadable file is preserved and opens **Settings → Settings File** with an error instead of being replaced by onboarding.
 
 Microphone and playback selections are saved by device ID. If a saved device is unavailable on a later launch, the picker remains unselected so the user can explicitly choose a replacement. Older files without device IDs use the detected defaults. The local microphone test makes no server connection; stop it before advancing setup. Passwords remain session-only.
 
@@ -12,9 +12,11 @@ The Permissions step has separate actions for microphone, screen sharing and sys
 
 Normal windows have a **760 × 560 logical-pixel minimum**. Performance mode keeps its **440 × 320** minimum, and leaving it restores the normal minimum before resizing back.
 
-The top bar contains performance mode, Statistics and Settings; Voice and Streaming tabs are removed. The disconnected home screen centers one saved-server card with an icon-only Connect button and tooltip. Edit the saved server, username or session-only server password in Settings. Unsaved address/name drafts do not change the server shown on the card or used by Connect.
+The top bar contains performance mode, Statistics and Settings; Voice and Streaming tabs are removed. The disconnected home screen centers a **Saved servers** card: one row per server (its name, or address, with the address beneath a name) and its own **Connect** button. The first server's Connect is the default button, so Return connects to it; **+** adds a server. Only one session runs at a time: while one server connects or is connected, its row offers **Cancel** and the others' Connect buttons wait until you disconnect.
 
-Once connected, the left sidebar contains the server/channel tree and Disconnect, Mute and Deafen. The channel tree reserves 16 logical pixels before its scrollbar. The right pane contains stream publishing and available streams. Opening Settings or Statistics stops watching/sharing, as leaving the old Streaming view did. Peer connection details and voice packet counts are in Statistics; sidebar health dots remain on the server view.
+Manage the list in **Settings → Server → Servers**. **Add Server** and each row's **Edit** open a dialog with **Address** (required, unique in the list), an optional **Name**, and an optional **Password**. The password is kept per server until the app quits and is never written to the file. Saving the dialog writes the list straight away, without saving other unsaved Settings edits. **Remove** is in the Edit dialog; the last server can't be removed, and the server in use can't be edited or removed until you disconnect. The row of the server in use is marked **Connecting** or **Connected**. Your **Nickname** (Settings → Server → Identity) is used on every server and is kept by **Save**.
+
+Once connected, the left sidebar contains the server/channel tree and Disconnect, Mute and Deafen. The channel tree reserves 16 logical pixels before its scrollbar. The right pane contains stream publishing and available streams. Opening Statistics stops watching/sharing, as leaving the old Streaming view did; Settings floats over the server view and leaves streams, sharing and peer polling running. Peer connection details and voice packet counts are in Statistics; sidebar health dots remain on the server view.
 
 ## Global shortcuts
 
@@ -29,7 +31,7 @@ Lucide icons accompany the CPU, RAM, server, channel, microphone, playback and v
 
 ## Change and save controls
 
-Open **Settings** using the gear icon at the top right. The adjacent graph icon opens **Statistics**; both show a label on hover and highlight the selected page. Edit the server address, nickname, and shortcut text, then choose **Save settings**. A hostname, IP address, or address with a port can be used. Examples of shortcut text include `Ctrl+Shift+M`, `Ctrl+Alt+D`, `F8`, and `CmdOrCtrl+Shift+M`. The latter uses Command on macOS and Control on other platforms.
+Open **Settings** using the gear icon at the top right, or **⌘,** (**Ctrl+,** on Windows and Linux). It opens as a window over the app: categories on the left (**Server**, **Appearance**, then **Voice**: **Audio**, **Shortcuts**, **Permissions**, then **Storage**: **Settings File**) and the chosen category's settings on the right. **Search** at the top of the sidebar (or press **/**) filters every category at once to the rows that match, such as `mic`, `deafen` or `ember`, and dims the categories with no match. **Escape** clears a search first, then closes the window; **×** or a click outside the panel also closes it, and the gear reopens it on the category last used. **Save** (**⌘S**) sits in the window's header. Settings is unavailable during setup and in performance mode. The adjacent graph icon opens **Statistics**; both show a label on hover and highlight while open. Edit the server address, nickname, and shortcut text, then choose **Save**. A hostname, IP address, or address with a port can be used. Examples of shortcut text include `Ctrl+Shift+M`, `Ctrl+Alt+D`, `F8`, and `CmdOrCtrl+Shift+M`. The latter uses Command on macOS and Control on other platforms.
 
 The two actions must use different shortcuts. Invalid syntax is rejected. New keys are registered before old keys are released; an ordinary registration conflict preserves the previous working keys and leaves the file unchanged. The Settings page shows registration/save errors and the last shortcut received, so the keys can be checked while disconnected.
 
@@ -57,7 +59,7 @@ While connected in normal mode, the fixed bottom bar shows incoming/outgoing pac
 
 **Channel connections**, in Statistics, lists only the other clients in your current channel. Every row shows a health dot before the name even while collapsed: Good (green), Fair (amber), Poor (red), or Unknown (neutral). The repeated channel name is omitted. Hover the dot for its health label and only problematic or unavailable measurements, using the same explanation as the footer. Sidebar client dots use the same data; your own dot uses your local connection metrics, and clients outside your channel show Unknown with an explanation that they are not sampled. The worst available loss/ping/variation rating wins; idle time is not a fault. Good requires all primary readings. Click a row to expand the same four charts; one client is expanded at a time. The channel tree keeps its normal names and mute indicators.
 
-While the server view or Statistics is visible in normal mode, the worker refreshes all current-channel clients, including collapsed ones. Requests are staggered: at most one statistics request per second and one outstanding request across your own server statistics and all peers. Each peer is requested no more often than every five seconds, with the oldest request first. Your own five-second statistics retain priority. Small channels therefore refresh in roughly five seconds; large channels take longer, and samples older than 15 seconds become Unknown until refreshed. Opening Settings pauses peer polling; performance mode pauses all optional network telemetry and drops chart histories/caches. Membership and channel changes remove obsolete samples and polling targets.
+While the server view or Statistics is visible in normal mode, the worker refreshes all current-channel clients, including collapsed ones. Requests are staggered: at most one statistics request per second and one outstanding request across your own server statistics and all peers. Each peer is requested no more often than every five seconds, with the oldest request first. Your own five-second statistics retain priority. Small channels therefore refresh in roughly five seconds; large channels take longer, and samples older than 15 seconds become Unknown until refreshed. Settings floats over the server view and leaves peer polling running; performance mode pauses all optional network telemetry and drops chart histories/caches. Membership and channel changes remove obsolete samples and polling targets.
 
 For a small channel, each peer adds up to 12 requests per minute, but the shared cap stays at 60 total requests per minute including your own. The pinned protocol's example plaintext reply is 314 bytes; a synthetic reply containing all declared fields with ten-character values is 2,012 bytes. At the shared one-request/second cap those examples represent about 0.3–2 KB/s of response payload total, before transport framing, acknowledgements, retries and any server-to-peer exchange. These are size estimates, not measured live traffic or guaranteed bounds. Roster/mute-state subscriptions remain separate.
 
@@ -85,7 +87,7 @@ CPU, RAM and the platform-specific memory detail stay in the bottom bar while th
 
 ## Appearance
 
-Settings opens with **Color Scheme** (System, Light or Dark) and **Themes**. Five themes ship with the app — Flexspeak (blue), Grove (green), Ocean (teal), Ember (orange) and Iris (violet) — and each has a light and a dark palette. Each theme card shows two swatches: press the light one to use that theme while the window is light, and the dark one for while it is dark. The two choices are independent, so Grove can be the light theme and Ember the dark one. System follows the computer's appearance: on macOS the app's effective appearance (including Auto), on Windows the app mode in Personalisation, and on Linux GNOME's `color-scheme`, read once at launch. macOS and Windows are checked with each usage tick, so a change shows within a second (ten in performance mode).
+**Settings → Appearance** holds **Color Scheme** (System, Light or Dark) and **Themes**. Five themes ship with the app — Flexspeak (blue), Grove (green), Ocean (teal), Ember (orange) and Iris (violet) — and each has a light and a dark palette. Each theme card shows two swatches: press the light one to use that theme while the window is light, and the dark one for while it is dark. The two choices are independent, so Grove can be the light theme and Ember the dark one. System follows the computer's appearance: on macOS the app's effective appearance (including Auto), on Windows the app mode in Personalisation, and on Linux GNOME's `color-scheme`, read once at launch. macOS and Windows are checked with each usage tick, so a change shows within a second (ten in performance mode).
 
 Like the footer choice, appearance applies and saves immediately without saving other unsaved Settings edits. It is stored as an optional `appearance` object and left out of the file while it is the default:
 
@@ -101,7 +103,7 @@ Server commands share a bounded scheduler with acknowledgement tracking. Rapid m
 
 ## JSON file
 
-The default file is `settings.json` beside the local identity file. **Copy settings path** gives its exact location, and `--settings-path` prints it. On this Mac it is:
+The default file is `settings.json` beside the local identity file. **Settings → Settings File → Copy Path** gives its exact location, and `--settings-path` prints it. On this Mac it is:
 
 ```text
 /Users/jangj/Library/Application Support/io.Venator.TeamSpeakNative/settings.json
@@ -111,7 +113,11 @@ The portable format is shown in [`settings.example.json`](../settings.example.js
 
 ```json
 {
-  "server_address": "ts.zirkumflex.io",
+  "servers": [
+    {
+      "address": "ts.zirkumflex.io"
+    }
+  ],
   "nickname": "Flexspeak",
   "playback_volume_percent": 100,
   "keybinds": {
@@ -121,7 +127,7 @@ The portable format is shown in [`settings.example.json`](../settings.example.js
 }
 ```
 
-Copy the JSON to the settings location on another computer, or set `NATIVE_VOICE_SETTINGS` to a custom JSON path. After external edits, disconnect and choose **Reload JSON**, or restart. The file may also contain optional `input_device_id` and `output_device_id` strings. These are machine-specific: choose devices again, or omit the fields to use defaults, when copying settings to another computer. Server/channel passwords and the private TeamSpeak identity are not saved in this file.
+Copy the JSON to the settings location on another computer, or set `NATIVE_VOICE_SETTINGS` to a custom JSON path. After external edits, disconnect and choose **Settings → Settings File → Reload**, or restart. Each entry in `servers` has an `address` and an optional `name`, in the order the home screen lists them. A file written before the server list, with one `server_address`, still loads: that server becomes the first in the list, and the next save writes `servers` instead. The file may also contain optional `input_device_id` and `output_device_id` strings. These are machine-specific: choose devices again, or omit the fields to use defaults, when copying settings to another computer. Server/channel passwords and the private TeamSpeak identity are not saved in this file.
 
 Saving is explicit. Missing files start onboarding; missing known fields in an existing file receive defaults. Invalid JSON, unknown field names, invalid shortcuts and out-of-range volume produce an error. Loading an invalid file does not rewrite it. A successful Save writes a complete temporary file and renames it into place; failed writes do not leave partially written settings. Saving the displayed values after a load error explicitly replaces the invalid file.
 

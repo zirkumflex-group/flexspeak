@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    /// Saved servers, in the order the home screen lists them. One is connected at a time.
+    #[serde(default)]
+    pub servers: Vec<Server>,
+    /// The single server of files written before the list. Loading moves it to the front of
+    /// `servers`, and it is never written again.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub server_address: String,
     pub nickname: String,
     pub playback_volume_percent: u8,
@@ -26,6 +32,33 @@ pub struct Settings {
     /// Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Appearance::is_default")]
     pub appearance: Appearance,
+}
+
+/// A saved server: an optional name to show, and the address to connect to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Server {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    pub address: String,
+}
+
+impl Server {
+    pub fn new(address: impl Into<String>) -> Self {
+        Self {
+            name: String::new(),
+            address: address.into(),
+        }
+    }
+
+    /// The name, or the address for a server without one.
+    pub fn title(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.address
+        } else {
+            &self.name
+        }
+    }
 }
 
 /// Whether the window follows the system's light or dark appearance or keeps one.
@@ -118,7 +151,8 @@ impl Appearance {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            server_address: "ts.zirkumflex.io".into(),
+            servers: vec![Server::new("ts.zirkumflex.io")],
+            server_address: String::new(),
             nickname: "Flexspeak".into(),
             playback_volume_percent: 100,
             keybinds: Keybinds::default(),
@@ -131,9 +165,26 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Moves a pre-list file's `server_address` to the front of `servers`.
+    pub fn migrate(mut self) -> Self {
+        let legacy = std::mem::take(&mut self.server_address);
+        let legacy = legacy.trim();
+        if !legacy.is_empty() && !self.servers.iter().any(|server| server.address == legacy) {
+            self.servers.insert(0, Server::new(legacy));
+        }
+        self
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if self.server_address.trim().is_empty() {
-            bail!("Enter a server address.");
+        if self.servers.is_empty() {
+            bail!("Add a server.");
+        }
+        if self
+            .servers
+            .iter()
+            .any(|server| server.address.trim().is_empty())
+        {
+            bail!("Enter an address for every server.");
         }
         if self.nickname.trim().is_empty() {
             bail!("Enter a nickname.");
@@ -158,8 +209,9 @@ pub fn path() -> Result<PathBuf> {
 pub fn load(path: &Path) -> Result<Option<Settings>> {
     match fs::read_to_string(path) {
         Ok(json) => {
-            let settings: Settings = serde_json::from_str(&json)
-                .context("Invalid settings.json; the file was not changed")?;
+            let settings = serde_json::from_str::<Settings>(&json)
+                .context("Invalid settings.json; the file was not changed")?
+                .migrate();
             settings.validate()?;
             Ok(Some(settings))
         }
@@ -210,7 +262,13 @@ mod tests {
             Settings::default()
         );
         let settings = Settings {
-            server_address: "[::1]:9987".into(),
+            servers: vec![
+                Server::new("[::1]:9987"),
+                Server {
+                    name: "Friends".into(),
+                    address: "voice.example".into(),
+                },
+            ],
             nickname: "Älex".into(),
             playback_volume_percent: 37,
             keybinds: Keybinds {
@@ -225,14 +283,38 @@ mod tests {
                 light_theme: ThemeName::Grove,
                 dark_theme: ThemeName::Iris,
             },
+            ..Settings::default()
         };
         settings.validate()?;
         assert_eq!(
             serde_json::from_str::<Settings>(&serde_json::to_string(&settings)?)?,
             settings
         );
-        let minimal: Settings =
-            serde_json::from_str(r#"{"server_address":"voice.example:9987","nickname":"Alex"}"#)?;
+        // A file from before the server list keeps its server, now the only one in the list.
+        let minimal = serde_json::from_str::<Settings>(
+            r#"{"server_address":"voice.example:9987","nickname":"Alex"}"#,
+        )?
+        .migrate();
+        assert_eq!(minimal.servers, [Server::new("voice.example:9987")]);
+        assert!(minimal.server_address.is_empty());
+        assert!(!serde_json::to_string(&minimal)?.contains("server_address"));
+        minimal.validate()?;
+        assert!(
+            Settings {
+                servers: Vec::new(),
+                ..Settings::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Settings {
+                servers: vec![Server::new(" ")],
+                ..Settings::default()
+            }
+            .validate()
+            .is_err()
+        );
         assert_eq!(minimal.playback_volume_percent, 100);
         assert_eq!(minimal.keybinds, Keybinds::default());
         assert!(serde_json::from_str::<Settings>(r#"{"nicknmae":"Alex"}"#).is_err());
