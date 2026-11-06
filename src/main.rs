@@ -298,6 +298,7 @@ impl App {
             app.resume = resume::take(&resume::path(path), SystemTime::now());
         }
         app.sync_page_visibility();
+        app.permissions.refresh();
         app.shortcuts = Some(shortcuts);
         ui::forward_shortcuts(app.handle.clone(), events);
         app.sync_fields();
@@ -455,6 +456,18 @@ impl App {
         self.password.clear();
         self.tab = Tab::Home;
         self.sync_page_visibility();
+    }
+
+    /// Settings and the setup step show live status; re-read it while either is open, so a
+    /// change made in the OS's privacy settings appears on return without a restart.
+    fn refresh_visible_permissions(&mut self) {
+        let showing = match self.onboarding {
+            Some(step) => step == onboarding::Step::Permissions,
+            None => self.tab == Tab::Settings,
+        };
+        if showing {
+            self.permissions.refresh();
+        }
     }
 
     fn sync_page_visibility(&self) {
@@ -813,6 +826,7 @@ impl App {
                     self.onboarding_error = None;
                     if let Some(next) = step.next() {
                         self.onboarding = Some(next);
+                        self.refresh_visible_permissions();
                     } else if self.save_settings() {
                         self.onboarding = None;
                         self.tab = Tab::Home;
@@ -827,6 +841,7 @@ impl App {
                 {
                     self.onboarding = Some(previous);
                     self.onboarding_error = None;
+                    self.refresh_visible_permissions();
                 }
             }
             Message::TestHotkeys => {
@@ -863,6 +878,7 @@ impl App {
                         Ok(message) => message,
                         Err(error) => error,
                     });
+                    self.permissions.refresh();
                 }
             }
             Message::OpenPermissionSettings(kind) => {
@@ -987,6 +1003,7 @@ impl App {
                 }
                 self.tab = tab;
                 self.sync_page_visibility();
+                self.refresh_visible_permissions();
                 if tab != Tab::Home {
                     self.streaming.sharing.stop_capture();
                     self.streaming.clear_picture();
@@ -1133,6 +1150,7 @@ impl App {
                 }
             }
             Message::UsageTick => {
+                self.refresh_visible_permissions();
                 if self.performance_mode.load(Ordering::Relaxed) {
                     return Task::none();
                 }

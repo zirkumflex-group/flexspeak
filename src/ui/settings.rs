@@ -264,17 +264,39 @@ pub fn audio(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
     )
 }
 
+/// The OS's current answer as a tinted pill, so the row reads at a glance.
+fn status_pill(t: &Theme, status: permissions::Status) -> El {
+    use permissions::Status;
+    let (glyph, color) = match status {
+        Status::Granted => (&icons::CHECK, t.good),
+        Status::Denied => (&icons::CLOSE, t.poor),
+        Status::NotDetermined => (&icons::LOCK, t.fair),
+        Status::NotRequired => (&icons::CHECK, t.muted),
+        Status::Unknown => (&icons::LOCK, t.faint),
+    };
+    row()
+        .h(22.0)
+        .px(8.0)
+        .gap(5.0)
+        .center_y()
+        .radius(11.0)
+        .fill(color.alpha(0.14))
+        .label(status.label())
+        .child(rune::icon(glyph, 12.0).color(color).a11y_hidden())
+        .child(
+            text(status.label())
+                .font(ty::LABEL)
+                .color(color)
+                .a11y_hidden(),
+        )
+}
+
 pub fn permissions(s: &App, t: &Theme) -> El {
+    use permissions::Status;
     let enabled = s.permissions.pending.is_none() && s.session.is_none();
     let mut rows = Vec::new();
     for kind in permissions::Kind::ALL {
-        let request_label = if cfg!(windows) && kind == permissions::Kind::Microphone {
-            "Open Privacy Settings"
-        } else if cfg!(target_os = "macos") {
-            "Request Access"
-        } else {
-            "Review Access"
-        };
+        let status = s.permissions.status[kind.index()];
         let pending = s.permissions.pending == Some(kind);
         let detail = match &s.permissions.messages[kind.index()] {
             Some(message) => format!("{} {message}", kind.detail()),
@@ -284,15 +306,24 @@ pub fn permissions(s: &App, t: &Theme) -> El {
         if pending {
             controls = controls.child(super::widgets::pulse(t.accent));
         }
-        controls = controls.child(button(
-            t,
-            "request",
-            request_label,
-            None,
-            Variant::Secondary,
-            enabled.then_some(Message::RequestPermission(kind)),
-        ));
-        if cfg!(any(target_os = "macos", windows)) {
+        controls = controls.child(status_pill(t, status));
+        // Once denied, the OS won't ask again: the switch lives in its privacy settings.
+        let give = match status {
+            Status::NotDetermined | Status::Unknown => Some(Message::RequestPermission(kind)),
+            Status::Denied => Some(Message::OpenPermissionSettings(kind)),
+            Status::Granted | Status::NotRequired => None,
+        };
+        if let Some(give) = give {
+            controls = controls.child(button(
+                t,
+                "request",
+                "Give Access",
+                None,
+                Variant::Primary,
+                enabled.then_some(give),
+            ));
+        }
+        if cfg!(any(target_os = "macos", windows)) && status != Status::NotRequired {
             controls = controls.child(super::widgets::icon_button(
                 t,
                 "os-settings",
@@ -309,7 +340,7 @@ pub fn permissions(s: &App, t: &Theme) -> El {
     }
     let mut note = String::from("Your operating system controls access; you can change it later.");
     if cfg!(target_os = "macos") {
-        note.push_str(" This build appears as Flexspeak in Privacy & Security.");
+        note.push_str(" This build appears as Flexspeak in Privacy & Security. macOS may ask you to reopen the app after allowing screen recording.");
     }
     if s.session.is_some() {
         note.push_str(" Disconnect or stop the local test before requesting access.");

@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::permissions::{Kind, Status};
 use crate::{
     App, Tab,
     alerts::Source,
@@ -16,11 +17,17 @@ type Scene = (&'static str, fn(&mut App));
 pub const SCENES: &[Scene] = &[
     ("setup", setup),
     ("devices", devices),
+    ("permissions-not-asked", permissions_not_asked),
+    ("permissions-allowed", permissions_allowed),
+    ("permissions-denied", permissions_denied),
+    ("permissions-mixed", permissions_mixed),
+    ("permissions-windows", permissions_windows),
     ("home", home),
     ("connected", connected),
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
+    ("settings-permissions", settings_permissions),
     ("performance", performance),
     ("password", password),
     ("alert", alert),
@@ -60,6 +67,41 @@ fn setup(s: &mut App) {
 fn devices(s: &mut App) {
     setup(s);
     s.onboarding = Some(onboarding::Step::Devices);
+}
+
+/// The setup step with the OS reporting `status` for microphone, screen and system audio.
+fn permissions_step(s: &mut App, status: [Status; 3]) {
+    setup(s);
+    s.onboarding = Some(onboarding::Step::Permissions);
+    s.permissions.status = status;
+}
+
+fn permissions_not_asked(s: &mut App) {
+    permissions_step(s, [Status::NotDetermined; 3]);
+}
+
+fn permissions_allowed(s: &mut App) {
+    permissions_step(s, [Status::Granted; 3]);
+}
+
+fn permissions_denied(s: &mut App) {
+    permissions_step(s, [Status::Denied; 3]);
+    s.permissions.messages[Kind::Microphone.index()] = Some(
+        "Microphone access is off. Enable it in System Settings → Privacy & Security → Microphone."
+            .into(),
+    );
+}
+
+fn permissions_mixed(s: &mut App) {
+    permissions_step(s, [Status::Granted, Status::Denied, Status::NotDetermined]);
+}
+
+/// What Windows reports: only the microphone has a privacy switch.
+fn permissions_windows(s: &mut App) {
+    permissions_step(
+        s,
+        [Status::Denied, Status::NotRequired, Status::NotRequired],
+    );
 }
 
 fn home(s: &mut App) {
@@ -196,6 +238,12 @@ fn statistics(s: &mut App) {
 fn settings_page(s: &mut App) {
     saved(s);
     s.tab = Tab::Settings;
+}
+
+/// Settings with a mix of answers, to show the same live status outside setup.
+fn settings_permissions(s: &mut App) {
+    settings_page(s);
+    s.permissions.status = [Status::Granted, Status::Denied, Status::NotDetermined];
 }
 
 fn performance(s: &mut App) {
