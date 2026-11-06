@@ -3,7 +3,13 @@
 
 use std::time::{Duration, Instant};
 
-use crate::{App, Tab, alerts::Source, client, onboarding, settings, usage};
+use crate::{
+    App, Tab,
+    alerts::Source,
+    client, onboarding, settings,
+    updater::{self, Build, Phase, Progress, Retry},
+    usage,
+};
 
 type Scene = (&'static str, fn(&mut App));
 
@@ -18,6 +24,15 @@ pub const SCENES: &[Scene] = &[
     ("performance", performance),
     ("password", password),
     ("alert", alert),
+    ("update-available", update_available),
+    ("update-downloading", update_downloading),
+    ("update-ready", update_ready),
+    ("update-installing", update_installing),
+    ("update-download-failed", update_download_failed),
+    ("update-install-failed", update_install_failed),
+    ("update-settings", update_settings),
+    ("update-settings-downloading", update_settings_downloading),
+    ("update-check-failed", update_check_failed),
 ];
 
 fn saved(s: &mut App) {
@@ -200,6 +215,105 @@ fn alert(s: &mut App) {
         Source::Connection,
         "The server did not answer within 10 seconds. Check the address and your network, then try again.",
     );
+}
+
+const RUNNING: Build = Build {
+    major: 0,
+    minor: 1,
+    patch: 0,
+    number: 6,
+};
+
+/// A release build that has found build 7. Nothing is fetched; the scene only sets state.
+fn with_update(s: &mut App, phase: Phase) {
+    let mut u = updater::Updater::new(Some(RUNNING), Ok(updater::Package::MacApp), true);
+    u.release = Some(updater::Release {
+        tag: "v0.1.0-build.7".into(),
+        build: Build {
+            number: 7,
+            ..RUNNING
+        },
+        asset: updater::Asset {
+            name: updater::MACOS_DMG.into(),
+            url: String::new(),
+            size: 25_237_970,
+            digest: None,
+        },
+        checksums_url: String::new(),
+    });
+    u.phase = phase;
+    s.updater = u;
+}
+
+fn downloading() -> Phase {
+    Phase::Downloading(Progress {
+        received: 12_118_000,
+        total: Some(25_237_970),
+        bytes_per_second: Some(3_420_000.0),
+    })
+}
+
+fn update_available(s: &mut App) {
+    home(s);
+    with_update(s, Phase::Available);
+}
+
+fn update_downloading(s: &mut App) {
+    connected(s);
+    with_update(s, downloading());
+}
+
+fn update_ready(s: &mut App) {
+    connected(s);
+    with_update(s, Phase::Ready);
+}
+
+fn update_installing(s: &mut App) {
+    connected(s);
+    with_update(s, Phase::Installing);
+}
+
+fn update_download_failed(s: &mut App) {
+    home(s);
+    with_update(
+        s,
+        Phase::Failed {
+            retry: Retry::Download,
+            detail: "The download ended after 12118000 of 25237970 bytes.".into(),
+        },
+    );
+}
+
+fn update_install_failed(s: &mut App) {
+    home(s);
+    with_update(
+        s,
+        Phase::Failed {
+            retry: Retry::Install,
+            detail: "Cannot update /Applications/Flexspeak.app: Permission denied (os error 13). Check that you can write to /Applications.".into(),
+        },
+    );
+}
+
+/// Settings with a downloaded build waiting and the notice closed.
+fn update_settings(s: &mut App) {
+    settings_page(s);
+    with_update(s, Phase::Ready);
+    s.updater.dismissed = true;
+}
+
+fn update_settings_downloading(s: &mut App) {
+    settings_page(s);
+    with_update(s, downloading());
+    s.updater.auto_download = false;
+    s.updater.dismissed = true;
+}
+
+/// A failed check stays on the Settings page; nothing pops up.
+fn update_check_failed(s: &mut App) {
+    settings_page(s);
+    s.updater = updater::Updater::new(Some(RUNNING), Ok(updater::Package::MacApp), false);
+    s.updater.check_error = Some("error sending request for url (https://api.github.com/repos/zirkumflex-group/flexspeak/releases/latest): dns error".into());
 }
 
 #[cfg(test)]

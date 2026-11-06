@@ -23,6 +23,13 @@ pub struct Settings {
     /// The footer shows only the connection status and resource icons.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub footer_hidden: bool,
+    /// New releases download in the background; installing still waits for Restart.
+    #[serde(skip_serializing_if = "is_true")]
+    pub auto_download_updates: bool,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Default for Settings {
@@ -35,6 +42,7 @@ impl Default for Settings {
             input_device_id: None,
             output_device_id: None,
             footer_hidden: false,
+            auto_download_updates: true,
         }
     }
 }
@@ -129,6 +137,7 @@ mod tests {
             input_device_id: Some("input-id".into()),
             output_device_id: Some("output-id".into()),
             footer_hidden: true,
+            auto_download_updates: false,
         };
         settings.validate()?;
         assert_eq!(
@@ -139,6 +148,15 @@ mod tests {
             serde_json::from_str(r#"{"server_address":"voice.example:9987","nickname":"Alex"}"#)?;
         assert_eq!(minimal.playback_volume_percent, 100);
         assert_eq!(minimal.keybinds, Keybinds::default());
+        assert!(
+            minimal.auto_download_updates,
+            "updates download unless turned off"
+        );
+        assert!(
+            !serde_json::to_string(&Settings::default())?.contains("auto_download_updates"),
+            "the default stays out of the file"
+        );
+        assert!(serde_json::to_string(&settings)?.contains(r#""auto_download_updates":false"#));
         assert!(serde_json::from_str::<Settings>(r#"{"nicknmae":"Alex"}"#).is_err());
         assert!(
             Settings {

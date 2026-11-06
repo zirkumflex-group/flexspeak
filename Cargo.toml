@@ -19,11 +19,15 @@ crossbeam-queue = "0.3"
 directories = "6"
 futures = "0.3"
 global-hotkey = "0.9"
+# Update checks and downloads. TLS through rustls on ring: no extra C toolchain on any platform.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
 rune = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50" }
 rubato = { version = "0.16.2", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"

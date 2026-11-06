@@ -1602,11 +1602,14 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-avf-audio",
  "objc2-core-graphics",
+ "reqwest 0.13.5",
  "rubato",
  "rune",
  "rune-kit",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tokio",
  "tracing",
@@ -4497,6 +4500,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
