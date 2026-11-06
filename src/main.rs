@@ -25,7 +25,7 @@ mod usage;
 mod window_icon;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -153,6 +153,12 @@ struct App {
     output: Option<audio::DeviceChoice>,
     status: String,
     password_error: Option<String>,
+    /// Saved servers. Adding, editing or removing one saves the list straight away.
+    servers: Vec<settings::Server>,
+    /// Server passwords by address, kept until the app quits and never saved.
+    server_passwords: HashMap<String, String>,
+    /// The Add or Edit Server dialog, while it is open.
+    server_editor: Option<ServerEditor>,
     server_controls: Option<command_flow::AudioState>,
     controls_pending: bool,
     detail: String,
@@ -181,6 +187,12 @@ struct App {
     network_usage: usage::NetworkUsage,
     connection_usage: usage::ConnectionUsage,
     tab: Tab,
+    /// The open Settings window's category; Settings floats over whichever page is showing.
+    settings_page: Option<SettingsPage>,
+    /// The category Settings reopens on.
+    settings_recent: SettingsPage,
+    /// What the Settings search field holds; empty shows the chosen category.
+    settings_query: String,
     streaming: streaming::View,
     heap_usage: memory::HeapUsage,
     audio_buffer_bytes: usize,
@@ -200,7 +212,52 @@ struct App {
 enum Tab {
     Home,
     Statistics,
-    Settings,
+}
+
+/// The Add or Edit Server dialog's drafts. `index` is the server being edited; `None` adds one.
+#[derive(Debug, Clone, Default)]
+struct ServerEditor {
+    index: Option<usize>,
+    name: String,
+    address: String,
+    password: String,
+    error: Option<String>,
+}
+
+/// A category of the Settings window, in sidebar order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    Server,
+    Appearance,
+    Audio,
+    Shortcuts,
+    Permissions,
+    Updates,
+    File,
+}
+
+impl SettingsPage {
+    const ALL: [Self; 7] = [
+        Self::Server,
+        Self::Appearance,
+        Self::Audio,
+        Self::Shortcuts,
+        Self::Permissions,
+        Self::Updates,
+        Self::File,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Server => "Server",
+            Self::Appearance => "Appearance",
+            Self::Audio => "Audio",
+            Self::Shortcuts => "Shortcuts",
+            Self::Permissions => "Permissions",
+            Self::Updates => "Updates",
+            Self::File => "Settings File",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -232,7 +289,16 @@ enum Message {
     Input(audio::DeviceChoice),
     Output(audio::DeviceChoice),
     Refresh,
-    Connect,
+    /// Connects to the saved server at this index; only one session runs at a time.
+    Connect(usize),
+    AddServer,
+    EditServer(usize),
+    ServerName(String),
+    ServerAddress(String),
+    ServerPassword(String),
+    SubmitServer,
+    CancelServer,
+    RemoveServer,
     TestAudio,
     Stop,
     Mute,
@@ -248,6 +314,9 @@ enum Message {
     UsageTick,
     CompactUsageTick,
     ShowTab(Tab),
+    OpenSettings(SettingsPage),
+    CloseSettings,
+    SettingsSearch(String),
     RefreshStreams,
     WatchStream(String),
     StopWatching,
@@ -376,6 +445,9 @@ impl App {
             password_channel: None,
             status: "Ready to connect".into(),
             password_error: None,
+            servers: Vec::new(),
+            server_passwords: HashMap::new(),
+            server_editor: None,
             server_controls: None,
             controls_pending: false,
             detail: String::new(),
@@ -403,6 +475,9 @@ impl App {
             network_usage: usage::NetworkUsage::default(),
             connection_usage: usage::ConnectionUsage::default(),
             tab: Tab::Home,
+            settings_page: None,
+            settings_recent: SettingsPage::Server,
+            settings_query: String::new(),
             streaming: streaming::View::default(),
             heap_usage: memory::snapshot(),
             audio_buffer_bytes: 0,
@@ -464,7 +539,7 @@ impl App {
             }
             Ok(None) => self.begin_setup(),
             Err(error) => {
-                self.tab = Tab::Settings;
+                self.open_settings(SettingsPage::File);
                 self.alerts.raise(Source::SettingsLoad,format!("{error:#}. The file was not changed. Repair it and Reload, or Save to replace it with the values shown."));
             }
         }
@@ -478,8 +553,115 @@ impl App {
         self.nickname.clear();
         self.address.clear();
         self.password.clear();
+        self.servers.clear();
+        self.server_editor = None;
         self.tab = Tab::Home;
+        self.close_settings();
         self.sync_page_visibility();
+    }
+
+    fn open_settings(&mut self, page: SettingsPage) {
+        self.settings_page = Some(page);
+        self.settings_recent = page;
+        self.settings_query.clear();
+        self.ui.open = None;
+    }
+
+    fn close_settings(&mut self) {
+        self.settings_page = None;
+        self.settings_query.clear();
+        self.server_editor = None;
+        self.ui.open = None;
+    }
+
+    /// The address of the server a session is running or starting for, if any.
+    fn session_address(&self) -> Option<&str> {
+        (self.session.is_some() && !self.loopback).then_some(self.address.trim())
+    }
+
+    /// Whether the server at `index` is the one in use, so it can't be edited or removed.
+    fn server_in_use(&self, index: usize) -> bool {
+        self.servers
+            .get(index)
+            .is_some_and(|server| self.session_address() == Some(server.address.trim()))
+    }
+
+    /// Adds or updates the dialog's server and saves the list.
+    fn submit_server(&mut self) {
+        let Some(editor) = self.server_editor.clone() else {
+            return;
+        };
+        let address = editor.address.trim().to_owned();
+        let error = if address.is_empty() {
+            Some("Enter the server's address.")
+        } else if editor.index.is_some_and(|index| self.server_in_use(index)) {
+            Some("Disconnect before editing this server.")
+        } else if self
+            .servers
+            .iter()
+            .enumerate()
+            .any(|(i, server)| Some(i) != editor.index && server.address.trim() == address)
+        {
+            Some("This server is already in the list.")
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            if let Some(open) = &mut self.server_editor {
+                open.error = Some(error.into());
+            }
+            return;
+        }
+        let server = settings::Server {
+            name: editor.name.trim().into(),
+            address: address.clone(),
+        };
+        let mut servers = self.servers.clone();
+        match editor.index {
+            Some(index) if index < servers.len() => {
+                let old = std::mem::replace(&mut servers[index], server);
+                if old.address.trim() != address {
+                    self.server_passwords.remove(old.address.trim());
+                }
+            }
+            _ => servers.push(server),
+        }
+        if editor.password.is_empty() {
+            self.server_passwords.remove(&address);
+        } else {
+            self.server_passwords.insert(address, editor.password);
+        }
+        self.set_servers(servers);
+        self.server_editor = None;
+    }
+
+    /// Removes the dialog's server, unless it is the last one or in use.
+    fn remove_server(&mut self) {
+        let Some(index) = self.server_editor.as_ref().and_then(|editor| editor.index) else {
+            return;
+        };
+        if self.servers.len() <= 1 || self.server_in_use(index) {
+            return;
+        }
+        let mut servers = self.servers.clone();
+        let removed = servers.remove(index);
+        self.server_passwords.remove(removed.address.trim());
+        self.set_servers(servers);
+        self.server_editor = None;
+    }
+
+    /// Uses `servers` and saves only the list, leaving other unsaved edits alone.
+    fn set_servers(&mut self, servers: Vec<settings::Server>) {
+        self.servers = servers.clone();
+        if self.session.is_none()
+            && let Some(first) = servers.first()
+        {
+            self.address = first.address.clone();
+        }
+        self.save_preference(
+            |saved| saved.servers = servers,
+            "The server list applies for now but was not saved",
+        );
     }
 
     /// Settings and the setup step show live status; re-read it while either is open, so a
@@ -487,7 +669,7 @@ impl App {
     fn refresh_visible_permissions(&mut self) {
         let showing = match self.onboarding {
             Some(step) => step == onboarding::Step::Permissions,
-            None => self.tab == Tab::Settings,
+            None => self.settings_page == Some(SettingsPage::Permissions),
         };
         if showing {
             self.permissions.refresh();
@@ -506,7 +688,12 @@ impl App {
     }
 
     fn apply_settings(&mut self, saved: settings::Settings) {
-        if self.address.trim() != saved.server_address.trim() {
+        let first = saved
+            .servers
+            .first()
+            .map(|server| server.address.clone())
+            .unwrap_or_default();
+        if self.session.is_none() && self.address.trim() != first.trim() {
             self.password.clear();
             self.channel_password.clear();
         }
@@ -529,7 +716,11 @@ impl App {
             None => self.devices.output.clone(),
         };
         self.saved = Some(saved.clone());
-        self.address = saved.server_address;
+        // A running session keeps the address it connected to.
+        if self.session.is_none() {
+            self.address = first;
+        }
+        self.servers = saved.servers;
         self.nickname = saved.nickname;
         self.playback_volume
             .set_percent(saved.playback_volume_percent);
@@ -544,7 +735,13 @@ impl App {
 
     fn edited_settings(&self) -> settings::Settings {
         settings::Settings {
-            server_address: self.address.trim().into(),
+            // Setup has no list yet: its one server becomes the first.
+            servers: if self.servers.is_empty() {
+                vec![settings::Server::new(self.address.trim())]
+            } else {
+                self.servers.clone()
+            },
+            server_address: String::new(),
             nickname: self.nickname.trim().into(),
             playback_volume_percent: self.playback_volume.percent(),
             audio_processing: self.audio_processing,
@@ -664,9 +861,9 @@ impl App {
         resume::Resume {
             written_at: 0,
             page: match self.tab {
+                _ if self.settings_page.is_some() => resume::Page::Settings,
                 Tab::Home => resume::Page::Home,
                 Tab::Statistics => resume::Page::Statistics,
-                Tab::Settings => resume::Page::Settings,
             },
             performance_mode: self.performance_mode.load(Ordering::Relaxed),
             server_address: in_session.then(|| self.address.clone()),
@@ -692,18 +889,30 @@ impl App {
             return Task::none();
         };
         let mut tasks = vec![self.update(Message::ShowTab(match resume.page {
-            resume::Page::Home => Tab::Home,
             resume::Page::Statistics => Tab::Statistics,
-            resume::Page::Settings => Tab::Settings,
+            resume::Page::Home | resume::Page::Settings => Tab::Home,
         }))];
+        if resume.page == resume::Page::Settings {
+            self.open_settings(SettingsPage::Updates);
+        }
         if resume.performance_mode {
             tasks.push(self.update(Message::PerformanceMode(true)));
         }
-        // Only the saved server is reconnected; Connect always uses it.
-        let saved = self.saved.as_ref().map(|saved| &saved.server_address);
-        if resume.server_address.is_some() && resume.server_address.as_ref() == saved {
-            self.password = resume.server_password;
-            tasks.push(self.update(Message::Connect));
+        // Only a saved server is reconnected, with the password it was joined with.
+        let address = resume.server_address.as_deref().map(str::trim);
+        if let Some(index) = self
+            .servers
+            .iter()
+            .position(|server| Some(server.address.trim()) == address)
+        {
+            let address = self.servers[index].address.trim().to_owned();
+            if resume.server_password.is_empty() {
+                self.server_passwords.remove(&address);
+            } else {
+                self.server_passwords
+                    .insert(address, resume.server_password.clone());
+            }
+            tasks.push(self.update(Message::Connect(index)));
         }
         if self.session.is_none() {
             self.resume = None;
@@ -889,6 +1098,10 @@ impl App {
                         self.onboarding = Some(next);
                         self.refresh_visible_permissions();
                     } else if self.save_settings() {
+                        if !self.password.is_empty() {
+                            self.server_passwords
+                                .insert(self.address.trim().into(), self.password.clone());
+                        }
                         self.onboarding = None;
                         self.tab = Tab::Home;
                         self.sync_page_visibility();
@@ -1085,6 +1298,18 @@ impl App {
                 if tab != Tab::Home {
                     self.streaming.sharing.stop_capture();
                     self.streaming.clear_picture();
+                }
+            }
+            Message::OpenSettings(page) => {
+                // Performance mode's compact window has no room for Settings, nor a way in.
+                if self.onboarding.is_none() && !self.performance_mode.load(Ordering::Relaxed) {
+                    self.open_settings(page);
+                }
+            }
+            Message::CloseSettings => self.close_settings(),
+            Message::SettingsSearch(query) => {
+                if self.settings_page.is_some() {
+                    self.settings_query = query;
                 }
             }
             Message::RefreshStreams => {
@@ -1315,21 +1540,73 @@ impl App {
                     }
                 }
             }
-            Message::Connect => {
-                if self.onboarding.is_some() {
+            Message::Connect(index) => {
+                // One session at a time: a running one is cancelled or disconnected first.
+                if self.onboarding.is_some() || self.session.is_some() {
                     return Task::none();
                 }
+                let Some(server) = self.servers.get(index) else {
+                    return Task::none();
+                };
+                let address = server.address.trim().to_owned();
+                if self.address.trim() != address {
+                    self.channel_password.clear();
+                }
+                self.password = self
+                    .server_passwords
+                    .get(&address)
+                    .cloned()
+                    .unwrap_or_default();
+                self.address = address;
                 if let Some(saved) = &self.saved {
-                    if self.address != saved.server_address {
-                        self.password.clear();
-                    }
-                    self.address = saved.server_address.clone();
                     self.nickname = saved.nickname.clone();
                 }
                 self.alerts.begin(Source::Connection);
                 self.alerts.begin(Source::Audio);
                 return self.start(false);
             }
+            Message::AddServer => {
+                if self.onboarding.is_none() {
+                    if self.settings_page.is_none() {
+                        self.open_settings(SettingsPage::Server);
+                    }
+                    self.server_editor = Some(ServerEditor::default());
+                }
+            }
+            Message::EditServer(index) => {
+                if let Some(server) = self.servers.get(index) {
+                    self.server_editor = Some(ServerEditor {
+                        index: Some(index),
+                        name: server.name.clone(),
+                        address: server.address.clone(),
+                        password: self
+                            .server_passwords
+                            .get(server.address.trim())
+                            .cloned()
+                            .unwrap_or_default(),
+                        error: None,
+                    });
+                }
+            }
+            Message::ServerName(value) => {
+                if let Some(editor) = &mut self.server_editor {
+                    editor.name = value;
+                }
+            }
+            Message::ServerAddress(value) => {
+                if let Some(editor) = &mut self.server_editor {
+                    editor.address = value;
+                    editor.error = None;
+                }
+            }
+            Message::ServerPassword(value) => {
+                if let Some(editor) = &mut self.server_editor {
+                    editor.password = value;
+                }
+            }
+            Message::SubmitServer => self.submit_server(),
+            Message::CancelServer => self.server_editor = None,
+            Message::RemoveServer => self.remove_server(),
             Message::TestAudio => {
                 self.alerts.begin(Source::Audio);
                 return self.start(true);
@@ -1825,6 +2102,111 @@ mod tests {
         (app, root)
     }
 
+    /// A saved profile with one server, written to a fresh file.
+    fn saved_fixture(name: &str) -> (App, PathBuf) {
+        let (mut app, root) = setup_fixture(name);
+        let path = root.join("settings.json");
+        settings::save(
+            &path,
+            &settings::Settings {
+                servers: vec![settings::Server::new("one.example")],
+                nickname: "Alex".into(),
+                ..settings::Settings::default()
+            },
+        )
+        .unwrap();
+        app.load_settings(path);
+        assert!(app.onboarding.is_none());
+        (app, root)
+    }
+
+    fn add_server(app: &mut App, name: &str, address: &str, password: &str) {
+        let _ = app.update(Message::AddServer);
+        let _ = app.update(Message::ServerName(name.into()));
+        let _ = app.update(Message::ServerAddress(address.into()));
+        let _ = app.update(Message::ServerPassword(password.into()));
+        let _ = app.update(Message::SubmitServer);
+    }
+
+    #[test]
+    fn servers_are_added_edited_and_removed_and_save_at_once() {
+        let (mut app, root) = saved_fixture("servers");
+        let path = root.join("settings.json");
+        app.nickname = "Unsaved draft".into();
+        add_server(&mut app, "Friends", " two.example:9988 ", "secret");
+        assert!(app.server_editor.is_none());
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert_eq!(
+            stored.servers,
+            [
+                settings::Server::new("one.example"),
+                settings::Server {
+                    name: "Friends".into(),
+                    address: "two.example:9988".into(),
+                },
+            ]
+        );
+        assert_eq!(stored.nickname, "Alex", "other drafts stay unsaved");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("secret"));
+        // Empty and repeated addresses keep the dialog open with a reason.
+        add_server(&mut app, "", "  ", "");
+        assert!(app.server_editor.as_ref().unwrap().error.is_some());
+        let _ = app.update(Message::CancelServer);
+        add_server(&mut app, "Again", "two.example:9988", "");
+        assert!(app.server_editor.as_ref().unwrap().error.is_some());
+        let _ = app.update(Message::CancelServer);
+        // Editing keeps the place in the list and the session password.
+        let _ = app.update(Message::EditServer(1));
+        assert_eq!(app.server_editor.as_ref().unwrap().password, "secret");
+        let _ = app.update(Message::ServerName("Squad".into()));
+        let _ = app.update(Message::SubmitServer);
+        assert_eq!(app.servers[1].name, "Squad");
+        assert_eq!(
+            settings::load(&path).unwrap().unwrap().servers[1].name,
+            "Squad"
+        );
+        let _ = app.update(Message::EditServer(0));
+        let _ = app.update(Message::RemoveServer);
+        assert_eq!(app.servers.len(), 1);
+        assert_eq!(app.servers[0].address, "two.example:9988");
+        // The last server stays.
+        let _ = app.update(Message::EditServer(0));
+        let _ = app.update(Message::RemoveServer);
+        assert_eq!(app.servers.len(), 1);
+        assert_eq!(settings::load(&path).unwrap().unwrap().servers.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn connect_uses_the_chosen_server_and_one_session_runs_at_a_time() {
+        let (mut app, root) = saved_fixture("connect");
+        add_server(&mut app, "", "two.example", "two-password");
+        let (sender, _commands) = mpsc::channel(4);
+        // While a session runs, no other server connects and the one in use is locked.
+        app.session = Some(sender);
+        app.address = "two.example".into();
+        let _ = app.update(Message::Connect(0));
+        assert_eq!(app.address, "two.example");
+        assert!(app.server_in_use(1) && !app.server_in_use(0));
+        let _ = app.update(Message::EditServer(1));
+        let _ = app.update(Message::ServerAddress("elsewhere.example".into()));
+        let _ = app.update(Message::SubmitServer);
+        assert_eq!(app.servers[1].address, "two.example");
+        let _ = app.update(Message::RemoveServer);
+        assert_eq!(app.servers.len(), 2);
+        let _ = app.update(Message::CancelServer);
+        app.session = None;
+        // Each connection takes its own server's address and remembered password.
+        let _ = app.update(Message::Connect(1));
+        assert_eq!(app.address, "two.example");
+        assert_eq!(app.password, "two-password");
+        app.session = None;
+        let _ = app.update(Message::Connect(0));
+        assert_eq!(app.address, "one.example");
+        assert!(app.password.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn first_run_only_saves_after_five_steps_and_restores_devices_without_connecting() {
         let (mut app, root) = setup_fixture("complete");
@@ -1871,7 +2253,14 @@ mod tests {
         assert_eq!(app.password, "temporary-test-password");
         let saved = settings::load(&path).unwrap().unwrap();
         assert_eq!(saved.nickname, "Alex");
-        assert_eq!(saved.server_address, "voice.example:9987");
+        assert_eq!(saved.servers, [settings::Server::new("voice.example:9987")]);
+        assert_eq!(
+            app.server_passwords
+                .get("voice.example:9987")
+                .map(String::as_str),
+            Some("temporary-test-password"),
+            "the setup password is remembered for the session"
+        );
         assert_eq!(saved.input_device_id.as_deref(), Some("mic-b"));
         assert_eq!(saved.output_device_id.as_deref(), Some("speaker"));
         assert_eq!(saved.keybinds.toggle_mute, "F8");
@@ -1927,7 +2316,7 @@ mod tests {
         app.onboarding = None;
         app.load_settings(path.clone());
         assert!(app.onboarding.is_none());
-        assert_eq!(app.tab, Tab::Settings);
+        assert_eq!(app.settings_page, Some(SettingsPage::File));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
         app.apply_settings(settings::Settings {
             input_device_id: Some("unplugged-microphone".into()),
@@ -2050,6 +2439,7 @@ mod tests {
     fn after_an_update_the_app_rejoins_its_channel_with_the_same_microphone() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         app.saved = Some(settings::Settings::default());
+        app.servers = vec![settings::Server::new("ts.zirkumflex.io")];
         app.resume = Some(resume::Resume {
             page: resume::Page::Settings,
             server_address: Some("ts.zirkumflex.io".into()),
@@ -2062,7 +2452,7 @@ mod tests {
         });
         // Without devices the reconnect can't start, so the resume ends there, on its page.
         let _ = app.update(Message::Resume);
-        assert_eq!(app.tab, Tab::Settings);
+        assert_eq!(app.settings_page, Some(SettingsPage::Updates));
         assert_eq!(app.password, "server secret");
         assert!(app.resume.is_none());
 
@@ -2132,8 +2522,11 @@ mod tests {
         let _ = app.update(Message::ShowTab(Tab::Statistics));
         assert!(!app.streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
-        let _ = app.update(Message::ShowTab(Tab::Settings));
-        assert!(!app.channel_health_visible.load(Ordering::Relaxed));
+        // Settings floats over the page, so it leaves what that page shows running.
+        let _ = app.update(Message::OpenSettings(SettingsPage::Audio));
+        assert!(app.channel_health_visible.load(Ordering::Relaxed));
+        let _ = app.update(Message::CloseSettings);
+        assert_eq!(app.settings_page, None);
         app.begin_setup();
         let _ = app.update(Message::ShowTab(Tab::Home));
         assert!(!app.streaming.visible.load(Ordering::Relaxed));
@@ -2294,8 +2687,8 @@ mod tests {
             result: Err("Denied"),
         }));
         assert_eq!(app.client_quality(11, now).health(), usage::Health::Unknown);
-        let _ = app.update(Message::ShowTab(Tab::Settings));
-        assert!(!app.channel_health_visible.load(Ordering::Relaxed));
+        let _ = app.update(Message::ShowTab(Tab::Statistics));
+        assert!(app.channel_health_visible.load(Ordering::Relaxed));
         let _ = app.update(Message::ShowTab(Tab::Home));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
     }
@@ -2487,7 +2880,7 @@ mod tests {
         app.password = "old-server-password".into();
         app.channel_password = "old-channel-password".into();
         app.apply_settings(settings::Settings {
-            server_address: "voice.example:9987".into(),
+            servers: vec![settings::Server::new("voice.example:9987")],
             nickname: "Portable name".into(),
             playback_volume_percent: 42,
             ..settings::Settings::default()

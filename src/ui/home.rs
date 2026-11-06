@@ -8,19 +8,17 @@ use super::widgets::{
     Variant, body, button, card, divider, faint, heading, health_dot, icon_button, labelled, meter,
     muted, overline, pulse, scroll_page, speaking_dot, vertical_divider,
 };
-use super::{footer, icons, send, settings, statistics, streams};
+use super::{footer, icons, send, statistics, streams};
 use crate::{App, Message, Tab, client, shortcuts, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     let page = match s.tab {
         Tab::Home => home(s, cx, t, k, layer),
         Tab::Statistics => statistics::view(s, cx, t, k),
-        Tab::Settings => settings::view(s, cx, t, k, layer),
     };
     let key = match s.tab {
         Tab::Home => "page-home",
         Tab::Statistics => "page-statistics",
-        Tab::Settings => "page-settings",
     };
     col()
         .w_full()
@@ -68,7 +66,6 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         Tab::Home if s.connected && !s.loopback => None,
         Tab::Home => Some("Flexspeak"),
         Tab::Statistics => Some("Usage & Statistics"),
-        Tab::Settings => Some("Settings"),
     };
     if let Some(title) = title {
         bar = bar.child(
@@ -83,24 +80,44 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     bar = bar
         .child(performance_switch(k, false))
         .child(vertical_divider(t, 24.0));
-    for (tab, glyph, label) in [
-        (Tab::Statistics, &icons::CHART_LINE, "Statistics"),
-        (Tab::Settings, &icons::SETTINGS, "Settings"),
-    ] {
-        let active = s.tab == tab;
-        bar = bar.child(icon_button(
-            t,
-            label,
-            glyph,
-            label,
-            if active {
-                Variant::Active
-            } else {
-                Variant::Ghost
-            },
-            Some(Message::ShowTab(if active { Tab::Home } else { tab })),
-        ));
-    }
+    let statistics = s.tab == Tab::Statistics;
+    bar = bar.child(icon_button(
+        t,
+        "Statistics",
+        &icons::CHART_LINE,
+        "Statistics",
+        if statistics {
+            Variant::Active
+        } else {
+            Variant::Ghost
+        },
+        Some(Message::ShowTab(if statistics {
+            Tab::Home
+        } else {
+            Tab::Statistics
+        })),
+    ));
+    let open = s.settings_page.is_some();
+    bar = bar.child(icon_button(
+        t,
+        "Settings",
+        &icons::SETTINGS,
+        if cfg!(target_os = "macos") {
+            "Settings · ⌘,"
+        } else {
+            "Settings · Ctrl+,"
+        },
+        if open {
+            Variant::Active
+        } else {
+            Variant::Ghost
+        },
+        Some(if open {
+            Message::CloseSettings
+        } else {
+            Message::OpenSettings(s.settings_recent)
+        }),
+    ));
     col().w_full().child(bar).child(divider(t))
 }
 
@@ -129,82 +146,97 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
                     .child(streams::view(s, cx, t, k, layer)),
             );
     }
-    saved_server(s, t)
+    saved_servers(s, t, k)
 }
 
-fn saved_server(s: &App, t: &Theme) -> El {
+/// The saved servers, each with its own Connect. One session runs at a time, so while one
+/// connects or is connected the others wait.
+fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
     let busy = s.session.is_some();
-    let mut content = col().w_full().gap(14.0).child(overline(t, "Saved server"));
-    if let Some(saved) = &s.saved {
-        let label = if s.stopping {
-            "Stopping…"
-        } else if busy && s.loopback {
-            "Stop test"
-        } else if busy {
-            "Cancel"
-        } else {
-            "Connect"
-        };
-        let enabled = !s.stopping && s.permissions.pending.is_none();
-        let action = if busy {
-            Message::Stop
-        } else {
-            Message::Connect
-        };
-        let mut status = row().gap(8.0).center_y();
+    let mut content = col().w_full().gap(14.0);
+    if let Some(saved) = s.saved.as_ref().filter(|_| !s.servers.is_empty()) {
+        content = content.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(overline(t, "Saved servers").grow(1.0))
+                .child(labelled(
+                    &icons::USER,
+                    format!("Connect as {}", saved.nickname),
+                    t.muted,
+                ))
+                .child(icon_button(
+                    t,
+                    "add-server",
+                    &icons::PLUS,
+                    "Add server",
+                    Variant::Ghost,
+                    Some(Message::AddServer),
+                )),
+        );
+        let ready = !s.stopping && s.permissions.pending.is_none();
+        let current = s.session_address();
+        let mut list = col().key("server-list").w_full().gap(4.0);
+        for (index, server) in s.servers.iter().enumerate() {
+            let mine = current == Some(server.address.trim());
+            list = list.child(server_row(t, s, index, server, mine, busy, ready));
+        }
+        content = content.child(
+            k.scroll_bar(
+                col()
+                    .key("servers-scroll")
+                    .w_full()
+                    .max_h(300.0)
+                    .scroll(rune::ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .scroll_edge_fade(12.0)
+                    .child(list),
+            ),
+        );
+        let mut status = row().w_full().gap(8.0).center_y();
         if busy && !s.stopping {
             status = status.child(pulse(if s.loopback { t.live } else { t.accent }));
         }
-        status = status.child(muted(t, s.status.clone()));
+        status = status.child(muted(t, s.status.clone()).grow(1.0));
+        if busy && s.loopback {
+            status = status.child(button(
+                t,
+                "stop-test",
+                if s.stopping {
+                    "Stopping…"
+                } else {
+                    "Stop test"
+                },
+                Some(&icons::STOP),
+                Variant::Secondary,
+                (!s.stopping).then_some(Message::Stop),
+            ));
+        }
         content = content
-            .child(
-                row()
-                    .w_full()
-                    .gap(16.0)
-                    .center_y()
-                    .child(
-                        col()
-                            .grow(1.0)
-                            .min_w(0.0)
-                            .gap(4.0)
-                            .child(
-                                text(saved.server_address.clone())
-                                    .font(ty::TITLE)
-                                    .color(t.text)
-                                    .truncate_fade(),
-                            )
-                            .child(labelled(
-                                &icons::USER,
-                                format!("Connect as {}", saved.nickname),
-                                t.muted,
-                            )),
-                    )
-                    .child(connect_button(t, busy, label, enabled.then_some(action))),
-            )
             .child(divider(t))
             .child(status.key("status").transition(Transition::opacity()));
     } else {
         content = content
+            .child(overline(t, "Saved servers"))
             .child(super::widgets::title(t, "No saved server yet"))
-            .child(body(
-                t,
-                "Open Settings to configure your server and username.",
-            ))
+            .child(body(t, "Add a server and choose your nickname to connect."))
             .child(
                 button(
                     t,
                     "open-settings",
-                    "Open Settings",
-                    Some(&icons::SETTINGS),
+                    "Add Server",
+                    Some(&icons::PLUS),
                     Variant::Primary,
-                    Some(Message::ShowTab(Tab::Settings)),
+                    Some(Message::AddServer),
                 )
                 .self_end(),
             );
     }
     let hero = card(t)
         .key("saved-server")
-        .max_w(520.0)
+        .max_w(560.0)
         .padding(20.0)
         .child(content)
         .sequence(rune::Sequence::new(ENTRANCE).delay(0.05));
@@ -216,29 +248,106 @@ fn saved_server(s: &App, t: &Theme) -> El {
         .child(hero)
 }
 
-const ENTRANCE: &[rune::Beat] = &[rune::Beat::new(0.0).opacity(0.0), rune::Beat::new(0.25)];
-
-/// Connect / Cancel on the home card: the window's default button, so Return connects.
-fn connect_button(t: &Theme, busy: bool, label: &str, on: Option<Message>) -> El {
-    let e = button(
+/// One saved server: its name and address, and Connect — or Cancel while it connects.
+fn server_row(
+    t: &Theme,
+    s: &App,
+    index: usize,
+    server: &crate::settings::Server,
+    mine: bool,
+    busy: bool,
+    ready: bool,
+) -> El {
+    let named = !server.name.trim().is_empty();
+    let mut names = col().grow(1.0).min_w(0.0).gap(2.0).child(
+        text(server.title().to_owned())
+            .font(ty::BODY_STRONG)
+            .color(t.text)
+            .truncate_fade(),
+    );
+    if named {
+        names = names.child(
+            text(server.address.clone())
+                .font(ty::SMALL)
+                .color(t.muted)
+                .truncate_fade(),
+        );
+    }
+    let (label, action) = if mine {
+        (
+            if s.stopping { "Stopping…" } else { "Cancel" },
+            (!s.stopping).then_some(Message::Stop),
+        )
+    } else {
+        (
+            "Connect",
+            (!busy && ready).then_some(Message::Connect(index)),
+        )
+    };
+    // The first server is the window's default button, so Return connects to it.
+    let default = index == 0 && !busy;
+    let mut connect = button(
         t,
-        "connect",
+        &format!("connect-{index}"),
         label,
-        Some(if busy {
+        Some(if mine {
             &icons::DISCONNECT
         } else {
             &icons::CONNECT
         }),
-        if busy {
-            Variant::Secondary
-        } else {
+        if default {
             Variant::Primary
+        } else {
+            Variant::Secondary
         },
-        on,
+        action,
     )
-    .help(label.to_owned());
-    if busy { e } else { e.default_button() }
+    .help(if mine {
+        format!("Cancel connecting to {}", server.title())
+    } else if busy {
+        "Disconnect first: one server at a time".to_owned()
+    } else {
+        format!("Connect to {}", server.title())
+    });
+    if default {
+        connect = connect.default_button();
+    }
+    row()
+        .key(format!("server-{index}"))
+        .w_full()
+        .min_h(52.0)
+        .px(10.0)
+        .py(8.0)
+        .gap(12.0)
+        .center_y()
+        .radius(radius::ROW)
+        .fill(if mine {
+            t.accent.alpha(0.10)
+        } else {
+            t.wash(0.03)
+        })
+        .border(
+            1.0,
+            if mine {
+                t.accent.alpha(0.35)
+            } else {
+                t.hairline
+            },
+        )
+        .motion(motion::QUICK)
+        .child(
+            el().size(32.0, 32.0)
+                .radius(radius::CONTROL)
+                .center()
+                .fill(t.raised)
+                .child(icon(&icons::SERVER, 16.0).color(t.accent).a11y_hidden())
+                .a11y_hidden(),
+        )
+        .child(names)
+        .child(connect)
 }
+
+const ENTRANCE: &[rune::Beat] = &[rune::Beat::new(0.0).opacity(0.0), rune::Beat::new(0.25)];
 
 fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
     let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);

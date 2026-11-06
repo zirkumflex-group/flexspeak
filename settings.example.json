@@ -1,5 +1,9 @@
 {
-  "server_address": "ts.zirkumflex.io",
+  "servers": [
+    {
+      "address": "ts.zirkumflex.io"
+    }
+  ],
   "nickname": "Flexspeak",
   "playback_volume_percent": 100,
   "audio_processing": {

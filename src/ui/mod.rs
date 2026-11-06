@@ -6,6 +6,7 @@
 
 mod charts;
 mod footer;
+mod fx;
 mod home;
 pub mod icons;
 mod modals;
@@ -98,6 +99,10 @@ pub struct UiState {
     pub channel_password: TextEdit,
     pub mute_key: TextEdit,
     pub deafen_key: TextEdit,
+    pub settings_search: TextEdit,
+    pub server_name: TextEdit,
+    pub server_address: TextEdit,
+    pub server_password: TextEdit,
     pub ptt_key: TextEdit,
     /// The device or source picker whose list is open.
     pub open: Option<&'static str>,
@@ -112,6 +117,10 @@ impl Default for UiState {
             channel_password: TextEdit::new("").secure(),
             mute_key: TextEdit::new(""),
             deafen_key: TextEdit::new(""),
+            settings_search: TextEdit::new(""),
+            server_name: TextEdit::new(""),
+            server_address: TextEdit::new(""),
+            server_password: TextEdit::new("").secure(),
             ptt_key: TextEdit::new(""),
             open: None,
         }
@@ -134,6 +143,11 @@ impl App {
         mirror(&mut self.ui.channel_password, &self.channel_password);
         mirror(&mut self.ui.mute_key, &self.keybind_draft.toggle_mute);
         mirror(&mut self.ui.deafen_key, &self.keybind_draft.toggle_deafen);
+        mirror(&mut self.ui.settings_search, &self.settings_query);
+        let editor = self.server_editor.clone().unwrap_or_default();
+        mirror(&mut self.ui.server_name, &editor.name);
+        mirror(&mut self.ui.server_address, &editor.address);
+        mirror(&mut self.ui.server_password, &editor.password);
         mirror(&mut self.ui.ptt_key, &self.keybind_draft.push_to_talk);
     }
 }
@@ -299,9 +313,15 @@ fn on_close(s: &mut App, tx: &mut Tx) {
 }
 
 fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    // ⌘, opens Settings, as in every Mac app.
+    if key.is_command(',') && s.onboarding.is_none() && s.settings_page.is_none() {
+        dispatch(s, tx, Message::OpenSettings(s.settings_recent));
+        return true;
+    }
     // Escape returns from a utility page to the server, as the back button does.
     if key.key == rune::Key::Escape
         && s.onboarding.is_none()
+        && s.settings_page.is_none()
         && s.tab != Tab::Home
         && s.password_channel.is_none()
         && s.alerts.current().is_none()
@@ -333,6 +353,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     // Under any dialog, whose scrim then covers it too.
     layer.extend(updates::notice(s, &t));
+    settings::window(s, cx, &t, &k, &mut layer);
     modals::build(s, &t, &k, &mut layer);
     let base = el()
         .key("window")
@@ -380,6 +401,7 @@ pub fn run() {
             traffic_lights: Some((20.0, 19.0)),
             drag_regions: true,
         })
+        .compositor(fx::Effects::default())
         .keep_running()
         .on_close(on_close)
         .run();
