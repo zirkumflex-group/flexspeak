@@ -70,6 +70,33 @@ class HomebrewReleaseTests(unittest.TestCase):
             self.assertEqual(digest, release.sha256(self.root / name))
 
 
+class DownloadTests(unittest.TestCase):
+    def test_a_reset_connection_is_retried_and_never_leaves_a_partial_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "opus.tar.gz"
+            calls = []
+
+            def flaky(url, path):
+                calls.append(url)
+                Path(path).write_bytes(b"partial")
+                if len(calls) < 3:
+                    raise OSError("EOF occurred in violation of protocol")
+                Path(path).write_bytes(b"complete")
+
+            with patch.object(release.urllib.request, "urlretrieve", side_effect=flaky), \
+                    patch.object(release.time, "sleep"):
+                release.download("https://example.invalid/opus.tar.gz", target)
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(target.read_bytes(), b"complete")
+            self.assertEqual(sorted(p.name for p in Path(directory).iterdir()), ["opus.tar.gz"])
+
+            target.unlink()
+            with patch.object(release.urllib.request, "urlretrieve", side_effect=OSError("down")), \
+                    patch.object(release.time, "sleep"), self.assertRaises(OSError):
+                release.download("https://example.invalid/opus.tar.gz", target, attempts=2)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+
 class OpusBuildTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
