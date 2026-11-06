@@ -338,7 +338,8 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     ));
     let speaking = s.microphone_meter_level();
     // Lit while you are heard; it eases in and out only as that changes, not with every reading.
-    let talking = speaking > crate::audio::SPEAKING_METER;
+    // Push-to-talk and voice activation keep it dark while their gate is closed.
+    let talking = speaking > crate::audio::SPEAKING_METER && s.transmitting;
     let mut panel = col()
         .key("voice")
         .w_full()
@@ -675,12 +676,16 @@ pub fn shortcut_hint(s: &App, t: &Theme) -> El {
             },
         )
     } else {
-        faint(
-            t,
-            format!(
-                "Global: {} · mute/unmute   |   {} · deafen/undeafen",
-                s.keybinds.toggle_mute, s.keybinds.toggle_deafen
-            ),
-        )
+        let mut hint = format!(
+            "Global: {} · mute/unmute   |   {} · deafen/undeafen",
+            s.keybinds.toggle_mute, s.keybinds.toggle_deafen
+        );
+        if !s.keybinds.push_to_talk.trim().is_empty() {
+            hint.push_str(&format!(
+                "   |   {} · hold to talk",
+                s.keybinds.push_to_talk
+            ));
+        }
+        faint(t, hint)
     }
 }

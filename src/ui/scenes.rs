@@ -3,7 +3,9 @@
 
 use std::time::{Duration, Instant};
 
-use crate::{App, Tab, alerts::Source, client, onboarding, settings, usage};
+use crate::{
+    App, Tab, alerts::Source, audio_processing, client, onboarding, settings, transmission, usage,
+};
 
 type Scene = (&'static str, fn(&mut App));
 
@@ -15,6 +17,9 @@ pub const SCENES: &[Scene] = &[
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
+    ("audio-processing", audio_processing_page),
+    ("push-to-talk", push_to_talk_page),
+    ("push-to-talk-connected", push_to_talk_connected),
     ("performance", performance),
     ("password", password),
     ("alert", alert),
@@ -67,6 +72,7 @@ fn connected(s: &mut App) {
     s.connected = true;
     s.muted = false;
     s.level = 0.3;
+    s.transmitting = true;
     s.state.can_talk = true;
     s.state.server = "Zirkumflex".into();
     s.state.server_version = "6.0.0".into();
@@ -183,6 +189,46 @@ fn settings_page(s: &mut App) {
     s.tab = Tab::Settings;
 }
 
+/// Settings with every microphone effect on and voice activation chosen.
+fn audio_processing_page(s: &mut App) {
+    settings_page(s);
+    s.audio_processing = audio_processing::Settings {
+        noise_suppression: true,
+        suppression_level: audio_processing::SuppressionLevel::High,
+        automatic_gain: true,
+        echo_cancellation: true,
+    };
+    s.transmission = transmission::Settings {
+        mode: transmission::Mode::VoiceActivation,
+        voice_threshold_db: -45,
+        ..transmission::Settings::default()
+    };
+}
+
+/// Settings with push-to-talk chosen and its key set.
+fn push_to_talk_page(s: &mut App) {
+    settings_page(s);
+    s.transmission = transmission::Settings {
+        mode: transmission::Mode::PushToTalk,
+        ptt_release_ms: 200,
+        ..transmission::Settings::default()
+    };
+    s.keybinds.push_to_talk = "Ctrl+Shift+Space".into();
+    s.keybind_draft.push_to_talk = "Ctrl+Shift+Space".into();
+    s.sync_fields();
+}
+
+/// Connected in push-to-talk with the key up: the voice panel waits instead of lighting up.
+fn push_to_talk_connected(s: &mut App) {
+    connected(s);
+    s.transmission = transmission::Settings {
+        mode: transmission::Mode::PushToTalk,
+        ..transmission::Settings::default()
+    };
+    s.transmitting = false;
+    s.talking = [2].into();
+}
+
 fn performance(s: &mut App) {
     connected(s);
     s.performance_mode
@@ -264,6 +310,35 @@ mod tests {
         rt.state.sync_fields();
         assert_eq!(rt.state.address, "ts.zirkumflex.io");
         assert_eq!(rt.state.ui.address.text, "ts.zirkumflex.io");
+    }
+
+    #[test]
+    fn processing_switches_apply_while_idle_and_lock_during_a_session() {
+        let mut rt = runtime(settings_page, (900.0, 2000.0));
+        for _ in 0..10 {
+            rt.frame(1.0 / 30.0);
+        }
+        let (x, y) = rt
+            .find("echo-cancellation-switch")
+            .expect("echo cancellation switch");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(
+            rt.state.audio_processing.echo_cancellation,
+            crate::audio_processing::AVAILABLE
+        );
+        let before = rt.state.audio_processing;
+        rt.state.session = Some(tokio::sync::mpsc::channel(1).0);
+        for _ in 0..10 {
+            rt.frame(1.0 / 30.0);
+        }
+        if let Some((x, y)) = rt.find("echo-cancellation-switch") {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.audio_processing, before);
     }
 
     /// The connected scene with enough streams to overflow the pane, whether or not this

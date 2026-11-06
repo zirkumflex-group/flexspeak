@@ -85,6 +85,7 @@ pub struct UiState {
     pub channel_password: TextEdit,
     pub mute_key: TextEdit,
     pub deafen_key: TextEdit,
+    pub ptt_key: TextEdit,
     /// The device or source picker whose list is open.
     pub open: Option<&'static str>,
 }
@@ -98,6 +99,7 @@ impl Default for UiState {
             channel_password: TextEdit::new("").secure(),
             mute_key: TextEdit::new(""),
             deafen_key: TextEdit::new(""),
+            ptt_key: TextEdit::new(""),
             open: None,
         }
     }
@@ -119,6 +121,7 @@ impl App {
         mirror(&mut self.ui.channel_password, &self.channel_password);
         mirror(&mut self.ui.mute_key, &self.keybind_draft.toggle_mute);
         mirror(&mut self.ui.deafen_key, &self.keybind_draft.toggle_deafen);
+        mirror(&mut self.ui.ptt_key, &self.keybind_draft.push_to_talk);
     }
 }
 

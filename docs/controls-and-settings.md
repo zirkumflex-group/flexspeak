@@ -135,13 +135,13 @@ The disconnected test profile uses separate keys and a temporary settings path s
 
 ## Audio processing options
 
-**Settings → Audio → Microphone processing** offers three independent, opt-in WebRTC effects on Mac and Windows:
+**Settings → Audio → Microphone Processing** offers three independent, opt-in WebRTC effects on Mac and Windows:
 
 - **Noise suppression** (Rauschunterdrückung) has Low, Moderate, High and Very high strength. Moderate preserves the earlier behavior; stronger settings can affect voice quality.
 - **Automatic microphone gain** applies adaptive digital gain to keep voice levels more consistent. It does not change the operating system’s microphone volume.
 - **Echo cancellation (experimental)** reduces this app’s speaker playback returning through the microphone. Its reference includes received voice and stream audio, after app volume, channel mapping and device-format conversion. Audio played independently by other apps is outside that reference.
 
-All effects default to **off**, including when loading older JSON. Change effects while disconnected or after stopping the local test, then **Save settings** to persist them. The next session uses the chosen values. The local headphone test previews suppression and gain but bypasses echo cancellation: listening to your own microphone through speakers is a feedback loop, not a useful echo test. Linux retains saved preferences but does not apply these effects; its settings explain that processing is unavailable.
+All effects default to **off**, including when loading older JSON. Change effects while disconnected or after stopping the local test, then **Save** to persist them. The next session uses the chosen values. The local headphone test previews suppression and gain but bypasses echo cancellation: listening to your own microphone through speakers is a feedback loop, not a useful echo test. Linux retains saved preferences but does not apply these effects; its settings explain that processing is unavailable. Effects are on/off switches, and the strength picker is enabled while noise suppression is on.
 
 Microphone processing runs on the existing voice worker in 10 ms / 480-sample frames after resampling to 48 kHz and before local monitoring or 20 ms Opus encoding. The PCM16 adapter bounds nonfinite/out-of-range input; when effects are off, original float samples bypass it. Enabling any effect also enables WebRTC’s high-pass filter. Shared music/system-audio publishing is not processed. Microphone meters remain input meters. Transmission mode is applied after processing and before Opus encoding; mute, deafen and server restrictions remain authoritative.
 
@@ -155,10 +155,10 @@ Validation on 2026-11-01: 83 ordinary Rust tests and three packaging tests passe
 
 ## Voice transmission
 
-Select **Settings → Audio → Voice transmission** while disconnected or after stopping the local test, then save:
+Select **Settings → Audio → Voice Transmission** while disconnected or after stopping the local test, then save:
 
 - **Continuous** preserves the existing behavior: unmuting sends continuously.
-- **Push to talk** captures/transmits while the assigned global key is held, followed by the chosen **0–500 ms release delay** (default 150 ms). Set/apply the key under **Global keybinds**, then unmute before holding it during a call. New profiles suggest `Ctrl+Shift+Space`; older two-key profiles retain their existing bindings and leave PTT unassigned until you choose a key. Empty PTT bindings do not disable mute/deafen, but starting a PTT session requires a registered PTT key. Duplicate bindings are rejected.
+- **Push to talk** captures/transmits while the assigned global key is held, followed by the chosen **0–500 ms release delay** (default 150 ms). Set/apply the key under **Keyboard Shortcuts**, then unmute before holding it during a call. New profiles suggest `Ctrl+Shift+Space`; older two-key profiles retain their existing bindings and leave PTT unassigned until you choose a key. Empty PTT bindings do not disable mute/deafen, but starting a PTT session requires a registered PTT key. Duplicate bindings are rejected.
 - **Voice activation** requires both WebRTC speech detection and a level above the **−60 to 0 dBFS** threshold (default −40). Level is RMS after microphone processing, so it differs from the raw peak input meter. It keeps up to 60 ms of preceding audio and a 200 ms tail to avoid clipping word beginnings/endings. Speech detection is not a guarantee against every background sound.
 
 The local headphone test uses the selected transmission mode without connecting: hold the PTT key in PTT mode, or speak above the threshold in voice-activation mode. Stop the test to adjust settings. Echo cancellation remains bypassed in this feedback test. Continuous stays the default for older configurations; imported unsupported modes never silently switch to continuous.
@@ -170,6 +170,8 @@ The worker gates complete 20 ms frames, bounds pre-roll, clears it on mute/reset
 `native/audio.cpp` is a small fixed-frame C interface to the existing pinned WebRTC binary. It exposes APM suppression strength and WebRTC VAD; it does not add a second DSP engine, model download or Krisp. Build-time `cc` and `webrtc-sys-build` use the same headers, defines and artifact as `libwebrtc`; keep their pins aligned when upgrading. Native errors stop the audio session rather than bypassing the selected speech gate.
 
 Validation of transmission controls: 91 ordinary Rust tests and three packaging tests passed, with three opt-in network/media tests ignored. Mac/Windows all-target Clippy and optimized Mac/Windows builds passed. Tests cover old two-key profiles, duplicate/optional PTT bindings, press/release behavior, permission overrides, bounded pre-roll/hangover, actual native speech detection and suppression-strength differences, utterance markers, and status delivery with a busy UI or performance mode. Physical keyboard holds, real conversations and native UI interaction were not tested for this update.
+
+The controls were rebuilt for the Rune interface on 2026-11-06: switches and a strength picker under **Microphone Processing**, a mode picker with a release-delay or threshold slider under **Voice Transmission**, and a **Push to talk** field under **Keyboard Shortcuts**. Onboarding's device step shows the same audio section. The voice panel's green edge now lights only while the transmission gate is open. Preview scenes: `audio-processing`, `push-to-talk` and `push-to-talk-connected`.
 
 ## Earlier onboarding validation
 
