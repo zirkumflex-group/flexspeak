@@ -15,9 +15,10 @@ mod shortcuts;
 mod streaming;
 mod ui;
 mod usage;
+mod window_icon;
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -119,6 +120,9 @@ struct App {
     playback_volume: Arc<audio::PlaybackVolume>,
     performance_mode: Arc<AtomicBool>,
     channel_health_visible: Arc<AtomicBool>,
+    subscribe_all: Arc<AtomicBool>,
+    /// Saved straight to settings when toggled, not held until the Settings page saves.
+    footer_hidden: bool,
     window_restore: Option<(f32, f32)>,
     window_size: (f32, f32),
     next_usage_tick: Instant,
@@ -150,6 +154,8 @@ struct App {
     state: client::Snapshot,
     collapsed_channels: HashSet<u64>,
     expanded_client: Option<u16>,
+    /// Clients heard right now, including yourself while you transmit.
+    talking: BTreeSet<u16>,
     client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
     connection_history: ConnectionHistory,
     client_history: ConnectionHistory,
@@ -209,6 +215,8 @@ enum Message {
     Deafen,
     Join(u64),
     ToggleChannel(u64),
+    ToggleSubscribeAll,
+    ToggleFooter,
     ToggleClient(u16),
     Backend(client::Event),
     Close,
@@ -300,6 +308,8 @@ impl App {
             playback_volume: Arc::new(audio::PlaybackVolume::default()),
             performance_mode: Arc::new(AtomicBool::new(false)),
             channel_health_visible: Arc::new(AtomicBool::new(true)),
+            subscribe_all: Arc::new(AtomicBool::new(true)),
+            footer_hidden: false,
             window_restore: None,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -331,6 +341,7 @@ impl App {
             state: client::Snapshot::default(),
             collapsed_channels: HashSet::new(),
             expanded_client: None,
+            talking: BTreeSet::new(),
             client_usage: BTreeMap::new(),
             connection_history: ConnectionHistory::new(),
             client_history: ConnectionHistory::new(),
@@ -456,6 +467,7 @@ impl App {
             .set_percent(saved.playback_volume_percent);
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
+        self.footer_hidden = saved.footer_hidden;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -469,6 +481,31 @@ impl App {
             },
             input_device_id: self.input.as_ref().map(|device| device.id.clone()),
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
+            footer_hidden: self.footer_hidden,
+        }
+    }
+
+    /// Hides or shows the footer and stores only that choice, leaving unsaved edits alone.
+    fn set_footer_hidden(&mut self, hidden: bool) {
+        self.footer_hidden = hidden;
+        let Some(mut saved) = self.saved.clone() else {
+            return;
+        };
+        saved.footer_hidden = hidden;
+        let result = self
+            .settings_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Settings path is unavailable"))
+            .and_then(|path| settings::save(path, &saved));
+        match result {
+            Ok(()) => {
+                self.saved = Some(saved);
+                self.alerts.recover(Source::SettingsSave);
+            }
+            Err(error) => self.alerts.raise(
+                Source::SettingsSave,
+                format!("The footer choice applies for now but was not saved: {error:#}"),
+            ),
         }
     }
 
@@ -553,6 +590,7 @@ impl App {
             playback_volume: self.playback_volume.clone(),
             performance_mode: self.performance_mode.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
+            subscribe_all: self.subscribe_all.clone(),
             streaming_visible: self.streaming.visible.clone(),
             video_surface: self.streaming.surface.clone(),
             address: self.address.trim().into(),
@@ -586,6 +624,7 @@ impl App {
         self.collapsed_channels.clear();
         self.clear_client_details();
         self.client_usage.clear();
+        self.talking.clear();
         self.connection_history = ConnectionHistory::new();
         self.network_usage = usage::NetworkUsage::default();
         self.connection_usage = usage::ConnectionUsage::default();
@@ -1090,6 +1129,10 @@ impl App {
                 self.password_error = None;
                 self.channel_password.clear();
             }
+            Message::ToggleFooter => self.set_footer_hidden(!self.footer_hidden),
+            Message::ToggleSubscribeAll => {
+                self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
+            }
             Message::ToggleChannel(id) => {
                 if !self.collapsed_channels.remove(&id) {
                     self.collapsed_channels.insert(id);
@@ -1122,6 +1165,7 @@ impl App {
                     self.streaming.reset();
                     self.clear_client_details();
                     self.client_usage.clear();
+                    self.talking.clear();
                     self.connection_history = ConnectionHistory::new();
                     self.password_channel = None;
                     self.channel_password.clear();
@@ -1172,6 +1216,7 @@ impl App {
                         self.channel_password.clear();
                     }
                 }
+                client::Event::Talking(talking) => self.talking = talking,
                 client::Event::Streaming(event) => {
                     match &event {
                         streaming::Event::State {
@@ -1253,6 +1298,7 @@ impl App {
                     self.streaming.reset();
                     self.clear_client_details();
                     self.client_usage.clear();
+                    self.talking.clear();
                     self.connection_history = ConnectionHistory::new();
                     self.password_channel = None;
                     self.channel_password.clear();
@@ -1392,6 +1438,15 @@ impl App {
                 .channels
                 .iter()
                 .any(|channel| channel.id == id && channel.join_access.can_request())
+    }
+    /// Whether the member is sharing a stream; the catalog only covers your current channel.
+    fn is_streaming(&self, member: &client::Member) -> bool {
+        (member.is_self && self.streaming.sharing.status.live)
+            || self
+                .streaming
+                .catalog
+                .iter()
+                .any(|stream| stream.publisher == member.id)
     }
     fn member_health(
         &self,
@@ -1594,6 +1649,43 @@ mod tests {
         assert!(app.input.is_none());
         assert!(app.output.is_some());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hiding_the_footer_saves_only_that_choice_and_survives_a_restart() {
+        let (mut app, root) = setup_fixture("footer");
+        let path = root.join("settings.json");
+        let saved = settings::Settings {
+            nickname: "Saved name".into(),
+            ..Default::default()
+        };
+        settings::save(&path, &saved).unwrap();
+        app.load_settings(path.clone());
+        app.nickname = "Unsaved draft".into();
+        let _ = app.update(Message::ToggleFooter);
+        assert!(app.footer_hidden);
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert!(stored.footer_hidden);
+        assert_eq!(stored.nickname, "Saved name", "drafts stay unsaved");
+        let (mut restarted, _) = setup_fixture("footer-restart");
+        restarted.load_settings(path.clone());
+        assert!(restarted.footer_hidden);
+        let _ = restarted.update(Message::ToggleFooter);
+        assert!(!settings::load(&path).unwrap().unwrap().footer_hidden);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_eye_toggles_between_every_channel_and_your_own() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        assert!(
+            app.subscribe_all.load(Ordering::Relaxed),
+            "TeamSpeak's default"
+        );
+        let _ = app.update(Message::ToggleSubscribeAll);
+        assert!(!app.subscribe_all.load(Ordering::Relaxed));
+        let _ = app.update(Message::ToggleSubscribeAll);
+        assert!(app.subscribe_all.load(Ordering::Relaxed));
     }
 
     #[test]

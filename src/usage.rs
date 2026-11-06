@@ -27,6 +27,27 @@ pub const MEMORY_DETAIL_LABEL: &str = "Private RAM";
 #[cfg(not(windows))]
 pub const MEMORY_DETAIL_LABEL: &str = "Footprint";
 
+/// How heavy the app's own CPU use is: amber from 25 %, red from 50 %.
+pub fn cpu_health(percent: Option<f32>) -> Health {
+    match percent {
+        None => Health::Unknown,
+        Some(value) if value >= 50.0 => Health::Poor,
+        Some(value) if value >= 25.0 => Health::Fair,
+        Some(_) => Health::Good,
+    }
+}
+
+/// How heavy the app's own memory use is: amber from 400 MiB, red from 700 MiB.
+pub fn memory_health(bytes: Option<u64>) -> Health {
+    const MIB: u64 = 1024 * 1024;
+    match bytes {
+        None => Health::Unknown,
+        Some(value) if value >= 700 * MIB => Health::Poor,
+        Some(value) if value >= 400 * MIB => Health::Fair,
+        Some(_) => Health::Good,
+    }
+}
+
 pub fn format_mib(bytes: Option<u64>) -> String {
     bytes.map_or_else(
         || "—".into(),
@@ -534,6 +555,18 @@ pub fn format_bytes(mut value: f64) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn resource_load_turns_amber_then_red() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(cpu_health(None), Health::Unknown);
+        assert_eq!(cpu_health(Some(24.9)), Health::Good);
+        assert_eq!(cpu_health(Some(25.0)), Health::Fair);
+        assert_eq!(cpu_health(Some(50.0)), Health::Poor);
+        assert_eq!(memory_health(Some(399 * MIB)), Health::Good);
+        assert_eq!(memory_health(Some(400 * MIB)), Health::Fair);
+        assert_eq!(memory_health(Some(700 * MIB)), Health::Poor);
+    }
 
     #[test]
     fn cpu_display_preserves_small_readings_without_trailing_zeroes() {

@@ -20,6 +20,9 @@ pub struct Settings {
     pub input_device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_device_id: Option<String>,
+    /// The footer shows only the connection status and resource icons.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub footer_hidden: bool,
 }
 
 impl Default for Settings {
@@ -31,6 +34,7 @@ impl Default for Settings {
             keybinds: Keybinds::default(),
             input_device_id: None,
             output_device_id: None,
+            footer_hidden: false,
         }
     }
 }
@@ -124,6 +128,7 @@ mod tests {
             },
             input_device_id: Some("input-id".into()),
             output_device_id: Some("output-id".into()),
+            footer_hidden: true,
         };
         settings.validate()?;
         assert_eq!(

@@ -12,6 +12,7 @@ pub const SCENES: &[Scene] = &[
     ("devices", devices),
     ("home", home),
     ("connected", connected),
+    ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
     ("performance", performance),
@@ -96,7 +97,7 @@ fn connected(s: &mut App) {
             id: 3,
             name: "Focus room".into(),
             has_password: true,
-            members_visible: true,
+            members_visible: false,
             join_access: client::JoinAccess::Unknown,
             ..client::Channel::default()
         },
@@ -110,6 +111,7 @@ fn connected(s: &mut App) {
     ];
     s.state.channels = channels;
     s.state.current = Some(lobby);
+    s.talking = [2].into();
     s.server_controls = Some(crate::command_flow::AudioState {
         muted: false,
         deafened: false,
@@ -146,6 +148,15 @@ fn connected(s: &mut App) {
         has_audio: true,
         server_relayed: false,
     }];
+}
+
+/// The hidden footer under load: CPU red, footprint amber.
+fn footer_hidden(s: &mut App) {
+    connected(s);
+    s.footer_hidden = true;
+    s.process_usage.cpu_percent = Some(64.0);
+    s.process_usage.memory_bytes = Some(812 * 1024 * 1024);
+    s.process_usage.memory_detail_bytes = Some(590 * 1024 * 1024);
 }
 
 fn statistics(s: &mut App) {

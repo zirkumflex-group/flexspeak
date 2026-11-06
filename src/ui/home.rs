@@ -6,7 +6,7 @@ use rune_kit::{Kit, Switch};
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
     Variant, body, button, card, divider, faint, heading, health_dot, icon_button, labelled, meter,
-    muted, overline, pulse, scroll_page, vertical_divider,
+    muted, overline, pulse, scroll_page, speaking_dot, vertical_divider,
 };
 use super::{footer, icons, send, settings, statistics, streams};
 use crate::{App, Message, Tab, client, shortcuts, usage};
@@ -63,21 +63,23 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
             Some(Message::ShowTab(Tab::Home)),
         ));
     }
+    // Connected, the sidebar already names the server.
     let title = match s.tab {
-        Tab::Home if s.connected && !s.loopback => s.state.server.clone(),
-        Tab::Home => "Flexspeak".into(),
-        Tab::Statistics => "Usage & Statistics".into(),
-        Tab::Settings => "Settings".into(),
+        Tab::Home if s.connected && !s.loopback => None,
+        Tab::Home => Some("Flexspeak"),
+        Tab::Statistics => Some("Usage & Statistics"),
+        Tab::Settings => Some("Settings"),
     };
-    bar = bar
-        .child(
+    if let Some(title) = title {
+        bar = bar.child(
             text(title)
                 .font(ty::HEADING)
                 .color(t.text)
                 .truncate()
                 .ml(4.0),
-        )
-        .child(el().grow(1.0));
+        );
+    }
+    bar = bar.child(el().grow(1.0));
     bar = bar
         .child(performance_switch(k, false))
         .child(vertical_divider(t, 24.0));
@@ -239,11 +241,7 @@ fn connect_button(t: &Theme, busy: bool, label: &str, on: Option<Message>) -> El
 }
 
 fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
-    let channel = s
-        .state
-        .current
-        .as_ref()
-        .map_or("No channel", |channel| channel.name.as_str());
+    let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
     let server = row()
         .w_full()
         .gap(12.0)
@@ -256,13 +254,23 @@ fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
                 .child(icon(&icons::SERVER, 15.0).color(t.accent).a11y_hidden()),
         )
         .child(
-            col()
+            heading(t, s.state.server.clone())
+                .truncate_fade()
                 .grow(1.0)
-                .min_w(0.0)
-                .gap(2.0)
-                .child(heading(t, s.state.server.clone()).truncate_fade())
-                .child(labelled(&icons::CHANNEL, channel, t.muted)),
-        );
+                .min_w(0.0),
+        )
+        .child(icon_button(
+            t,
+            "subscribe-all",
+            if all { &icons::EYE } else { &icons::EYE_OFF },
+            if all {
+                "Seeing every channel · show only your channel"
+            } else {
+                "Seeing only your channel · show every channel"
+            },
+            if all { Variant::Active } else { Variant::Ghost },
+            Some(Message::ToggleSubscribeAll),
+        ));
     col()
         .key("sidebar")
         .w(size::SIDEBAR)
@@ -271,14 +279,15 @@ fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
         .padding(12.0)
         .gap(12.0)
         .child(server)
-        .child(voice_controls(s, t))
         .child(divider(t))
         .child(overline(t, "Channels").ml(6.0))
+        // The channel list takes the free height, so the voice controls sit at the bottom.
         .child(scroll_page(
             k,
             "channel-scroll",
             channel_tree(s, t).pr(10.0).pb(8.0),
         ))
+        .child(voice_controls(s, t))
 }
 
 fn voice_controls(s: &App, t: &Theme) -> El {
@@ -329,7 +338,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     ));
     let speaking = s.microphone_meter_level();
     // Lit while you are heard; it eases in and out only as that changes, not with every reading.
-    let talking = speaking > 0.08;
+    let talking = speaking > crate::audio::SPEAKING_METER;
     let mut panel = col()
         .key("voice")
         .w_full()
@@ -447,8 +456,17 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     .font(ty::BODY_STRONG)
                     .color(ink)
                     .truncate_fade()
+                    .grow(1.0)
+                    .min_w(0.0)
                     .a11y_hidden(),
             );
+        if !channel.members_visible {
+            name = name.child(
+                el().help("You can't see who is in this channel")
+                    .label("Members not visible")
+                    .child(icon(&icons::EYE_OFF, 13.0).color(t.faint)),
+            );
+        }
         if current {
             name = name.fill(t.accent.alpha(0.16));
         }
@@ -510,9 +528,6 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             for member in &channel.members {
                 members = members.child(member_row(s, t, member, current));
             }
-            if !channel.members_visible {
-                members = members.child(faint(t, "Members not visible").pl(10.0).py(2.0));
-            }
             node = node.child(members);
         }
         tree = tree.child(node);
@@ -540,6 +555,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .radius(radius::ROW)
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
         .child(health_dot(t, health, format!("{label}\n{detail}")))
+        .child(speaking_dot(t, s.talking.contains(&member.id)))
         .child(
             text(if member.is_self {
                 format!("{} (you)", member.name)
@@ -552,6 +568,13 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
             .grow(1.0)
             .min_w(0.0),
         );
+    if s.is_streaming(member) {
+        entry = entry.child(
+            el().help("Sharing a stream")
+                .label("Sharing a stream")
+                .child(icon(&icons::SCREEN_SHARE, 13.0).color(t.live)),
+        );
+    }
     for (muted, glyph, help) in [
         (mic_muted, &icons::MIC_OFF, "Microphone muted"),
         (sound_muted, &icons::HEADPHONE_OFF, "Sound muted"),

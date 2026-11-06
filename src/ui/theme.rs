@@ -121,7 +121,7 @@ impl Theme {
             fair: rgb(0xf2c46b),
             poor: rgb(0xff7a8a),
             unknown: rgb(0x8c95ab),
-            live: rgb(0xff7a3d),
+            live: rgb(0xff5a52),
             cpu: rgb(0x46cfe0),
             ram: rgb(0xa98ff8),
         }

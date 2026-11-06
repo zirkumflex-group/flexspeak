@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -33,6 +33,8 @@ use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 pub struct Config {
     pub performance_mode: Arc<AtomicBool>,
     pub channel_health_visible: Arc<AtomicBool>,
+    /// See every channel's members (subscribe to all), or only your own channel's.
+    pub subscribe_all: Arc<AtomicBool>,
     pub streaming_visible: Arc<AtomicBool>,
     pub video_surface: Arc<streaming::Surface>,
     pub playback_volume: Arc<PlaybackVolume>,
@@ -116,6 +118,8 @@ pub enum Event {
     Status(String),
     Connected(String),
     State(Snapshot),
+    /// The clients heard right now, sent whenever the set changes.
+    Talking(BTreeSet<u16>),
     Streaming(streaming::Event),
     Meter {
         level: f32,
@@ -221,6 +225,45 @@ fn load_identity() -> Result<Identity> {
             Identity::new_from_ts_str(fs::read_to_string(&path)?.trim()).map_err(Into::into)
         }
         Err(error) => Err(error).context("Cannot save TeamSpeak identity"),
+    }
+}
+
+/// Who is heard right now. A client talks from its first voice packet until it sends the
+/// empty end-of-speech packet, or until no packet arrived for [`Speakers::HOLD`].
+#[derive(Debug, Default)]
+struct Speakers {
+    heard: BTreeMap<u16, Instant>,
+    reported: BTreeSet<u16>,
+}
+
+impl Speakers {
+    /// Voice packets arrive every 20 ms; this rides out jitter without lingering after speech.
+    const HOLD: Duration = Duration::from_millis(300);
+
+    fn packet(&mut self, id: u16, end_of_speech: bool, now: Instant) {
+        if end_of_speech {
+            self.heard.remove(&id);
+        } else {
+            self.heard.insert(id, now);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.heard.clear();
+    }
+
+    /// Hands the talking set to `send` when it differs from the last one delivered; a failed
+    /// send is retried on the next call.
+    fn report(&mut self, now: Instant, send: impl FnOnce(BTreeSet<u16>) -> bool) {
+        self.heard
+            .retain(|_, at| now.saturating_duration_since(*at) < Self::HOLD);
+        if self.heard.len() == self.reported.len() && self.heard.keys().eq(self.reported.iter()) {
+            return;
+        }
+        let talking: BTreeSet<u16> = self.heard.keys().copied().collect();
+        if send(talking.clone()) {
+            self.reported = talking;
+        }
     }
 }
 
@@ -475,8 +518,9 @@ async fn run_connection(
     );
     let result = async {
         let mut controls = Controls::new(Instant::now());
-        let mut subscription: Option<Ticket> = None;
-        let mut subscription_finished = false;
+        // The request in flight, and the subscription the server last settled on.
+        let mut subscription: Option<(Ticket, bool)> = None;
+        let mut subscribed: Option<bool> = None;
         let mut connected = false;
         let mut deadline = Instant::now();
         let mut sent = 0;
@@ -491,6 +535,7 @@ async fn run_connection(
         let mut pending_join: Option<(Ticket, u64, Instant)> = None;
         let mut server_info_enabled = true;
         let mut last_voice = None;
+        let mut speakers = Speakers::default();
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(Option<streaming::MediaEvent>), Tick }
@@ -589,7 +634,7 @@ async fn run_connection(
                             last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
                             let _ = events.try_send(Event::Connected(audio.description.clone()));
                             controls.reconnect(Instant::now());
-                            subscription_finished = false;
+                            subscribed = None;
                             subscription = None;
                         }
                         let state = connection.get_state()?;
@@ -616,6 +661,9 @@ async fn run_connection(
                     },
                     StreamItem::Audio(packet) => {
                         received += 1;
+                        if let AudioData::S2C { from, data, .. } | AudioData::S2CWhisper { from, data, .. } = packet.data().data() {
+                            speakers.packet(*from, data.is_empty(), Instant::now());
+                        }
                         if !controls.desired.deafened && connection.can_receive_audio() { audio.receive(packet); }
                     },
                     StreamItem::IdentityLevelIncreasing(level) => { let _ = events.try_send(Event::Status(format!("Preparing server identity (security level {level})…"))); },
@@ -624,7 +672,7 @@ async fn run_connection(
                         *flow.borrow_mut() = Flow::default();
                         controls.reconnect(Instant::now());
                         subscription = None;
-                        subscription_finished = false;
+                        subscribed = None;
                         connected = false;
                         deadline = Instant::now();
                         audio.set_capture(false);
@@ -634,6 +682,7 @@ async fn run_connection(
                         channel_polls = ChannelPolls::default();
                         pending_join = None;
                         last_voice = None;
+                        speakers.clear();
                         let network = traffic.reset_transport(Instant::now());
                         let _ = events.try_send(Event::Usage { network, connection: ConnectionUsage::default() });
                         let _ = events.try_send(Event::Status("Connection lost. Reconnecting…".into()));
@@ -656,9 +705,9 @@ async fn run_connection(
                                 } else if !reply.flooded && let Err(error) = &reply.result {
                                     let _ = events.try_send(Event::Warning { source: Source::Controls, detail: format!("Server rejected the mute/deafen update: {error}. Your local audio choice is still applied.") });
                                 }
-                            } else if subscription == Some(ticket) {
+                            } else if let Some((_, wanted)) = subscription.filter(|(pending, _)| *pending == ticket) {
                                 subscription = None;
-                                subscription_finished = !reply.flooded;
+                                if !reply.flooded { subscribed = Some(wanted); }
                                 if reply.result.is_ok() { let _ = events.try_send(Event::Recovered(Source::Subscription)); }
                                 else if !reply.flooded && let Err(error) = &reply.result {
                                     let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: format!("Channel subscription: {error}") });
@@ -701,6 +750,9 @@ async fn run_connection(
                         audio.set_capture(can_send);
                         config.video_surface.set_audio_enabled(!controls.desired.deafened && connected);
                         let packets = audio.tick(false, controls.desired.deafened || !connected, Some(&config.video_surface)).map_err(AudioFailure)?;
+                        if can_send && !packets.is_empty() && audio.level().sqrt() > crate::audio::SPEAKING_METER {
+                            speakers.packet(connection.get_state()?.own_client.0, false, Instant::now());
+                        }
                         if can_send {
                             for packet in packets {
                                 let _trace = profiler::scope(Category::Network, "network.send_voice");
@@ -710,14 +762,15 @@ async fn run_connection(
                             }
                         }
                         let now = Instant::now();
+                        speakers.report(now, |talking| events.try_send(Event::Talking(talking)).is_ok());
                         let expired = flow.borrow_mut().expired(now);
                         for (ticket, operation) in expired {
                             if controls.reply(ticket, false, false) {
                                 let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: false });
                                 let _ = events.try_send(Event::Warning { source: Source::Controls, detail: "The server did not acknowledge the mute/deafen update. Local audio protection remains applied.".into() });
-                            } else if subscription == Some(ticket) {
+                            } else if let Some((_, wanted)) = subscription.filter(|(pending, _)| *pending == ticket) {
                                 subscription = None;
-                                subscription_finished = true;
+                                subscribed = Some(wanted);
                                 let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: "Channel subscription timed out.".into() });
                             } else if streams.timeout(&mut connection, ticket) {
                             } else if pending_join.is_some_and(|(pending, _, _)| pending == ticket) {
@@ -738,9 +791,10 @@ async fn run_connection(
                             controls.pending = Some((ticket, desired));
                             let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: true });
                         }
-                        if connected && !subscription_finished && subscription.is_none() && !flow.borrow().cooling_down(now) {
-                            let command = connection.get_state()?.server.set_subscribed(true);
-                            subscription = Some(flow.borrow_mut().enqueue(command, Operation::Subscribe)?);
+                        let wanted = config.subscribe_all.load(Ordering::Relaxed);
+                        if connected && subscribed != Some(wanted) && subscription.is_none() && !flow.borrow().cooling_down(now) {
+                            let command = connection.get_state()?.server.set_subscribed(wanted);
+                            subscription = Some((flow.borrow_mut().enqueue(command, Operation::Subscribe)?, wanted));
                         }
                         if pending_join.is_some_and(|(_, _, at)| now.duration_since(at) > Duration::from_secs(10)) {
                             if let Some((ticket, _, _)) = pending_join.take() { flow.borrow_mut().cancel(ticket); }
@@ -896,6 +950,41 @@ pub fn probe(address: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speakers_start_on_voice_and_stop_on_end_packet_or_silence() {
+        fn report(
+            speakers: &mut Speakers,
+            sent: &mut Vec<BTreeSet<u16>>,
+            at: Instant,
+            delivered: bool,
+        ) {
+            speakers.report(at, |talking| {
+                sent.push(talking);
+                delivered
+            });
+        }
+        let now = Instant::now();
+        let ms = Duration::from_millis;
+        let mut speakers = Speakers::default();
+        let mut sent = Vec::new();
+        report(&mut speakers, &mut sent, now, true);
+        assert!(sent.is_empty(), "nothing changed, nothing to send");
+        speakers.packet(2, false, now);
+        speakers.packet(3, false, now);
+        report(&mut speakers, &mut sent, now, true);
+        assert_eq!(sent.pop(), Some(BTreeSet::from([2, 3])));
+        report(&mut speakers, &mut sent, now + ms(20), true);
+        assert!(sent.is_empty(), "an unchanged set is not resent");
+        speakers.packet(2, true, now + ms(40));
+        // A full queue keeps the change pending until it is delivered.
+        report(&mut speakers, &mut sent, now + ms(40), false);
+        report(&mut speakers, &mut sent, now + ms(50), true);
+        assert_eq!(sent, [BTreeSet::from([3]), BTreeSet::from([3])]);
+        sent.clear();
+        report(&mut speakers, &mut sent, now + Speakers::HOLD, true);
+        assert_eq!(sent.pop(), Some(BTreeSet::new()), "silence ends speech");
+    }
 
     #[test]
     fn channel_health_polling_rotates_fairly_and_stops_retrying_denied_peers() {
