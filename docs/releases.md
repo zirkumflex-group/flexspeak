@@ -45,6 +45,25 @@ This installs `flexspeak` and an application-launcher entry, and lets pacman res
 
 Omarchy uses Wayland. Native Wayland global mute/deafen shortcuts remain unsupported by the app; use its buttons. The release pipeline installs the Arch package in a clean container and verifies `flexspeak --help`. GUI/audio behavior on an actual Omarchy desktop still needs runtime validation.
 
+## In-app updates
+
+Release builds check GitHub Releases five seconds after launch and every six hours. The newest build is the release GitHub marks **latest**. The workflow sets that mark only after every package and the Homebrew tap are published, and never moves it backwards. That release is an update when its `(version, build)` from `v{version}-build.{N}` is greater than the running build's, which comes from `CARGO_PKG_VERSION` and `NATIVE_VOICE_BUILD_NUMBER` at compile time. Local `cargo` builds have no build number and never update themselves.
+
+**The app reads releases anonymously, so this only works once the repository (or at least its releases) is public.** While the repository is private, GitHub answers 404. The check fails quietly, and Settings → Updates shows why.
+
+| Installation | Asset | Install on Restart |
+| --- | --- | --- |
+| Windows x64 (`Flexspeak.exe`, from the ZIP or the standalone exe) | `Flexspeak-windows-x64.exe` | The running `.exe` is renamed to `.exe.old`, the new one takes its name, and a hidden PowerShell waits for the old process to exit before starting it. The next launch removes `.old`. |
+| macOS arm64 (`Flexspeak.app`) | `Flexspeak-macos-arm64.dmg` | At download time the DMG is mounted read-only, `Flexspeak.app` is copied out, and its signature (`codesign --verify --strict`) and bundle identifier are checked. On Restart it is copied beside the installed app, checked again, and swapped in with two renames on one volume (rolled back if the second fails). The app reopens with `open` after the old process exits. A translocated app (opened from a quarantined download) is asked to move to Applications first. |
+| Arch/Omarchy package (`/usr/bin/flexspeak`) | `Flexspeak-linux-x64.pkg.tar.zst` | `pkexec pacman -U --noconfirm`, then relaunch. |
+| Linux tarball (anywhere else) | `Flexspeak-linux-x64.tar.gz` | `flexspeak` is unpacked and renamed over the running executable, then relaunched. |
+
+Every download is checked against `SHA256SUMS.txt` from the same release, and against GitHub's own asset digest when the API reports one. A mismatch, a short download or a disagreement between the two discards the file. Verified downloads wait in the cache directory (`…/TeamSpeakNative/updates/<tag>`, overridable with `FLEXSPEAK_UPDATES_DIR`) and are found again after a restart. Older ones are removed. This verifies integrity against what was published. It is not code signing: builds remain ad-hoc signed and not notarized.
+
+With **Download updates automatically** on (the default), a found update downloads in the background and the notice offers **Restart**. With it off, the notice offers **Download**, shows a progress ring with size and speed while downloading, then offers **Restart**. Installing always waits for Restart. Before the update exits, Flexspeak writes `resume.json` beside `settings.json` (owner-only, deleted when read, ignored after ten minutes). The new build then returns to the same page, reconnects to the saved server with the session's server password, rejoins the channel (with its password if one was used) and restores mute and deafen.
+
+After an in-place update, Homebrew's record still names the old cask version. `brew upgrade` later reinstalls the current build, which is harmless.
+
 ## Automation
 
 - PRs run formatting, Clippy and tests once on Linux. Dependencies are cached, old runs of the same PR are cancelled, and documentation-only PRs skip checks. PR code receives a read-only token and no publishing secret. Fork PR workflow execution requires owner approval.

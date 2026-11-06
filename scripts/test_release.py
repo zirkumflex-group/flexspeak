@@ -1,4 +1,5 @@
 import copy
+import re
 import tempfile
 from pathlib import Path
 import unittest
@@ -67,6 +68,37 @@ class HomebrewReleaseTests(unittest.TestCase):
         for line in sums:
             digest, name = line.split("  ")
             self.assertEqual(digest, release.sha256(self.root / name))
+
+
+class InAppUpdaterContractTests(unittest.TestCase):
+    """The app downloads release assets by name; renaming one here must not strand it."""
+
+    def test_updater_asset_names_are_published_with_checksums(self):
+        source = (release.ROOT / "src/updater.rs").read_text()
+        names = dict(re.findall(r'pub const ([A-Z_]+): &str = "(Flexspeak-[^"]+|SHA256SUMS\.txt)";', source))
+        self.assertEqual(set(names), {"CHECKSUMS", "WINDOWS_EXE", "MACOS_DMG", "LINUX_PACKAGE", "LINUX_TARBALL"})
+        self.assertEqual(names.pop("CHECKSUMS"), "SHA256SUMS.txt")
+        for name in names.values():
+            (self.root / name).write_bytes(name.encode())
+        (self.root / "Flexspeak-windows-x64.zip").write_bytes(b"zip")
+        (self.root / "THIRD-PARTY-LICENSES.txt").write_bytes(b"notices")
+        with patch.object(release, "OUTPUT", self.root):
+            release.checksums()
+        listed = {line.split("  ", 1)[1] for line in (self.root / "SHA256SUMS.txt").read_text().splitlines()}
+        self.assertTrue(set(names.values()) <= listed)
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def test_updater_reads_the_tag_the_workflow_creates(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn('tag="v${version}-build.${GITHUB_RUN_NUMBER}"', workflow)
+        self.assertIn('gh release edit "$RELEASE_TAG" --latest', workflow)
+        source = (release.ROOT / "src/updater.rs").read_text()
+        self.assertIn('split_once("-build.")', source)
+        self.assertIn("releases/latest", source)
 
 
 if __name__ == "__main__":

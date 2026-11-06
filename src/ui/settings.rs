@@ -8,7 +8,7 @@ use super::widgets::{
     Variant, button, field, form_row, group, group_note, group_title, labelled, meter,
     percent_slider, picker, scroll_page,
 };
-use super::{home, icons};
+use super::{home, icons, updates};
 use crate::{App, Message, permissions, shortcuts};
 
 /// A trailing control at the form's control width.
@@ -128,6 +128,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
         ))
         .child(permissions(s, t).key("permissions"))
         .child(shortcut_settings(s, t, k).key("shortcuts"))
+        .child(group_title(t, "Updates"))
+        .child(updates::settings(s, t, k).key("updates"))
+        .child(updates::note(t))
         .child(footer)
         .child(group_note(
             t,

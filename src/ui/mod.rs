@@ -15,6 +15,7 @@ mod settings;
 mod statistics;
 mod streams;
 mod theme;
+mod updates;
 mod widgets;
 
 use std::{sync::atomic::Ordering, time::Instant};
@@ -26,6 +27,9 @@ use crate::{App, Message, Tab, client, shortcuts, usage};
 
 pub use theme::Theme;
 
+/// A [`Task::Stream`] job: interim messages go to the callback, the result is the last one.
+pub type StreamJob = dyn FnOnce(&dyn Fn(Message)) -> Message + Send;
+
 /// What an update asks the window or a worker thread to do after it returns.
 pub enum Task {
     None,
@@ -36,6 +40,9 @@ pub enum Task {
     Resize((f32, f32)),
     /// Blocking work for a worker thread; its message returns to the UI thread.
     Perform(Box<dyn FnOnce() -> Message + Send>),
+    /// Blocking work for a worker thread that reports along the way: it gets a sender for
+    /// interim messages (download progress) and returns its final one.
+    Stream(Box<StreamJob>),
     /// A session's backend events, forwarded until the worker closes the channel.
     Events(mpsc::Receiver<client::Event>),
 }
@@ -68,6 +75,12 @@ impl Task {
                 }),
             }
         }))
+    }
+}
+
+impl Task {
+    pub fn stream(job: impl FnOnce(&dyn Fn(Message)) -> Message + Send + 'static) -> Self {
+        Self::Stream(Box::new(job))
     }
 }
 
@@ -166,6 +179,26 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
                 );
             }
         }
+        Task::Stream(job) => {
+            let handle = s.handle.clone();
+            let spawned = std::thread::Builder::new()
+                .name("flexspeak-task".into())
+                .spawn(move || {
+                    let deliver = |message: Message| {
+                        if let Some(handle) = &handle {
+                            handle.update(move |s, tx| dispatch(s, tx, message));
+                        }
+                    };
+                    let message = job(&deliver);
+                    deliver(message);
+                });
+            if let Err(error) = spawned {
+                s.alerts.raise(
+                    crate::alerts::Source::Worker,
+                    format!("Could not start a background task: {error}"),
+                );
+            }
+        }
         Task::Events(mut events) => {
             let Some(handle) = s.handle.clone() else {
                 return;
@@ -232,7 +265,20 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
             };
         changed = true;
     }
-    tx.wake_after(s.next_usage_tick.saturating_duration_since(now));
+    if s.resume.is_some() && !s.resume_started {
+        s.resume_started = true;
+        dispatch(s, tx, Message::Resume);
+        changed = true;
+    }
+    if s.updater.next_check.is_some_and(|at| now >= at) {
+        dispatch(s, tx, Message::Updater(crate::updater::Event::Check));
+        changed = true;
+    }
+    let wake = match s.updater.next_check {
+        Some(check) => s.next_usage_tick.min(check),
+        None => s.next_usage_tick,
+    };
+    tx.wake_after(wake.saturating_duration_since(now));
     if s.streaming.sync_frame() {
         changed = true;
     }
@@ -270,6 +316,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     } else {
         home::normal(s, cx, &t, &k, &mut layer)
     };
+    // Under any dialog, whose scrim then covers it too.
+    layer.extend(updates::notice(s, &t));
     modals::build(s, &t, &k, &mut layer);
     let base = el()
         .key("window")
