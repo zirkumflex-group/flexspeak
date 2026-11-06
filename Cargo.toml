@@ -59,5 +59,8 @@ strip = "debuginfo"
 strip = "none"
 
 [build-dependencies]
+cc = "1"
 embed-resource = "3"
+# Keep this aligned with the helper used by the pinned libwebrtc dependency.
+webrtc-sys-build = "=0.3.21"
 

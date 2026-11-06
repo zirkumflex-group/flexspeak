@@ -15,6 +15,8 @@ pub struct Settings {
     pub server_address: String,
     pub nickname: String,
     pub playback_volume_percent: u8,
+    pub audio_processing: crate::audio_processing::Settings,
+    pub transmission: crate::transmission::Settings,
     pub keybinds: Keybinds,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_device_id: Option<String>,
@@ -128,6 +130,8 @@ impl Default for Settings {
             server_address: "ts.zirkumflex.io".into(),
             nickname: "Flexspeak".into(),
             playback_volume_percent: 100,
+            audio_processing: crate::audio_processing::Settings::default(),
+            transmission: crate::transmission::Settings::default(),
             keybinds: Keybinds::default(),
             input_device_id: None,
             output_device_id: None,
@@ -150,6 +154,7 @@ impl Settings {
             bail!("Playback volume must be between 0 and 100.");
         }
         self.keybinds.parse()?;
+        self.transmission.validate()?;
         Ok(())
     }
 }
@@ -221,9 +226,21 @@ mod tests {
             server_address: "[::1]:9987".into(),
             nickname: "Älex".into(),
             playback_volume_percent: 37,
+            audio_processing: crate::audio_processing::Settings {
+                noise_suppression: true,
+                automatic_gain: true,
+                echo_cancellation: true,
+                ..crate::audio_processing::Settings::default()
+            },
             keybinds: Keybinds {
                 toggle_mute: "F8".into(),
                 toggle_deafen: "Ctrl+Alt+D".into(),
+                ..Keybinds::default()
+            },
+            transmission: crate::transmission::Settings {
+                mode: crate::transmission::Mode::VoiceActivation,
+                voice_threshold_db: -35,
+                ptt_release_ms: 100,
             },
             input_device_id: Some("input-id".into()),
             output_device_id: Some("output-id".into()),
@@ -243,6 +260,26 @@ mod tests {
         let minimal: Settings =
             serde_json::from_str(r#"{"server_address":"voice.example:9987","nickname":"Alex"}"#)?;
         assert_eq!(minimal.playback_volume_percent, 100);
+        assert_eq!(
+            minimal.transmission,
+            crate::transmission::Settings::default()
+        );
+        let old_processing: Settings =
+            serde_json::from_str(r#"{"audio_processing":{"noise_suppression":true}}"#)?;
+        assert_eq!(
+            old_processing.audio_processing.suppression_level,
+            crate::audio_processing::SuppressionLevel::Moderate
+        );
+        let invalid: Settings = serde_json::from_str(r#"{"transmission":{"ptt_release_ms":501}}"#)?;
+        assert!(invalid.validate().is_err());
+        assert_eq!(
+            minimal.audio_processing,
+            crate::audio_processing::Settings::default()
+        );
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"audio_processing":{"noise_suppresion":true}}"#)
+                .is_err()
+        );
         assert_eq!(minimal.keybinds, Keybinds::default());
         assert!(
             minimal.auto_download_updates,

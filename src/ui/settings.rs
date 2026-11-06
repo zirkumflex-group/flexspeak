@@ -1,16 +1,16 @@
 //! Settings, and the sections onboarding reuses: audio, permissions and shortcuts.
 
 use rune::{Color, Cx, El, TextEdit, col, el, icon, row, text};
-use rune_kit::Kit;
+use rune_kit::{Kit, Switch};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Variant, button, field, form_row, group, group_note, group_title, labelled, meter,
-    percent_slider, picker, scroll_page,
+    Range, Variant, button, field, form_row, group, group_note, group_title, labelled, meter,
+    percent_slider, picker, scroll_page, slider,
 };
 use super::{home, icons, send, updates};
 use crate::settings::{Appearance, ColorScheme, ThemeName};
-use crate::{App, Message, permissions, shortcuts};
+use crate::{App, Message, audio_processing, permissions, shortcuts, transmission};
 
 /// A trailing control at the form's control width.
 fn trailing(e: El) -> El {
@@ -124,10 +124,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
         .child(server)
         .child(group_title(t, "Audio"))
         .child(audio(s, cx, t, k, layer).key("audio"))
-        .child(group_note(
-            t,
-            "Disconnect to change devices; volume applies immediately. Use headphones for the microphone test.",
-        ))
         .child(permissions(s, t).key("permissions"))
         .child(shortcut_settings(s, t, k).key("shortcuts"))
         .child(group_title(t, "Updates"))
@@ -378,7 +374,27 @@ fn orb(t: &Theme, current: Appearance, name: ThemeName, dark: bool) -> El {
     e
 }
 
-pub fn audio(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+/// The audio section: devices, microphone processing and voice transmission.
+pub fn audio(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(devices(s, cx, t, k, layer).key("devices"))
+        .child(group_note(
+            t,
+            "Disconnect to change devices; volume applies immediately. Use headphones for the microphone test.",
+        ))
+        .child(group_title(t, "Microphone Processing"))
+        .child(processing(s, t, k, layer).key("processing"))
+        .child(group_title(t, "Voice Transmission"))
+        .child(transmission_settings(s, t, k, layer).key("transmission"))
+        .child(group_note(
+            t,
+            "Stop the microphone test or disconnect to change processing and transmission. Save to keep them.",
+        ))
+}
+
+fn devices(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     let busy = s.session.is_some();
     let volume = s.playback_volume.percent();
     let inputs: Vec<String> = s.devices.inputs.iter().map(|d| d.name.clone()).collect();
@@ -455,6 +471,7 @@ pub fn audio(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                     "volume",
                     "Playback volume",
                     volume,
+                    |s| s.playback_volume.percent(),
                     Message::PlaybackVolume,
                 )),
             ),
@@ -521,6 +538,250 @@ fn status_pill(t: &Theme, status: permissions::Status) -> El {
                 .color(color)
                 .a11y_hidden(),
         )
+}
+
+/// A compact switch at a row's trailing edge; the row's label names it.
+fn switch(
+    key: &'static str,
+    label: &str,
+    on: bool,
+    enabled: bool,
+    k: &Kit,
+    flip: fn(&App, bool) -> Message,
+) -> El {
+    Switch::new(on)
+        .label(label)
+        .hide_label()
+        .disabled(!enabled)
+        .on_toggle_tx(move |s: &mut App, tx| {
+            let message = flip(s, !on);
+            super::dispatch(s, tx, message);
+        })
+        .build(k)
+        .key(key)
+}
+
+/// A processing change built from the applied options; `update` refuses it during a session.
+fn processing_with(s: &App, change: impl FnOnce(&mut audio_processing::Settings)) -> Message {
+    let mut next = s.audio_processing;
+    change(&mut next);
+    Message::AudioProcessing(next)
+}
+
+fn processing(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+    if !audio_processing::AVAILABLE {
+        return group(
+            t,
+            [form_row(
+                t,
+                "Noise suppression and echo cancellation",
+                Some("Available on Mac and Windows. Saved effects are not applied here."),
+                el(),
+            )],
+        );
+    }
+    let options = s.audio_processing;
+    let editable = s.session.is_none();
+    let levels: Vec<String> = audio_processing::SuppressionLevel::ALL
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    group(
+        t,
+        [
+            form_row(
+                t,
+                "Noise suppression",
+                Some("Reduces steady background noise such as fans and typing."),
+                switch(
+                    "noise-suppression-switch",
+                    "Noise suppression",
+                    options.noise_suppression,
+                    editable,
+                    k,
+                    |s, on| processing_with(s, |o| o.noise_suppression = on),
+                ),
+            )
+            .key("noise-suppression"),
+            form_row(
+                t,
+                "Suppression level",
+                Some("Higher levels remove more noise and some voice."),
+                picker(
+                    k,
+                    s,
+                    "suppression-level",
+                    levels,
+                    Some(options.suppression_level.to_string().as_str()),
+                    "Choose…",
+                    editable && options.noise_suppression,
+                    size::FORM_CONTROL,
+                    move |index| {
+                        Message::AudioProcessing(audio_processing::Settings {
+                            suppression_level: audio_processing::SuppressionLevel::ALL[index],
+                            ..options
+                        })
+                    },
+                    layer,
+                ),
+            )
+            .key("suppression-level"),
+            form_row(
+                t,
+                "Automatic gain",
+                Some("Evens out your microphone level."),
+                switch(
+                    "automatic-gain-switch",
+                    "Automatic gain",
+                    options.automatic_gain,
+                    editable,
+                    k,
+                    |s, on| processing_with(s, |o| o.automatic_gain = on),
+                ),
+            )
+            .key("automatic-gain"),
+            form_row(
+                t,
+                "Echo cancellation",
+                Some("Experimental. Removes Flexspeak’s playback from your microphone in calls."),
+                switch(
+                    "echo-cancellation-switch",
+                    "Echo cancellation",
+                    options.echo_cancellation,
+                    editable,
+                    k,
+                    |s, on| processing_with(s, |o| o.echo_cancellation = on),
+                ),
+            )
+            .key("echo-cancellation"),
+        ],
+    )
+}
+
+fn transmission_settings(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+    let settings = s.transmission;
+    let editable = s.session.is_none();
+    let modes: Vec<String> = transmission::Mode::ALL
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let ptt_key = s.keybinds.push_to_talk.trim();
+    let detail: String = match settings.mode {
+        transmission::Mode::Continuous => "Sends whenever you are unmuted.".into(),
+        transmission::Mode::PushToTalk if !shortcuts::supported() => {
+            "Global shortcuts are unavailable here. Choose another mode.".into()
+        }
+        transmission::Mode::PushToTalk if ptt_key.is_empty() => {
+            "Set a push-to-talk key under Keyboard Shortcuts.".into()
+        }
+        transmission::Mode::PushToTalk => format!("Hold {ptt_key} to talk while unmuted."),
+        transmission::Mode::VoiceActivation if !audio_processing::AVAILABLE => {
+            "Speech detection needs Mac or Windows. Choose another mode.".into()
+        }
+        transmission::Mode::VoiceActivation => {
+            "Sends when speech is detected above the threshold.".into()
+        }
+    };
+    let mut rows = vec![
+        form_row(
+            t,
+            "Transmission",
+            Some(detail.as_str()),
+            picker(
+                k,
+                s,
+                "transmission-mode",
+                modes,
+                Some(settings.mode.to_string().as_str()),
+                "Choose…",
+                editable,
+                size::FORM_CONTROL,
+                move |index| {
+                    Message::Transmission(transmission::Settings {
+                        mode: transmission::Mode::ALL[index],
+                        ..settings
+                    })
+                },
+                layer,
+            ),
+        )
+        .key("transmission-mode"),
+    ];
+    match settings.mode {
+        transmission::Mode::Continuous => {}
+        transmission::Mode::PushToTalk => rows.push(
+            form_row(
+                t,
+                format!("Release delay · {} ms", settings.ptt_release_ms),
+                Some("Keeps sending briefly after you let go."),
+                trailing(locked(
+                    editable,
+                    slider(
+                        t,
+                        "ptt-release",
+                        "Push-to-talk release delay",
+                        i32::from(settings.ptt_release_ms),
+                        format!("{} milliseconds", settings.ptt_release_ms),
+                        Range {
+                            min: 0,
+                            max: 500,
+                            step: 25,
+                            key_step: 25,
+                        },
+                        |s| i32::from(s.transmission.ptt_release_ms),
+                        move |value| {
+                            Message::Transmission(transmission::Settings {
+                                ptt_release_ms: value.clamp(0, 500) as u16,
+                                ..settings
+                            })
+                        },
+                    ),
+                )),
+            )
+            .key("ptt-release"),
+        ),
+        transmission::Mode::VoiceActivation => rows.push(
+            form_row(
+                t,
+                format!("Voice threshold · {} dBFS", settings.voice_threshold_db),
+                Some("Move right to require a louder voice."),
+                trailing(locked(
+                    editable,
+                    slider(
+                        t,
+                        "voice-threshold",
+                        "Voice activation threshold",
+                        i32::from(settings.voice_threshold_db),
+                        format!("{} decibels", settings.voice_threshold_db),
+                        Range {
+                            min: -60,
+                            max: 0,
+                            step: 1,
+                            key_step: 2,
+                        },
+                        |s| i32::from(s.transmission.voice_threshold_db),
+                        move |value| {
+                            Message::Transmission(transmission::Settings {
+                                voice_threshold_db: value.clamp(-60, 0) as i16,
+                                ..settings
+                            })
+                        },
+                    ),
+                )),
+            )
+            .key("voice-threshold"),
+        ),
+    }
+    group(t, rows)
+}
+
+/// A control that `update` would refuse right now: shown at 42% and not interactive.
+fn locked(editable: bool, control: El) -> El {
+    if editable {
+        control
+    } else {
+        control.dim(0.42).disabled(true)
+    }
 }
 
 pub fn permissions(s: &App, t: &Theme) -> El {
@@ -599,6 +860,8 @@ pub fn shortcut_settings(s: &App, t: &Theme, k: &Kit) -> El {
     let detected = match s.last_shortcut {
         Some(shortcuts::Action::Mute) => "Detected mute / unmute",
         Some(shortcuts::Action::Deafen) => "Detected deafen / undeafen",
+        Some(shortcuts::Action::PushToTalk(true)) => "Detected push-to-talk pressed",
+        Some(shortcuts::Action::PushToTalk(false)) => "Detected push-to-talk released",
         None => "Press a shortcut after testing to check it",
     };
     col()
@@ -630,6 +893,18 @@ pub fn shortcut_settings(s: &App, t: &Theme, k: &Kit) -> El {
                         |s| &mut s.ui.deafen_key,
                         "Ctrl+Shift+D",
                         Message::DeafenKeybind,
+                    ),
+                ),
+                form_row(
+                    t,
+                    "Push to talk",
+                    Some("Held, not toggled. Used in push-to-talk mode."),
+                    key_field(
+                        k,
+                        &s.ui.ptt_key,
+                        |s| &mut s.ui.ptt_key,
+                        "Ctrl+Shift+Space",
+                        Message::PttKeybind,
                     ),
                 ),
                 form_row(
