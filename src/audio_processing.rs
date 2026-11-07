@@ -274,7 +274,7 @@ impl Processor {
                     })?;
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                let _ = delay;
+                let _ = (delay, &mut pcm);
                 let mut block = pcm.map(|sample| f32::from(sample) / 32768.0);
                 // After WebRTC, so echo cancellation still sees the unaltered microphone.
                 if let Some(state) = self.rnnoise.as_mut() {
