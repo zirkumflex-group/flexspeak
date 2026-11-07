@@ -288,6 +288,7 @@ mod tests {
                 noise_suppression: true,
                 automatic_gain: true,
                 echo_cancellation: true,
+                typing_suppression: true,
                 ..crate::audio_processing::Settings::default()
             },
             keybinds: Keybinds {
