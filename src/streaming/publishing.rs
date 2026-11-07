@@ -204,6 +204,8 @@ impl fmt::Display for ShareSource {
 pub struct Options {
     pub source: ShareSource,
     pub audio: Option<DeviceChoice>,
+    /// Read by the native publisher, which only Mac and Windows build.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub quality: Quality,
 }
 
@@ -220,6 +222,8 @@ pub enum Quality {
     Smooth,
 }
 
+// The encoder settings are read by the native publisher, which only Mac and Windows build.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 impl Quality {
     pub const ALL: [Self; 4] = [Self::Saver, Self::Standard, Self::Sharp, Self::Smooth];
 
