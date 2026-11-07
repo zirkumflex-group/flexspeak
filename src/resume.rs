@@ -31,7 +31,6 @@ pub struct Resume {
     /// Seconds since the Unix epoch.
     pub written_at: u64,
     pub page: Page,
-    pub performance_mode: bool,
     /// The saved server the session was on; `None` when there was no session.
     pub server_address: Option<String>,
     pub server_password: String,

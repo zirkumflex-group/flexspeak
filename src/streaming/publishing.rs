@@ -39,6 +39,7 @@ mod tests {
                 name: "Test screen".into(),
             },
             audio: None,
+            quality: Quality::default(),
         }
     }
     fn fixture() -> (
@@ -203,6 +204,68 @@ impl fmt::Display for ShareSource {
 pub struct Options {
     pub source: ShareSource,
     pub audio: Option<DeviceChoice>,
+    pub quality: Quality,
+}
+
+/// How sharp and smooth a shared screen is sent. Higher settings cost viewers more bandwidth.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Quality {
+    /// For slow connections and many viewers.
+    Saver,
+    #[default]
+    Standard,
+    /// Sharper text: code, documents.
+    Sharp,
+    /// Fluid motion: games, video.
+    Smooth,
+}
+
+impl Quality {
+    pub const ALL: [Self; 4] = [Self::Saver, Self::Standard, Self::Sharp, Self::Smooth];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Saver => "480p · 30 fps",
+            Self::Standard => "720p · 30 fps",
+            Self::Sharp => "1080p · 30 fps",
+            Self::Smooth => "720p · 60 fps",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Saver => "Data saver, for slow connections",
+            Self::Standard => "Balanced, the default",
+            Self::Sharp => "Sharp text, for code and documents",
+            Self::Smooth => "Fluid motion, for games and video",
+        }
+    }
+
+    /// The largest frame sent; captures are scaled down to fit, never up.
+    pub fn max_size(self) -> (u32, u32) {
+        match self {
+            Self::Saver => (854, 480),
+            Self::Standard | Self::Smooth => (1280, 720),
+            Self::Sharp => (1920, 1080),
+        }
+    }
+
+    pub fn fps(self) -> u32 {
+        match self {
+            Self::Smooth => 60,
+            _ => 30,
+        }
+    }
+
+    /// The video encoder's ceiling in bits per second.
+    pub fn bitrate(self) -> u64 {
+        match self {
+            Self::Saver => 1_200_000,
+            Self::Standard => 2_500_000,
+            Self::Sharp => 4_500_000,
+            Self::Smooth => 4_000_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -224,6 +287,7 @@ pub struct Ui {
     pub loading: bool,
     pub audio: bool,
     pub audio_device: Option<DeviceChoice>,
+    pub quality: Quality,
     pub status: Status,
 }
 impl Default for Ui {
@@ -234,6 +298,7 @@ impl Default for Ui {
             loading: false,
             audio: true,
             audio_device: None,
+            quality: Quality::default(),
             status: Status::default(),
         }
     }

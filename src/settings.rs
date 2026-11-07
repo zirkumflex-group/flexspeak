@@ -37,6 +37,9 @@ pub struct Settings {
     /// Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Appearance::is_default")]
     pub appearance: Appearance,
+    /// A release running from Downloads or a disk image no longer offers to install itself.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skip_install_prompt: bool,
 }
 
 /// A saved server: an optional name to show, and the address to connect to.
@@ -172,6 +175,7 @@ impl Default for Settings {
             footer_hidden: false,
             auto_download_updates: true,
             appearance: Appearance::default(),
+            skip_install_prompt: false,
         }
     }
 }

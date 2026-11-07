@@ -1,5 +1,5 @@
 use super::{
-    AVAILABLE, Event, MAX_CANDIDATES, Phase, StreamInfo, Surface,
+    AVAILABLE, Event, MAX_CANDIDATES, MAX_WATCHES, Phase, StreamInfo, Surfaces,
     protocol::{self, Input},
     rtc,
 };
@@ -26,6 +26,7 @@ use tsproto_packets::packets::OutCommand;
 struct Watch {
     info: StreamInfo,
     generation: u64,
+    slot: usize,
     started: Instant,
     phase: Phase,
     candidates: Vec<Input>,
@@ -45,9 +46,8 @@ enum Pending {
 pub struct Session {
     pub publisher: super::publishing::Publisher,
     events: mpsc::Sender<client::Event>,
-    surface: Arc<Surface>,
+    surfaces: Arc<Surfaces>,
     visible: Arc<AtomicBool>,
-    performance: Arc<AtomicBool>,
     supported: bool,
     channel: Option<ChannelId>,
     members: HashSet<u16>,
@@ -58,23 +58,23 @@ pub struct Session {
     last_request: Instant,
     was_visible: bool,
     discovery_failed: bool,
-    watch: Option<Watch>,
+    watches: Vec<Watch>,
+    /// Which receiver `next_media` polls first, so a busy stream can't starve the others.
+    turn: usize,
 }
 
 impl Session {
     pub fn new(
         events: mpsc::Sender<client::Event>,
-        surface: Arc<Surface>,
+        surfaces: Arc<Surfaces>,
         visible: Arc<AtomicBool>,
-        performance: Arc<AtomicBool>,
         flow: Rc<RefCell<Flow>>,
     ) -> Self {
         Self {
             publisher: super::publishing::Publisher::new(events.clone(), flow.clone()),
             events,
-            surface,
+            surfaces,
             visible,
-            performance,
             supported: false,
             channel: None,
             members: HashSet::new(),
@@ -85,7 +85,8 @@ impl Session {
             last_request: Instant::now() - Duration::from_secs(1),
             was_visible: false,
             discovery_failed: false,
-            watch: None,
+            watches: Vec::new(),
+            turn: 0,
         }
     }
 
@@ -95,14 +96,40 @@ impl Session {
     fn publish_catalog(&self) {
         self.emit(Event::Catalog(self.catalog.values().cloned().collect()));
     }
-    fn state(&self, phase: Phase, detail: impl Into<String>) {
-        if let Some(watch) = &self.watch {
+    fn state(&self, generation: u64, phase: Phase, detail: impl Into<String>) {
+        if let Some(watch) = self.find(generation) {
             self.emit(Event::State {
-                generation: watch.generation,
+                generation,
+                slot: watch.slot,
                 stream: watch.info.clone(),
                 phase,
                 detail: detail.into(),
             });
+        }
+    }
+    fn find(&self, generation: u64) -> Option<&Watch> {
+        self.watches
+            .iter()
+            .find(|watch| watch.generation == generation)
+    }
+    /// The generations of the watches `select` picks.
+    fn matching(&self, select: impl Fn(&Watch) -> bool) -> Vec<u64> {
+        self.watches
+            .iter()
+            .filter(|watch| select(watch))
+            .map(|watch| watch.generation)
+            .collect()
+    }
+    /// Stops every watch `select` picks.
+    fn stop_where(
+        &mut self,
+        connection: &mut Connection,
+        select: impl Fn(&Watch) -> bool,
+        phase: Phase,
+        detail: &str,
+    ) {
+        for generation in self.matching(select) {
+            self.stop_one(connection, generation, phase, detail);
         }
     }
 
@@ -145,6 +172,7 @@ impl Session {
             }
             self.stop(
                 connection,
+                None,
                 Phase::Stopped,
                 "Stopped after changing channels",
             );
@@ -154,17 +182,12 @@ impl Session {
             self.members.clear();
             self.publish_catalog();
         }
-        if self
-            .watch
-            .as_ref()
-            .is_some_and(|watch| !members.contains(&watch.info.publisher))
-        {
-            self.stop(
-                connection,
-                Phase::Stopped,
-                "The publisher left your channel",
-            );
-        }
+        self.stop_where(
+            connection,
+            |watch| !members.contains(&watch.info.publisher),
+            Phase::Stopped,
+            "The publisher left your channel",
+        );
         let previous = self.catalog.len();
         self.catalog
             .retain(|_, info| members.contains(&info.publisher));
@@ -215,11 +238,16 @@ impl Session {
             "The native stream receiver is currently available on Mac and Windows"
         );
         ensure!(
-            self.supported
-                && self.visible.load(Ordering::Relaxed)
-                && !self.performance.load(Ordering::Relaxed),
-            "Open your server view in normal mode on a TeamSpeak 6 server"
+            self.supported && self.visible.load(Ordering::Relaxed),
+            "Open your server view on a TeamSpeak 6 server"
         );
+        if self.watches.iter().any(|watch| watch.info.id == id) {
+            return Ok(());
+        }
+        let Some(slot) = (0..MAX_WATCHES).find(|slot| self.watches.iter().all(|w| w.slot != *slot))
+        else {
+            anyhow::bail!("You can watch up to {MAX_WATCHES} streams at once. Stop one first.");
+        };
         let info = self
             .catalog
             .get(id)
@@ -230,23 +258,28 @@ impl Session {
             !info.server_relayed,
             "This proof supports peer-to-peer streams only"
         );
-        self.stop(connection, Phase::Stopped, "Stopped watching");
-        let generation = self.surface.begin();
-        self.watch = Some(Watch {
+        let generation = self.surfaces.get(slot).begin();
+        self.watches.push(Watch {
             info: info.clone(),
             generation,
+            slot,
             started: Instant::now(),
             phase: Phase::Requesting,
             candidates: Vec::new(),
             receiver: None,
         });
-        self.state(Phase::Requesting, "The publisher may need to accept your request. Stream audio follows playback volume and deafen.");
+        self.state(generation, Phase::Requesting, "The publisher may need to accept your request. Stream audio follows playback volume and deafen.");
         if let Err(error) = self.send(
             protocol::join(&info, false),
             Pending::Control(generation),
             Operation::StreamJoin,
         ) {
-            self.stop(connection, Phase::Failed, "Could not request the stream");
+            self.stop_one(
+                connection,
+                generation,
+                Phase::Failed,
+                "Could not request the stream",
+            );
             return Err(error);
         }
         let _ = self.send(
@@ -257,10 +290,37 @@ impl Session {
         Ok(())
     }
 
-    pub fn stop(&mut self, _connection: &mut Connection, phase: Phase, detail: &str) {
-        self.state(phase, detail);
-        if let Some(watch) = self.watch.take() {
-            self.surface.end(watch.generation);
+    /// Stops the stream with this ID, or every watched stream for `None`.
+    pub fn stop(
+        &mut self,
+        connection: &mut Connection,
+        id: Option<&str>,
+        phase: Phase,
+        detail: &str,
+    ) {
+        self.stop_where(
+            connection,
+            |watch| id.is_none_or(|id| watch.info.id == id),
+            phase,
+            detail,
+        );
+    }
+
+    fn stop_one(
+        &mut self,
+        _connection: &mut Connection,
+        generation: u64,
+        phase: Phase,
+        detail: &str,
+    ) {
+        self.state(generation, phase, detail);
+        if let Some(index) = self
+            .watches
+            .iter()
+            .position(|watch| watch.generation == generation)
+        {
+            let watch = self.watches.remove(index);
+            self.surfaces.get(watch.slot).end(watch.generation);
             self.pending.retain(|ticket, (kind, _)| {
                 if matches!(kind, Pending::Control(generation) if *generation == watch.generation) {
                     self.flow.borrow_mut().cancel(*ticket);
@@ -280,9 +340,15 @@ impl Session {
 
     pub fn reset(&mut self) {
         self.publisher.reset();
-        self.state(Phase::Stopped, "The server connection ended");
-        if let Some(watch) = self.watch.take() {
-            self.surface.end(watch.generation);
+        for watch in std::mem::take(&mut self.watches) {
+            self.emit(Event::State {
+                generation: watch.generation,
+                slot: watch.slot,
+                stream: watch.info.clone(),
+                phase: Phase::Stopped,
+                detail: "The server connection ended".into(),
+            });
+            self.surfaces.get(watch.slot).end(watch.generation);
         }
         self.catalog.clear();
         self.members.clear();
@@ -296,8 +362,7 @@ impl Session {
     }
 
     pub fn tick(&mut self, connection: &mut Connection) {
-        let visible =
-            self.visible.load(Ordering::Relaxed) && !self.performance.load(Ordering::Relaxed);
+        let visible = self.visible.load(Ordering::Relaxed);
         if !visible {
             if self.publisher.active() {
                 self.publisher
@@ -305,6 +370,7 @@ impl Session {
             }
             self.stop(
                 connection,
+                None,
                 Phase::Stopped,
                 "Stopped when leaving the server view",
             );
@@ -314,15 +380,12 @@ impl Session {
         }
         self.was_visible = visible;
         self.publisher.tick();
-        if self.watch.as_ref().is_some_and(|watch| {
-            watch.receiver.is_none() && watch.started.elapsed() > Duration::from_secs(45)
-        }) {
-            self.stop(
-                connection,
-                Phase::Failed,
-                "The publisher did not send an offer within 45 seconds",
-            );
-        }
+        self.stop_where(
+            connection,
+            |watch| watch.receiver.is_none() && watch.started.elapsed() > Duration::from_secs(45),
+            Phase::Failed,
+            "The publisher did not send an offer within 45 seconds",
+        );
         let expired: Vec<_> = self
             .pending
             .iter()
@@ -333,13 +396,11 @@ impl Session {
             self.pending.remove(&handle);
             self.flow.borrow_mut().cancel(handle);
             if let Pending::Control(generation) = kind
-                && self
-                    .watch
-                    .as_ref()
-                    .is_some_and(|watch| watch.generation == generation)
+                && self.find(generation).is_some()
             {
-                self.stop(
+                self.stop_one(
                     connection,
+                    generation,
                     Phase::Failed,
                     "The server did not acknowledge stream signaling",
                 );
@@ -380,12 +441,9 @@ impl Session {
         if let Err(error) = result {
             if error.error == tsclientlib::TsError::ClientIsFlooding {
                 if let Pending::Control(generation) = kind
-                    && self
-                        .watch
-                        .as_ref()
-                        .is_some_and(|watch| watch.generation == generation)
+                    && self.find(generation).is_some()
                 {
-                    self.stop(connection, Phase::Stopped, "Viewing stopped while the server limits requests. Try Watch after the cooldown.");
+                    self.stop_one(connection, generation, Phase::Stopped, "Viewing stopped while the server limits requests. Try Watch after the cooldown.");
                 }
                 return true;
             }
@@ -408,14 +466,10 @@ impl Session {
                     }
                 }
                 Pending::Discovery { .. } => {}
-                Pending::Control(generation)
-                    if self
-                        .watch
-                        .as_ref()
-                        .is_some_and(|watch| watch.generation == generation) =>
-                {
-                    self.stop(
+                Pending::Control(generation) if self.find(generation).is_some() => {
+                    self.stop_one(
                         connection,
+                        generation,
                         Phase::Failed,
                         &format!("The server rejected stream signaling: {}", error.error),
                     );
@@ -445,13 +499,11 @@ impl Session {
             return false;
         };
         if let Pending::Control(generation) = kind
-            && self
-                .watch
-                .as_ref()
-                .is_some_and(|watch| watch.generation == generation)
+            && self.find(generation).is_some()
         {
-            self.stop(
+            self.stop_one(
                 connection,
+                generation,
                 Phase::Failed,
                 "The server did not acknowledge video negotiation",
             );
@@ -492,17 +544,12 @@ impl Session {
                         {
                             self.catalog.retain(|_, info| info.publisher != id);
                             self.publish_catalog();
-                            if self
-                                .watch
-                                .as_ref()
-                                .is_some_and(|watch| watch.info.publisher == id)
-                            {
-                                self.stop(
-                                    connection,
-                                    Phase::Stopped,
-                                    "The publisher stopped sharing",
-                                );
-                            }
+                            self.stop_where(
+                                connection,
+                                |watch| watch.info.publisher == id,
+                                Phase::Stopped,
+                                "The publisher stopped sharing",
+                            );
                         }
                     }
                 }
@@ -513,15 +560,14 @@ impl Session {
                         if self.catalog.len() >= 128 && !self.catalog.contains_key(&info.id) {
                             continue;
                         }
-                        if self.watch.as_ref().is_some_and(|watch| {
-                            watch.info.publisher == info.publisher && watch.info.id != info.id
-                        }) {
-                            self.stop(
-                                connection,
-                                Phase::Stopped,
-                                "The publisher started a different stream",
-                            );
-                        }
+                        self.stop_where(
+                            connection,
+                            |watch| {
+                                watch.info.publisher == info.publisher && watch.info.id != info.id
+                            },
+                            Phase::Stopped,
+                            "The publisher started a different stream",
+                        );
                         self.catalog
                             .retain(|id, old| old.publisher != info.publisher || *id == info.id);
                         self.catalog.insert(info.id.clone(), info);
@@ -532,36 +578,37 @@ impl Session {
                     if let Some(id) = args.get("id") {
                         self.catalog.remove(id);
                         self.publish_catalog();
-                        if self
-                            .watch
-                            .as_ref()
-                            .is_some_and(|watch| watch.info.id == *id)
-                        {
-                            self.stop(connection, Phase::Stopped, "The publisher stopped sharing");
-                        }
+                        self.stop_where(
+                            connection,
+                            |watch| watch.info.id == *id,
+                            Phase::Stopped,
+                            "The publisher stopped sharing",
+                        );
                     }
                 }
                 "notifystreamclientleft" => {
                     let own = connection.get_state().ok().map(|state| state.own_client.0);
                     let left = args.get("clid").and_then(|id| id.parse::<u16>().ok());
-                    if self.watch.as_ref().is_some_and(|watch| {
-                        args.get("id") == Some(&watch.info.id)
-                            && left.is_some_and(|id| Some(id) == own || id == watch.info.publisher)
-                    }) {
-                        self.stop(
-                            connection,
-                            Phase::Stopped,
-                            "You or the publisher left the stream",
-                        );
-                    }
+                    self.stop_where(
+                        connection,
+                        |watch| {
+                            args.get("id") == Some(&watch.info.id)
+                                && left
+                                    .is_some_and(|id| Some(id) == own || id == watch.info.publisher)
+                        },
+                        Phase::Stopped,
+                        "You or the publisher left the stream",
+                    );
                 }
                 "notifyrespondjoinstreamrequest" | "notifystreamsignaling" => {
-                    let Some(watch) = &self.watch else {
+                    let Some(watch) = self
+                        .watches
+                        .iter()
+                        .find(|watch| args.get("id") == Some(&watch.info.id))
+                    else {
                         continue;
                     };
-                    if args.get("id") != Some(&watch.info.id) {
-                        continue;
-                    }
+                    let generation = watch.generation;
                     if args
                         .get("invokerid")
                         .is_some_and(|id| id.parse::<u16>().ok() != Some(watch.info.publisher))
@@ -570,8 +617,9 @@ impl Session {
                     }
                     let signal = if name == "notifyrespondjoinstreamrequest" {
                         if args.get("decision").map(String::as_str) != Some("1") {
-                            self.stop(
+                            self.stop_one(
                                 connection,
+                                generation,
                                 Phase::Failed,
                                 "The publisher declined the viewing request",
                             );
@@ -583,13 +631,19 @@ impl Session {
                     };
                     match signal {
                         Ok(Some(signal)) => {
-                            if let Err(error) = self.media_input(signal) {
-                                self.stop(connection, Phase::Failed, &error.to_string());
+                            if let Err(error) = self.media_input(generation, signal) {
+                                self.stop_one(
+                                    connection,
+                                    generation,
+                                    Phase::Failed,
+                                    &error.to_string(),
+                                );
                             }
                         }
                         Ok(None) => {}
-                        Err(_) => self.stop(
+                        Err(_) => self.stop_one(
                             connection,
+                            generation,
                             Phase::Failed,
                             "Invalid stream offer or connection candidate",
                         ),
@@ -600,8 +654,12 @@ impl Session {
         }
     }
 
-    fn media_input(&mut self, input: Input) -> Result<()> {
-        let Some(watch) = &mut self.watch else {
+    fn media_input(&mut self, generation: u64, input: Input) -> Result<()> {
+        let Some(watch) = self
+            .watches
+            .iter_mut()
+            .find(|watch| watch.generation == generation)
+        else {
             return Ok(());
         };
         if let Some(receiver) = &watch.receiver {
@@ -614,10 +672,11 @@ impl Session {
                 sdp,
                 std::mem::take(&mut watch.candidates),
                 watch.generation,
-                self.surface.clone(),
+                self.surfaces.get(watch.slot).clone(),
             )?);
             watch.phase = Phase::Negotiating;
             self.state(
+                generation,
                 Phase::Negotiating,
                 "Negotiating a receive-only media connection",
             );
@@ -631,22 +690,38 @@ impl Session {
         Ok(())
     }
 
-    pub async fn next_media(&mut self) -> Option<rtc::Output> {
-        match self
-            .watch
-            .as_mut()
-            .and_then(|watch| watch.receiver.as_mut())
-        {
-            Some(receiver) => receiver.output.recv().await,
-            None => std::future::pending().await,
+    /// The next output of any watched stream's receiver, with that stream's generation.
+    pub async fn next_media(&mut self) -> (u64, Option<rtc::Output>) {
+        let count = self.watches.len();
+        if !self.watches.iter().any(|watch| watch.receiver.is_some()) {
+            return std::future::pending().await;
         }
+        self.turn = self.turn.wrapping_add(1);
+        let first = self.turn;
+        let watches = &mut self.watches;
+        std::future::poll_fn(|context| {
+            for offset in 0..count {
+                let watch = &mut watches[(first + offset) % count];
+                if let Some(receiver) = &mut watch.receiver
+                    && let std::task::Poll::Ready(output) = receiver.output.poll_recv(context)
+                {
+                    return std::task::Poll::Ready((watch.generation, output));
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await
     }
 
-    pub fn media_event(&mut self, connection: &mut Connection, event: Option<rtc::Output>) {
-        let Some(watch) = &self.watch else {
+    pub fn media_event(
+        &mut self,
+        connection: &mut Connection,
+        generation: u64,
+        event: Option<rtc::Output>,
+    ) {
+        let Some(watch) = self.find(generation) else {
             return;
         };
-        let generation = watch.generation;
         match event {
             Some(rtc::Output::Signal(value)) => {
                 let packet = protocol::signal(&watch.info, &value);
@@ -660,22 +735,29 @@ impl Session {
                     })
                     .is_err()
                 {
-                    self.stop(
+                    self.stop_one(
                         connection,
+                        generation,
                         Phase::Failed,
                         "Could not send video connection signaling",
                     );
                 }
             }
             Some(rtc::Output::TransportConnected) => self.state(
+                generation,
                 Phase::Negotiating,
                 "Video transport connected; waiting for decoded frames",
             ),
             Some(rtc::Output::Playing) => {
-                if let Some(watch) = &mut self.watch {
+                if let Some(watch) = self
+                    .watches
+                    .iter_mut()
+                    .find(|watch| watch.generation == generation)
+                {
                     watch.phase = Phase::Receiving;
                 }
                 self.state(
+                    generation,
                     Phase::Receiving,
                     "Receiving stream · audio follows playback volume and deafen",
                 );
@@ -694,16 +776,23 @@ impl Session {
                 }
                 self.emit(Event::Stats { generation, stats });
             }
-            Some(rtc::Output::Failed(error)) => self.stop(connection, Phase::Failed, &error),
-            None => self.stop(connection, Phase::Stopped, "The video receiver stopped"),
+            Some(rtc::Output::Failed(error)) => {
+                self.stop_one(connection, generation, Phase::Failed, &error)
+            }
+            None => self.stop_one(
+                connection,
+                generation,
+                Phase::Stopped,
+                "The video receiver stopped",
+            ),
         }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(watch) = self.watch.take() {
-            self.surface.end(watch.generation);
+        for watch in self.watches.drain(..) {
+            self.surfaces.get(watch.slot).end(watch.generation);
         }
     }
 }
@@ -716,9 +805,8 @@ mod tests {
         let (events, output) = mpsc::channel(32);
         let mut session = Session::new(
             events,
-            Arc::new(Surface::default()),
+            Arc::new(Surfaces::default()),
             Arc::new(AtomicBool::new(true)),
-            Arc::new(AtomicBool::new(false)),
             Rc::new(RefCell::new(Flow::default())),
         );
         session.channel = Some(ChannelId(1));
@@ -732,17 +820,19 @@ mod tests {
         (session, connection, output)
     }
 
-    fn active(session: &mut Session) {
+    fn active(session: &mut Session) -> u64 {
         let info = session.catalog.get("stream-a").unwrap().clone();
-        let generation = session.surface.begin();
-        session.watch = Some(Watch {
+        let generation = session.surfaces.get(0).begin();
+        session.watches.push(Watch {
             info,
             generation,
+            slot: 0,
             started: Instant::now(),
             phase: Phase::Requesting,
             candidates: vec![],
             receiver: None,
         });
+        generation
     }
 
     #[test]
@@ -776,19 +866,19 @@ mod tests {
             "notifyrespondjoinstreamrequest",
             "notifyrespondjoinstreamrequest id=other decision=0",
         );
-        assert!(session.watch.is_some());
+        assert_eq!(session.watches.len(), 1);
         session.notification(
             &mut connection,
             "notifyrespondjoinstreamrequest",
             "notifyrespondjoinstreamrequest id=stream-a invokerid=8 decision=0",
         );
-        assert!(session.watch.is_some());
+        assert_eq!(session.watches.len(), 1);
         session.notification(
             &mut connection,
             "notifyrespondjoinstreamrequest",
             "notifyrespondjoinstreamrequest id=stream-a invokerid=7 decision=0",
         );
-        assert!(session.watch.is_none());
+        assert!(session.watches.is_empty());
     }
 
     #[test]
@@ -799,23 +889,29 @@ mod tests {
             "notifystreaminfo",
             "notifystreaminfo id=stream-a clid=7 name=Window",
         );
-        active(&mut session);
+        let generation = active(&mut session);
         for _ in 0..MAX_CANDIDATES {
             session
-                .media_input(Input::Candidate {
-                    sdp: "candidate:1 1 udp 1 127.0.0.1 5000 typ host".into(),
-                    mid: "0".into(),
-                    mline: 0,
-                })
+                .media_input(
+                    generation,
+                    Input::Candidate {
+                        sdp: "candidate:1 1 udp 1 127.0.0.1 5000 typ host".into(),
+                        mid: "0".into(),
+                        mline: 0,
+                    },
+                )
                 .unwrap();
         }
         assert!(
             session
-                .media_input(Input::Candidate {
-                    sdp: "x".into(),
-                    mid: "0".into(),
-                    mline: 0
-                })
+                .media_input(
+                    generation,
+                    Input::Candidate {
+                        sdp: "x".into(),
+                        mid: "0".into(),
+                        mline: 0
+                    }
+                )
                 .is_err()
         );
         session.notification(
@@ -823,7 +919,7 @@ mod tests {
             "notifyclientupdated",
             "notifyclientupdated clid=7 client_is_streaming=0",
         );
-        assert!(session.watch.is_none());
+        assert!(session.watches.is_empty());
         assert!(session.catalog.is_empty());
         while let Ok(event) = output.try_recv() {
             assert!(matches!(event, client::Event::Streaming(_)));

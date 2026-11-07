@@ -151,6 +151,17 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
                 (!busy && step.previous().is_some()).then_some(Message::SetupBack),
             ))
             .child(el().grow(1.0))
+            .children(s.redoing_setup.then(|| {
+                button(
+                    t,
+                    "cancel-setup",
+                    "Cancel",
+                    None,
+                    Variant::Ghost,
+                    (!busy).then_some(Message::CancelSetup),
+                )
+                .help("Keep your saved settings as they were")
+            }))
             .child(
                 button(
                     t,

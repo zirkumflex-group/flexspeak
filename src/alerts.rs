@@ -17,6 +17,9 @@ pub enum Source {
     StreamWatch,
     StreamFrame,
     StreamPublish,
+    Poke,
+    Move,
+    Install,
 }
 
 impl Source {
@@ -37,6 +40,9 @@ impl Source {
             Self::StreamWatch => "Could not watch stream",
             Self::StreamFrame => "Video frame could not be displayed",
             Self::StreamPublish => "Screen sharing unavailable",
+            Self::Poke => "Could not poke",
+            Self::Move => "Could not move clients",
+            Self::Install => "Could not install Flexspeak",
         }
     }
 }

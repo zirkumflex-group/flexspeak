@@ -23,20 +23,19 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tsclientlib::{
-    ChannelId, ChannelPermissionHint, ClientId, Codec, Connection, DisconnectOptions, Identity,
-    StreamItem,
+    ChannelId, ChannelPermissionHint, ClientId, ClientPermissionHint, Codec, Connection,
+    DisconnectOptions, Identity, StreamItem,
     events::{Event as BookEvent, PropertyId},
     prelude::*,
 };
 use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 
 pub struct Config {
-    pub performance_mode: Arc<AtomicBool>,
     pub channel_health_visible: Arc<AtomicBool>,
     /// See every channel's members (subscribe to all), or only your own channel's.
     pub subscribe_all: Arc<AtomicBool>,
     pub streaming_visible: Arc<AtomicBool>,
-    pub video_surface: Arc<streaming::Surface>,
+    pub video_surfaces: Arc<streaming::Surfaces>,
     pub playback_volume: Arc<PlaybackVolume>,
     pub audio_processing: crate::audio_processing::Settings,
     pub transmission: crate::transmission::Settings,
@@ -59,7 +58,12 @@ pub enum Command {
     StartSharing(streaming::publishing::Options),
     StopSharing,
     DecideViewer(u16, bool),
-    StopWatching,
+    /// Stops the stream with this ID, or every watched stream.
+    StopWatching(Option<String>),
+    /// Pokes a client with a message.
+    Poke(u16, String),
+    /// Moves these clients into a channel.
+    Move(Vec<u16>, u64),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -84,6 +88,9 @@ pub struct Member {
     pub is_self: bool,
     pub mic_muted: bool,
     pub sound_muted: bool,
+    /// Whether the server says you may poke and move this client; `None` when it hasn't said.
+    pub can_poke: Option<bool>,
+    pub can_move: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -150,6 +157,13 @@ pub enum Event {
         pending: bool,
     },
     ChannelPasswordRequired(u64),
+    /// Someone poked you.
+    Poked {
+        from: String,
+        message: String,
+    },
+    /// The server accepted a poke or move you asked for.
+    Done(Source),
     Stopped(Option<(Source, String)>),
 }
 
@@ -294,6 +308,12 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
             sound_muted: client.output_muted
                 || client.output_only_muted
                 || !client.output_hardware_enabled,
+            can_poke: client
+                .permission_hints
+                .map(|hints| hints.contains(ClientPermissionHint::POKE)),
+            can_move: client
+                .permission_hints
+                .map(|hints| hints.contains(ClientPermissionHint::MOVE_CLIENT)),
         });
     }
     for clients in members.values_mut() {
@@ -526,9 +546,8 @@ async fn run_connection(
     let flow = Rc::new(RefCell::new(Flow::default()));
     let mut streams = streaming::Session::new(
         events.clone(),
-        config.video_surface.clone(),
+        config.video_surfaces.clone(),
         config.streaming_visible.clone(),
-        config.performance_mode.clone(),
         flow.clone(),
     );
     let result = async {
@@ -553,7 +572,9 @@ async fn run_connection(
         let mut speakers = Speakers::default();
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(Option<streaming::MediaEvent>), Tick }
+        enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(u64, Option<streaming::MediaEvent>), Tick }
+        // Pokes and moves in flight, so their replies can be reported.
+        let mut requests: HashMap<Ticket, Source> = HashMap::new();
         loop {
             let step = {
                 let mut stream = connection.events();
@@ -565,7 +586,7 @@ async fn run_connection(
                 tokio::select! {
                     command = commands.recv() => Step::Command(command),
                     event = next_event => Step::Network(event),
-                    event = streams.next_media() => Step::Media(event),
+                    (generation, event) = streams.next_media() => Step::Media(generation, event),
                     _ = tick.tick() => Step::Tick,
                 }
             };
@@ -583,7 +604,7 @@ async fn run_connection(
                         },
                         Command::Deafen(value) => {
                             controls.desired.deafened = value;
-                            config.video_surface.set_audio_enabled(!value);
+                            config.video_surfaces.set_audio_enabled(!value);
                             audio.clear_playback();
                             audio.set_capture(false).map_err(AudioFailure)?;
                             controls.changed(&mut flow.borrow_mut(), Instant::now());
@@ -618,15 +639,40 @@ async fn run_connection(
                                 let _ = events.try_send(Event::Warning { source: Source::StreamWatch, detail: error.to_string() });
                             }
                         },
-                        Command::StopWatching => streams.stop(&mut connection, streaming::Phase::Stopped, "Stopped watching"),
+                        Command::StopWatching(id) => streams.stop(&mut connection, id.as_deref(), streaming::Phase::Stopped, "Stopped watching"),
+                        Command::Poke(id, message) => {
+                            let Some(client) = state.clients.get(&ClientId(id)) else {
+                                let _ = events.try_send(Event::Warning { source: Source::Poke, detail: "That client is no longer on the server.".into() });
+                                continue;
+                            };
+                            let message: String = message.chars().filter(|c| !c.is_control()).take(100).collect();
+                            match flow.borrow_mut().enqueue(client.poke(&message), Operation::Poke) {
+                                Ok(ticket) => { requests.insert(ticket, Source::Poke); },
+                                Err(error) => { let _ = events.try_send(Event::Warning { source: Source::Poke, detail: error.to_string() }); },
+                            }
+                        },
+                        Command::Move(ids, channel) => {
+                            if !state.channels.contains_key(&ChannelId(channel)) {
+                                let _ = events.try_send(Event::Warning { source: Source::Move, detail: "That channel no longer exists.".into() });
+                                continue;
+                            }
+                            for id in ids {
+                                let Some(client) = state.clients.get(&ClientId(id)) else { continue; };
+                                if client.channel == ChannelId(channel) { continue; }
+                                match flow.borrow_mut().enqueue(client.client_move(ChannelId(channel)).to_packet(), Operation::Move) {
+                                    Ok(ticket) => { requests.insert(ticket, Source::Move); },
+                                    Err(error) => { let _ = events.try_send(Event::Warning { source: Source::Move, detail: error.to_string() }); },
+                                }
+                            }
+                        },
                         Command::StartSharing(options) => {
                             streams.sync(&mut connection);
-                            let result = if !connected || config.performance_mode.load(Ordering::Relaxed) || !config.streaming_visible.load(Ordering::Relaxed) {
+                            let result = if !connected || !config.streaming_visible.load(Ordering::Relaxed) {
                                 Err(anyhow::anyhow!("Open your connected server view to share"))
                             } else if !connection.get_state()?.server.version.starts_with("6.") {
                                 Err(anyhow::anyhow!("Sharing requires a TeamSpeak 6 server"))
                             } else {
-                                streams.stop(&mut connection, streaming::Phase::Stopped, "Stopped watching to share");
+                                streams.stop(&mut connection, None, streaming::Phase::Stopped, "Stopped watching to share");
                                 streams.publisher.start(options)
                             };
                             if let Err(error) = result { let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() }); }
@@ -660,6 +706,12 @@ async fn run_connection(
                         // Deliver membership first so new-channel samples cannot populate the old view.
                         let _ = events.try_send(Event::State(snapshot(&connection)?));
                         for change in &changes {
+                            if let BookEvent::Message { target: tsclientlib::MessageTarget::Poke(_), invoker, message } = change {
+                                let clean = |text: &str, limit: usize| text.chars().filter(|c| !c.is_control()).take(limit).collect::<String>();
+                                let _ = events.try_send(Event::Poked { from: clean(&invoker.name, 64), message: clean(message, 200) });
+                                audio.chime();
+                                continue;
+                            }
                             if let BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }
                                 | BookEvent::PropertyChanged { id: PropertyId::ConnectionClientData(id), .. } = change
                                 && let Some(data) = state.clients.get(id).and_then(|client| client.connection_data.as_ref()) {
@@ -727,6 +779,19 @@ async fn run_connection(
                                 else if !reply.flooded && let Err(error) = &reply.result {
                                     let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: format!("Channel subscription: {error}") });
                                 }
+                            } else if let Some(source) = requests.remove(&ticket) {
+                                match &reply.result {
+                                    Ok(()) => { let _ = events.try_send(Event::Done(source)); },
+                                    Err(error) if !reply.flooded => {
+                                        let detail = if error.missing_permission.is_some() || error.error == tsclientlib::TsError::PermissionsClientInsufficient {
+                                            format!("The server denied it: you lack the permission ({}).", error.error)
+                                        } else {
+                                            format!("The server rejected it: {error}")
+                                        };
+                                        let _ = events.try_send(Event::Warning { source, detail });
+                                    },
+                                    Err(_) => {},
+                                }
                             } else if streams.message_result(&mut connection, ticket, &reply.result) {
                             } else if pending_join.is_some_and(|(pending, _, _)| pending == ticket) {
                                 let (_, id, _) = pending_join.take().unwrap();
@@ -756,7 +821,7 @@ async fn run_connection(
                 },
                 Step::Network(Some(Err(error))) => return Err(connection_error(error)).context("TeamSpeak connection failed"),
                 Step::Network(None) => bail!("The server closed the connection."),
-                Step::Media(event) => streams.media_event(&mut connection, event),
+                Step::Media(generation, event) => streams.media_event(&mut connection, generation, event),
                 Step::Tick => {
                     if events.is_closed() { break; }
                     if !connected && deadline.elapsed() > Duration::from_secs(40) { bail!("Connection timed out. Check the address, UDP port, password, and server availability."); }
@@ -764,8 +829,8 @@ async fn run_connection(
                         let can_send = connected && controls.capture_allowed() && connection.can_send_audio();
                         let capture = ptt_gate.allows(can_send, config.ptt.load(Ordering::Acquire), Instant::now(), config.transmission);
                         audio.set_capture(capture).map_err(AudioFailure)?;
-                        config.video_surface.set_audio_enabled(!controls.desired.deafened && connected);
-                        let packets = audio.tick(false, controls.desired.deafened || !connected, Some(&config.video_surface)).map_err(AudioFailure)?;
+                        config.video_surfaces.set_audio_enabled(!controls.desired.deafened && connected);
+                        let packets = audio.tick(false, controls.desired.deafened || !connected, Some(&config.video_surfaces)).map_err(AudioFailure)?;
                         // Empty packets end an utterance when push-to-talk or voice activation closes.
                         if can_send && packets.iter().any(|packet| !packet.is_empty()) && audio.level().sqrt() > crate::audio::SPEAKING_METER {
                             speakers.packet(connection.get_state()?.own_client.0, false, Instant::now());
@@ -789,6 +854,8 @@ async fn run_connection(
                                 subscription = None;
                                 subscribed = Some(wanted);
                                 let _ = events.try_send(Event::Warning { source: Source::Subscription, detail: "Channel subscription timed out.".into() });
+                            } else if let Some(source) = requests.remove(&ticket) {
+                                let _ = events.try_send(Event::Warning { source, detail: format!("The server did not answer the {}.", operation.label()) });
                             } else if streams.timeout(&mut connection, ticket) {
                             } else if pending_join.is_some_and(|(pending, _, _)| pending == ticket) {
                                 pending_join = None;
@@ -817,8 +884,7 @@ async fn run_connection(
                             if let Some((ticket, _, _)) = pending_join.take() { flow.borrow_mut().cancel(ticket); }
                             let _ = events.try_send(Event::Warning { source: Source::Join, detail: "Channel join timed out. You can try again.".into() });
                         }
-                        let show_telemetry = !config.performance_mode.load(Ordering::Relaxed);
-                        if show_telemetry && now.duration_since(last_usage) >= usage::REFRESH_INTERVAL {
+                        if now.duration_since(last_usage) >= usage::REFRESH_INTERVAL {
                             if let Ok(stats) = connection.get_network_stats() {
                                 let network = traffic.sample(&stats.total_bytes, now);
                                 let quality = usage::connection_usage(stats, server_usage.as_ref(), last_voice, now);
@@ -837,7 +903,7 @@ async fn run_connection(
                                 let _ = events.try_send(Event::ClientUsage { id: id.0, result: Err("Connection details timed out.") });
                             }
                         }
-                        if show_telemetry && connected && pending_info.is_none()
+                        if connected && pending_info.is_none()
                             && flow.borrow().optional_ready(now)
                             && now.duration_since(last_info_check) >= usage::REFRESH_INTERVAL {
                             last_info_check = now;
@@ -860,7 +926,7 @@ async fn run_connection(
                                 if id == own { last_server_request = now; } else { channel_polls.requested(id, now); }
                             }
                         }
-                        if show_telemetry && last_meter.elapsed() >= Duration::from_millis(100) {
+                        if last_meter.elapsed() >= Duration::from_millis(100) {
                             let _ = events.try_send(Event::Meter { level: audio.level(), sent, received, audio_buffer_bytes: audio.buffer_bytes() });
                             last_meter = Instant::now();
                         }
@@ -877,6 +943,7 @@ async fn run_connection(
     streams.publisher.stop("Disconnected");
     streams.stop(
         &mut connection,
+        None,
         streaming::Phase::Stopped,
         "The voice session ended",
     );
@@ -919,8 +986,7 @@ async fn run_loopback(
                 audio.set_capture(capture).map_err(AudioFailure)?;
                 audio.tick(true, false, None).map_err(AudioFailure)?;
                 report_transmission(events, &mut reported_transmission, audio.transmitting());
-                if !config.performance_mode.load(Ordering::Relaxed)
-                    && last_meter.elapsed() >= Duration::from_millis(100) {
+                if last_meter.elapsed() >= Duration::from_millis(100) {
                     let _ = events.try_send(Event::Meter { level: audio.level(), sent: 0, received: 0, audio_buffer_bytes: audio.buffer_bytes() });
                     last_meter = Instant::now();
                 }

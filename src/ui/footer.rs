@@ -161,7 +161,7 @@ fn toggle(t: &Theme, hidden: bool) -> El {
     )
 }
 
-pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, _compact: bool) -> El {
+pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
     let show_connection = s.connected && !s.loopback && !s.stopping && s.state.current.is_some();
     let (content, py) = if s.footer_hidden {
         (
@@ -226,21 +226,4 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, _compact: bool) -> El {
         .w_full()
         .child(divider(t))
         .child(el().w_full().px(12.0).py(py).fill(t.chrome).child(content))
-}
-
-/// Performance mode's footer: resources above the health indicator, no charts.
-pub fn compact(s: &App, t: &Theme) -> El {
-    col()
-        .w_full()
-        .child(divider(t))
-        .child(
-            col()
-                .w_full()
-                .padding(12.0)
-                .gap(8.0)
-                .fill(t.chrome)
-                .child(readings(s, t, false))
-                .child(status_pill(s, t).self_start()),
-        )
-        .fill(Color::TRANSPARENT)
 }
