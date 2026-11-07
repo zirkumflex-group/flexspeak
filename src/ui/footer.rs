@@ -67,7 +67,6 @@ fn reading(
 struct Resources {
     cpu: (String, usage::Health),
     ram: (String, usage::Health),
-    footprint: (String, usage::Health),
 }
 
 fn resources(s: &App) -> Resources {
@@ -84,10 +83,6 @@ fn resources(s: &App) -> Resources {
             usage::format_mib(usage.memory_bytes),
             usage::memory_health(usage.memory_bytes),
         ),
-        footprint: (
-            usage::format_mib(usage.memory_detail_bytes),
-            usage::memory_health(usage.memory_detail_bytes),
-        ),
     }
 }
 
@@ -96,13 +91,6 @@ fn readings(s: &App, t: &Theme, stacked: bool) -> El {
     let items = [
         reading(t, &icons::CPU, "CPU", r.cpu.0, r.cpu.1),
         reading(t, &icons::MEMORY, "RAM", r.ram.0, r.ram.1),
-        reading(
-            t,
-            &icons::ACTIVITY,
-            usage::MEMORY_DETAIL_LABEL,
-            r.footprint.0,
-            r.footprint.1,
-        ),
     ];
     if stacked {
         col().gap(3.0).w(160.0).children(items)
@@ -117,12 +105,7 @@ fn resource_icons(s: &App, t: &Theme) -> El {
     let mut icons_row = row().key("resource-icons").gap(2.0).center_y();
     for (key, glyph, label, (value, health)) in [
         ("cpu", &icons::CPU, "CPU", r.cpu),
-        (
-            "footprint",
-            &icons::ACTIVITY,
-            usage::MEMORY_DETAIL_LABEL,
-            r.footprint,
-        ),
+        ("ram", &icons::MEMORY, "RAM", r.ram),
     ] {
         icons_row = icons_row.child(
             el().key(key)
@@ -189,7 +172,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                         .h(44.0)
                         .scroll_x()
                         .scroll_edge_fade(12.0)
-                        // The strip fills the band; below four 110 pt charts it scrolls sideways.
+                        // The strip fills the band; below three connection charts it scrolls sideways.
                         .child(
                             charts::connection(
                                 cx,
@@ -198,6 +181,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                                 s.connection_usage,
                                 &s.connection_history,
                                 true,
+                                false,
                             )
                             .h(44.0)
                             .center_y(),

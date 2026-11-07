@@ -345,6 +345,14 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
             .w_full()
             .h_full()
             .padding(if narrow { 16.0 } else { 28.0 })
+            // Windows draws its window buttons over the top band; keep Save and Close clear.
+            .pt(if cfg!(windows) {
+                size::HEADER
+            } else if narrow {
+                16.0
+            } else {
+                28.0
+            })
             .center()
             .child(panel),
     );

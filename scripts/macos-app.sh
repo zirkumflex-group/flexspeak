@@ -19,8 +19,10 @@ cp vendor/tsclientlib/LICENSE-APACHE "$app/Contents/Resources/tsclientlib-LICENS
 # Preserve the mapped executable of an already-running voice session.
 cp "target/$profile/flexspeak" "$app/Contents/MacOS/flexspeak.new"
 mv -f "$app/Contents/MacOS/flexspeak.new" "$app/Contents/MacOS/flexspeak"
-# The Icon Composer source compiles to Assets.car (Liquid Glass on macOS 26) and an .icns for
-# earlier systems. Without an actool that reads .icon files, use the checked-in .icns.
+# Always ship the Finder/Dock fallback (16–1024 px, rendered from the Icon Composer icon).
+# CI's actool can exit 0 without writing anything, which shipped build 16 with no icon.
+cp assets/icon/Flexspeak.icns "$app/Contents/Resources/Flexspeak.icns"
+# Icon Composer adds Liquid Glass on macOS 26 and newer.
 if ! xcrun actool assets/icon/Flexspeak.icon --compile "$app/Contents/Resources" \
     --output-format human-readable-text --errors --app-icon Flexspeak --include-all-app-icons \
     --output-partial-info-plist "$app/Contents/Resources/.icon-info.plist" \
@@ -28,7 +30,6 @@ if ! xcrun actool assets/icon/Flexspeak.icon --compile "$app/Contents/Resources"
     --minimum-deployment-target 14.2 --platform macosx >/dev/null 2>&1; then
     echo "actool could not compile assets/icon/Flexspeak.icon; using assets/icon/Flexspeak.icns" >&2
     rm -f "$app/Contents/Resources/Assets.car"
-    cp assets/icon/Flexspeak.icns "$app/Contents/Resources/Flexspeak.icns"
 fi
 rm -f "$app/Contents/Resources/.icon-info.plist"
 cat > "$app/Contents/Info.plist" <<'PLIST'
@@ -36,7 +37,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>flexspeak</string>
-<key>CFBundleIconFile</key><string>Flexspeak</string>
+<key>CFBundleIconFile</key><string>Flexspeak.icns</string>
 <key>CFBundleIconName</key><string>Flexspeak</string>
 <key>CFBundleIdentifier</key><string>io.venator.flexspeak</string>
 <key>CFBundleName</key><string>Flexspeak</string>
@@ -47,7 +48,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>LSMinimumSystemVersion</key><string>14.2</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Flexspeak uses your microphone for TeamSpeak voice chat and the local microphone test.</string>
-<key>NSScreenCaptureUsageDescription</key><string>Flexspeak shares the screen or window you select with viewers you approve.</string>
+<key>NSScreenCaptureUsageDescription</key><string>Flexspeak shares the screen or window you select with viewers in your channel, using your chosen access settings.</string>
+<key>NSCameraUsageDescription</key><string>Flexspeak uses the camera you select when you start a camera stream.</string>
 <key>NSAudioCaptureUsageDescription</key><string>Flexspeak shares sound from your chosen output device when you enable system audio for a screen share.</string>
 </dict></plist>
 PLIST

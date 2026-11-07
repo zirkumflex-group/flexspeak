@@ -52,6 +52,12 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libxkbcommon-dev libwayland-dev desktop-file-utils
+      - name: macOS disk image tools
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/dmg-tools"
+          "$RUNNER_TEMP/dmg-tools/bin/pip" install dmgbuild==1.6.7
+          echo "FLEXSPEAK_DMGBUILD=$RUNNER_TEMP/dmg-tools/bin/dmgbuild" >> "$GITHUB_ENV"
       - name: Build and package
         env:
           FLEXSPEAK_OPUS_DIR: ${{ runner.temp }}/opus

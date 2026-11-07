@@ -355,6 +355,11 @@ enum Message {
     OpenShare,
     CloseShare,
     ShareQuality(streaming::publishing::Quality),
+    ShareResolution(streaming::publishing::Resolution),
+    ShareFrameRate(u32),
+    ShareVideoBitrate(u32),
+    ShareAudioBitrate(u32),
+    ShareAccess(streaming::publishing::Access),
     RefreshShareSources,
     ShareSources(Result<Vec<streaming::publishing::ShareSource>, String>),
     ShareSource(streaming::publishing::ShareSource),
@@ -1387,8 +1392,41 @@ impl App {
                 self.ui.open = None;
             }
             Message::ShareQuality(quality) => {
-                if !self.streaming.sharing.status.active {
+                if !self.streaming.sharing.status.active && quality.validate().is_ok() {
                     self.streaming.sharing.quality = quality;
+                }
+            }
+            Message::ShareResolution(resolution) => {
+                let quality = streaming::publishing::Quality {
+                    resolution,
+                    ..self.streaming.sharing.quality
+                };
+                return self.update(Message::ShareQuality(quality));
+            }
+            Message::ShareFrameRate(frame_rate) => {
+                let quality = streaming::publishing::Quality {
+                    frame_rate,
+                    ..self.streaming.sharing.quality
+                };
+                return self.update(Message::ShareQuality(quality));
+            }
+            Message::ShareVideoBitrate(video_kbps) => {
+                let quality = streaming::publishing::Quality {
+                    video_kbps,
+                    ..self.streaming.sharing.quality
+                };
+                return self.update(Message::ShareQuality(quality));
+            }
+            Message::ShareAudioBitrate(audio_kbps) => {
+                let quality = streaming::publishing::Quality {
+                    audio_kbps,
+                    ..self.streaming.sharing.quality
+                };
+                return self.update(Message::ShareQuality(quality));
+            }
+            Message::ShareAccess(access) => {
+                if !self.streaming.sharing.status.active {
+                    self.streaming.sharing.access = access;
                 }
             }
             Message::RefreshShareSources => {
@@ -1429,6 +1467,10 @@ impl App {
             }
             Message::ShareSource(source) => {
                 if !self.streaming.sharing.status.active {
+                    // A camera share starts without system sound; voice chat remains separate.
+                    if source.kind.is_camera() {
+                        self.streaming.sharing.audio = false;
+                    }
                     self.streaming.sharing.selected = Some(source);
                 }
             }
@@ -1444,6 +1486,8 @@ impl App {
             }
             Message::StartSharing => {
                 if self.connected
+                    && !self.streaming.sharing.status.active
+                    && !self.streaming.sharing.loading
                     && !self.loopback
                     && !self.stopping
                     && self.tab == Tab::Home
@@ -1473,6 +1517,7 @@ impl App {
                             source,
                             audio,
                             quality: self.streaming.sharing.quality,
+                            access: self.streaming.sharing.access,
                         },
                     )) {
                         self.streaming.share_open = false;

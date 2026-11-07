@@ -707,3 +707,5 @@ mod tests {
         assert!(!view.active());
     }
 }
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod camera;

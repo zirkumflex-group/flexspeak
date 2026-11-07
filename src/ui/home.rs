@@ -46,7 +46,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
         .h(size::HEADER)
         .w_full()
         .pl(16.0 + cx.titlebar_inset())
-        .pr(12.0)
+        .pr(if cfg!(windows) { 150.0 } else { 12.0 })
         .gap(size::GAP)
         .center_y()
         .fill(t.chrome)

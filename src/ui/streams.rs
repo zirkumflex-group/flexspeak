@@ -14,13 +14,16 @@ use super::widgets::{
     meter, muted, picker, pulse, scroll_page, slider, title,
 };
 use super::{dispatch, icons, send};
-use crate::streaming::{self, Watching, publishing::Quality};
+use crate::streaming::{
+    self, Watching,
+    publishing::{Access, Preset, Resolution},
+};
 use crate::{App, Message, usage};
 
-pub fn view(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     let connected = s.connected && !s.loopback && !s.stopping;
     let supported = connected && s.state.server_version.starts_with("6.");
-    share_dialog(s, t, k, layer);
+    share_dialog(s, cx, t, k, layer);
     let watching = s.streaming.active();
     let mut pane = col()
         .key("streams")
@@ -257,7 +260,7 @@ fn sharing_banner(s: &App, t: &Theme) -> El {
                         if status.detail.is_empty() {
                             s.streaming.sharing.quality.label()
                         } else {
-                            status.detail.as_str()
+                            status.detail.clone()
                         },
                         status.viewers.len(),
                         streaming::publishing::MAX_VIEWERS
@@ -677,14 +680,19 @@ fn stats(s: &App, watch: &Watching) -> El {
 }
 
 /// Choosing what to share, its quality and audio; or, while sharing, who watches.
-pub fn share_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     if !s.streaming.share_open {
         return;
     }
     let sharing = &s.streaming.sharing;
+    let quality = sharing.quality;
     let status = &sharing.status;
     let mut menus = Vec::new();
-    let mut body = col().w_full().px(16.0).pb(16.0).gap(14.0);
+    let height = cx
+        .layout_size("window")
+        .map_or(s.window_size.1, |size| size[1]);
+    let actions;
+    let mut body = col().key("share-body").w_full().px(16.0).pb(16.0).gap(14.0);
     if status.active {
         body = body
             .child(muted(t, status.detail.clone()))
@@ -728,28 +736,26 @@ pub fn share_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         for (id, name) in &status.requests {
             body = body.child(request_row(t, status, *id, name));
         }
-        body = body.child(
-            row()
-                .w_full()
-                .gap(size::GAP)
-                .child(el().grow(1.0))
-                .child(button(
-                    t,
-                    "close-share",
-                    "Close",
-                    None,
-                    Variant::Secondary,
-                    Some(Message::CloseShare),
-                ))
-                .child(button(
-                    t,
-                    "stop-sharing-dialog",
-                    "Stop Sharing",
-                    Some(&icons::STOP),
-                    Variant::Danger,
-                    Some(Message::StopSharing),
-                )),
-        );
+        actions = row()
+            .w_full()
+            .gap(size::GAP)
+            .child(el().grow(1.0))
+            .child(button(
+                t,
+                "close-share",
+                "Close",
+                None,
+                Variant::Secondary,
+                Some(Message::CloseShare),
+            ))
+            .child(button(
+                t,
+                "stop-sharing-dialog",
+                "Stop Sharing",
+                Some(&icons::STOP),
+                Variant::Danger,
+                Some(Message::StopSharing),
+            ));
     } else {
         let names: Vec<String> = sharing
             .sources
@@ -757,7 +763,7 @@ pub fn share_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
             .map(|source| source.name.clone())
             .collect();
         body = body
-            .child(field_label(t, "Screen or window"))
+            .child(field_label(t, "Screen, window or camera"))
             .child(
                 row()
                     .w_full()
@@ -770,9 +776,9 @@ pub fn share_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                         names,
                         sharing.selected.as_ref().map(|source| source.name.as_str()),
                         if sharing.loading {
-                            "Looking for screens and windows…"
+                            "Looking for sources…"
                         } else {
-                            "Choose a screen or window…"
+                            "Choose a screen, window or camera…"
                         },
                         true,
                         SHARE_PICKER,
@@ -786,29 +792,61 @@ pub fn share_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                         t,
                         "find-sources",
                         &icons::REFRESH,
-                        "Look for screens and windows again",
+                        "Refresh screens, windows and cameras",
                         Variant::Secondary,
                         (!sharing.loading).then_some(Message::RefreshShareSources),
                     )),
             )
-            .child(field_label(t, "Quality"))
+            .child(field_label(t, "Preset"))
+            .child(preset_picker(s, k, &mut menus))
+            .child(
+                row()
+                    .w_full()
+                    .gap(16.0)
+                    .child(
+                        col()
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .gap(10.0)
+                            .child(field_label(t, "Resolution"))
+                            .child(resolution_picker(s, k, &mut menus)),
+                    )
+                    .child(col().grow(1.0).min_w(0.0).child(quality_slider(
+                        t,
+                        "share-fps",
+                        "Frame rate",
+                        quality.frame_rate as i32,
+                        format!("{} fps", quality.frame_rate),
+                        Range { min: 5, max: 60, step: 1, key_step: 1 },
+                        |s: &App| s.streaming.sharing.quality.frame_rate as i32,
+                        |value| Message::ShareFrameRate(value as u32),
+                    ))),
+            )
+            .child(quality_slider(
+                t,
+                "share-video-bitrate",
+                "Video bitrate",
+                quality.video_kbps as i32,
+                format!("{} kbps", quality.video_kbps),
+                Range { min: 250, max: 20_000, step: 50, key_step: 50 },
+                |s: &App| s.streaming.sharing.quality.video_kbps as i32,
+                |value| Message::ShareVideoBitrate(value as u32),
+            ))
+            .child(faint(
+                t,
+                "Resolution, frame rate and bitrate are maximums. Actual quality depends on the source and connection. Bitrate is per viewer.",
+            ))
+            .child(field_label(t, "Who can watch"))
             .child(picker(
                 k,
                 s,
-                "share-quality",
-                Quality::ALL
-                    .iter()
-                    .map(|quality| format!("{} — {}", quality.label(), quality.description()))
-                    .collect(),
-                Some(&format!(
-                    "{} — {}",
-                    sharing.quality.label(),
-                    sharing.quality.description()
-                )),
-                "Quality",
+                "share-access",
+                Access::ALL.iter().map(|access| access.label().to_owned()).collect(),
+                Some(sharing.access.label()),
+                "Access",
                 true,
                 SHARE_PICKER,
-                |index| Message::ShareQuality(Quality::ALL[index]),
+                |index| Message::ShareAccess(Access::ALL[index]),
                 &mut menus,
             ))
             .child(
@@ -843,6 +881,16 @@ pub fn share_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                     },
                     &mut menus,
                 ))
+                .child(quality_slider(
+                    t,
+                    "share-audio-bitrate",
+                    "Audio bitrate",
+                    quality.audio_kbps as i32,
+                    format!("{} kbps", quality.audio_kbps),
+                    Range { min: 32, max: 320, step: 16, key_step: 16 },
+                    |s: &App| s.streaming.sharing.quality.audio_kbps as i32,
+                    |value| Message::ShareAudioBitrate(value as u32),
+                ))
                 .child(faint(
                     t,
                     "Shares everything on this output, including notifications. Your microphone stays separate.",
@@ -851,63 +899,152 @@ pub fn share_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         if !status.detail.is_empty() {
             body = body.child(muted(t, status.detail.clone()));
         }
-        body = body.child(
-            row()
-                .w_full()
-                .gap(size::GAP)
-                .center_y()
-                .child(
-                    faint(t, "You approve each viewer. Up to four can watch.")
-                        .grow(1.0)
-                        .min_w(0.0),
-                )
-                .child(button(
+        actions = row()
+            .w_full()
+            .gap(size::GAP)
+            .center_y()
+            .child(
+                faint(
                     t,
-                    "cancel-share",
-                    "Cancel",
-                    None,
-                    Variant::Secondary,
-                    Some(Message::CloseShare),
-                ))
-                .child(
-                    button(
-                        t,
-                        "start-sharing",
-                        "Go Live",
-                        Some(&icons::MONITOR_UP),
-                        Variant::Primary,
-                        sharing.selected.is_some().then_some(Message::StartSharing),
-                    )
-                    .default_button(),
-                ),
-        );
+                    if sharing.access == Access::Public {
+                        "Anyone in your channel can join. Up to four viewers."
+                    } else {
+                        "You approve each viewer. Up to four can watch."
+                    },
+                )
+                .grow(1.0)
+                .min_w(0.0),
+            )
+            .child(button(
+                t,
+                "cancel-share",
+                "Cancel",
+                None,
+                Variant::Secondary,
+                Some(Message::CloseShare),
+            ))
+            .child(
+                button(
+                    t,
+                    "start-sharing",
+                    "Go Live",
+                    Some(&icons::MONITOR_UP),
+                    Variant::Primary,
+                    (!sharing.loading && sharing.selected.is_some())
+                        .then_some(Message::StartSharing),
+                )
+                .default_button(),
+            );
     }
     Dialog::new(
         "share",
         if status.active {
             "You are sharing"
         } else {
-            "Share your screen"
+            "Share screen or camera"
         },
     )
     .open(true)
     .fit()
-    .width(480.0)
+    .width(560.0)
     .on_close(|s: &mut App| {
         let _ = s.update(Message::CloseShare);
         s.sync_fields();
     })
-    .child(body)
+    .child(
+        k.scroll_bar(
+            col()
+                .key("share-scroll")
+                .w_full()
+                .min_h(0.0)
+                // The centred dialog stays below Windows' in-app window buttons.
+                .max_h((height - 180.0 - if cfg!(windows) { 72.0 } else { 0.0 }).max(220.0))
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
+                .scroll_edge_fade(12.0)
+                .child(body),
+        ),
+    )
+    .child(el().w_full().padding(16.0).child(actions))
     .build(k, layer);
     layer.extend(menus);
 }
 
+/// A preset fills all four quality values; any change after that reads "Custom".
+fn preset_picker(s: &App, k: &Kit, menus: &mut Vec<El>) -> El {
+    let label = |preset: Preset| format!("{} · {}", preset.label(), preset.quality().label());
+    let current = s
+        .streaming
+        .sharing
+        .quality
+        .preset()
+        .map_or_else(|| "Custom".to_owned(), label);
+    picker(
+        k,
+        s,
+        "share-quality",
+        Preset::ALL.into_iter().map(label).collect(),
+        Some(&current),
+        "Preset",
+        true,
+        SHARE_PICKER,
+        |index| Message::ShareQuality(Preset::ALL[index].quality()),
+        menus,
+    )
+}
+
+fn resolution_picker(s: &App, k: &Kit, menus: &mut Vec<El>) -> El {
+    picker(
+        k,
+        s,
+        "share-resolution",
+        Resolution::ALL
+            .iter()
+            .map(|resolution| resolution.label().to_owned())
+            .collect(),
+        Some(s.streaming.sharing.quality.resolution.label()),
+        "Resolution",
+        true,
+        224.0,
+        |index| Message::ShareResolution(Resolution::ALL[index]),
+        menus,
+    )
+}
+
 /// The share dialog's pickers span its width.
-const SHARE_PICKER: f32 = 392.0;
+const SHARE_PICKER: f32 = 480.0;
 
 fn field_label(t: &Theme, label: &str) -> El {
     text(label.to_owned())
         .font(ty::LABEL)
         .color(t.muted)
         .mb(-6.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quality_slider(
+    t: &Theme,
+    key: &str,
+    label: &str,
+    value: i32,
+    spoken: String,
+    range: Range,
+    current: fn(&App) -> i32,
+    on_change: fn(i32) -> Message,
+) -> El {
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .child(text(label.to_owned()).font(ty::LABEL).color(t.muted))
+                .child(el().grow(1.0))
+                .child(text(spoken.clone()).font(ty::NUMERIC).color(t.text)),
+        )
+        .child(slider(
+            t, key, label, value, spoken, range, current, on_change,
+        ))
 }

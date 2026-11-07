@@ -198,8 +198,11 @@ def build():
         app = stage / "Flexspeak.app"
         shutil.copytree(ROOT / "dist/Flexspeak.app", app)
         resources = app / "Contents/Resources"
-        resources.mkdir(exist_ok=True)
-        shutil.copy2(stage / "THIRD-PARTY-LICENSES.txt", resources)
+        # Build 16 shipped without an icon: CI's actool exited 0 but wrote nothing.
+        if not (resources / "Flexspeak.icns").is_file():
+            raise ValueError("Flexspeak.app has no Flexspeak.icns; Finder would show a blank icon")
+        for name in ("THIRD-PARTY-LICENSES.txt", "BUILD-INFO.json", "README.md", "settings.example.json"):
+            shutil.copy2(stage / name, resources)
         run("codesign", "--force", "--sign", "-", app)
         run("codesign", "--verify", "--strict", app)
         binary = app / "Contents/MacOS/flexspeak"
@@ -207,10 +210,12 @@ def build():
         if any(path in dependencies for path in ("/opt/homebrew/", "/usr/local/")):
             raise ValueError("App links to a Homebrew library instead of being standalone")
         run(binary, "--help")
-        (stage / "Applications").symlink_to("/Applications")
         dmg = OUTPUT / "Flexspeak-macos-arm64.dmg"
-        run("hdiutil", "create", "-ov", "-volname", "Flexspeak", "-srcfolder", stage,
-            "-format", "UDZO", dmg)
+        # dmgbuild writes Finder's layout directly, including icon positions and the
+        # background arrow, on CI as well as on Macs with a desktop session.
+        run(os.environ.get("FLEXSPEAK_DMGBUILD", "dmgbuild"),
+            "-s", ROOT / "scripts/dmg-settings.py", "-D", f"app={app}",
+            "-D", f"background={ROOT / 'assets/installer/background.png'}", "Flexspeak", dmg)
         run("hdiutil", "verify", dmg)
     else:
         executable = cargo_target / "release/flexspeak"

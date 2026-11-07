@@ -22,7 +22,7 @@ A minimal native Rust desktop client for TeamSpeak voice servers. The UI uses [R
 - A searchable Settings window (⌘,) with portable JSON for servers, nickname, volume and keybinds.
 - A Statistics tab with CPU/RAM usage, five-minute history graphs, and P50/P90/P99.
 - Live upload/download rates, session traffic totals, packet loss in/out, ping variation, idle time, and server-reported file-transfer rates.
-- Own connection health and compact line charts in the fixed footer; current-channel clients have collapsed health labels and expandable details in Voice (subject to server permissions).
+- Own connection health, packet loss in/out and ping charts, and CPU/RAM in the fixed footer (private RAM/physical footprint stays in Statistics); current-channel clients have collapsed health labels and expandable details in Voice (subject to server permissions).
 - On-demand traces, CPU timing by subsystem, and a memory breakdown with explicit measurement boundaries.
 - Persistent local TeamSpeak identity, bounded audio buffers, and device-rate conversion.
 - Dismissible error modals, duplicate suppression, acknowledged audio controls and adaptive server-command pacing. See [error handling](docs/error-handling.md).
@@ -63,7 +63,7 @@ cargo run --locked
 
 ### Windows
 
-Releases include a portable Windows x64 package, `Flexspeak-windows-x64.zip`. Extract it and open `Flexspeak.exe`. See [Windows build details and validation](docs/windows-build.md).
+The Windows app integrates minimize, maximize/restore and close into its header, with header dragging and double-click maximize. Releases include a portable Windows x64 package, `Flexspeak-windows-x64.zip`. Extract it and open `Flexspeak.exe`. See [Windows build details and validation](docs/windows-build.md).
 
 Install Rust's MSVC toolchain, Visual Studio C++ Build Tools, Git, and CMake. Then run:
 

@@ -21,9 +21,50 @@ pub const MAX_VIEWERS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareSource {
-    pub window: bool,
-    pub id: Option<u64>,
+    pub kind: SourceKind,
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub enum SourceKind {
+    Screen(Option<u64>),
+    Window(u64),
+    Camera(String),
+}
+impl SourceKind {
+    pub fn wire_type(&self) -> u8 {
+        match self {
+            Self::Camera(_) => 1,
+            Self::Screen(_) => 2,
+            Self::Window(_) => 3,
+        }
+    }
+    pub fn is_camera(&self) -> bool {
+        matches!(self, Self::Camera(_))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Access {
+    Public,
+    #[default]
+    Private,
+}
+impl Access {
+    pub const ALL: [Self; 2] = [Self::Public, Self::Private];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Public => "Public · join automatically",
+            Self::Private => "Private · approve each viewer",
+        }
+    }
+    pub fn wire_value(self) -> u8 {
+        match self {
+            Self::Public => 1,
+            Self::Private => 3,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -34,12 +75,12 @@ mod tests {
     fn options() -> Options {
         Options {
             source: ShareSource {
-                window: false,
-                id: None,
+                kind: SourceKind::Screen(None),
                 name: "Test screen".into(),
             },
             audio: None,
             quality: Quality::default(),
+            access: Access::default(),
         }
     }
     fn fixture() -> (
@@ -81,6 +122,78 @@ mod tests {
             matches!(commands.try_recv(),Ok(publish_media::Input::Remove(removed)) if removed == key)
         );
     }
+    #[test]
+    fn public_shares_admit_channel_members_and_fill_vacancies_without_approval() {
+        let (mut publisher, mut commands, _output) = fixture();
+        publisher.options.as_mut().unwrap().access = Access::Public;
+        publisher.members = (1..=6).map(|id| (id, format!("Viewer {id}"))).collect();
+        notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=1");
+        notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=99");
+        assert!(commands.try_recv().is_err());
+        for id in 2..=6 {
+            notify(
+                &mut publisher,
+                "notifyjoinstreamrequest",
+                &format!("id=ours clid={id}"),
+            );
+        }
+        assert_eq!(publisher.viewers.len(), MAX_VIEWERS);
+        assert_eq!(
+            publisher.requests.keys().copied().collect::<Vec<_>>(),
+            vec![6]
+        );
+        for _ in 0..MAX_VIEWERS {
+            assert!(matches!(
+                commands.try_recv(),
+                Ok(publish_media::Input::Add(_))
+            ));
+        }
+        notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=2");
+        assert!(
+            commands.try_recv().is_err(),
+            "Repeated requests must not create duplicate peers"
+        );
+        notify(&mut publisher, "notifystreamclientleft", "id=ours clid=2");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(publish_media::Input::Remove(_))
+        ));
+        assert!(
+            matches!(commands.try_recv(), Ok(publish_media::Input::Add(key)) if key.client == 6)
+        );
+        assert_eq!(publisher.viewers.len(), MAX_VIEWERS);
+        assert!(publisher.requests.is_empty());
+    }
+
+    #[test]
+    fn quality_presets_are_valid_and_custom_settings_are_independent() {
+        for preset in Preset::ALL {
+            let quality = preset.quality();
+            quality.validate().unwrap();
+            assert_eq!(quality.preset(), Some(preset));
+        }
+        let mut quality = Quality {
+            frame_rate: 24,
+            resolution: Resolution::P2160,
+            video_kbps: 12_000,
+            audio_kbps: 256,
+        };
+        assert_eq!(quality.preset(), None);
+        assert_eq!(quality.max_size(), (3840, 2160));
+        assert_eq!(quality.fps(), 24);
+        assert_eq!(quality.bitrate(), 12_000_000);
+        assert_eq!(quality.audio_bitrate(), 256_000);
+        quality.validate().unwrap();
+        quality.frame_rate = 0;
+        assert!(quality.validate().is_err());
+        quality.frame_rate = 60;
+        quality.audio_kbps = 321;
+        assert!(quality.validate().is_err());
+        quality.audio_kbps = 128;
+        quality.video_kbps = 20_001;
+        assert!(quality.validate().is_err());
+    }
+
     #[test]
     fn stale_peer_events_cannot_reopen_or_remove_a_new_attempt() {
         let (mut publisher, mut commands, _output) = fixture();
@@ -184,7 +297,13 @@ mod tests {
         assert!(!publisher.uncertain_start);
         let old = publisher
             .send(
-                protocol::setup("old", false, false),
+                protocol::setup(
+                    "old",
+                    &SourceKind::Screen(None),
+                    false,
+                    Quality::default(),
+                    Access::Private,
+                ),
                 Pending::Setup(0),
                 Operation::StreamStart,
             )
@@ -204,70 +323,134 @@ impl fmt::Display for ShareSource {
 pub struct Options {
     pub source: ShareSource,
     pub audio: Option<DeviceChoice>,
-    /// Read by the native publisher, which only Mac and Windows build.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub quality: Quality,
+    pub access: Access,
 }
 
-/// How sharp and smooth a shared screen is sent. Higher settings cost viewers more bandwidth.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Quality {
-    /// For slow connections and many viewers.
-    Saver,
+pub enum Resolution {
+    P480,
     #[default]
-    Standard,
-    /// Sharper text: code, documents.
-    Sharp,
-    /// Fluid motion: games, video.
-    Smooth,
+    P720,
+    P1080,
+    P1440,
+    P2160,
 }
-
-// The encoder settings are read by the native publisher, which only Mac and Windows build.
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-impl Quality {
-    pub const ALL: [Self; 4] = [Self::Saver, Self::Standard, Self::Sharp, Self::Smooth];
-
+impl Resolution {
+    pub const ALL: [Self; 5] = [
+        Self::P480,
+        Self::P720,
+        Self::P1080,
+        Self::P1440,
+        Self::P2160,
+    ];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Saver => "480p · 30 fps",
-            Self::Standard => "720p · 30 fps",
-            Self::Sharp => "1080p · 30 fps",
-            Self::Smooth => "720p · 60 fps",
+            Self::P480 => "480p",
+            Self::P720 => "720p",
+            Self::P1080 => "1080p",
+            Self::P1440 => "1440p",
+            Self::P2160 => "2160p (4K)",
         }
     }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Saver => "Data saver, for slow connections",
-            Self::Standard => "Balanced, the default",
-            Self::Sharp => "Sharp text, for code and documents",
-            Self::Smooth => "Fluid motion, for games and video",
-        }
-    }
-
-    /// The largest frame sent; captures are scaled down to fit, never up.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn max_size(self) -> (u32, u32) {
         match self {
-            Self::Saver => (854, 480),
-            Self::Standard | Self::Smooth => (1280, 720),
-            Self::Sharp => (1920, 1080),
+            Self::P480 => (854, 480),
+            Self::P720 => (1280, 720),
+            Self::P1080 => (1920, 1080),
+            Self::P1440 => (2560, 1440),
+            Self::P2160 => (3840, 2160),
         }
     }
+}
 
+/// Independent encoder ceilings. Presets just fill these values; changing one leaves the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quality {
+    pub resolution: Resolution,
+    pub frame_rate: u32,
+    pub video_kbps: u32,
+    pub audio_kbps: u32,
+}
+impl Default for Quality {
+    fn default() -> Self {
+        Preset::Balanced.quality()
+    }
+}
+impl Quality {
+    pub fn label(self) -> String {
+        format!(
+            "{} · {} fps · {} kbps",
+            self.resolution.label(),
+            self.frame_rate,
+            self.video_kbps
+        )
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    pub fn max_size(self) -> (u32, u32) {
+        self.resolution.max_size()
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn fps(self) -> u32 {
+        self.frame_rate
+    }
+    pub fn bitrate(self) -> u64 {
+        u64::from(self.video_kbps) * 1000
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    pub fn audio_bitrate(self) -> u64 {
+        u64::from(self.audio_kbps) * 1000
+    }
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            (5..=60).contains(&self.frame_rate),
+            "Frame rate must be 5–60 fps"
+        );
+        ensure!(
+            (250..=20_000).contains(&self.video_kbps),
+            "Video bitrate must be 250–20,000 kbps"
+        );
+        ensure!(
+            (32..=320).contains(&self.audio_kbps),
+            "Audio bitrate must be 32–320 kbps"
+        );
+        Ok(())
+    }
+    pub fn preset(self) -> Option<Preset> {
+        Preset::ALL.into_iter().find(|p| p.quality() == self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    Saver,
+    Balanced,
+    Sharp,
+    Smooth,
+}
+impl Preset {
+    pub const ALL: [Self; 4] = [Self::Saver, Self::Balanced, Self::Sharp, Self::Smooth];
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Smooth => 60,
-            _ => 30,
+            Self::Saver => "Data saver",
+            Self::Balanced => "Balanced",
+            Self::Sharp => "Sharp text",
+            Self::Smooth => "Smooth motion",
         }
     }
-
-    /// The video encoder's ceiling in bits per second.
-    pub fn bitrate(self) -> u64 {
-        match self {
-            Self::Saver => 1_200_000,
-            Self::Standard => 2_500_000,
-            Self::Sharp => 4_500_000,
-            Self::Smooth => 4_000_000,
+    pub fn quality(self) -> Quality {
+        let (resolution, frame_rate, video_kbps, audio_kbps) = match self {
+            Self::Saver => (Resolution::P480, 30, 1200, 64),
+            Self::Balanced => (Resolution::P720, 30, 2500, 128),
+            Self::Sharp => (Resolution::P1080, 30, 4500, 128),
+            Self::Smooth => (Resolution::P720, 60, 4000, 128),
+        };
+        Quality {
+            resolution,
+            frame_rate,
+            video_kbps,
+            audio_kbps,
         }
     }
 }
@@ -292,6 +475,7 @@ pub struct Ui {
     pub audio: bool,
     pub audio_device: Option<DeviceChoice>,
     pub quality: Quality,
+    pub access: Access,
     pub status: Status,
 }
 impl Default for Ui {
@@ -303,6 +487,7 @@ impl Default for Ui {
             audio: true,
             audio_device: None,
             quality: Quality::default(),
+            access: Access::default(),
             status: Status::default(),
         }
     }
@@ -431,13 +616,14 @@ impl Publisher {
             !self.flow.borrow().cooling_down(Instant::now()),
             "Wait for the server cooldown before sharing"
         );
+        options.quality.validate()?;
         self.generation += 1;
         self.status = Status::default();
         self.denied.clear();
         self.started = Instant::now();
         self.worker = Some(publish_media::start(options.clone())?);
         self.options = Some(options);
-        self.status.detail = "Choose a screen or window and allow capture if prompted…".into();
+        self.status.detail = "Starting capture; allow access if prompted…".into();
         self.emit();
         Ok(())
     }
@@ -584,7 +770,26 @@ impl Publisher {
             self.pending.remove(&ticket);
             self.flow.borrow_mut().cancel(ticket);
         }
+        self.admit_waiting();
         self.emit();
+    }
+    /// Public shares also fill newly freed slots, so a full share never needs manual approval.
+    fn admit_waiting(&mut self) {
+        if !self
+            .options
+            .as_ref()
+            .is_some_and(|o| o.access == Access::Public)
+        {
+            return;
+        }
+        let available = MAX_VIEWERS.saturating_sub(self.viewers.len());
+        let waiting: Vec<_> = self.requests.keys().copied().take(available).collect();
+        for peer in waiting {
+            if let Err(error) = self.decide(peer, true) {
+                self.warn(format!("Could not admit viewer: {error}"));
+                break;
+            }
+        }
     }
     pub fn notification(&mut self, name: &str, args: &protocol::Args) {
         if name == "notifystreamstarted"
@@ -615,7 +820,16 @@ impl Publisher {
             }
             self.id = Some(id.clone());
             self.setup = None;
-            self.status.detail = "Sharing is ready. Approve viewers below.".into();
+            self.status.detail = if self
+                .options
+                .as_ref()
+                .is_some_and(|o| o.access == Access::Public)
+            {
+                "Public stream · viewers in your channel join automatically."
+            } else {
+                "Private stream · approve viewers below."
+            }
+            .into();
             let _ = self
                 .events
                 .try_send(client::Event::Recovered(Source::StreamPublish));
@@ -637,7 +851,9 @@ impl Publisher {
                 }
             }
             "notifyjoinstreamrequest" => {
-                if let Some(peer) = peer.filter(|id| self.members.contains_key(id)) {
+                if let Some(peer) =
+                    peer.filter(|id| self.members.contains_key(id) && Some(*id) != self.own)
+                {
                     if args.get("is_remove").is_some_and(|v| v == "1") {
                         self.remove_viewer(peer);
                     } else if !self.denied.contains(&peer)
@@ -645,6 +861,7 @@ impl Publisher {
                         && self.requests.len() < 16
                     {
                         self.requests.insert(peer, self.members[&peer].clone());
+                        self.admit_waiting();
                         self.emit();
                     }
                 }
@@ -776,9 +993,15 @@ impl Publisher {
                     .as_ref()
                     .ok_or_else(|| anyhow!("Sharing was cancelled"))?;
                 let packet = protocol::setup(
-                    "Screen share",
-                    options.source.window,
+                    if options.source.kind.is_camera() {
+                        "Camera"
+                    } else {
+                        "Screen share"
+                    },
+                    &options.source.kind,
                     options.audio.is_some(),
+                    options.quality,
+                    options.access,
                 );
                 self.setup = Some(self.send(
                     packet,
