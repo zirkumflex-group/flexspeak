@@ -5,10 +5,14 @@ use std::{
 };
 
 use anyhow::{Result, bail, ensure};
+use nnnoiseless::DenoiseState;
 use serde::{Deserialize, Serialize};
 
+/// WebRTC processing (noise suppression, gain, echo cancellation) needs the bundled native
+/// library. Typing suppression is pure Rust and works everywhere.
 pub const AVAILABLE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 pub const SAMPLES: usize = 480;
+const _: () = assert!(SAMPLES == DenoiseState::FRAME_SIZE);
 const RATE: u32 = 48_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,21 +46,42 @@ pub struct Settings {
     pub suppression_level: SuppressionLevel,
     pub automatic_gain: bool,
     pub echo_cancellation: bool,
+    /// RNNoise after WebRTC's stages: removes keyboard clicks and other clatter that WebRTC's
+    /// suppressor, tuned for steady noise, lets through. The counterpart of TeamSpeak's
+    /// typing suppression.
+    pub typing_suppression: bool,
 }
 
 impl Settings {
     pub fn enabled(self) -> bool {
+        self.webrtc() || self.typing_suppression
+    }
+
+    /// Whether any stage needs the native WebRTC library.
+    fn webrtc(self) -> bool {
         self.noise_suppression || self.automatic_gain || self.echo_cancellation
     }
 
     pub fn for_session(self, local_test: bool) -> Self {
         if !AVAILABLE {
-            return Self::default();
+            return Self {
+                typing_suppression: self.typing_suppression,
+                ..Self::default()
+            };
         }
         Self {
             echo_cancellation: self.echo_cancellation && !local_test,
             ..self
         }
+    }
+}
+
+/// Runs RNNoise on one block in place. It expects 16-bit-range samples.
+fn denoise(state: &mut DenoiseState, block: &mut [f32; SAMPLES]) {
+    let input = block.map(|sample| sample * 32768.0);
+    state.process_frame(block, &input);
+    for sample in block.iter_mut() {
+        *sample = (*sample / 32768.0).clamp(-1.0, 1.0);
     }
 }
 
@@ -116,13 +141,14 @@ pub struct Processor {
     started: Instant,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     apm: Option<crate::native_audio::Apm>,
+    rnnoise: Option<Box<DenoiseState<'static>>>,
 }
 
 impl Processor {
     pub fn new(settings: Settings) -> Result<Self> {
         ensure!(
-            AVAILABLE || !settings.enabled(),
-            "Microphone processing is available on Mac and Windows"
+            AVAILABLE || !settings.webrtc(),
+            "Noise suppression, automatic gain and echo cancellation are available on Mac and Windows"
         );
         Ok(Self {
             settings,
@@ -136,9 +162,10 @@ impl Processor {
             started: Instant::now(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             apm: settings
-                .enabled()
+                .webrtc()
                 .then(|| crate::native_audio::Apm::new(settings))
                 .transpose()?,
+            rnnoise: settings.typing_suppression.then(DenoiseState::new),
         })
     }
 
@@ -241,15 +268,19 @@ impl Processor {
                 };
                 let mut pcm = self.capture.map(pcm16);
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
-                {
-                    let apm = self.apm.as_mut().unwrap();
+                if let Some(apm) = self.apm.as_mut() {
                     apm.capture(&mut pcm, delay).map_err(|error| {
                         anyhow::anyhow!("Microphone processing failed: {error}")
                     })?;
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                let _ = (delay, &mut pcm);
-                output.extend(pcm.map(|sample| f32::from(sample) / 32768.0));
+                let _ = delay;
+                let mut block = pcm.map(|sample| f32::from(sample) / 32768.0);
+                // After WebRTC, so echo cancellation still sees the unaltered microphone.
+                if let Some(state) = self.rnnoise.as_mut() {
+                    denoise(state, &mut block);
+                }
+                output.extend(block);
             }
         }
         Ok(())
@@ -346,6 +377,71 @@ mod tests {
         assert!(output.is_empty());
         processor.capture(&[0.0], None, &mut output)?;
         assert_eq!(output, VecDeque::from([0.0; SAMPLES]));
+        Ok(())
+    }
+
+    /// Deterministic low-passed noise, like a fan or rumble. RNNoise is trained on real noise
+    /// and handles synthetic white noise unevenly.
+    fn rumble(blocks: usize) -> Vec<f32> {
+        let mut seed = 1_u32;
+        let mut low = 0.0_f32;
+        (0..SAMPLES * blocks)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let white = (seed >> 8) as f32 / (1 << 24) as f32 * 2.0 - 1.0;
+                low = 0.97 * low + 0.03 * white;
+                low * 0.08
+            })
+            .collect()
+    }
+
+    fn energy(samples: impl IntoIterator<Item = f32>) -> f64 {
+        samples.into_iter().map(|s| f64::from(s).powi(2)).sum()
+    }
+
+    #[test]
+    fn typing_suppression_runs_everywhere_and_quiets_noise() -> Result<()> {
+        let typing = Settings {
+            typing_suppression: true,
+            ..Settings::default()
+        };
+        assert!(typing.enabled());
+        assert_eq!(
+            typing.for_session(true),
+            typing,
+            "it needs no native library"
+        );
+        let mut processor = Processor::new(typing)?;
+        let input = rumble(300);
+        let mut output = VecDeque::new();
+        for chunk in input.chunks(137) {
+            processor.capture(chunk, None, &mut output)?;
+        }
+        assert_eq!(output.len(), input.len() / SAMPLES * SAMPLES);
+        let tail = 100 * SAMPLES;
+        let reduction = 10.0
+            * (energy(output.iter().rev().take(tail).copied())
+                / energy(input.iter().rev().take(tail).copied()))
+            .log10();
+        assert!(reduction < -10.0, "noise is reduced, got {reduction:.1} dB");
+        assert!(output.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn typing_suppression_follows_webrtc_processing() -> Result<()> {
+        let mut processor = Processor::new(Settings {
+            noise_suppression: true,
+            automatic_gain: true,
+            typing_suppression: true,
+            ..Settings::default()
+        })?;
+        let input = rumble(200);
+        let mut output = VecDeque::new();
+        processor.capture(&input, None, &mut output)?;
+        assert_eq!(output.len(), input.len());
+        assert!(energy(output.iter().copied()) < energy(input.iter().copied()));
         Ok(())
     }
 

@@ -1187,7 +1187,8 @@ impl App {
                 self.settings_message = None;
             }
             Message::AudioProcessing(options) => {
-                if self.session.is_none() && audio_processing::AVAILABLE {
+                // Without WebRTC only typing suppression applies; refuse the other effects.
+                if self.session.is_none() && options.for_session(false) == options {
                     self.audio_processing = options;
                     self.settings_message = None;
                 }

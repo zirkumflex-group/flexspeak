@@ -388,6 +388,7 @@ fn audio_processing_page(s: &mut App) {
         suppression_level: audio_processing::SuppressionLevel::High,
         automatic_gain: true,
         echo_cancellation: true,
+        typing_suppression: true,
     };
     s.transmission = transmission::Settings {
         mode: transmission::Mode::VoiceActivation,

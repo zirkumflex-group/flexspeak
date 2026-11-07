@@ -1290,17 +1290,40 @@ fn processing_with(s: &App, change: impl FnOnce(&mut audio_processing::Settings)
     Message::AudioProcessing(next)
 }
 
+fn typing_row(s: &App, t: &Theme, k: &Kit) -> Row {
+    item(
+        "typing suppression keyboard clicks clatter rnnoise noise",
+        form_row(
+            t,
+            "Typing suppression",
+            Some("Removes keyboard clicks and other clatter."),
+            switch(
+                "typing-suppression-switch",
+                "Typing suppression",
+                s.audio_processing.typing_suppression,
+                s.session.is_none(),
+                k,
+                |s, on| processing_with(s, |o| o.typing_suppression = on),
+            ),
+        )
+        .key("typing-suppression"),
+    )
+}
+
 fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
     if !audio_processing::AVAILABLE {
-        return vec![item(
-            "noise suppression echo cancellation gain",
-            form_row(
-                t,
-                "Noise suppression and echo cancellation",
-                Some("Available on Mac and Windows. Saved effects are not applied here."),
-                el(),
+        return vec![
+            item(
+                "noise suppression echo cancellation gain",
+                form_row(
+                    t,
+                    "Noise suppression and echo cancellation",
+                    Some("Available on Mac and Windows. Saved effects are not applied here."),
+                    el(),
+                ),
             ),
-        )];
+            typing_row(s, t, k),
+        ];
     }
     let options = s.audio_processing;
     let editable = s.session.is_none();
@@ -1312,7 +1335,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
         form_row(
             t,
             "Noise suppression",
-            Some("Reduces steady background noise such as fans and typing."),
+            Some("Reduces steady background noise such as fans and hum."),
             switch(
                 "noise-suppression-switch",
                 "Noise suppression",
@@ -1376,15 +1399,19 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
         .key("echo-cancellation"),
     ];
     let terms = [
-        "noise suppression background fans typing",
+        "noise suppression background fans hum",
         "noise suppression level strength",
         "automatic gain control volume loudness",
         "echo cancellation playback feedback",
     ];
-    rows.into_iter()
+    let mut rows: Vec<Row> = rows
+        .into_iter()
         .zip(terms)
         .map(|(e, terms)| item(terms, e))
-        .collect()
+        .collect();
+    // After noise suppression: it is the second, stronger pass.
+    rows.insert(2, typing_row(s, t, k));
+    rows
 }
 
 fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
