@@ -369,6 +369,16 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     } else {
         home::normal(s, cx, &t, &k, &mut layer)
     };
+    #[cfg(windows)]
+    let content = if s.onboarding.is_some() {
+        col()
+            .w_full()
+            .h_full()
+            .child(rune::row().w_full().h(theme::size::HEADER).window_drag())
+            .child(rune::el().grow(1.0).min_h(0.0).w_full().child(content))
+    } else {
+        content
+    };
     // Under any dialog, whose scrim then covers it too.
     layer.extend(updates::notice(s, &t));
     settings::window(s, cx, &t, &k, &mut layer);
@@ -392,6 +402,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             .h_full()
             .child(content),
     );
+    #[cfg(windows)]
+    layer.push(window_controls(&t));
     rune_kit::root(base, layer)
         .hover_motion_within(rune::Spring::new(0.12, 0.0), rune::Spring::new(0.28, 0.0))
 }
@@ -418,6 +430,10 @@ pub fn run() {
             full_size_content: true,
             traffic_lights: Some((20.0, 19.0)),
             drag_regions: true,
+        })
+        .window_options(rune::WindowOptions {
+            borderless: cfg!(windows),
+            ..Default::default()
         })
         .compositor(fx::Effects::default())
         .keep_running()
@@ -448,4 +464,40 @@ pub fn is_tool_flag(arg: &str) -> bool {
             | "--out"
             | "--strip"
     )
+}
+
+/// Keep native window actions reachable in setup, Settings and modal dialogs too.
+#[cfg(windows)]
+fn window_controls(t: &Theme) -> El {
+    use rune::{icon, row, text};
+    let control = |key: &str, label: &str| {
+        el().key(key.to_owned())
+            .role("button")
+            .label(label.to_owned())
+            .help(label.to_owned())
+            .size(46.0, theme::size::HEADER)
+            .center()
+            .focusable(true)
+            .cursor(rune::Cursor::Pointer)
+            .hover(t.wash(0.08))
+    };
+    row()
+        .key("window-controls")
+        .pin(None, Some(0.0), Some(0.0), None)
+        .child(
+            control("window-minimize", "Minimize")
+                .child(text("−").font(theme::ty::BODY).color(t.text).a11y_hidden())
+                .on_press_tx(|_: &mut App, _| crate::window_icon::minimize()),
+        )
+        .child(
+            control("window-maximize", "Maximize or restore")
+                .child(icon(&icons::MAXIMIZE, 14.0).color(t.text).a11y_hidden())
+                .on_press_tx(|_: &mut App, _| crate::window_icon::toggle_maximized()),
+        )
+        .child(
+            control("window-close", "Close Flexspeak")
+                .hover(t.poor.alpha(0.25))
+                .child(icon(&icons::X, 16.0).color(t.text).a11y_hidden())
+                .on_press_tx(send(Message::Close)),
+        )
 }

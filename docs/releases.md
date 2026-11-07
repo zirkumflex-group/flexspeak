@@ -14,7 +14,7 @@ brew tap zirkumflex-group/flexspeak
 brew install --cask zirkumflex-group/flexspeak/flexspeak
 ```
 
-The cask installs **Flexspeak.app** on Apple Silicon Macs using a DMG with a verified SHA-256 checksum. macOS 14.2 or later is required. The token stays in your environment, not in the cask or download URL; use a token with read-only Contents access to `flexspeak` and `homebrew-flexspeak` if configuring a dedicated token.
+The cask installs **Flexspeak.app** on Apple Silicon Macs using a DMG with a verified SHA-256 checksum. The same DMG opens in Finder with Flexspeak on the left, an arrow, and Applications on the right: drag the app into Applications. Both the classic Finder/Dock icon and the newer Icon Composer asset are bundled. macOS 14.2 or later is required. The token stays in your environment, not in the cask or download URL; use a token with read-only Contents access to `flexspeak` and `homebrew-flexspeak` if configuring a dedicated token.
 
 To update, authenticate as above if your shell no longer has the token, then:
 
@@ -94,6 +94,6 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 actionlint
 ```
 
-`python scripts/release.py build` builds and packages on native macOS, Windows or Linux. Linux packaging also requires Docker and `desktop-file-validate`. It verifies the Opus download, smoke-tests `--help` without opening audio or connecting, verifies Mac ad-hoc signatures and DMG integrity, and rejects Homebrew-linked Mac executables. Hosted release builds are still not a substitute for a two-client voice test.
+`python scripts/release.py build` builds and packages on native macOS, Windows or Linux. Mac packaging also needs `dmgbuild==1.6.7` installed in a virtual environment; set `FLEXSPEAK_DMGBUILD` to that environment’s `bin/dmgbuild`. CI installs it automatically. `scripts/dmg-settings.py` records the Finder layout without UI automation; regenerate its background with `swift scripts/dmg-background.swift`. The build fails if the app lacks `Flexspeak.icns`; after changing the Icon Composer icon, regenerate that fallback as described in `scripts/render-icns.swift`. Linux packaging also requires Docker and `desktop-file-validate`. It verifies the Opus download, smoke-tests `--help` without opening audio or connecting, verifies Mac ad-hoc signatures and DMG integrity, and rejects Homebrew-linked Mac executables. Hosted release builds are still not a substitute for a two-client voice test.
 
 The private cask's download strategy uses Homebrew's `CurlDownloadStrategy` hooks to attach authentication only at download time. If Homebrew changes those hooks, update `scripts/flexspeak.rb.in` in the source repository; the next release regenerates the tap.

@@ -13,6 +13,8 @@ fn main() {
             .expect("compile the Windows icon resource");
     }
     println!("cargo:rerun-if-changed=native/audio.cpp");
+    println!("cargo:rerun-if-changed=native/camera.cpp");
+    println!("cargo:rerun-if-changed=native/camera.mm");
     println!("cargo:rerun-if-env-changed=LK_CUSTOM_WEBRTC");
     println!("cargo:rerun-if-env-changed=LK_DEBUG_WEBRTC");
     if !matches!(target.as_str(), "macos" | "windows") {
@@ -37,12 +39,27 @@ fn main() {
         .flag_if_supported("-Wno-nullability-completeness")
         .flag_if_supported("-Wno-unused-parameter");
     if target == "windows" {
-        build.flag("/EHsc");
+        build
+            .flag("/EHsc")
+            .file("native/camera.cpp")
+            .include(include.join("third_party/libyuv/include"));
     }
     if target == "macos" {
         build.flag("-stdlib=libc++");
     }
     build.compile("flexspeak_audio");
+    if target == "macos" {
+        cc::Build::new()
+            .cpp(true)
+            .std("c++20")
+            .file("native/camera.mm")
+            .flag("-fobjc-arc")
+            .flag("-stdlib=libc++")
+            .compile("flexspeak_camera");
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
+        println!("cargo:rustc-link-lib=framework=CoreVideo");
+    }
     println!(
         "cargo:rustc-link-search=native={}",
         directory.join("lib").display()

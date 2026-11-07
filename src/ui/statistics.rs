@@ -179,8 +179,8 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                 .flex_wrap()
                 .child(metric(t, "Upload", rate(network.upload_per_second)))
                 .child(metric(t, "Download", rate(network.download_per_second)))
-                .child(metric(t, "Packet loss (in)", percent(quality.packet_loss_in)))
-                .child(metric(t, "Packet loss (out)", percent(quality.packet_loss_out)))
+                .child(metric(t, "Packet loss in", percent(quality.packet_loss_in)))
+                .child(metric(t, "Packet loss out", percent(quality.packet_loss_out)))
                 .child(metric(t, "Ping", quality.ping_text()))
                 .child(metric(
                     t,
@@ -364,6 +364,7 @@ fn client_connections(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                             quality,
                             &s.client_history,
                             false,
+                            !member.is_self,
                         ))
                         .child(faint(
                             t,

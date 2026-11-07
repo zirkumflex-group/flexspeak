@@ -53,8 +53,8 @@ fn readings(quality: usage::ConnectionUsage) -> [Reading; 4] {
     [
         Reading {
             metric: Metric::LossIn,
-            label: "Packet loss (in)",
-            short: "Loss ↓",
+            label: "Packet loss in",
+            short: "Packet loss in",
             value: percent(quality.packet_loss_in),
             health: usage::Health::loss(quality.packet_loss_in),
             status: None,
@@ -62,8 +62,8 @@ fn readings(quality: usage::ConnectionUsage) -> [Reading; 4] {
         },
         Reading {
             metric: Metric::LossOut,
-            label: "Packet loss (out)",
-            short: "Loss ↑",
+            label: "Packet loss out",
+            short: "Packet loss out",
             value: percent(quality.packet_loss_out),
             health: usage::Health::loss(quality.packet_loss_out),
             status: None,
@@ -94,7 +94,7 @@ fn readings(quality: usage::ConnectionUsage) -> [Reading; 4] {
     ]
 }
 
-/// Four connection charts: a compact strip for the footer, or a detailed column for a peer.
+/// The footer omits idle activity; remote peers retain their idle chart.
 pub fn connection(
     cx: &mut Cx<App>,
     t: &Theme,
@@ -102,11 +102,15 @@ pub fn connection(
     quality: usage::ConnectionUsage,
     history: &ConnectionHistory,
     compact: bool,
+    show_idle: bool,
 ) -> El {
     let p = paint(t);
     let mut strip = row().w_full().gap(size::CHART_GAP);
     let mut column = col().w_full().gap(8.0);
     for reading in readings(quality) {
+        if !show_idle && matches!(reading.metric, Metric::Idle) {
+            continue;
+        }
         let status = reading.status.unwrap_or(reading.health.label());
         let color = t.health(reading.health);
         let key = format!("{scope}-{}", reading.short);

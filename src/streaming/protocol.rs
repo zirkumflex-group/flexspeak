@@ -107,12 +107,18 @@ pub fn signal_to(id: &str, peer: u16, payload: &Value) -> Result<OutCommand> {
     Ok(command)
 }
 
-pub fn setup(name: &str, window: bool, audio: bool) -> OutCommand {
+pub fn setup(
+    name: &str,
+    source: &super::publishing::SourceKind,
+    audio: bool,
+    quality: super::publishing::Quality,
+    access: super::publishing::Access,
+) -> OutCommand {
     let mut packet = command("setupstream");
     packet.write_arg("name", &name);
-    packet.write_arg("type", &if window { 3_u8 } else { 2 });
-    packet.write_arg("bitrate", &2_500_000_u32);
-    packet.write_arg("accessibility", &3_u8);
+    packet.write_arg("type", &source.wire_type());
+    packet.write_arg("bitrate", &quality.bitrate());
+    packet.write_arg("accessibility", &access.wire_value());
     packet.write_arg("mode", &1_u8);
     packet.write_arg("viewer_limit", &super::publishing::MAX_VIEWERS);
     packet.write_arg("audio", &u8::from(audio));
@@ -221,8 +227,35 @@ pub fn answer(sdp: String) -> Value {
 mod tests {
     use super::*;
     #[test]
+    fn public_camera_advertises_selected_bitrate_source_and_access() {
+        use super::super::publishing::{Access, Quality, SourceKind};
+        let packet = setup(
+            "Camera",
+            &SourceKind::Camera("camera-id".into()),
+            false,
+            Quality {
+                video_kbps: 8200,
+                ..Quality::default()
+            },
+            Access::Public,
+        );
+        let args = parse("setupstream", str::from_utf8(packet.0.content()).unwrap()).unwrap();
+        assert_eq!(args[0]["type"], "1");
+        assert_eq!(args[0]["accessibility"], "1");
+        assert_eq!(args[0]["bitrate"], "8200000");
+        assert_eq!(args[0]["audio"], "0");
+    }
+
+    #[test]
     fn publishing_commands_preserve_ts6_wire_fields_and_escaping() {
-        let packet = setup("Window | test", true, true);
+        use super::super::publishing::{Access, Quality, SourceKind};
+        let packet = setup(
+            "Window | test",
+            &SourceKind::Window(1),
+            true,
+            Quality::default(),
+            Access::Private,
+        );
         let args = parse("setupstream", str::from_utf8(packet.0.content()).unwrap()).unwrap();
         assert_eq!(args[0]["name"], "Window | test");
         for (key, value) in [

@@ -95,7 +95,18 @@ pub fn start(_: Options) -> Result<Publisher> {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn sources() -> Result<Vec<ShareSource>> {
-    native::sources()
+    let mut sources = native::sources()?;
+    // The picker resolves display labels; disambiguate identical camera/window names.
+    let mut counts = std::collections::HashMap::new();
+    for source in &sources {
+        *counts.entry(source.name.clone()).or_insert(0) += 1;
+    }
+    for (index, source) in sources.iter_mut().enumerate() {
+        if counts[&source.name] > 1 {
+            source.name = format!("{} ({})", source.name, index + 1);
+        }
+    }
+    Ok(sources)
 }
 #[cfg(target_os = "macos")]
 pub fn request_system_audio_access(device: crate::audio::DeviceChoice) -> Result<()> {
@@ -131,8 +142,8 @@ pub fn start(options: Options) -> Result<Publisher> {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native {
     use super::super::{
-        MAX_CANDIDATES,
-        publishing::{MAX_VIEWERS, Quality},
+        MAX_CANDIDATES, camera,
+        publishing::{MAX_VIEWERS, Quality, SourceKind},
     };
     use super::*;
     use crate::audio::{self, RateConverter};
@@ -192,11 +203,12 @@ mod native {
     pub fn sources() -> Result<Vec<ShareSource>> {
         #[cfg(target_os = "macos")]
         {
-            Ok(vec![ShareSource {
-                window: false,
-                id: None,
+            let mut sources = vec![ShareSource {
+                kind: SourceKind::Screen(None),
                 name: "Choose a screen or window…".into(),
-            }])
+            }];
+            sources.extend(camera::sources());
+            Ok(sources)
         }
         #[cfg(target_os = "windows")]
         {
@@ -215,8 +227,11 @@ mod native {
                         .take(160)
                         .collect::<String>();
                     sources.push(ShareSource {
-                        window,
-                        id: Some(source.id()),
+                        kind: if window {
+                            SourceKind::Window(source.id())
+                        } else {
+                            SourceKind::Screen(Some(source.id()))
+                        },
                         name: if name.is_empty() {
                             format!("Screen {}", index + 1)
                         } else {
@@ -225,6 +240,7 @@ mod native {
                     });
                 }
             }
+            sources.extend(camera::sources());
             Ok(sources)
         }
     }
@@ -499,7 +515,11 @@ mod native {
                 params.set_degradation_preference(DegradationPreference::MaintainResolution);
             }
             for encoding in &mut params.encodings {
-                encoding.max_bitrate = Some(if video { quality.bitrate() } else { 128_000 });
+                encoding.max_bitrate = Some(if video {
+                    quality.bitrate()
+                } else {
+                    quality.audio_bitrate()
+                });
                 if video {
                     encoding.max_framerate = Some(f64::from(quality.fps()));
                 }
@@ -527,9 +547,9 @@ mod native {
                 width: options.quality.max_size().0,
                 height: options.quality.max_size().1,
             },
-            true,
+            !options.source.kind.is_camera(),
         );
-        let video_track = factory.create_video_track("screen", video.clone());
+        let video_track = factory.create_video_track("shared-video", video.clone());
         let audio = options
             .audio
             .as_ref()
@@ -537,56 +557,66 @@ mod native {
         let audio_track = audio
             .as_ref()
             .map(|source| factory.create_audio_track("system-audio", source.clone()));
-        let mut capture = capturer(options.source.window)?;
-        let selected = if let Some(id) = options.source.id {
-            Some(
-                capture
-                    .get_source_list()
-                    .into_iter()
-                    .find(|s| s.id() == id)
-                    .ok_or_else(|| {
-                        anyhow!("The selected screen or window is no longer available")
-                    })?,
-            )
-        } else {
-            None
-        };
+        let quality = options.quality;
+        quality.validate()?;
+        let max_size = quality.max_size();
+        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(quality.fps()));
         let latest = Arc::new(Mutex::new(None));
-        let slot = latest.clone();
         let failure = Arc::new(Mutex::new(None));
+        let slot = latest.clone();
         let failed = failure.clone();
         let running = active.clone();
-        if !active.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let quality = options.quality;
-        let max_size = quality.max_size();
-        let frame_interval = Duration::from_millis(1000 / u64::from(quality.fps()));
-        capture.start_capture(selected, move |frame| {
+        let receive = move |data: &[u8], stride, width, height| {
             if !running.load(Ordering::Acquire) {
                 return;
             }
-            match frame {
-                Ok(frame) => {
-                    match video_buffer(
-                        frame.data(),
-                        frame.stride(),
-                        frame.width(),
-                        frame.height(),
-                        max_size,
-                    ) {
-                        Ok(buffer) => *slot.lock().unwrap() = Some(buffer),
-                        Err(error) => *failed.lock().unwrap() = Some(error.to_string()),
-                    }
-                }
+            match video_buffer(data, stride, width, height, max_size) {
+                Ok(buffer) => *slot.lock().unwrap() = Some(buffer),
+                Err(error) => *failed.lock().unwrap() = Some(error.to_string()),
+            }
+        };
+        let mut capture = None;
+        let mut camera_capture = None;
+        if let SourceKind::Camera(id) = &options.source.kind {
+            tokio::select! {
+                biased;
+                _ = cancel.changed() => return Ok(()),
+                result = camera::request_access() => result?,
+            }
+            if !active.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            camera_capture = Some(camera::Capture::open(id, quality, receive)?);
+        } else {
+            let (window, id) = match options.source.kind {
+                SourceKind::Window(id) => (true, Some(id)),
+                SourceKind::Screen(id) => (false, id),
+                SourceKind::Camera(_) => unreachable!(),
+            };
+            let mut desktop = capturer(window)?;
+            let selected = id
+                .map(|id| {
+                    desktop
+                        .get_source_list()
+                        .into_iter()
+                        .find(|source| source.id() == id)
+                        .ok_or_else(|| {
+                            anyhow!("The selected screen or window is no longer available")
+                        })
+                })
+                .transpose()?;
+            let failed = failure.clone();
+            desktop.start_capture(selected, move |frame| match frame {
+                Ok(frame) => receive(frame.data(), frame.stride(), frame.width(), frame.height()),
                 Err(CaptureError::Permanent) => {
                     *failed.lock().unwrap() = Some(
                         "Screen capture stopped. Check permission or select another window.".into(),
                     )
                 }
                 Err(CaptureError::Temporary) => {}
-            }
-        });
+            });
+            capture = Some(desktop);
+        }
         let mut system_audio = options
             .audio
             .as_ref()
@@ -603,7 +633,8 @@ mod native {
         let mut level = 0.0_f32;
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_capture = Instant::now() - Duration::from_secs(1);
+        let mut video_tick = tokio::time::interval(frame_interval);
+        video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = async {
             loop {
                 if !active.load(Ordering::Acquire) { return Ok(()); }
@@ -650,17 +681,20 @@ mod native {
                         Callback::State(id,PeerConnectionState::Failed | PeerConnectionState::Closed | PeerConnectionState::Disconnected) if peers.contains_key(&id) => { peers.remove(&id); emit(events,Output::Left(id))?; },
                         _ => {},
                     },
-                    _ = tick.tick() => {
-                        if let Some(error) = failure.lock().unwrap().take() { bail!(error); }
-                        if last_capture.elapsed() >= frame_interval { capture.capture_frame(); last_capture = Instant::now(); }
-                        let buffer = latest.lock().unwrap().take();
-                        if let Some(buffer) = buffer {
+                    _ = video_tick.tick() => {
+                        if let Some(capture) = &mut capture { capture.capture_frame(); }
+                        if let Some(buffer) = latest.lock().unwrap().take() {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             video.capture_frame(&frame); last_video = Instant::now(); frames += 1;
                             if frames == 1 { emit(events,Output::Ready)?; }
                         }
-                        ensure!(frames > 0 || last_video.elapsed() < Duration::from_secs(60),"No screen frames arrived. Check capture permission and choose a visible source.");
+                    }
+                    _ = tick.tick() => {
+                        if let Some(error) = failure.lock().unwrap().take() { bail!(error); }
+                        let stalled_camera = options.source.kind.is_camera() && frames > 0 && last_video.elapsed() > Duration::from_secs(5);
+                        ensure!(!stalled_camera, "Camera stopped delivering video. Check its connection and start sharing again.");
+                        ensure!(frames > 0 || last_video.elapsed() < Duration::from_secs(60),"No video frames arrived. Check capture permission and choose an available source.");
                         if let (Some(capture),Some(source)) = (&mut system_audio,&audio) {
                             for _ in 0..4 {
                                 let Some((frame,peak)) = capture.next()? else { break; };
@@ -690,6 +724,7 @@ mod native {
         }
         peers.clear();
         drop(capture);
+        drop(camera_capture);
         drop(system_audio);
         result
     }
@@ -729,9 +764,25 @@ mod native {
             let pixels = vec![128; 1920 * 1080 * 4];
             let scaled = video_buffer(&pixels, 1920 * 4, 1920, 1080, HD).unwrap();
             assert_eq!((scaled.width(), scaled.height()), (1280, 720));
-            let full = video_buffer(&pixels, 1920 * 4, 1920, 1080, Quality::Sharp.max_size());
+            let full = video_buffer(
+                &pixels,
+                1920 * 4,
+                1920,
+                1080,
+                super::super::super::publishing::Preset::Sharp
+                    .quality()
+                    .max_size(),
+            );
             assert_eq!(full.map(|b| (b.width(), b.height())).unwrap(), (1920, 1080));
-            let saver = video_buffer(&pixels, 1920 * 4, 1920, 1080, Quality::Saver.max_size());
+            let saver = video_buffer(
+                &pixels,
+                1920 * 4,
+                1920,
+                1080,
+                super::super::super::publishing::Preset::Saver
+                    .quality()
+                    .max_size(),
+            );
             assert_eq!(saver.map(|b| (b.width(), b.height())).unwrap(), (852, 480));
         }
 

@@ -475,17 +475,19 @@ fn poked(s: &mut App) {
 }
 
 fn share_sources(s: &mut App) {
-    use crate::streaming::publishing::ShareSource;
+    use crate::streaming::publishing::{ShareSource, SourceKind};
     s.streaming.sharing.sources = vec![
         ShareSource {
-            window: false,
-            id: Some(1),
+            kind: SourceKind::Screen(Some(1)),
             name: "Built-in Retina Display".into(),
         },
         ShareSource {
-            window: true,
-            id: Some(2),
+            kind: SourceKind::Window(2),
             name: "Code — flexspeak".into(),
+        },
+        ShareSource {
+            kind: SourceKind::Camera("demo-camera".into()),
+            name: "Camera · Built-in camera".into(),
         },
     ];
     s.streaming.sharing.selected = s.streaming.sharing.sources.first().cloned();
@@ -729,6 +731,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sharing_dialog_fits_small_windows_and_keeps_actions_visible_while_scrolling() {
+        let mut rt = runtime(share, crate::MIN_SIZE);
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        let panel = rt.presented("share-dialog").unwrap().0;
+        assert!(
+            panel[1] >= 0.0 && panel[1] + panel[3] <= crate::MIN_SIZE.1,
+            "Share dialog must fit the window: {panel:?}"
+        );
+        let before = rt.presented("start-sharing").unwrap().0;
+        assert!(before[1] >= 0.0 && before[1] + before[3] <= crate::MIN_SIZE.1);
+        let audio_before = rt.presented("share-audio-bitrate").unwrap().0[1];
+        let (x, y) = rt.find("share-scroll").unwrap();
+        for _ in 0..8 {
+            rt.wheel(x, y, -120.0);
+            rt.frame(1.0 / 60.0);
+        }
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        let audio_after = rt.presented("share-audio-bitrate").unwrap().0[1];
+        assert!(
+            audio_after < audio_before - 40.0,
+            "The advanced controls must scroll into view"
+        );
+        assert_eq!(
+            rt.presented("start-sharing").unwrap().0,
+            before,
+            "Go Live stays fixed"
+        );
+    }
+
+    #[test]
+    fn share_quality_controls_are_independent_validate_and_lock_while_live() {
+        use crate::Message;
+        use crate::streaming::publishing::{Access, Preset, Resolution};
+        let mut rt = runtime(share, (900.0, 790.0));
+        let s = &mut rt.state;
+        let _ = s.update(Message::ShareFrameRate(24));
+        let _ = s.update(Message::ShareResolution(Resolution::P1440));
+        let _ = s.update(Message::ShareVideoBitrate(8000));
+        let _ = s.update(Message::ShareAudioBitrate(192));
+        let _ = s.update(Message::ShareAccess(Access::Public));
+        let quality = s.streaming.sharing.quality;
+        assert_eq!(
+            (quality.frame_rate, quality.video_kbps, quality.audio_kbps),
+            (24, 8000, 192)
+        );
+        assert_eq!(quality.resolution, Resolution::P1440);
+        assert!(quality.preset().is_none());
+        let _ = s.update(Message::ShareFrameRate(0));
+        assert_eq!(s.streaming.sharing.quality, quality);
+        let camera = s.streaming.sharing.sources.last().unwrap().clone();
+        let _ = s.update(Message::ShareSource(camera.clone()));
+        assert!(
+            !s.streaming.sharing.audio,
+            "Camera selection must not unexpectedly share system sound"
+        );
+        s.streaming.sharing.status.active = true;
+        let _ = s.update(Message::ShareQuality(Preset::Saver.quality()));
+        let _ = s.update(Message::ShareAccess(Access::Private));
+        let _ = s.update(Message::ShareSource(s.streaming.sharing.sources[0].clone()));
+        assert_eq!(s.streaming.sharing.quality, quality);
+        assert_eq!(s.streaming.sharing.access, Access::Public);
+        assert_eq!(s.streaming.sharing.selected, Some(camera));
     }
 
     #[test]
