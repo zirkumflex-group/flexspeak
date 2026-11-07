@@ -10,9 +10,9 @@ The Permissions step, and the same section in Settings, shows what the operating
 
 ## Server view and window bounds
 
-Normal windows have a **760 × 560 logical-pixel minimum**. Performance mode keeps its **440 × 320** minimum, and leaving it restores the normal minimum before resizing back.
+The window has a **760 × 560 logical-pixel minimum**.
 
-The top bar contains performance mode, Statistics and Settings; Voice and Streaming tabs are removed. The disconnected home screen centers a **Saved servers** card: one row per server (its name, or address, with the address beneath a name) and its own **Connect** button. The first server's Connect is the default button, so Return connects to it; **+** adds a server. Only one session runs at a time: while one server connects or is connected, its row offers **Cancel** and the others' Connect buttons wait until you disconnect.
+The top bar contains Statistics and Settings; Voice and Streaming tabs are removed. The disconnected home screen centers a **Saved servers** card: one row per server (its name, or address, with the address beneath a name) and its own **Connect** button. The first server's Connect is the default button, so Return connects to it; **+** adds a server. Only one session runs at a time: while one server connects or is connected, its row offers **Cancel** and the others' Connect buttons wait until you disconnect.
 
 Manage the list in **Settings → Server → Servers**. **Add Server** and each row's **Edit** open a dialog with **Address** (required, unique in the list), an optional **Name**, and an optional **Password**. The password is kept per server until the app quits and is never written to the file. Saving the dialog writes the list straight away, without saving other unsaved Settings edits. **Remove** is in the Edit dialog; the last server can't be removed, and the server in use can't be edited or removed until you disconnect. The row of the server in use is marked **Connecting** or **Connected**. Your **Nickname** (Settings → Server → Identity) is used on every server and is kept by **Save**.
 
@@ -25,9 +25,9 @@ Default global shortcuts:
 - `Ctrl+Shift+M`: toggle microphone mute.
 - `Ctrl+Shift+D`: toggle deafen. Deafening stops playback and microphone transmission; undeafening restores the existing microphone-mute choice.
 
-Both use the same control handlers as the buttons and work in normal/performance mode. They act only during a connected voice session, not during connection setup, shutdown or the local microphone test. Holding a key does not repeatedly toggle it: macOS/X11 events are filtered by press/release state; Windows registration uses `MOD_NOREPEAT`.
+Both use the same control handlers as the buttons and work on every page. They act only during a connected voice session, not during connection setup, shutdown or the local microphone test. Holding a key does not repeatedly toggle it: macOS/X11 events are filtered by press/release state; Windows registration uses `MOD_NOREPEAT`.
 
-Lucide icons accompany the CPU, RAM, server, channel, microphone, playback and volume labels. The microphone icon reflects effective transmission state, including deafen and server restrictions; the crossed-out headphones indicate deafen. Icons keep their text labels in both normal and performance modes.
+Lucide icons accompany the CPU, RAM, server, channel, microphone, playback and volume labels. The microphone icon reflects effective transmission state, including deafen and server restrictions; the crossed-out headphones indicate deafen.
 
 ## Change and save controls
 

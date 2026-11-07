@@ -130,7 +130,10 @@ pub fn start(options: Options) -> Result<Publisher> {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native {
-    use super::super::{MAX_CANDIDATES, publishing::MAX_VIEWERS};
+    use super::super::{
+        MAX_CANDIDATES,
+        publishing::{MAX_VIEWERS, Quality},
+    };
     use super::*;
     use crate::audio::{self, RateConverter};
     use anyhow::{Context, anyhow, bail, ensure};
@@ -225,7 +228,13 @@ mod native {
             Ok(sources)
         }
     }
-    fn video_buffer(data: &[u8], stride: u32, width: i32, height: i32) -> Result<I420Buffer> {
+    fn video_buffer(
+        data: &[u8],
+        stride: u32,
+        width: i32,
+        height: i32,
+        (max_width, max_height): (u32, u32),
+    ) -> Result<I420Buffer> {
         ensure!(
             (1..=8192).contains(&width) && (1..=8192).contains(&height),
             "Unsupported capture dimensions"
@@ -243,7 +252,9 @@ mod native {
         libwebrtc::native::yuv_helper::argb_to_i420(
             data, stride, y, sy, u, su, v, sv, width, height,
         );
-        let scale = (1280.0 / width as f64).min(720.0 / height as f64).min(1.0);
+        let scale = (f64::from(max_width) / width as f64)
+            .min(f64::from(max_height) / height as f64)
+            .min(1.0);
         if scale < 1.0 {
             Ok(buffer.scale(
                 ((width as f64 * scale) as i32 / 2 * 2).max(2),
@@ -427,6 +438,7 @@ mod native {
         overflow: Arc<AtomicBool>,
         events: &mpsc::Sender<Output>,
         servers: Vec<String>,
+        quality: Quality,
     ) -> Result<Peer> {
         let mut config = RtcConfiguration::default();
         config.continual_gathering_policy = ContinualGatheringPolicy::GatherOnce;
@@ -487,9 +499,9 @@ mod native {
                 params.set_degradation_preference(DegradationPreference::MaintainResolution);
             }
             for encoding in &mut params.encodings {
-                encoding.max_bitrate = Some(if video { 2_500_000 } else { 128_000 });
+                encoding.max_bitrate = Some(if video { quality.bitrate() } else { 128_000 });
                 if video {
-                    encoding.max_framerate = Some(30.0);
+                    encoding.max_framerate = Some(f64::from(quality.fps()));
                 }
             }
             sender.set_parameters(params)?;
@@ -512,8 +524,8 @@ mod native {
         factory.set_adm_playout_enabled(false);
         let video = NativeVideoSource::new(
             VideoResolution {
-                width: 1280,
-                height: 720,
+                width: options.quality.max_size().0,
+                height: options.quality.max_size().1,
             },
             true,
         );
@@ -547,14 +559,22 @@ mod native {
         if !active.load(Ordering::Acquire) {
             return Ok(());
         }
+        let quality = options.quality;
+        let max_size = quality.max_size();
+        let frame_interval = Duration::from_millis(1000 / u64::from(quality.fps()));
         capture.start_capture(selected, move |frame| {
             if !running.load(Ordering::Acquire) {
                 return;
             }
             match frame {
                 Ok(frame) => {
-                    match video_buffer(frame.data(), frame.stride(), frame.width(), frame.height())
-                    {
+                    match video_buffer(
+                        frame.data(),
+                        frame.stride(),
+                        frame.width(),
+                        frame.height(),
+                        max_size,
+                    ) {
                         Ok(buffer) => *slot.lock().unwrap() = Some(buffer),
                         Err(error) => *failed.lock().unwrap() = Some(error.to_string()),
                     }
@@ -598,7 +618,7 @@ mod native {
                                 Input::Add(id) if !peers.contains_key(&id) => {
                                     ensure!(peers.len() < MAX_VIEWERS,"Too many viewers");
                                     let peer = add_peer(&factory,&video_track,audio_track.as_ref(),id,callbacks.clone(),overflow.clone(),events,
-                                        vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()]).await?;
+                                        vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()],quality).await?;
                                     peers.insert(id,peer);
                                 },
                                 Input::Remove(id) => { peers.remove(&id); },
@@ -632,7 +652,7 @@ mod native {
                     },
                     _ = tick.tick() => {
                         if let Some(error) = failure.lock().unwrap().take() { bail!(error); }
-                        if last_capture.elapsed() >= Duration::from_millis(33) { capture.capture_frame(); last_capture = Instant::now(); }
+                        if last_capture.elapsed() >= frame_interval { capture.capture_frame(); last_capture = Instant::now(); }
                         let buffer = latest.lock().unwrap().take();
                         if let Some(buffer) = buffer {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
@@ -689,6 +709,8 @@ mod native {
             );
             assert_eq!(stereo_sample(&[f32::NAN, f32::INFINITY]), [0.0, 0.0]);
         }
+        const HD: (u32, u32) = (1280, 720);
+
         #[test]
         fn capture_conversion_preserves_bgra_channels_padding_and_bounds() {
             let mut pixels = vec![0_u8; 24 * 4];
@@ -697,16 +719,20 @@ mod native {
                     pixel.copy_from_slice(&[0, 0, 255, 255]);
                 }
             }
-            let buffer = video_buffer(&pixels, 24, 4, 4).unwrap();
+            let buffer = video_buffer(&pixels, 24, 4, 4, HD).unwrap();
             let (y, u, v) = buffer.data();
             assert!(y[0] > 60 && y[0] < 100);
             assert!(v[0] > 200 && u[0] < 130, "Red must not become blue");
-            assert!(video_buffer(&pixels[..5], 24, 4, 4).is_err());
-            assert!(video_buffer(&pixels, 2, 4, 4).is_err());
-            assert!(video_buffer(&pixels, 24, -1, 4).is_err());
+            assert!(video_buffer(&pixels[..5], 24, 4, 4, HD).is_err());
+            assert!(video_buffer(&pixels, 2, 4, 4, HD).is_err());
+            assert!(video_buffer(&pixels, 24, -1, 4, HD).is_err());
             let pixels = vec![128; 1920 * 1080 * 4];
-            let scaled = video_buffer(&pixels, 1920 * 4, 1920, 1080).unwrap();
+            let scaled = video_buffer(&pixels, 1920 * 4, 1920, 1080, HD).unwrap();
             assert_eq!((scaled.width(), scaled.height()), (1280, 720));
+            let full = video_buffer(&pixels, 1920 * 4, 1920, 1080, Quality::Sharp.max_size());
+            assert_eq!(full.map(|b| (b.width(), b.height())).unwrap(), (1920, 1080));
+            let saver = video_buffer(&pixels, 1920 * 4, 1920, 1080, Quality::Saver.max_size());
+            assert_eq!(saver.map(|b| (b.width(), b.height())).unwrap(), (852, 480));
         }
 
         #[tokio::test]
@@ -740,6 +766,7 @@ mod native {
                 Arc::new(AtomicBool::new(false)),
                 &events,
                 vec![],
+                Quality::default(),
             )
             .await?;
             let Some(Output::Offer(_, sdp)) = output.recv().await else {

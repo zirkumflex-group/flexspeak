@@ -8,16 +8,21 @@ Incoming stream audio is decoded to stereo 48 kHz PCM and mixed into the existin
 
 Publishing captures a selected screen/window and optionally the sound on a selected output device. It uses native `libwebrtc` 0.3.54 with CPAL output loopback; there is no browser UI, LiveKit service or extra signaling server. SFU publishing and TURN relaying are not configured.
 
+## Watching several streams — 2026-11-07
+
+Up to four streams can be watched at once, each with its own receiver, picture and audio. One watched stream fills the right pane. With several, they share it as a grid; **Maximize** (or clicking a tile) puts one on the stage and lines the others up beneath it, and **Minimize** or double-clicking the stage returns to the grid. Every stream has its own volume slider and mute button on top of the app volume; the setting is kept per publisher for the session. Codec, resolution, frame rate, decoder and transport details are hidden behind the **info** button in the pane header. Watching still stops while you share.
+
 ## Start sharing
 
-1. Connect and join the channel where you want to share. Open the server view → **Choose source**.
+1. Connect and join the channel where you want to share. Press the **share** button beside Disconnect at the bottom of the sidebar; the dialog lists screens and windows.
 2. On Windows, select a screen or window from the list. On Mac, select **Choose a screen or window…**; **Start sharing** opens the system content picker.
-3. Leave **Share system audio** enabled and select the output carrying the sound, or disable it for silent video. **All sound on that output is shared**, including calls and notifications, even for a single-window share. This is not per-application audio. Microphone mute remains separate.
-4. Press **Start sharing** and grant the OS capture permissions if needed. The app announces the stream only after capture starts. A generic stream name is announced; the selected window's title is not sent as metadata.
-5. Each viewer must request access and be approved with **Allow**. **Deny** suppresses repeat requests for that share. Up to four current-channel viewers can be admitted. The app enforces admission and limits itself rather than relying on the server's advertised privacy fields.
-6. **Stop sharing**, opening Settings or Statistics, changing channels, entering performance mode or disconnecting stops capture. The Stop control cancels media directly, even when the voice-worker command queue is full. Server cleanup continues through the paced command scheduler. A timed-out, unconfirmed start may require reconnecting before another start.
+3. Choose a **Quality**: 480p · 30 fps (data saver, 1.2 Mbit/s), 720p · 30 fps (default, 2.5 Mbit/s), 1080p · 30 fps (sharp text, 4.5 Mbit/s) or 720p · 60 fps (fluid motion, 4 Mbit/s). Caps apply per viewer.
+4. Leave **Share system audio** enabled and select the output carrying the sound, or disable it for silent video. **All sound on that output is shared**, including calls and notifications, even for a single-window share. This is not per-application audio. Microphone mute remains separate.
+5. Press **Go Live** and grant the OS capture permissions if needed. The app announces the stream only after capture starts. A generic stream name is announced; the selected window's title is not sent as metadata.
+6. Each viewer must request access and be approved with **Allow**. **Deny** suppresses repeat requests for that share. Up to four current-channel viewers can be admitted. The app enforces admission and limits itself rather than relying on the server's advertised privacy fields.
+7. A banner above the streams shows viewers and requests while you share. **Stop**, opening Statistics, changing channels or disconnecting stops capture. The Stop control cancels media directly, even when the voice-worker command queue is full. Server cleanup continues through the paced command scheduler. A timed-out, unconfirmed start may require reconnecting before another start.
 
-Publishing uses VP8 video at up to 1280×720 / 30 FPS and a 2.5 Mbit/s cap per viewer, plus stereo Opus audio capped at 128 kbit/s. Captured frames/audio blocks are capture counters, not proof of remote rendering. Each viewer has its own peer connection, so upload grows with the number of viewers. No publishing CPU/RAM or hardware-encoding performance claim is made.
+Publishing uses VP8 video at the chosen quality (default 1280×720 / 30 FPS with a 2.5 Mbit/s cap per viewer), plus stereo Opus audio capped at 128 kbit/s. Captured frames/audio blocks are capture counters, not proof of remote rendering. Each viewer has its own peer connection, so upload grows with the number of viewers. No publishing CPU/RAM or hardware-encoding performance claim is made.
 
 On Mac, the current CPAL loopback path requires an **output-only audio endpoint**, such as the built-in speakers. A duplex endpoint that also exposes input is rejected explicitly so it cannot accidentally record the microphone; select another output or share without audio. Screen Recording and System Audio Recording permission may be required. On Windows, loopback captures the selected WASAPI render endpoint. Mono is duplicated to stereo; surround output is downmixed so center and other channels are retained.
 
@@ -33,7 +38,7 @@ Both optimized builds and Mac/Windows cross-target Clippy passed. Native Mac UI 
 2. Start a peer-to-peer screen share from an official TS6 client. Use a harmless window for validation.
 3. Open the server view, use **Refresh streams** if necessary, then **Watch**. The publisher may need to accept the request.
 4. A transport connection alone does not count as successful video. Look for decoded frames, UI updates and a visibly changing picture.
-5. **Stop watching**, changing channels, opening Settings or Statistics, entering performance mode or disconnecting stops the viewer. An interrupted video connection requires clicking Watch again.
+5. **Stop watching** (the × on a stream, or **Stop All**), changing channels, opening Statistics or disconnecting stops viewing. An interrupted video connection requires clicking Watch again.
 
 The player and its Stop button appear only while requesting or watching a stream. The watched stream is omitted from the available-stream list, so it appears once. After stopping, the player disappears and the single catalog entry offers **Watch** again. Failed requests leave an explanation above the list.
 

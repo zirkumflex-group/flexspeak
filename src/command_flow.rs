@@ -24,6 +24,8 @@ pub enum Operation {
     StreamStop,
     StreamAdmit,
     PublisherInfo,
+    Poke,
+    Move,
 }
 impl Operation {
     pub fn label(self) -> &'static str {
@@ -40,6 +42,8 @@ impl Operation {
             Self::StreamStop => "stop sharing",
             Self::StreamAdmit => "viewer admission",
             Self::PublisherInfo => "publisher information",
+            Self::Poke => "poke",
+            Self::Move => "client move",
         }
     }
     pub fn optional(self) -> bool {

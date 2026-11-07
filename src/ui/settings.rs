@@ -12,7 +12,7 @@ use super::widgets::{
     Range, Variant, button, divider, field, form_row, group, group_note, group_title, icon_button,
     labelled, meter, muted, percent_slider, picker, scroll_page, slider,
 };
-use super::{dispatch, home, icons, send, updates};
+use super::{dispatch, icons, send, updates};
 use crate::settings::{Appearance, ColorScheme, ThemeName};
 use crate::{App, Message, SettingsPage, audio_processing, permissions, shortcuts, transmission};
 
@@ -195,8 +195,9 @@ fn sections(
                 vec![item("", updates::settings(s, t, k))],
             )
             .note(updates::note(t)),
+            install_section(s, t),
         ],
-        SettingsPage::File => vec![file_section(s, t)],
+        SettingsPage::File => vec![file_section(s, t), setup_section(s, t)],
     }
 }
 
@@ -839,6 +840,78 @@ fn file_section(s: &App, t: &Theme) -> Section {
         t,
         "Save writes your portable settings file. Appearance applies and saves as soon as you choose it.",
     ))
+}
+
+/// Running setup again over the saved profile; Cancel in setup keeps everything as it was.
+fn setup_section(s: &App, t: &Theme) -> Section {
+    let idle = s.session.is_none();
+    Section::boxed(
+        "setup",
+        "Setup",
+        "onboarding welcome first run wizard again redo restart",
+        vec![item(
+            "run setup again onboarding redo",
+            form_row(
+                t,
+                "Run setup again",
+                Some(if idle {
+                    "Walk through username, server, permissions, devices and shortcuts again."
+                } else {
+                    "Disconnect to run setup again."
+                }),
+                button(
+                    t,
+                    "redo-setup",
+                    "Run Setup",
+                    Some(&icons::SPARKLES),
+                    Variant::Secondary,
+                    idle.then_some(Message::RedoSetup),
+                ),
+            ),
+        )],
+    )
+}
+
+/// Where Flexspeak runs from, and installing it when that place is temporary.
+fn install_section(s: &App, t: &Theme) -> Section {
+    let running = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "Unknown".into());
+    let row = match &s.install_offer {
+        Some(offer) => form_row(
+            t,
+            "Not installed",
+            Some(&format!(
+                "Running from {}. Install to {} so it and its updates stay put.",
+                offer.from.display(),
+                offer.to.display()
+            )),
+            button(
+                t,
+                "install-now",
+                if s.installing {
+                    "Installing…"
+                } else {
+                    "Install"
+                },
+                Some(&icons::DOWNLOAD),
+                Variant::Secondary,
+                (!s.installing).then_some(Message::Install),
+            ),
+        ),
+        None => form_row(
+            t,
+            "Installed",
+            Some(&running),
+            el().child(icon(&icons::CHECK, 16.0).color(t.good)),
+        ),
+    };
+    Section::boxed(
+        "installation",
+        "Installation",
+        "install location applications program files folder portable",
+        vec![item("install installed location", row)],
+    )
 }
 
 /// The colour scheme, then a theme for light and one for dark. Choices apply and save at once.
@@ -1706,5 +1779,31 @@ fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
             ),
         ],
     )
-    .note(home::shortcut_hint(s, t).px(2.0))
+    .note(shortcut_hint(s, t).px(2.0))
+}
+
+/// The global shortcuts in force, or why they aren't.
+fn shortcut_hint(s: &App, t: &Theme) -> El {
+    if let Some(error) = &s.shortcut_error {
+        super::widgets::error_text(
+            t,
+            if shortcuts::supported() {
+                "Global shortcuts unavailable. Configure them in Settings.".into()
+            } else {
+                format!("Global shortcuts unavailable: {error}")
+            },
+        )
+    } else {
+        let mut hint = format!(
+            "Global: {} · mute/unmute   |   {} · deafen/undeafen",
+            s.keybinds.toggle_mute, s.keybinds.toggle_deafen
+        );
+        if !s.keybinds.push_to_talk.trim().is_empty() {
+            hint.push_str(&format!(
+                "   |   {} · hold to talk",
+                s.keybinds.push_to_talk
+            ));
+        }
+        super::widgets::faint(t, hint)
+    }
 }

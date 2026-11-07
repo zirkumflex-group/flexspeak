@@ -9,7 +9,10 @@ pub use publish_media::sources as share_sources;
 
 pub(crate) use rtc::Output as MediaEvent;
 pub use session::Session;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 pub const AVAILABLE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 pub const MAX_SDP_BYTES: usize = 64 * 1024;
@@ -69,8 +72,10 @@ pub enum Event {
     Publishing(publishing::Status),
     Catalog(Vec<StreamInfo>),
     Notice(String),
+    /// One watched stream's progress. `slot` is the [`Surfaces`] entry its picture goes to.
     State {
         generation: u64,
+        slot: usize,
         stream: StreamInfo,
         phase: Phase,
         detail: String,
@@ -81,40 +86,116 @@ pub enum Event {
     },
 }
 
-#[derive(Default)]
-pub struct View {
-    pub sharing: publishing::Ui,
-    pub catalog: Vec<StreamInfo>,
-    pub stream: Option<StreamInfo>,
+/// The most streams watched at once; each has its own picture and audio.
+pub const MAX_WATCHES: usize = 4;
+
+/// One stream being watched, as the view knows it.
+#[derive(Debug, Clone)]
+pub struct Watching {
+    pub stream: StreamInfo,
+    pub slot: usize,
     pub generation: u64,
-    pub phase: Option<Phase>,
+    pub phase: Phase,
     pub detail: String,
-    pub notice: String,
     pub stats: Stats,
     pub frame: Option<Frame>,
     pub ui_updates: u64,
-    pub surface: Arc<Surface>,
+}
+
+pub struct View {
+    pub sharing: publishing::Ui,
+    pub catalog: Vec<StreamInfo>,
+    /// Watched streams, oldest first.
+    pub watching: Vec<Watching>,
+    /// The stream filling the stage, by ID; the others shrink to a strip beside it.
+    pub focused: Option<String>,
+    /// Codec, resolution and transport details over each picture.
+    pub show_stats: bool,
+    /// The share dialog is open.
+    pub share_open: bool,
+    /// Each publisher's stream volume in percent, kept for the session.
+    pub volumes: std::collections::HashMap<u16, u8>,
+    /// Generations stopped from this window, so a late state from them can't bring them back.
+    stopped: u64,
+    pub notice: String,
+    pub surfaces: Arc<Surfaces>,
     pub visible: Arc<AtomicBool>,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            sharing: publishing::Ui::default(),
+            catalog: Vec::new(),
+            watching: Vec::new(),
+            focused: None,
+            show_stats: false,
+            share_open: false,
+            volumes: std::collections::HashMap::new(),
+            stopped: 0,
+            notice: String::new(),
+            surfaces: Arc::new(Surfaces::default()),
+            visible: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl View {
     pub fn active(&self) -> bool {
-        self.phase.is_some_and(Phase::active)
+        !self.watching.is_empty()
+    }
+    pub fn watching(&self, id: &str) -> Option<&Watching> {
+        self.watching.iter().find(|watch| watch.stream.id == id)
+    }
+    /// The stream on the stage: the focused one, or the only one.
+    pub fn stage(&self) -> Option<&Watching> {
+        match &self.focused {
+            Some(id) => self.watching(id),
+            None if self.watching.len() == 1 => self.watching.first(),
+            None => None,
+        }
+    }
+    /// A watched stream's volume in percent; streams start at full volume.
+    pub fn volume(&self, publisher: u16) -> u8 {
+        self.volumes.get(&publisher).copied().unwrap_or(100)
+    }
+    /// Sets a publisher's stream volume, and remembers it for the session.
+    pub fn set_volume(&mut self, publisher: u16, percent: u8) {
+        let percent = percent.min(100);
+        self.volumes.insert(publisher, percent);
+        for watch in &self.watching {
+            if watch.stream.publisher == publisher {
+                self.surfaces
+                    .get(watch.slot)
+                    .set_volume(f32::from(percent) / 100.0);
+            }
+        }
     }
     pub fn reset(&mut self) {
         self.sharing.status = publishing::Status::default();
         self.clear_picture();
         self.catalog.clear();
-        self.stream = None;
-        self.phase = None;
-        self.detail.clear();
         self.notice.clear();
-        self.stats = Stats::default();
-        self.ui_updates = 0;
+        self.share_open = false;
     }
+    /// Ends every picture and forgets the watched streams; the session stops them too.
     pub fn clear_picture(&mut self) {
-        self.surface.end(self.generation);
-        self.frame = None;
+        for watch in self.watching.drain(..) {
+            self.surfaces.get(watch.slot).end(watch.generation);
+            self.stopped = self.stopped.max(watch.generation);
+        }
+        self.focused = None;
+    }
+    /// Forgets one watched stream at once, before the session confirms it stopped.
+    pub fn forget(&mut self, id: &str) {
+        if let Some(index) = self.watching.iter().position(|watch| watch.stream.id == id) {
+            let watch = self.watching.remove(index);
+            self.surfaces.get(watch.slot).end(watch.generation);
+            self.stopped = self.stopped.max(watch.generation);
+        }
+        if self.focused.as_deref() == Some(id) {
+            self.focused = None;
+        }
     }
     pub fn update(&mut self, event: Event) {
         match event {
@@ -123,55 +204,131 @@ impl View {
             Event::Notice(notice) => self.notice = notice,
             Event::State {
                 generation,
+                slot,
                 stream,
                 phase,
                 detail,
-            } if generation >= self.generation => {
-                if generation != self.generation {
-                    self.clear_picture();
-                    self.ui_updates = 0;
-                    self.stats = Stats::default();
+            } => {
+                let index = self.watching.iter().position(|watch| {
+                    watch.generation == generation || watch.stream.id == stream.id
+                });
+                if let Some(index) = index
+                    && self.watching[index].generation > generation
+                {
+                    return;
                 }
                 if !phase.active() {
-                    self.clear_picture();
+                    if let Some(index) = index {
+                        let watch = self.watching.remove(index);
+                        if self.focused.as_deref() == Some(watch.stream.id.as_str()) {
+                            self.focused = None;
+                        }
+                    }
+                    return;
                 }
-                self.generation = generation;
-                self.stream = Some(stream);
-                self.phase = Some(phase);
-                self.detail = detail;
+                if index.is_none() && generation <= self.stopped {
+                    return;
+                }
+                let publisher = stream.publisher;
+                let entry = Watching {
+                    stream,
+                    slot,
+                    generation,
+                    phase,
+                    detail,
+                    stats: Stats::default(),
+                    frame: None,
+                    ui_updates: 0,
+                };
+                match index {
+                    Some(index) if self.watching[index].generation == generation => {
+                        let watch = &mut self.watching[index];
+                        watch.stream = entry.stream;
+                        watch.phase = phase;
+                        watch.detail = entry.detail;
+                    }
+                    Some(index) => self.watching[index] = entry,
+                    None => self.watching.push(entry),
+                }
+                let volume = self.volume(publisher);
+                self.surfaces
+                    .get(slot)
+                    .set_volume(f32::from(volume) / 100.0);
             }
-            Event::Stats { generation, stats }
-                if generation == self.generation && self.active() =>
-            {
-                self.stats = stats
+            Event::Stats { generation, stats } => {
+                if let Some(watch) = self
+                    .watching
+                    .iter_mut()
+                    .find(|watch| watch.generation == generation)
+                {
+                    watch.stats = stats;
+                }
             }
-            _ => {}
         }
     }
-    /// Notes the newest frame the decoder showed. Pixels reach the GPU without the UI thread;
-    /// this only tracks what the view describes. True when the picture appeared or changed shape.
+    /// Notes the newest frame each decoder showed. Pixels reach the GPU without the UI thread;
+    /// this only tracks what the view describes. True when a picture appeared or changed shape.
     pub fn sync_frame(&mut self) -> bool {
-        if !self.active() {
-            return false;
+        let mut changed = false;
+        for watch in &mut self.watching {
+            let Some(frame) = self.surfaces.get(watch.slot).latest() else {
+                continue;
+            };
+            if frame.generation != watch.generation {
+                continue;
+            }
+            let previous = watch.frame;
+            if previous.is_some_and(|previous| frame.sequence <= previous.sequence) {
+                continue;
+            }
+            watch.ui_updates += frame.sequence - previous.map_or(0, |previous| previous.sequence);
+            watch.frame = Some(frame);
+            changed |= previous.is_none_or(|previous| {
+                (previous.width, previous.height, previous.rotation)
+                    != (frame.width, frame.height, frame.rotation)
+            });
         }
-        let Some(frame) = self.surface.latest() else {
-            return false;
-        };
-        if frame.generation != self.generation {
-            return false;
-        }
-        let previous = self.frame;
-        if previous.is_some_and(|previous| frame.sequence <= previous.sequence) {
-            return false;
-        }
-        self.ui_updates += frame.sequence - previous.map_or(0, |previous| previous.sequence);
-        self.frame = Some(frame);
-        previous.is_none_or(|previous| {
-            (previous.width, previous.height, previous.rotation)
-                != (frame.width, frame.height, frame.rotation)
-        })
+        changed
     }
 }
+
+/// One surface per watched stream, shared with the session and the audio callback.
+pub struct Surfaces {
+    slots: [Arc<Surface>; MAX_WATCHES],
+}
+
+impl Default for Surfaces {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| Arc::new(Surface::default())),
+        }
+    }
+}
+
+impl Surfaces {
+    pub fn get(&self, slot: usize) -> &Arc<Surface> {
+        &self.slots[slot.min(MAX_WATCHES - 1)]
+    }
+    pub fn set_waker(&self, waker: rune::Waker) {
+        for surface in &self.slots {
+            surface.set_waker(waker.clone());
+        }
+    }
+    pub fn set_audio_enabled(&self, enabled: bool) {
+        for surface in &self.slots {
+            surface.set_audio_enabled(enabled);
+        }
+    }
+    /// Adds every watched stream's audio, each at its own volume.
+    pub fn mix_audio(&self, stereo: &mut [f32]) {
+        for surface in &self.slots {
+            surface.mix_audio(stereo);
+        }
+    }
+}
+
+/// Generations are unique across surfaces, so a stream's events can't reach another's view.
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Decoded RGBA, rows top first. Only the native receivers (macOS, Windows) produce one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,12 +361,22 @@ struct SurfaceState {
     audio_disabled: bool,
 }
 
+/// A stream's own volume, 0–100%, as `f32` bits.
+struct Volume(std::sync::atomic::AtomicU32);
+
+impl Default for Volume {
+    fn default() -> Self {
+        Self(std::sync::atomic::AtomicU32::new(1.0_f32.to_bits()))
+    }
+}
+
 /// One latest frame, never a queue of image buffers. Old sessions cannot publish into new ones.
 #[derive(Default)]
 pub struct Surface {
     state: Mutex<SurfaceState>,
     pixels: rune::Pixels,
     waker: Mutex<Option<rune::Waker>>,
+    volume: Volume,
 }
 
 impl Surface {
@@ -226,9 +393,18 @@ impl Surface {
             self.pixels.set(0, 0, Vec::new());
         }
     }
+    /// This stream's playback volume, 0–1, on top of the app's playback volume.
+    pub fn set_volume(&self, volume: f32) {
+        self.volume
+            .0
+            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.0.load(Ordering::Relaxed))
+    }
     pub fn begin(&self) -> u64 {
         let mut state = self.state.lock().unwrap();
-        state.generation += 1;
+        state.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         state.active = true;
         state.sequence = 0;
         state.frame = None;
@@ -314,12 +490,13 @@ impl Surface {
         if !state.active || state.audio_disabled {
             return;
         }
+        let volume = self.volume();
         for frame in stereo.as_chunks_mut::<2>().0 {
             let Some([left, right]) = state.audio.pop_front() else {
                 break;
             };
-            frame[0] = (frame[0] + left).clamp(-1.0, 1.0);
-            frame[1] = (frame[1] + right).clamp(-1.0, 1.0);
+            frame[0] = (frame[0] + left * volume).clamp(-1.0, 1.0);
+            frame[1] = (frame[1] + right * volume).clamp(-1.0, 1.0);
         }
     }
 }
@@ -351,45 +528,116 @@ mod tests {
         surface.mix_audio(&mut silent);
         assert_eq!(silent, [0.0; 2]);
     }
+    fn info(id: &str, publisher: u16) -> StreamInfo {
+        StreamInfo {
+            id: id.into(),
+            publisher,
+            name: "Window".into(),
+            viewers: 1,
+            has_audio: false,
+            server_relayed: false,
+        }
+    }
+
+    fn receiving(view: &mut View, id: &str, slot: usize) -> u64 {
+        let generation = view.surfaces.get(slot).begin();
+        view.update(Event::State {
+            generation,
+            slot,
+            stream: info(id, 7),
+            phase: Phase::Receiving,
+            detail: String::new(),
+        });
+        generation
+    }
+
     #[test]
     fn the_view_tracks_the_newest_frame_and_only_wakes_for_shape_changes() {
         let mut view = View::default();
         let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = wakes.clone();
-        view.surface.set_waker(Arc::new(move || {
+        view.surfaces.set_waker(Arc::new(move || {
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }));
-        view.generation = view.surface.begin();
-        view.phase = Some(Phase::Receiving);
+        let generation = receiving(&mut view, "a", 0);
+        let surface = view.surfaces.get(0).clone();
         let image = |w: u32, h: u32| Image {
             width: w,
             height: h,
             pixels: vec![255; (w * h * 4) as usize],
         };
         assert!(!view.sync_frame(), "No picture before the first frame");
-        view.surface.publish(view.generation, image(4, 2), 0.0);
+        surface.publish(generation, image(4, 2), 0.0);
         assert!(view.sync_frame(), "The first frame shows the picture");
-        assert_eq!(view.surface.pixels().size(), (4, 2));
+        assert_eq!(surface.pixels().size(), (4, 2));
         for _ in 0..3 {
-            view.surface.publish(view.generation, image(4, 2), 0.0);
+            surface.publish(generation, image(4, 2), 0.0);
         }
         assert!(
             !view.sync_frame(),
             "Same-shape frames redraw without the view"
         );
-        assert_eq!(view.ui_updates, 4);
+        assert_eq!(view.watching[0].ui_updates, 4);
         assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 1);
-        view.surface.publish(view.generation, image(2, 4), 0.0);
+        surface.publish(generation, image(2, 4), 0.0);
         assert!(view.sync_frame());
         assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 2);
         view.clear_picture();
-        assert!(view.frame.is_none());
-        assert_eq!(view.surface.pixels().size(), (0, 0));
-        view.surface.publish(view.generation, image(4, 2), 0.0);
+        assert!(view.watching.is_empty());
+        assert_eq!(surface.pixels().size(), (0, 0));
+        surface.publish(generation, image(4, 2), 0.0);
         assert!(
             !view.sync_frame(),
             "A closed session cannot bring the picture back"
         );
+    }
+
+    #[test]
+    fn several_streams_play_side_by_side_and_one_can_take_the_stage() {
+        let mut view = View::default();
+        let a = receiving(&mut view, "a", 0);
+        let b = receiving(&mut view, "b", 1);
+        assert_ne!(a, b, "Generations are unique across surfaces");
+        assert_eq!(view.watching.len(), 2);
+        assert!(view.stage().is_none(), "Two streams share the stage");
+        view.focused = Some("b".into());
+        assert_eq!(view.stage().map(|w| w.generation), Some(b));
+        view.surfaces.get(0).publish(
+            a,
+            Image {
+                width: 2,
+                height: 2,
+                pixels: vec![0; 16],
+            },
+            0.0,
+        );
+        assert!(view.sync_frame());
+        assert!(view.watching[0].frame.is_some() && view.watching[1].frame.is_none());
+        view.forget("b");
+        assert!(view.focused.is_none());
+        assert_eq!(view.stage().map(|w| w.generation), Some(a));
+        // A late state from the forgotten stream can't bring it back.
+        view.update(Event::State {
+            generation: b,
+            slot: 1,
+            stream: info("b", 7),
+            phase: Phase::Receiving,
+            detail: String::new(),
+        });
+        assert_eq!(view.watching.len(), 1);
+    }
+
+    #[test]
+    fn each_stream_mixes_at_its_own_volume() {
+        let surfaces = Surfaces::default();
+        let a = surfaces.get(0).begin();
+        let b = surfaces.get(1).begin();
+        surfaces.get(0).publish_audio(a, &[16384, 16384]);
+        surfaces.get(1).publish_audio(b, &[16384, 16384]);
+        surfaces.get(1).set_volume(0.5);
+        let mut mixed = [0.0; 2];
+        surfaces.mix_audio(&mut mixed);
+        assert_eq!(mixed, [0.75, 0.75]);
     }
 
     #[test]
@@ -418,50 +666,44 @@ mod tests {
 
     #[test]
     fn stopped_and_previous_receivers_cannot_replace_the_current_picture_or_stats() {
-        let info = StreamInfo {
-            id: "stream".into(),
-            publisher: 7,
-            name: "Window".into(),
-            viewers: 1,
-            has_audio: false,
-            server_relayed: false,
-        };
         let mut view = View::default();
         view.update(Event::State {
-            generation: 2,
-            stream: info.clone(),
+            generation: 20,
+            slot: 0,
+            stream: info("stream", 7),
             phase: Phase::Receiving,
             detail: String::new(),
         });
         view.update(Event::Stats {
-            generation: 1,
+            generation: 10,
             stats: Stats {
                 packets: 99,
                 ..Default::default()
             },
         });
         view.update(Event::State {
-            generation: 1,
-            stream: info.clone(),
+            generation: 10,
+            slot: 0,
+            stream: info("stream", 7),
             phase: Phase::Failed,
             detail: "Old session".into(),
         });
-        assert_eq!(view.phase, Some(Phase::Receiving));
-        assert_eq!(view.stats.packets, 0);
+        assert_eq!(view.watching[0].phase, Phase::Receiving);
+        assert_eq!(view.watching[0].stats.packets, 0);
         view.update(Event::State {
-            generation: 2,
-            stream: info,
+            generation: 20,
+            slot: 0,
+            stream: info("stream", 7),
             phase: Phase::Stopped,
             detail: "Stopped".into(),
         });
         view.update(Event::Stats {
-            generation: 2,
+            generation: 20,
             stats: Stats {
                 packets: 99,
                 ..Default::default()
             },
         });
-        assert_eq!(view.stats.packets, 0);
-        assert!(!view.active() && view.frame.is_none());
+        assert!(!view.active());
     }
 }

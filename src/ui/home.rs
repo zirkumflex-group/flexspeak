@@ -1,15 +1,15 @@
 //! The window shell, the saved-server home, the connected sidebar and performance mode.
 
 use rune::{Cx, El, Transition, col, el, icon, row, text};
-use rune_kit::{Kit, Switch};
+use rune_kit::Kit;
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
     Variant, body, button, card, divider, faint, heading, health_dot, icon_button, labelled, meter,
-    muted, overline, pulse, scroll_page, speaking_dot, vertical_divider,
+    muted, overline, pulse, scroll_page, speaking_dot,
 };
-use super::{footer, icons, send, statistics, streams};
-use crate::{App, Message, Tab, client, shortcuts, usage};
+use super::{footer, icons, members, send, statistics, streams};
+use crate::{App, Message, Tab, client, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     let page = match s.tab {
@@ -37,10 +37,10 @@ pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                     .child(page),
             ),
         )
-        .child(footer::view(s, cx, t, false))
+        .child(footer::view(s, cx, t))
 }
 
-fn header(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
+fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
     let mut bar = row()
         .key("header")
         .h(size::HEADER)
@@ -77,9 +77,6 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         );
     }
     bar = bar.child(el().grow(1.0));
-    bar = bar
-        .child(performance_switch(k, false))
-        .child(vertical_divider(t, 24.0));
     let statistics = s.tab == Tab::Statistics;
     bar = bar.child(icon_button(
         t,
@@ -121,22 +118,12 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     col().w_full().child(bar).child(divider(t))
 }
 
-pub fn performance_switch(k: &Kit, enabled: bool) -> El {
-    Switch::new(enabled)
-        .label("Performance mode")
-        .on_toggle_tx(move |s: &mut App, tx| {
-            super::dispatch(s, tx, Message::PerformanceMode(!enabled))
-        })
-        .build(k)
-        .help("A compact window that samples every 10 s and pauses graphs and streaming")
-}
-
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     if s.connected && !s.loopback {
         return row()
             .w_full()
             .h_full()
-            .child(sidebar(s, t, k))
+            .child(sidebar(s, t, k, layer))
             .child(el().w(1.0).h_full().fill(t.hairline))
             .child(
                 col()
@@ -349,7 +336,9 @@ fn server_row(
 
 const ENTRANCE: &[rune::Beat] = &[rune::Beat::new(0.0).opacity(0.0), rune::Beat::new(0.25)];
 
-fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
+fn sidebar(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+    members::menu(s, t, k, layer);
+    members::ghost(s, t, layer);
     let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
     let server = row()
         .w_full()
@@ -396,7 +385,45 @@ fn sidebar(s: &App, t: &Theme, k: &Kit) -> El {
             "channel-scroll",
             channel_tree(s, t).pr(10.0).pb(8.0),
         ))
+        .children(selection_bar(s, t))
         .child(voice_controls(s, t))
+}
+
+/// While several members are picked: how many, and how to drop the selection.
+fn selection_bar(s: &App, t: &Theme) -> Option<El> {
+    if s.selected_members.len() < 2 {
+        return None;
+    }
+    Some(
+        row()
+            .key("selection")
+            .w_full()
+            .gap(8.0)
+            .px(10.0)
+            .py(6.0)
+            .center_y()
+            .radius(radius::ROW)
+            .fill(t.accent.alpha(0.10))
+            .transition(Transition::opacity())
+            .child(
+                faint(
+                    t,
+                    format!(
+                        "{} selected · drag onto a channel or right-click",
+                        s.selected_members.len()
+                    ),
+                )
+                .grow(1.0),
+            )
+            .child(icon_button(
+                t,
+                "clear-selection",
+                &icons::X,
+                "Clear selection · Esc",
+                Variant::Ghost,
+                Some(Message::ClearSelection),
+            )),
+    )
 }
 
 fn voice_controls(s: &App, t: &Theme) -> El {
@@ -437,14 +464,17 @@ fn voice_controls(s: &App, t: &Theme) -> El {
             on.then_some(message),
         ));
     }
-    controls = controls.child(el().grow(1.0)).child(icon_button(
-        t,
-        "disconnect",
-        &icons::DISCONNECT,
-        "Disconnect",
-        Variant::Danger,
-        (!s.stopping).then_some(Message::Stop),
-    ));
+    controls = controls
+        .child(el().grow(1.0))
+        .child(share_button(s, t))
+        .child(icon_button(
+            t,
+            "disconnect",
+            &icons::DISCONNECT,
+            "Disconnect",
+            Variant::Danger,
+            (!s.stopping).then_some(Message::Stop),
+        ));
     let speaking = s.microphone_meter_level();
     // Lit while you are heard; it eases in and out only as that changes, not with every reading.
     // Push-to-talk and voice activation keep it dark while their gate is closed.
@@ -497,6 +527,37 @@ fn voice_controls(s: &App, t: &Theme) -> El {
         );
     }
     panel
+}
+
+/// Opens the share dialog; lit while you share.
+fn share_button(s: &App, t: &Theme) -> El {
+    let sharing = s.streaming.sharing.status.active;
+    let supported = s.connected
+        && !s.loopback
+        && !s.stopping
+        && s.state.server_version.starts_with("6.")
+        && crate::streaming::AVAILABLE;
+    let help = if sharing {
+        "You are sharing · manage or stop"
+    } else if !crate::streaming::AVAILABLE {
+        "Screen sharing is available on Mac and Windows"
+    } else if !supported {
+        "Screen sharing needs a TeamSpeak 6 server"
+    } else {
+        "Share your screen"
+    };
+    icon_button(
+        t,
+        "share-screen",
+        &icons::MONITOR_UP,
+        help,
+        if sharing {
+            Variant::Active
+        } else {
+            Variant::Secondary
+        },
+        (supported || sharing).then_some(Message::OpenShare),
+    )
 }
 
 fn channel_tree(s: &App, t: &Theme) -> El {
@@ -577,7 +638,15 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     .child(icon(&icons::EYE_OFF, 13.0).color(t.faint)),
             );
         }
-        if current {
+        let dropping =
+            s.ui.drag
+                .as_ref()
+                .is_some_and(|drag| drag.target == Some(channel.id));
+        if dropping {
+            name = name
+                .fill(t.accent.alpha(0.24))
+                .border(1.0, t.accent.alpha(0.6));
+        } else if current {
             name = name.fill(t.accent.alpha(0.16));
         }
         if joinable {
@@ -636,7 +705,12 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 .pl(20.0)
                 .transition(Transition::opacity());
             for member in &channel.members {
-                members = members.child(member_row(s, t, member, current));
+                members = members.child(members::interactive(
+                    s,
+                    t,
+                    member,
+                    member_row(s, t, member, current),
+                ));
             }
             node = node.child(members);
         }
@@ -698,103 +772,4 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         }
     }
     entry
-}
-
-pub fn performance(s: &App, t: &Theme, k: &Kit) -> El {
-    let in_channel = s.connected && !s.loopback && !s.stopping;
-    let connection = if s.stopping {
-        "Disconnecting…"
-    } else if s.connected {
-        if s.loopback {
-            "Local microphone test"
-        } else {
-            "Connected"
-        }
-    } else {
-        &s.status
-    };
-    let channel = s
-        .state
-        .current
-        .as_ref()
-        .filter(|_| in_channel)
-        .map_or("—", |channel| channel.name.as_str());
-    let playback = if !s.connected || s.stopping {
-        "Inactive"
-    } else if s.deafened {
-        "Deafened"
-    } else {
-        "On"
-    };
-    let line = |glyph: &'static rune::Icon, label: String| labelled(glyph, label, t.text);
-    let info = col()
-        .w_full()
-        .gap(8.0)
-        .child(line(&icons::ACTIVITY, format!("Connection: {connection}")))
-        .child(line(
-            &icons::SERVER,
-            format!("Server: {}", if in_channel { &s.state.server } else { "—" }),
-        ))
-        .child(line(&icons::CHANNEL, format!("Channel: {channel}")))
-        .child(line(
-            s.microphone_icon().glyph(),
-            format!("Microphone: {}", s.microphone_status()),
-        ))
-        .child(line(
-            s.playback_icon().glyph(),
-            format!("Playback: {playback}"),
-        ));
-    col()
-        .w_full()
-        .h_full()
-        .child(
-            col()
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .padding(16.0)
-                // Room for the macOS traffic lights over the drag band.
-                .pt(if cfg!(target_os = "macos") {
-                    40.0
-                } else {
-                    16.0
-                })
-                .gap(10.0)
-                .child(performance_switch(k, true))
-                .child(scroll_page(k, "performance-info", info))
-                .child(shortcut_hint(s, t))
-                .child(faint(
-                    t,
-                    format!(
-                        "Updates every {} s · CPU: 100% = one core",
-                        usage::COMPACT_REFRESH_INTERVAL.as_secs()
-                    ),
-                )),
-        )
-        .child(footer::compact(s, t))
-}
-
-pub fn shortcut_hint(s: &App, t: &Theme) -> El {
-    if let Some(error) = &s.shortcut_error {
-        super::widgets::error_text(
-            t,
-            if shortcuts::supported() {
-                "Global shortcuts unavailable. Configure them in Settings.".into()
-            } else {
-                format!("Global shortcuts unavailable: {error}")
-            },
-        )
-    } else {
-        let mut hint = format!(
-            "Global: {} · mute/unmute   |   {} · deafen/undeafen",
-            s.keybinds.toggle_mute, s.keybinds.toggle_deafen
-        );
-        if !s.keybinds.push_to_talk.trim().is_empty() {
-            hint.push_str(&format!(
-                "   |   {} · hold to talk",
-                s.keybinds.push_to_talk
-            ));
-        }
-        faint(t, hint)
-    }
 }

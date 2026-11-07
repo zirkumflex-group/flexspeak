@@ -45,6 +45,18 @@ This installs `flexspeak` and an application-launcher entry, and lets pacman res
 
 Omarchy uses Wayland. Native Wayland global mute/deafen shortcuts remain unsupported by the app; use its buttons. The release pipeline installs the Arch package in a clean container and verifies `flexspeak --help`. GUI/audio behavior on an actual Omarchy desktop still needs runtime validation.
 
+## Installing from a download
+
+A release that runs from somewhere temporary offers to install itself at launch, so in-app updates replace a copy that stays put. **Install & Reopen** copies the running build, registers it and reopens it from there (returning to the same session, as an update does); **Not Now** asks again next launch, **Don't Ask Again** stops asking. **Settings → Updates → Installation** shows where Flexspeak runs from and installs it later. Settings and the TeamSpeak identity live in the per-user data directory either way.
+
+| Platform | Installed copy | Also |
+| --- | --- | --- |
+| Windows | `%LOCALAPPDATA%\Programs\Flexspeak\Flexspeak.exe` (no administrator rights) | Start menu shortcut and an entry in Installed apps, whose Uninstall runs `Flexspeak.exe --uninstall` (removes the program, keeps settings) |
+| macOS | `/Applications/Flexspeak.app`, or `~/Applications` when `/Applications` isn't writable | The installed copy is verified with `codesign` and loses the download quarantine, as if dragged there, so it isn't translocated |
+| Linux tarball | `~/.local/bin/flexspeak` | A launcher entry in `~/.local/share/applications` |
+
+Homebrew and the Arch package already install the app and are never offered this. Development builds without a build number never offer it either.
+
 ## In-app updates
 
 Release builds check GitHub Releases five seconds after launch and every six hours. The newest build is the release GitHub marks **latest**. The workflow sets that mark only after every package and the Homebrew tap are published, and never moves it backwards. That release is an update when its `(version, build)` from `v{version}-build.{N}` is greater than the running build's, which comes from `CARGO_PKG_VERSION` and `NATIVE_VOICE_BUILD_NUMBER` at compile time. Local `cargo` builds have no build number and never update themselves.

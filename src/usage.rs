@@ -8,7 +8,6 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tsclientlib::{ConnectionStats, PacketStat, data::ConnectionClientData};
 
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-pub const COMPACT_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 pub const SERVER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const SERVER_MAX_AGE: Duration = Duration::from_secs(15);
 const HISTORY_WINDOW: Duration = Duration::from_secs(300);

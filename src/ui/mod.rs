@@ -9,6 +9,7 @@ mod footer;
 mod fx;
 mod home;
 pub mod icons;
+mod members;
 mod modals;
 mod onboarding;
 mod scenes;
@@ -19,7 +20,7 @@ mod theme;
 mod updates;
 mod widgets;
 
-use std::{sync::atomic::Ordering, time::Instant};
+use std::time::Instant;
 
 use rune::{AppSpec, Cx, El, TextEdit, Tx, Waker, col, el};
 use tokio::sync::mpsc;
@@ -38,7 +39,6 @@ pub enum Task {
     Exit,
     Copy(String),
     Focus(Field),
-    Resize((f32, f32)),
     /// Blocking work for a worker thread; its message returns to the UI thread.
     Perform(Box<dyn FnOnce() -> Message + Send>),
     /// Blocking work for a worker thread that reports along the way: it gets a sender for
@@ -89,6 +89,17 @@ impl Task {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     ChannelPassword,
+    PokeMessage,
+}
+
+/// Members being dragged onto a channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberDrag {
+    pub ids: Vec<u16>,
+    /// The pointer, in window points.
+    pub at: (f32, f32),
+    /// The channel under the pointer, where a drop would move them.
+    pub target: Option<u64>,
 }
 
 /// Interface-only state: field editors and the open picker.
@@ -104,8 +115,16 @@ pub struct UiState {
     pub server_address: TextEdit,
     pub server_password: TextEdit,
     pub ptt_key: TextEdit,
+    pub poke_message: TextEdit,
     /// The device or source picker whose list is open.
     pub open: Option<&'static str>,
+    /// The member a context menu is open for, and where it opened.
+    pub member_menu: Option<(u16, rune::PointerPress)>,
+    /// The context menu's Move submenu is open.
+    pub move_menu: bool,
+    pub drag: Option<MemberDrag>,
+    /// The window position of the member row last under the pointer, to place drags.
+    pub row_origin: (f32, f32),
 }
 
 impl Default for UiState {
@@ -122,7 +141,12 @@ impl Default for UiState {
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
             ptt_key: TextEdit::new(""),
+            poke_message: TextEdit::new(""),
             open: None,
+            member_menu: None,
+            move_menu: false,
+            drag: None,
+            row_origin: (0.0, 0.0),
         }
     }
 }
@@ -149,6 +173,11 @@ impl App {
         mirror(&mut self.ui.server_address, &editor.address);
         mirror(&mut self.ui.server_password, &editor.password);
         mirror(&mut self.ui.ptt_key, &self.keybind_draft.push_to_talk);
+        let poke = self
+            .poke
+            .as_ref()
+            .map_or("", |draft| draft.message.as_str());
+        mirror(&mut self.ui.poke_message, poke);
     }
 }
 
@@ -175,10 +204,7 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
         Task::Exit => tx.quit(),
         Task::Copy(text) => tx.copy(text),
         Task::Focus(Field::ChannelPassword) => s.ui.channel_password.focused = true,
-        Task::Resize(size) => {
-            tx.resize_window(size);
-            s.window_size = size;
-        }
+        Task::Focus(Field::PokeMessage) => s.ui.poke_message.focused = true,
         Task::Perform(job) => {
             let handle = s.handle.clone();
             let spawned = std::thread::Builder::new()
@@ -255,7 +281,7 @@ pub fn forward_shortcuts(
 }
 
 fn setup(s: &mut App, waker: Waker) {
-    s.streaming.surface.set_waker(waker);
+    s.streaming.surfaces.set_waker(waker);
 }
 
 /// Sampling timers and video frame bookkeeping. True only when something visible changed.
@@ -264,28 +290,14 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     let now = Instant::now();
     if now >= s.next_usage_tick {
-        let compact = s.performance_mode.load(Ordering::Relaxed);
-        dispatch(
-            s,
-            tx,
-            if compact {
-                Message::CompactUsageTick
-            } else {
-                Message::UsageTick
-            },
-        );
+        dispatch(s, tx, Message::UsageTick);
         // Following the system's appearance costs one cheap query per tick.
         if s.appearance.scheme == crate::settings::ColorScheme::System
             && let Some(dark) = crate::system_appearance::is_dark()
         {
             s.system_dark = dark;
         }
-        s.next_usage_tick = now
-            + if compact {
-                usage::COMPACT_REFRESH_INTERVAL
-            } else {
-                usage::REFRESH_INTERVAL
-            };
+        s.next_usage_tick = now + usage::REFRESH_INTERVAL;
         changed = true;
     }
     if s.resume.is_some() && !s.resume_started {
@@ -318,6 +330,15 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         dispatch(s, tx, Message::OpenSettings(s.settings_recent));
         return true;
     }
+    // Escape drops a member selection first.
+    if key.key == rune::Key::Escape
+        && !s.selected_members.is_empty()
+        && s.settings_page.is_none()
+        && s.ui.member_menu.is_none()
+    {
+        dispatch(s, tx, Message::ClearSelection);
+        return true;
+    }
     // Escape returns from a utility page to the server, as the back button does.
     if key.key == rune::Key::Escape
         && s.onboarding.is_none()
@@ -343,11 +364,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = theme(s);
     let k = t.kit();
     let mut layer = Vec::new();
-    let compact = s.performance_mode.load(Ordering::Relaxed);
     let content = if let Some(step) = s.onboarding {
         onboarding::view(s, cx, &t, &k, &mut layer, step)
-    } else if compact {
-        home::performance(s, &t, &k)
     } else {
         home::normal(s, cx, &t, &k, &mut layer)
     };
@@ -360,8 +378,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         .w_full()
         .h_full()
         .fill(t.canvas)
-        // Remembered for performance mode's restore. The view never reads it, so recording it
-        // must not commit: a committing layout handler would re-run layout every frame.
+        // Settings reads it for its margins. Recording it must not commit: a committing layout
+        // handler would re-run layout every frame.
         .on_layout_tx(|s: &mut App, r: [f32; 4], tx: &mut Tx| {
             s.window_size = (r[2], r[3]);
             tx.live_only();
@@ -384,7 +402,7 @@ pub fn run() {
     // Wayland app id and X11 class: desktops match it to flexspeak.desktop and its icon.
     rune::set_app_id("flexspeak");
     let spec = AppSpec::<App> {
-        min_size: Some(crate::COMPACT_MIN_SIZE),
+        min_size: Some(crate::MIN_SIZE),
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),

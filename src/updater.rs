@@ -892,7 +892,7 @@ async fn download_into(
     Ok(payload)
 }
 
-fn run(command: &mut Command, what: &str) -> Result<(), String> {
+pub(crate) fn run(command: &mut Command, what: &str) -> Result<(), String> {
     let output = command
         .stdin(Stdio::null())
         .output()
@@ -973,7 +973,7 @@ fn prepare(dir: &Path, archive: &Path, package: Package) -> Result<PathBuf, Stri
 }
 
 /// The app is intact (signature) and is Flexspeak (bundle identifier).
-fn verify_app(app: &Path) -> Result<(), String> {
+pub(crate) fn verify_app(app: &Path) -> Result<(), String> {
     run(
         Command::new("/usr/bin/codesign")
             .args(["--verify", "--strict"])
@@ -1133,7 +1133,7 @@ fn swap_app(staged: &Path, bundle: &Path, pid: u32) -> Result<PathBuf, String> {
 
 /// Runs `script` under `sh` with `args` as `$1…`, detached from this process's group so it
 /// outlives the window.
-fn relaunch_unix(script: &str, args: &[&std::ffi::OsStr]) -> Result<(), String> {
+pub(crate) fn relaunch_unix(script: &str, args: &[&std::ffi::OsStr]) -> Result<(), String> {
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
@@ -1153,7 +1153,7 @@ fn relaunch_unix(script: &str, args: &[&std::ffi::OsStr]) -> Result<(), String> 
     })
 }
 
-fn relaunch_windows(pid: u32, exe: &Path) -> Result<(), String> {
+pub(crate) fn relaunch_windows(pid: u32, exe: &Path) -> Result<(), String> {
     let mut command = Command::new("powershell.exe");
     command
         .args([

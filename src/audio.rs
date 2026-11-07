@@ -323,6 +323,8 @@ pub struct AudioEngine {
     output_rate: RateConverter,
     pcm: VecDeque<f32>,
     monitor: VecDeque<f32>,
+    /// A notification sound still to play, mixed over voice even while deafened.
+    chime: VecDeque<f32>,
     encoder: Encoder,
     incoming: AudioHandler,
     pub codec: CodecType,
@@ -441,6 +443,7 @@ impl AudioEngine {
             output_rate,
             pcm: VecDeque::new(),
             monitor: VecDeque::new(),
+            chime: VecDeque::new(),
             encoder,
             incoming: AudioHandler::new(),
             codec: CodecType::OpusVoice,
@@ -509,6 +512,11 @@ impl AudioEngine {
         }
     }
 
+    /// Plays the poke chime: two soft rising notes, about a third of a second.
+    pub fn chime(&mut self) {
+        self.chime = chime_samples().into();
+    }
+
     pub fn clear_playback(&mut self) {
         self.incoming = AudioHandler::new();
         while self.playback.pop().is_some() {}
@@ -545,7 +553,7 @@ impl AudioEngine {
         &mut self,
         loopback: bool,
         deafened: bool,
-        stream_audio: Option<&crate::streaming::Surface>,
+        stream_audio: Option<&crate::streaming::Surfaces>,
     ) -> Result<Vec<Vec<u8>>> {
         let _trace = profiler::scope(Category::AudioProcessing, "audio.process");
         if let Some(error) = self.errors.pop() {
@@ -632,8 +640,17 @@ impl AudioEngine {
                 }
             } else if !deafened {
                 self.incoming.fill_buffer(&mut stereo);
-                if let Some(surface) = stream_audio {
-                    surface.mix_audio(&mut stereo);
+                if let Some(surfaces) = stream_audio {
+                    surfaces.mix_audio(&mut stereo);
+                }
+            }
+            if !loopback {
+                for frame in stereo.as_chunks_mut::<2>().0 {
+                    let Some(sample) = self.chime.pop_front() else {
+                        break;
+                    };
+                    frame[0] = (frame[0] + sample).clamp(-1.0, 1.0);
+                    frame[1] = (frame[1] + sample).clamp(-1.0, 1.0);
                 }
             }
             for (i, frame) in stereo.as_chunks::<2>().0.iter().enumerate() {
@@ -649,6 +666,21 @@ impl AudioEngine {
         }
         Ok(packets)
     }
+}
+
+/// Two sine notes a fifth apart (A5 then E6), each with a quick attack and a soft decay.
+fn chime_samples() -> Vec<f32> {
+    let note = |frequency: f32, length: usize| {
+        (0..length).map(move |i| {
+            let t = i as f32 / RATE as f32;
+            let attack = (i as f32 / (RATE as f32 * 0.005)).min(1.0);
+            let decay = (-t * 9.0).exp();
+            (std::f32::consts::TAU * frequency * t).sin() * attack * decay * 0.28
+        })
+    };
+    note(880.0, RATE * 3 / 20)
+        .chain(note(1318.5, RATE / 5))
+        .collect()
 }
 
 pub(crate) fn report_stream_error(error: cpal::Error, errors: &ArrayQueue<String>) {
@@ -819,6 +851,19 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
 mod tests {
     use super::*;
     use audiopus::coder::Decoder;
+
+    #[test]
+    fn the_poke_chime_is_short_quiet_and_fades_out() {
+        let chime = chime_samples();
+        assert_eq!(chime.len(), RATE * 7 / 20);
+        assert!(chime.iter().all(|sample| sample.abs() <= 0.28));
+        assert!(chime.iter().any(|sample| sample.abs() > 0.1));
+        assert!(
+            chime[chime.len() - 10..]
+                .iter()
+                .all(|sample| sample.abs() < 0.06)
+        );
+    }
 
     #[test]
     fn capture_generations_reject_inflight_audio_after_mute_and_resume() {

@@ -45,7 +45,18 @@ pub const SCENES: &[Scene] = &[
     ("audio-processing", audio_processing_page),
     ("push-to-talk", push_to_talk_page),
     ("push-to-talk-connected", push_to_talk_connected),
-    ("performance", performance),
+    ("member-menu", member_menu),
+    ("member-selection", member_selection),
+    ("member-drag", member_drag),
+    ("poke", poke),
+    ("poked", poked),
+    ("share", share),
+    ("sharing", sharing),
+    ("watching", watching),
+    ("watching-grid", watching_grid),
+    ("watching-focus", watching_focus),
+    ("watching-stats", watching_stats),
+    ("install", install),
     ("password", password),
     ("alert", alert),
     ("update-available", update_available),
@@ -155,6 +166,8 @@ fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member
         is_self,
         mic_muted,
         sound_muted: false,
+        can_poke: None,
+        can_move: (!is_self).then_some(id != 3),
     }
 }
 
@@ -421,10 +434,159 @@ fn push_to_talk_connected(s: &mut App) {
     s.talking = [2].into();
 }
 
-fn performance(s: &mut App) {
+fn member_menu(s: &mut App) {
     connected(s);
-    s.performance_mode
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+    s.ui.member_menu = Some((2, rune::PointerPress { x: 150.0, y: 200.0 }));
+}
+
+fn member_selection(s: &mut App) {
+    connected(s);
+    s.selected_members = [2, 4].into();
+    s.ui.member_menu = Some((4, rune::PointerPress { x: 150.0, y: 240.0 }));
+    s.ui.move_menu = true;
+}
+
+fn member_drag(s: &mut App) {
+    connected(s);
+    s.selected_members = [2, 4].into();
+    s.ui.drag = Some(super::MemberDrag {
+        ids: vec![2, 4],
+        at: (150.0, 250.0),
+        target: Some(4),
+    });
+}
+
+fn poke(s: &mut App) {
+    connected(s);
+    s.poke = Some(crate::PokeDraft {
+        id: 2,
+        name: "Mara".into(),
+        message: "Raid starts in 5".into(),
+    });
+    s.sync_fields();
+}
+
+fn poked(s: &mut App) {
+    connected(s);
+    s.pokes.push(crate::Poke {
+        from: "Theo".into(),
+        message: "Can you hear me?".into(),
+    });
+}
+
+fn share_sources(s: &mut App) {
+    use crate::streaming::publishing::ShareSource;
+    s.streaming.sharing.sources = vec![
+        ShareSource {
+            window: false,
+            id: Some(1),
+            name: "Built-in Retina Display".into(),
+        },
+        ShareSource {
+            window: true,
+            id: Some(2),
+            name: "Code — flexspeak".into(),
+        },
+    ];
+    s.streaming.sharing.selected = s.streaming.sharing.sources.first().cloned();
+}
+
+fn share(s: &mut App) {
+    connected(s);
+    share_sources(s);
+    s.streaming.share_open = true;
+}
+
+fn sharing(s: &mut App) {
+    connected(s);
+    share_sources(s);
+    let status = &mut s.streaming.sharing.status;
+    status.active = true;
+    status.live = true;
+    status.detail = "Sharing Built-in Retina Display · 720p · 30 fps".into();
+    status.viewers = vec![(2, "Mara".into(), true)];
+    status.requests = vec![(4, "Ines".into())];
+}
+
+/// Streams watched without frames yet: what a fresh view looks like before video arrives.
+fn watch(s: &mut App, streams: &[(&str, u16, &str, crate::streaming::Phase)]) {
+    connected(s);
+    for (slot, (id, publisher, name, phase)) in streams.iter().enumerate() {
+        let info = crate::streaming::StreamInfo {
+            id: (*id).into(),
+            publisher: *publisher,
+            name: (*name).into(),
+            viewers: 2,
+            has_audio: true,
+            server_relayed: false,
+        };
+        s.streaming.update(crate::streaming::Event::State {
+            generation: 100 + slot as u64,
+            slot,
+            stream: info,
+            phase: *phase,
+            detail: "Receiving stream · audio follows playback volume and deafen".into(),
+        });
+    }
+}
+
+fn watching(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(s, &[("s1", 2, "Mara’s screen", Phase::Receiving)]);
+    s.streaming.catalog.push(crate::streaming::StreamInfo {
+        id: "s2".into(),
+        publisher: 4,
+        name: "Ines’s game".into(),
+        viewers: 1,
+        has_audio: false,
+        server_relayed: false,
+    });
+}
+
+fn watching_grid(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(
+        s,
+        &[
+            ("s1", 2, "Mara’s screen", Phase::Receiving),
+            ("s2", 4, "Ines’s game", Phase::Negotiating),
+            ("s3", 3, "Theo’s window", Phase::Requesting),
+        ],
+    );
+}
+
+fn watching_focus(s: &mut App) {
+    watching_grid(s);
+    s.streaming.focused = Some("s2".into());
+    s.streaming.set_volume(4, 40);
+}
+
+fn watching_stats(s: &mut App) {
+    watching(s);
+    s.streaming.show_stats = true;
+    if let Some(watch) = s.streaming.watching.first_mut() {
+        watch.stats = crate::streaming::Stats {
+            codec: "VP8".into(),
+            width: 1280,
+            height: 720,
+            fps: 29.8,
+            packets: 18_204,
+            decoded_frames: 1_790,
+            bytes: 21_000_000,
+            decoder: "libvpx".into(),
+            ice_path: "host → srflx (UDP)".into(),
+            ..Default::default()
+        };
+    }
+}
+
+fn install(s: &mut App) {
+    home(s);
+    s.install_offer = Some(crate::install::Offer {
+        from: "/Users/jan/Downloads/Flexspeak.app".into(),
+        to: "/Applications/Flexspeak.app".into(),
+    });
+    s.install_prompt = true;
 }
 
 fn password(s: &mut App) {
@@ -554,13 +716,9 @@ mod tests {
     }
 
     #[test]
-    fn every_scene_builds_at_the_normal_and_compact_minimum_sizes() {
+    fn every_scene_builds_at_the_minimum_and_a_large_size() {
         for (name, scene) in SCENES {
-            for size in [
-                crate::NORMAL_MIN_SIZE,
-                crate::COMPACT_MIN_SIZE,
-                (1400.0, 900.0),
-            ] {
+            for size in [crate::MIN_SIZE, (1400.0, 900.0)] {
                 let mut rt = runtime(*scene, size);
                 for _ in 0..30 {
                     rt.frame(1.0 / 30.0);
@@ -723,16 +881,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_stays_closed_during_setup_and_performance_mode() {
+    fn settings_stays_closed_during_setup() {
         let mut app = App::with_devices(crate::audio::Devices::default(), None);
         setup(&mut app);
         let _ = app.update(crate::Message::OpenSettings(SettingsPage::Audio));
         assert_eq!(app.settings_page, None);
         home(&mut app);
-        app.performance_mode
-            .store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = app.update(crate::Message::OpenSettings(SettingsPage::Audio));
-        assert_eq!(app.settings_page, None);
+        assert_eq!(app.settings_page, Some(SettingsPage::Audio));
     }
 
     #[test]
@@ -834,12 +990,7 @@ mod tests {
                 "statistics-scroll",
                 "record-trace",
             ),
-            (
-                "streams",
-                crowded_streams,
-                "streams-scroll",
-                "refresh-streams",
-            ),
+            ("streams", crowded_streams, "streams-scroll", "stream-s1"),
             ("channels", connected, "channel-scroll", "channels"),
             ("setup", devices, "setup-scroll", "refresh-devices"),
         ];
