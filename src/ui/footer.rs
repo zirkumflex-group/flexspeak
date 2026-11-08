@@ -8,7 +8,14 @@ use super::{charts, icons};
 use crate::{App, Message, usage};
 
 fn status_pill(s: &App, t: &Theme) -> El {
-    let (health, label, detail) = s.footer_connection_status();
+    let (mut health, mut label, mut detail) = s.footer_connection_status();
+    // A server that refuses requests for a while needs no dialog: Flexspeak resends what it
+    // must, so the pill says so until the server takes commands again.
+    if s.live() && s.server().limited {
+        health = usage::Health::Fair;
+        label = "Limited";
+        detail = "The server is limiting how often Flexspeak can send it requests. Your mute and deafen work here right away; others see them once it eases off, usually within a minute. Connection details pause until then.".into();
+    }
     let color = t.health(health);
     let lit = health != usage::Health::Unknown;
     row()
@@ -80,7 +87,7 @@ pub(super) fn resources(s: &App) -> Resources {
         cpu: (
             usage.cpu_percent.map_or_else(
                 || "…".into(),
-                |value| usage::format_cpu_percent(f64::from(value)),
+                |value| usage::format_cpu_whole(f64::from(value)),
             ),
             usage::cpu_health(usage.cpu_percent),
         ),

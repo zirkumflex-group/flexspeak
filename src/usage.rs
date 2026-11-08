@@ -62,6 +62,16 @@ pub fn format_cpu_percent(value: f64) -> String {
     format!("{}%", value.trim_end_matches('0').trim_end_matches('.'))
 }
 
+/// The live CPU figure, in whole percent so small changes don't keep redrawing it. The
+/// tooltip and charts keep the exact value.
+pub fn format_cpu_whole(value: f64) -> String {
+    if value > 0.0 && value < 0.5 {
+        "<1%".into()
+    } else {
+        format!("{value:.0}%")
+    }
+}
+
 /// `percent` of one core, and the same load as a share of the whole machine, as Task Manager
 /// and Activity Monitor's CPU totals show it.
 pub fn cpu_detail(percent: Option<f32>) -> String {
@@ -332,6 +342,14 @@ impl ServerUsage {
         }
     }
 
+    /// A reading made up for previews.
+    pub fn preview(quality: ConnectionUsage, now: Instant) -> Self {
+        Self {
+            received_at: now,
+            quality,
+        }
+    }
+
     pub fn sample(&self, now: Instant) -> ConnectionUsage {
         if now.saturating_duration_since(self.received_at) > SERVER_MAX_AGE {
             ConnectionUsage::default()
@@ -408,6 +426,46 @@ impl Health {
             (Self::Fair, _) | (_, Self::Fair) => Self::Fair,
             (Self::Unknown, _) => Self::Unknown,
             _ => Self::Good,
+        }
+    }
+}
+
+/// How long a new health state must last before the globe shows it.
+pub const HEALTH_HOLD: Duration = Duration::from_secs(4);
+
+/// Connection health as shown. Readings arrive every second or so and wobble across the
+/// thresholds while someone talks, so a new state only appears once it has lasted
+/// `HEALTH_HOLD`; a reading back at the shown state cancels the change.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SteadyHealth {
+    shown: Option<Health>,
+    /// When readings started to differ from `shown`.
+    since: Option<Instant>,
+}
+
+impl SteadyHealth {
+    pub fn update(&mut self, reading: Health, now: Instant) {
+        match self.shown {
+            Some(shown) if shown != reading => {
+                let since = *self.since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= HEALTH_HOLD {
+                    self.shown = Some(reading);
+                    self.since = None;
+                }
+            }
+            _ => {
+                self.shown = Some(reading);
+                self.since = None;
+            }
+        }
+    }
+
+    /// What to show while the latest reading is `reading`. Missing data shows at once, as
+    /// does the first reading.
+    pub fn show(&self, reading: Health) -> Health {
+        match self.shown {
+            Some(shown) if reading != Health::Unknown => shown,
+            _ => reading,
         }
     }
 }
@@ -599,6 +657,41 @@ mod tests {
         ] {
             assert_eq!(format_cpu_percent(value), expected);
         }
+    }
+
+    #[test]
+    fn live_cpu_is_whole_percent() {
+        for (value, expected) in [
+            (0.0, "0%"),
+            (0.2, "<1%"),
+            (0.6, "1%"),
+            (23.415, "23%"),
+            (26.562, "27%"),
+            (201.125, "201%"),
+        ] {
+            assert_eq!(format_cpu_whole(value), expected);
+        }
+    }
+
+    #[test]
+    fn steady_health_waits_before_changing() {
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let mut steady = SteadyHealth::default();
+        assert_eq!(steady.show(Health::Good), Health::Good);
+        steady.update(Health::Good, at(0));
+        // One jittery reading, then back: never shown.
+        steady.update(Health::Fair, at(1));
+        assert_eq!(steady.show(Health::Fair), Health::Good);
+        steady.update(Health::Good, at(2));
+        steady.update(Health::Fair, at(3));
+        steady.update(Health::Poor, at(5));
+        assert_eq!(steady.show(Health::Poor), Health::Good);
+        // Away from Good for the whole hold: the latest reading shows.
+        steady.update(Health::Poor, at(7));
+        assert_eq!(steady.show(Health::Poor), Health::Poor);
+        // Missing data is never held back.
+        assert_eq!(steady.show(Health::Unknown), Health::Unknown);
     }
 
     #[test]

@@ -11,8 +11,8 @@ use rune_kit::{Checkbox, Dialog, Kit};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Range, Variant, button, faint, group_title, icon_button, lit_dot, meter, muted, picker, pulse,
-    scroll_page, slider,
+    Range, Variant, button, faint, icon_button, lit_dot, meter, muted, picker, pulse, scroll_page,
+    slider,
 };
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
@@ -56,7 +56,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                     .child(channel_title(s, t))
                     .child(tools(s, t, supported, watching)),
             )
-            .child(scroll_page(k, "streams-scroll", no_streams(t, supported)));
+            .child(no_streams(t, supported));
     }
     pane
 }
@@ -218,11 +218,14 @@ fn watch_blocked(s: &App, supported: bool, stream: &streaming::StreamInfo) -> Op
     }
 }
 
-/// What the pane shows while no stream is running in the channel.
+/// What the pane shows while no stream is running in the channel: centred in the space left
+/// below the header, however wide the window is.
 fn no_streams(t: &Theme, supported: bool) -> El {
     let mut content = col()
+        .key("no-streams-area")
+        .grow(1.0)
+        .min_h(0.0)
         .w_full()
-        .max_w(860.0)
         .px(size::PAGE)
         .pb(size::PAGE)
         .gap(10.0);
@@ -237,16 +240,15 @@ fn no_streams(t: &Theme, supported: bool) -> El {
             "Native screen sharing is available on Mac and Windows.",
         )));
     }
-    content
-        .child(group_title(t, "In this channel").pt(0.0).px(0.0))
-        .child(
-            col()
-                .key("no-streams")
-                .w_full()
-                .pt(40.0)
-                .pb(12.0)
-                .gap(8.0)
-                .center()
+    content.child(
+        col()
+            .key("no-streams")
+            .grow(1.0)
+            .w_full()
+            // A little above the middle reads as centred; the header already sits on top.
+            .pb(56.0)
+            .gap(8.0)
+            .center()
                 .child(
                     el().size(44.0, 44.0)
                         .radius(radius::CARD)

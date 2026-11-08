@@ -298,29 +298,6 @@ pub fn health_dot(t: &Theme, health: Health, help: impl Into<String>) -> El {
     )
 }
 
-/// A ring that fills and glows softly while the client is heard, in the same green as a
-/// server tile's ring and the voice panel's edge.
-pub fn speaking_dot(t: &Theme, talking: bool) -> El {
-    let (ring, fill, glow) = if talking {
-        (t.good, t.good, t.good.alpha(0.55))
-    } else {
-        (t.faint.alpha(0.7), t.good.alpha(0.0), t.good.alpha(0.0))
-    };
-    el().w(12.0)
-        .h(20.0)
-        .center()
-        .help(if talking { "Speaking" } else { "Not speaking" })
-        .child(
-            el().size(8.0, 8.0)
-                .radius(4.0)
-                .fill(fill)
-                .border(1.5, ring)
-                .shadow(0.0, 8.0, glow)
-                .motion(motion::QUICK)
-                .a11y_hidden(),
-        )
-}
-
 /// A level from 0 to 1. Readings arrive about ten times a second, so the bar steps to each one
 /// rather than springing: a spring would keep the window drawing for the whole call.
 pub fn meter(t: &Theme, key: &str, level: f32, color: Color) -> El {

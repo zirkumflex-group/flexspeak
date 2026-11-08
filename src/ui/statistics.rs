@@ -156,7 +156,7 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                     "App CPU",
                     s.process_usage.cpu_percent.map_or_else(
                         || "—".into(),
-                        |value| usage::format_cpu_percent(f64::from(value)),
+                        |value| usage::format_cpu_whole(f64::from(value)),
                     ),
                     &s.cpu_history,
                     true,

@@ -58,6 +58,11 @@ impl Operation {
             Self::Statistics | Self::Discovery | Self::PublisherInfo
         )
     }
+    /// Whether Flexspeak sends this again by itself after the server refuses it, so a refusal
+    /// needs no one's attention.
+    pub fn retried(self) -> bool {
+        matches!(self, Self::Controls | Self::Subscribe) || self.optional()
+    }
     fn priority(self) -> u8 {
         match self {
             Self::Controls | Self::Join | Self::Subscribe | Self::StreamStop => 0,
@@ -242,7 +247,7 @@ impl Flow {
     }
     pub fn flood_detail(&self, operation: Operation, now: Instant) -> String {
         format!(
-            "The server is limiting requests (ClientIsFlooding): {}. Commands will wait about {} seconds before one recovery attempt. Local mute/deafen still apply.",
+            "The server asked Flexspeak to slow down, so the {} wasn't sent. Try again in about {} seconds.",
             operation.label(),
             self.wait_seconds(now)
         )
@@ -360,6 +365,30 @@ mod tests {
         }
         assert!(flow.enqueue(command(), Operation::Controls).is_err());
     }
+    #[test]
+    fn only_requests_flexspeak_resends_itself_count_as_retried() {
+        for operation in [
+            Operation::Controls,
+            Operation::Subscribe,
+            Operation::Statistics,
+            Operation::Discovery,
+            Operation::PublisherInfo,
+        ] {
+            assert!(operation.retried(), "{operation:?}");
+        }
+        for operation in [
+            Operation::Join,
+            Operation::Poke,
+            Operation::Move,
+            Operation::Moderate,
+            Operation::Groups,
+            Operation::StreamJoin,
+            Operation::StreamStart,
+        ] {
+            assert!(!operation.retried(), "{operation:?}");
+        }
+    }
+
     #[test]
     fn real_reply_tracking_and_expiry_never_mistake_an_old_ack_for_recovery() {
         let now = Instant::now();

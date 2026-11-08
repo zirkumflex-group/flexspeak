@@ -326,6 +326,8 @@ pub enum Event {
         detail: String,
     },
     Recovered(Source),
+    /// The server refused a command as flooding; `Recovered(Source::Flood)` ends it.
+    Limited,
     Controls {
         confirmed: Option<AudioState>,
         pending: bool,
@@ -535,16 +537,23 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
         state
             .channels
             .values()
-            .map(|c| Channel {
-                id: c.id.0,
-                name: c.name.clone(),
-                parent: c.parent.0,
-                order: c.order.0,
-                join_access: channel_join_access(c),
-                has_password: c.has_password.unwrap_or(false),
-                members_visible: c.subscribed || Some(c.id) == current_id,
-                members: members.remove(&c.id.0).unwrap_or_default(),
-                depth: 0,
+            .map(|c| {
+                let members = members.remove(&c.id.0).unwrap_or_default();
+                Channel {
+                    id: c.id.0,
+                    name: c.name.clone(),
+                    parent: c.parent.0,
+                    order: c.order.0,
+                    join_access: channel_join_access(c),
+                    has_password: c.has_password.unwrap_or(false),
+                    // The channel you just left can still be sent to you while its subscribed
+                    // flag reads false; anyone listed is someone you can see.
+                    members_visible: c.subscribed
+                        || Some(c.id) == current_id
+                        || !members.is_empty(),
+                    members,
+                    depth: 0,
+                }
             })
             .collect(),
     );
@@ -1102,9 +1111,14 @@ async fn run_connection(
                         if let Some(reply) = reply {
                             let ticket = reply.ticket;
                             if reply.flooded {
-                                let seconds = flow.borrow().wait_seconds(Instant::now());
-                                let _ = events.try_send(Event::Warning { source: Source::Flood, detail: format!(
-                                    "The server rejected {} (ClientIsFlooding). Optional requests are paused for about {seconds} seconds. Local mute/deafen still apply; one command will check recovery afterward.", reply.operation.label()) });
+                                let _ = events.try_send(Event::Limited);
+                                // What Flexspeak resends by itself only shows in the footer;
+                                // something you asked for that didn't happen gets a message.
+                                if !reply.operation.retried() {
+                                    let seconds = flow.borrow().wait_seconds(Instant::now());
+                                    let _ = events.try_send(Event::Warning { source: Source::Flood, detail: format!(
+                                        "The server asked Flexspeak to slow down, so the {} didn't go through. Try again in about {seconds} seconds.", reply.operation.label()) });
+                                }
                             }
                             if reply.recovered { let _ = events.try_send(Event::Recovered(Source::Flood)); }
                             if controls.reply(ticket, reply.result.is_ok(), reply.flooded) {
