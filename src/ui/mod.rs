@@ -152,6 +152,7 @@ pub struct UiState {
     /// Whether the pointer is over the server log, which shows its search button.
     pub log_hover: bool,
     /// Whether the pointer is over the window's close button, which turns its glyph white.
+    #[cfg(windows)]
     pub close_hover: bool,
     /// The server log's splitter is being dragged.
     pub log_resizing: bool,
@@ -186,6 +187,7 @@ impl Default for UiState {
             update_hover: false,
             streams_hover: false,
             log_hover: false,
+            #[cfg(windows)]
             close_hover: false,
             log_resizing: false,
             log_people: false,

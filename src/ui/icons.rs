@@ -275,21 +275,25 @@ pub static MINIMIZE: Icon = Icon {
 };
 // Windows caption buttons, drawn like Windows 11's own: 10 pt glyphs on a 1 pt stroke, with
 // the square's softly rounded corners. Lucide's 2 pt icons read heavy beside the system's.
+#[cfg(windows)]
 pub static CAPTION_MINIMIZE: Icon = Icon {
     name: "caption-minimize",
     view: 10.0,
     body: r#"<path d="M0 5.5h10" fill="none" stroke="currentColor" stroke-width="1"/>"#,
 };
+#[cfg(windows)]
 pub static CAPTION_MAXIMIZE: Icon = Icon {
     name: "caption-maximize",
     view: 10.0,
     body: r#"<rect x="0.5" y="0.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1"/>"#,
 };
+#[cfg(windows)]
 pub static CAPTION_RESTORE: Icon = Icon {
     name: "caption-restore",
     view: 10.0,
     body: r#"<rect x="0.5" y="2.5" width="7" height="7" rx="1.2" fill="none" stroke="currentColor" stroke-width="1"/><path d="M2.5 2.5V1.7A1.2 1.2 0 0 1 3.7 0.5H8.3A1.2 1.2 0 0 1 9.5 1.7V6.3A1.2 1.2 0 0 1 8.3 7.5H7.5" fill="none" stroke="currentColor" stroke-width="1"/>"#,
 };
+#[cfg(windows)]
 pub static CAPTION_CLOSE: Icon = Icon {
     name: "caption-close",
     view: 10.0,
