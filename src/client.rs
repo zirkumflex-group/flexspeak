@@ -62,8 +62,6 @@ pub struct Config {
 #[derive(Debug)]
 pub enum Command {
     Stop,
-    /// Plays a short sound on the shared audio device.
-    Cue(crate::audio::Cue),
     Mute(bool),
     Deafen(bool),
     Join(u64, String),
@@ -653,7 +651,6 @@ async fn run_connection(
                     if !connected { continue; }
                     let state = connection.get_state()?;
                     match command {
-                        Command::Cue(cue) => audio.cue(cue),
                         Command::Mute(value) => {
                             controls.desired.muted = value;
                             if value { audio.set_can_send(false); }
@@ -766,7 +763,6 @@ async fn run_connection(
                             if let BookEvent::Message { target: tsclientlib::MessageTarget::Poke(_), invoker, message } = change {
                                 let clean = |text: &str, limit: usize| text.chars().filter(|c| !c.is_control()).take(limit).collect::<String>();
                                 let _ = events.try_send(Event::Poked { from: clean(&invoker.name, 64), message: clean(message, 200) });
-                                audio.cue(crate::audio::Cue::Poke);
                                 continue;
                             }
                             if let BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }

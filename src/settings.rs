@@ -41,9 +41,11 @@ pub struct Settings {
     /// What you've set for other people, by identity. Only changes what you hear.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub user_audio: BTreeMap<String, UserAudio>,
-    /// A short sound when you mute, unmute, deafen or undeafen.
+    /// Whether the app plays its short event sounds at all.
     #[serde(skip_serializing_if = "is_true")]
     pub sound_cues: bool,
+    #[serde(skip_serializing_if = "crate::sounds::Settings::is_default")]
+    pub sounds: crate::sounds::Settings,
     /// Kept as written, so one bad entry can't stop the settings from loading.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_themes: Vec<serde_json::Value>,
@@ -237,6 +239,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             user_audio: BTreeMap::new(),
             sound_cues: true,
+            sounds: crate::sounds::Settings::default(),
             custom_themes: Vec::new(),
             skip_install_prompt: false,
         }

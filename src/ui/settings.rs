@@ -178,16 +178,13 @@ fn sections(
                 "transmission",
                 "Voice Transmission",
                 "audio talk send",
-                {
-                    let mut rows = transmission_rows(s, t, k, layer);
-                    rows.push(sound_cues_row(s, t, k));
-                    rows
-                },
+                transmission_rows(s, t, k, layer),
             )
             .note(group_note(
                 t,
                 "Stop the microphone test or disconnect from every server to change processing and transmission. Save to keep them.",
             )),
+            sound_section(s, t, k, layer),
         ],
         SettingsPage::Shortcuts => vec![shortcut_section(s, t, k)],
         SettingsPage::Permissions => vec![permission_section(s, t)],
@@ -1617,14 +1614,14 @@ fn processing_with(s: &App, change: impl FnOnce(&mut audio_processing::Settings)
 
 fn sound_cues_row(s: &App, t: &Theme, k: &Kit) -> Row {
     item(
-        "sound cues mute deafen beep notification",
+        "sound cues beep notification enable",
         form_row(
             t,
-            "Sound cues",
-            Some("Plays a short sound when you mute, unmute, deafen or undeafen."),
+            "Play sounds",
+            Some("Short sounds for mute, pokes, channels and your stream."),
             switch(
                 "sound-cues",
-                "Sound cues",
+                "Play sounds",
                 s.sound_cues,
                 true,
                 k,
@@ -1632,6 +1629,81 @@ fn sound_cues_row(s: &App, t: &Theme, k: &Kit) -> Row {
             ),
         ),
     )
+}
+
+/// The volume of every sound, and which sound each event uses.
+fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
+    use crate::sounds::{Sound, Source};
+    let connected = s.sessions.iter().any(|session| session.connected);
+    let volume = s.sounds.volume_percent;
+    let mut rows = vec![
+        sound_cues_row(s, t, k),
+        item(
+            "sound cues volume loudness",
+            form_row(
+                t,
+                format!("Sound volume · {volume}%"),
+                None,
+                trailing(percent_slider(
+                    t,
+                    "sound-volume",
+                    "Sound volume",
+                    volume,
+                    |s| s.sounds.volume_percent,
+                    Message::SoundVolume,
+                )),
+            ),
+        ),
+    ];
+    for sound in Sound::ALL {
+        let choices = [Source::Flexspeak, Source::TeamSpeak, Source::Off];
+        let names = choices.iter().map(|c| c.title().to_owned()).collect();
+        let current = s.sounds.source(sound);
+        let chooser = picker(
+            k,
+            s,
+            sound.key(),
+            names,
+            Some(current.title()),
+            "Choose…",
+            s.sound_cues,
+            size::FORM_CONTROL - 36.0,
+            move |index| Message::SoundSource(sound, choices[index]),
+            layer,
+        );
+        let preview = icon_button(
+            t,
+            &format!("preview-{}", sound.key()),
+            &icons::PLAY,
+            if connected {
+                "Play this sound"
+            } else {
+                "Connect to a server to hear it"
+            },
+            Variant::Ghost,
+            (connected && current != Source::Off).then_some(Message::PreviewSound(sound)),
+        );
+        rows.push(item(
+            format!("sound cues {}", sound.title().to_lowercase()),
+            form_row(
+                t,
+                sound.title(),
+                None,
+                trailing(
+                    row()
+                        .w_full()
+                        .gap(8.0)
+                        .center_y()
+                        .child(preview)
+                        .child(el().grow(1.0).min_w(0.0).child(chooser)),
+                ),
+            ),
+        ));
+    }
+    Section::boxed("sounds", "Sound Cues", "audio sound cues", rows).note(group_note(
+        t,
+        "Flexspeak and TeamSpeak sounds are included with the app.",
+    ))
 }
 
 fn typing_row(s: &App, t: &Theme, k: &Kit) -> Row {

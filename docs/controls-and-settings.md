@@ -105,7 +105,7 @@ CPU, RAM and the platform-specific memory detail stay in the bottom bar while th
 
 Right-click a server in the rail to **Disconnect** from it without switching to it.
 
-Right-click someone in the channel tree to **Mute** them or set their **Volume** from 0 to 200%. This only changes what you hear, is remembered by their identity across servers and reconnects, and a person you muted shows a red speaker icon on their row. **Sound cues** under Settings → Audio plays a short sound for your own mute, unmute, deafen and undeafen, and is on by default.
+Right-click someone in the channel tree to **Mute** them or set their **Volume** from 0 to 200%. This only changes what you hear, is remembered by their identity across servers and reconnects, and a person you muted shows a red speaker icon on their row. **Sound Cues** under Settings → Audio covers your own mute, unmute, deafen and undeafen, being poked, joining or being moved to a channel, and people joining or leaving your stream. It has one volume for all of them, and each can use Flexspeak's sound, TeamSpeak's, or none. The nine TeamSpeak sounds are bundled in the Flexspeak executable and are available on every platform without installing TeamSpeak. The old `sounds.folder` setting is ignored and omitted on the next save.
 
 On an Omarchy desktop, Flexspeak follows the active Omarchy theme and updates within a second of a switch, including themes you installed yourself. An **Omarchy** section appears at the top of Appearance only there; turn off **Match Omarchy theme** to use the themes below instead.
 

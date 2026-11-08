@@ -564,9 +564,9 @@ impl AudioEngine {
         Ok(packets)
     }
 
-    /// Plays a short cue over whatever is playing.
-    pub fn cue(&mut self, cue: Cue) {
-        self.chime = cue_samples(cue).into();
+    /// Plays a short sound over whatever is playing, replacing one already going.
+    pub fn play(&mut self, samples: Vec<f32>) {
+        self.chime = samples.into();
     }
 
     pub fn level(&self) -> f32 {
@@ -746,16 +746,10 @@ pub enum Cue {
     MicOn,
     SoundOff,
     SoundOn,
-}
-
-impl Cue {
-    pub const ALL: [Self; 5] = [
-        Self::Poke,
-        Self::MicOff,
-        Self::MicOn,
-        Self::SoundOff,
-        Self::SoundOn,
-    ];
+    Joined,
+    Moved,
+    ViewerJoined,
+    ViewerLeft,
 }
 
 /// Sine notes, each with a quick attack and a soft decay.
@@ -773,7 +767,7 @@ fn tones(notes: &[(f32, usize)], gain: f32) -> Vec<f32> {
         .collect()
 }
 
-fn cue_samples(cue: Cue) -> Vec<f32> {
+pub fn cue_samples(cue: Cue) -> Vec<f32> {
     let step = RATE * 9 / 100;
     match cue {
         // A5 then E6.
@@ -782,6 +776,10 @@ fn cue_samples(cue: Cue) -> Vec<f32> {
         Cue::MicOn => tones(&[(440.0, step), (659.3, step)], 0.2),
         Cue::SoundOff => tones(&[(392.0, step), (261.6, step)], 0.2),
         Cue::SoundOn => tones(&[(261.6, step), (392.0, step)], 0.2),
+        Cue::Joined => tones(&[(523.3, step), (784.0, step)], 0.2),
+        Cue::Moved => tones(&[(659.3, step), (523.3, step), (659.3, step)], 0.2),
+        Cue::ViewerJoined => tones(&[(784.0, step), (1046.5, step)], 0.16),
+        Cue::ViewerLeft => tones(&[(1046.5, step), (784.0, step)], 0.16),
     }
 }
 
@@ -972,9 +970,19 @@ mod tests {
 
     #[test]
     fn mute_and_deafen_cues_are_short_quiet_and_all_different() {
-        let cues = [Cue::MicOff, Cue::MicOn, Cue::SoundOff, Cue::SoundOn].map(cue_samples);
+        let cues = [
+            Cue::MicOff,
+            Cue::MicOn,
+            Cue::SoundOff,
+            Cue::SoundOn,
+            Cue::Joined,
+            Cue::Moved,
+            Cue::ViewerJoined,
+            Cue::ViewerLeft,
+        ]
+        .map(cue_samples);
         for cue in &cues {
-            assert!(cue.len() < RATE / 4, "brief enough to repeat quickly");
+            assert!(cue.len() < RATE * 3 / 10, "brief enough to repeat quickly");
             assert!(cue.iter().all(|sample| sample.abs() <= 0.2));
             assert!(cue.iter().any(|sample| sample.abs() > 0.08));
         }

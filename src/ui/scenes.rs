@@ -37,6 +37,7 @@ pub const SCENES: &[Scene] = &[
     ("settings", settings_page),
     ("settings-appearance", settings_appearance),
     ("settings-omarchy", settings_omarchy),
+    ("settings-sounds", settings_sounds),
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
     ("settings-picker", settings_picker),
@@ -455,6 +456,13 @@ fn settings_more_themes(s: &mut App) {
     settings_appearance(s);
     s.settings_path = Some("/home/jan/.config/flexspeak/settings.json".into());
     s.settings_query = "mocha".into();
+}
+
+/// Searching brings the list of sounds into view.
+fn settings_sounds(s: &mut App) {
+    connected(s);
+    s.settings_page = Some(SettingsPage::Audio);
+    s.settings_query = "sound cues".into();
 }
 
 /// On an Omarchy desktop, following its Nord theme.

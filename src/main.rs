@@ -20,6 +20,7 @@ mod profiler;
 mod resume;
 mod settings;
 mod shortcuts;
+mod sounds;
 mod streaming;
 mod system_appearance;
 mod themes;
@@ -153,6 +154,13 @@ struct App {
     /// `user_audio` as the voice threads read it.
     user_gains: client::UserGains,
     sound_cues: bool,
+    sounds: sounds::Settings,
+    /// TeamSpeak's sounds, bundled with the app.
+    sound_bank: sounds::Bank,
+    /// The sound volume moved and hasn't been saved yet.
+    sounds_unsaved: bool,
+    #[cfg(test)]
+    played_sounds: Vec<sounds::Sound>,
     /// `custom_themes` as written in the settings file.
     custom_themes: Vec<serde_json::Value>,
     theme_library: themes::Library,
@@ -218,6 +226,9 @@ struct App {
 
 /// One server you're connected to, or connecting to, and what the window shows for it.
 struct ServerSession {
+    /// The channel you asked to join, to tell that apart from being moved.
+    expected_channel: Option<u64>,
+    quiet_channel_change: bool,
     id: hub::SessionId,
     /// The name it's saved under, if it has one.
     name: String,
@@ -274,6 +285,8 @@ impl ServerSession {
         visible: Arc<AtomicBool>,
     ) -> Self {
         Self {
+            expected_channel: None,
+            quiet_channel_change: false,
             id,
             name,
             address,
@@ -416,6 +429,49 @@ impl SettingsPage {
     }
 }
 
+/// Which sound a channel change deserves. Connecting isn't a change, and neither is losing it.
+fn channel_sound(session: &mut ServerSession, next: &client::Snapshot) -> Option<sounds::Sound> {
+    let before = session.state.current.as_ref().map(|channel| channel.id);
+    let after = next.current.as_ref().map(|channel| channel.id);
+    let (Some(before), Some(after)) = (before, after) else {
+        return None;
+    };
+    if before == after {
+        return None;
+    }
+    let expected = session.expected_channel.take();
+    if std::mem::take(&mut session.quiet_channel_change) {
+        return None;
+    }
+    Some(if expected == Some(after) {
+        sounds::Sound::JoinedChannel
+    } else {
+        sounds::Sound::MovedChannel
+    })
+}
+
+/// One sound for each viewer who arrived or left, while your share keeps running.
+fn viewer_sounds(
+    before: &streaming::publishing::Status,
+    event: &streaming::Event,
+) -> Vec<sounds::Sound> {
+    let streaming::Event::Publishing(after) = event else {
+        return Vec::new();
+    };
+    if !before.live || !after.live {
+        return Vec::new();
+    }
+    let has = |status: &streaming::publishing::Status, id: u16| {
+        status.viewers.iter().any(|viewer| viewer.0 == id)
+    };
+    let joined = after.viewers.iter().filter(|v| !has(before, v.0));
+    let left = before.viewers.iter().filter(|v| !has(after, v.0));
+    joined
+        .map(|_| sounds::Sound::ViewerJoined)
+        .chain(left.map(|_| sounds::Sound::ViewerLeft))
+        .collect()
+}
+
 /// A shortcut being recorded, and why the last key press wasn't accepted.
 pub struct KeyCapture {
     binding: shortcuts::Binding,
@@ -489,6 +545,9 @@ enum Message {
     /// Silences or restores a person for you alone.
     ToggleUserMute(u16),
     SoundCues(bool),
+    SoundVolume(u8),
+    SoundSource(sounds::Sound, sounds::Source),
+    PreviewSound(sounds::Sound),
     ToggleClient(u16),
     /// A server's connection reporting; once it has ended, these are dropped.
     Backend(hub::SessionId, client::Event),
@@ -659,6 +718,11 @@ impl App {
             user_audio: BTreeMap::new(),
             user_gains: client::UserGains::default(),
             sound_cues: true,
+            sounds: sounds::Settings::default(),
+            sound_bank: sounds::Bank::bundled(),
+            sounds_unsaved: false,
+            #[cfg(test)]
+            played_sounds: Vec::new(),
             custom_themes: Vec::new(),
             theme_library: themes::Library::new(&[]),
             omarchy: None,
@@ -876,14 +940,11 @@ impl App {
         {
             let value = !self.server().muted;
             self.set_muted(id, value);
-            self.play_cue(
-                id,
-                if value {
-                    audio::Cue::MicOff
-                } else {
-                    audio::Cue::MicOn
-                },
-            );
+            self.play_sound(if value {
+                sounds::Sound::MicOff
+            } else {
+                sounds::Sound::MicOn
+            });
         }
     }
 
@@ -893,21 +954,41 @@ impl App {
         {
             let value = !self.server().deafened;
             self.set_deafened(id, value);
-            self.play_cue(
-                id,
-                if value {
-                    audio::Cue::SoundOff
-                } else {
-                    audio::Cue::SoundOn
-                },
-            );
+            self.play_sound(if value {
+                sounds::Sound::Deafened
+            } else {
+                sounds::Sound::Undeafened
+            });
         }
     }
 
-    fn play_cue(&mut self, id: hub::SessionId, cue: audio::Cue) {
-        if self.sound_cues {
-            self.send_to(id, client::Command::Cue(cue));
+    /// Plays an event's sound, if sounds are on and that one isn't turned off.
+    fn play_sound(&mut self, sound: sounds::Sound) {
+        if self.sound_cues && self.sounds.source(sound) != sounds::Source::Off {
+            #[cfg(test)]
+            self.played_sounds.push(sound);
+            self.preview_sound(sound);
         }
+    }
+
+    /// Plays the chosen sound at the chosen volume.
+    fn preview_sound(&self, sound: sounds::Sound) {
+        let mut samples = match self.sounds.source(sound) {
+            sounds::Source::Flexspeak => audio::cue_samples(sound.cue()),
+            sounds::Source::TeamSpeak => self.sound_bank.get(sound).to_vec(),
+            sounds::Source::Off => return,
+        };
+        let gain = f32::from(self.sounds.volume_percent) / 100.0;
+        samples.iter_mut().for_each(|sample| *sample *= gain);
+        self.hub.play(samples);
+    }
+
+    fn save_sounds(&mut self) {
+        let sounds = self.sounds.clone();
+        self.save_preference(
+            |saved| saved.sounds = sounds,
+            "That sound choice applies for now but was not saved",
+        );
     }
 
     /// What the voice threads play each person at. Everyone unset stays out of the map.
@@ -1049,6 +1130,9 @@ impl App {
 
     fn close_settings(&mut self) {
         self.end_recording();
+        if std::mem::take(&mut self.sounds_unsaved) {
+            self.save_sounds();
+        }
         self.settings_page = None;
         self.settings_query.clear();
         self.server_editor = None;
@@ -1218,6 +1302,7 @@ impl App {
         self.user_audio = saved.user_audio;
         self.sync_user_gains();
         self.sound_cues = saved.sound_cues;
+        self.sounds = saved.sounds;
         self.theme_library = themes::Library::new(&saved.custom_themes);
         self.custom_themes = saved.custom_themes;
     }
@@ -1243,6 +1328,7 @@ impl App {
             custom_themes: self.custom_themes.clone(),
             user_audio: self.user_audio.clone(),
             sound_cues: self.sound_cues,
+            sounds: self.sounds.clone(),
             skip_install_prompt: self
                 .saved
                 .as_ref()
@@ -2323,6 +2409,7 @@ impl App {
                         self.server_mut().password_channel = Some(id);
                         return Task::Focus(ui::Field::ChannelPassword);
                     }
+                    self.server_mut().expected_channel = Some(id);
                     self.command(client::Command::Join(id, String::new()));
                 }
             }
@@ -2334,6 +2421,7 @@ impl App {
                         self.server().channel_password.clone(),
                     ))
                 {
+                    self.server_mut().expected_channel = Some(id);
                     self.server_mut().channel_secret =
                         Some((id, self.server().channel_password.clone()));
                     self.server_mut().password_error = None;
@@ -2520,6 +2608,16 @@ impl App {
                     self.save_user_audio();
                 }
             }
+            Message::SoundVolume(percent) => {
+                self.sounds.volume_percent = percent.min(100);
+                self.sounds_unsaved = true;
+            }
+            Message::SoundSource(sound, source) => {
+                self.sounds.set_source(sound, source);
+                self.save_sounds();
+                self.preview_sound(sound);
+            }
+            Message::PreviewSound(sound) => self.preview_sound(sound),
             Message::SoundCues(on) => {
                 self.sound_cues = on;
                 self.save_preference(
@@ -2580,6 +2678,7 @@ impl App {
         let loopback = self.loopback;
         let active = self.active == Some(id);
         let session = &mut self.sessions[index];
+        let mut sounds_due = Vec::new();
         match event {
             client::Event::Status(status) => {
                 session.streaming.reset();
@@ -2629,6 +2728,7 @@ impl App {
             client::Event::State(state) => {
                 let channel_changed = session.state.current.as_ref().map(|channel| channel.id)
                     != state.current.as_ref().map(|channel| channel.id);
+                sounds_due.extend(channel_sound(session, &state));
                 if channel_changed {
                     session.client_usage.clear();
                 } else {
@@ -2686,12 +2786,17 @@ impl App {
                     session.channel_password.clear();
                 }
                 if let Some((channel, password)) = join {
+                    // Going back after an update isn't something to announce.
+                    if let Some(session) = self.session_mut(id) {
+                        session.quiet_channel_change = true;
+                    }
                     self.alerts.begin_in(id.0, Source::Join);
                     self.send_to(id, client::Command::Join(channel, password));
                 }
             }
             client::Event::Talking(talking) => session.talking = talking,
             client::Event::Poked { from, message } => {
+                sounds_due.push(sounds::Sound::Poke);
                 notify::show(
                     &format!("{from} poked you"),
                     if message.is_empty() {
@@ -2710,6 +2815,7 @@ impl App {
             }
             client::Event::Done(source) => self.alerts.recover_in(id.0, source),
             client::Event::Streaming(event) => {
+                sounds_due.extend(viewer_sounds(&session.streaming.sharing.status, &event));
                 session.streaming.update(event.clone());
                 match &event {
                     streaming::Event::State { phase, detail, .. } => match phase {
@@ -2816,6 +2922,9 @@ impl App {
                     }
                 }
             }
+        }
+        for sound in sounds_due {
+            self.play_sound(sound);
         }
         Task::none()
     }
@@ -3828,27 +3937,118 @@ mod tests {
     }
 
     #[test]
-    fn muting_and_deafening_play_a_cue_unless_turned_off() {
-        let (mut app, mut commands) = session_fixture();
-        let cues = |commands: &mut mpsc::Receiver<client::Command>| {
-            let mut found = Vec::new();
-            while let Ok(command) = commands.try_recv() {
-                if let client::Command::Cue(cue) = command {
-                    found.push(cue);
-                }
-            }
-            found
-        };
+    fn muting_and_deafening_play_their_sounds_unless_turned_off() {
+        use sounds::Sound::{Deafened, MicOff, MicOn, Undeafened};
+        let (mut app, _commands) = session_fixture();
         let _ = app.update(Message::Mute);
         let _ = app.update(Message::Mute);
         let _ = app.update(Message::Deafen);
         let _ = app.update(Message::Deafen);
-        let played = cues(&mut commands);
-        assert_eq!(played.len(), 4, "{played:?}");
-        assert!(played[0] != played[1] && played[2] != played[3]);
+        let mut played = std::mem::take(&mut app.played_sounds);
+        played.sort();
+        let mut expected = vec![MicOff, MicOn, Deafened, Undeafened];
+        expected.sort();
+        assert_eq!(played, expected);
+
+        let _ = app.update(Message::SoundSource(MicOff, sounds::Source::Off));
+        app.server_mut().muted = false;
+        let _ = app.update(Message::Mute);
+        assert!(app.played_sounds.is_empty(), "this sound is off");
         let _ = app.update(Message::SoundCues(false));
         let _ = app.update(Message::Mute);
-        assert!(cues(&mut commands).is_empty());
+        assert!(app.played_sounds.is_empty(), "all sounds are off");
+    }
+
+    #[test]
+    fn joining_and_being_moved_sound_different_and_connecting_is_silent() {
+        use sounds::Sound::{JoinedChannel, MovedChannel};
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let channels = app.server().state.channels.clone();
+        let home = app.server().state.current.clone().unwrap();
+        let other = channels.iter().find(|c| c.id != home.id).unwrap().clone();
+        let arrive = |app: &mut App, channel: Option<client::Channel>| {
+            let mut state = app.server().state.clone();
+            state.current = channel;
+            let _ = app.update(Message::Backend(id, client::Event::State(state)));
+        };
+
+        arrive(&mut app, Some(other.clone()));
+        assert_eq!(app.played_sounds, [MovedChannel], "nobody asked for this");
+        app.played_sounds.clear();
+
+        app.server_mut().expected_channel = Some(home.id);
+        arrive(&mut app, Some(home.clone()));
+        assert_eq!(app.played_sounds, [JoinedChannel]);
+        app.played_sounds.clear();
+
+        arrive(&mut app, Some(home.clone()));
+        assert!(app.played_sounds.is_empty(), "no change");
+        arrive(&mut app, None);
+        arrive(&mut app, Some(other.clone()));
+        assert!(app.played_sounds.is_empty(), "connecting isn't a move");
+
+        app.server_mut().quiet_channel_change = true;
+        arrive(&mut app, Some(home));
+        assert!(app.played_sounds.is_empty(), "returning after an update");
+    }
+
+    #[test]
+    fn viewers_arriving_and_leaving_your_stream_have_sounds() {
+        use sounds::Sound::{ViewerJoined, ViewerLeft};
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let publish = |app: &mut App, live: bool, viewers: &[u16]| {
+            let status = streaming::publishing::Status {
+                live,
+                viewers: viewers
+                    .iter()
+                    .map(|v| (*v, format!("V{v}"), true))
+                    .collect(),
+                ..Default::default()
+            };
+            let event = streaming::Event::Publishing(status);
+            let _ = app.update(Message::Backend(id, client::Event::Streaming(event)));
+        };
+        publish(&mut app, true, &[]);
+        publish(&mut app, true, &[7]);
+        assert_eq!(app.played_sounds, [ViewerJoined]);
+        app.played_sounds.clear();
+        publish(&mut app, true, &[]);
+        assert_eq!(app.played_sounds, [ViewerLeft]);
+        app.played_sounds.clear();
+        publish(&mut app, true, &[7]);
+        app.played_sounds.clear();
+        publish(&mut app, false, &[]);
+        assert!(
+            app.played_sounds.is_empty(),
+            "stopping your share is enough"
+        );
+    }
+
+    #[test]
+    fn a_poke_on_any_server_plays_its_sound() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let poke = client::Event::Poked {
+            from: "Mara".into(),
+            message: String::new(),
+        };
+        let _ = app.update(Message::Backend(id, poke));
+        assert_eq!(app.played_sounds, [sounds::Sound::Poke]);
+    }
+
+    #[test]
+    fn teamspeak_sounds_are_available_without_loading_settings_or_an_install() {
+        let (mut app, _commands) = session_fixture();
+        let _ = app.update(Message::SoundSource(
+            sounds::Sound::Poke,
+            sounds::Source::TeamSpeak,
+        ));
+        assert!(!app.sound_bank.get(sounds::Sound::Poke).is_empty());
+        app.played_sounds.clear();
+        app.play_sound(sounds::Sound::Poke);
+        assert_eq!(app.played_sounds, [sounds::Sound::Poke]);
     }
 
     #[test]
