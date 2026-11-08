@@ -110,9 +110,7 @@ mod native {
         rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
         session_description::{SdpType, SessionDescription},
         stats::{IceCandidatePairState, RtcStats},
-        video_frame::{
-            BoxVideoFrame, I420Buffer, VideoBuffer, VideoFormatType, native::VideoFrameBufferExt,
-        },
+        video_frame::{BoxVideoFrame, VideoFormatType, native::VideoFrameBufferExt},
         video_stream::native::NativeVideoStream,
     };
     use serde_json::json;
@@ -235,7 +233,6 @@ mod native {
         }
         let mut video: Option<NativeVideoStream> = None;
         let mut audio: Option<NativeAudioStream> = None;
-        let mut scaled = None;
         let result = async {
             for media in [MediaType::Video, MediaType::Audio] {
                 pc.add_transceiver_for_media(media, RtpTransceiverInit { direction: RtpTransceiverDirection::RecvOnly, stream_ids: vec![], send_encodings: vec![] })
@@ -248,7 +245,6 @@ mod native {
             }
             let started = Instant::now();
             let mut first_frame = false;
-            let mut last_presented = Instant::now() - Duration::from_secs(1);
             let mut candidate_count = 0;
             let mut stats_request = None;
             let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
@@ -277,7 +273,6 @@ mod native {
                         Some(Callback::Track(MediaStreamTrack::Video(track))) => {
                             if let Some(stream) = &mut video { stream.close(); }
                             video = Some(NativeVideoStream::new(track));
-                            scaled = None;
                         },
                         Some(Callback::Track(MediaStreamTrack::Audio(track))) => {
                             if let Some(stream) = &mut audio { stream.close(); }
@@ -288,9 +283,9 @@ mod native {
                     },
                     frame = async { match &mut video { Some(stream) => stream.next().await, None => std::future::pending().await } } => {
                         let Some(frame) = frame else { bail!("The video track ended"); };
-                        if last_presented.elapsed() < Duration::from_millis(33) { continue; }
-                        present_frame(frame, generation, &surface, &mut scaled)?;
-                        last_presented = Instant::now();
+                        // Every decoded frame, at its decoded size: the picture keeps the source's
+                        // resolution and frame rate. Rune shows the newest one each time it draws.
+                        present_frame(frame, generation, &surface)?;
                         if !first_frame { first_frame = true; send(output, Output::Playing)?; }
                     },
                     frame = async { match &mut audio { Some(stream) => stream.next().await, None => std::future::pending().await } } => {
@@ -329,21 +324,13 @@ mod native {
         result
     }
 
-    fn present_frame(
-        frame: BoxVideoFrame,
-        generation: u64,
-        surface: &Surface,
-        scaled: &mut Option<I420Buffer>,
-    ) -> Result<()> {
+    fn present_frame(frame: BoxVideoFrame, generation: u64, surface: &Surface) -> Result<()> {
         let width = frame.buffer.width();
         let height = frame.buffer.height();
         ensure!(
             width >= 2 && height >= 2 && width <= 7680 && height <= 4320,
             "Unsupported video frame dimensions"
         );
-        let scale = (1280.0 / width as f64).min(720.0 / height as f64).min(1.0);
-        let display_width = ((width as f64 * scale) as u32).max(2) & !1;
-        let display_height = ((height as f64 * scale) as u32).max(2) & !1;
         let converted;
         let buffer = if let Some(buffer) = frame.buffer.as_i420() {
             buffer
@@ -351,115 +338,25 @@ mod native {
             converted = frame.buffer.to_i420();
             &converted
         };
-        let buffer = if display_width != width || display_height != height {
-            if scaled
-                .as_ref()
-                .is_none_or(|b| b.width() != display_width || b.height() != display_height)
-            {
-                *scaled = Some(I420Buffer::new(display_width, display_height));
-            }
-            let destination = scaled.as_mut().unwrap();
-            scale_i420(buffer, destination)?;
-            &*destination
-        } else {
-            buffer
-        };
-        let mut rgba = vec![0; display_width as usize * display_height as usize * 4];
+        let mut rgba = vec![0; width as usize * height as usize * 4];
         // libyuv ABGR is RGBA byte order on the supported little-endian targets.
         buffer.to_argb(
             VideoFormatType::ABGR,
             &mut rgba,
-            display_width * 4,
-            display_width as i32,
-            display_height as i32,
+            width * 4,
+            width as i32,
+            height as i32,
         );
         surface.publish(
             generation,
             crate::streaming::Image {
-                width: display_width,
-                height: display_height,
+                width,
+                height,
                 pixels: rgba,
             },
             (frame.rotation as i32 as f32).to_radians(),
         );
         Ok(())
-    }
-
-    fn scale_i420(source: &I420Buffer, destination: &mut I420Buffer) -> Result<()> {
-        unsafe extern "C" {
-            fn I420Scale(
-                y: *const u8,
-                sy: i32,
-                u: *const u8,
-                su: i32,
-                v: *const u8,
-                sv: i32,
-                width: i32,
-                height: i32,
-                dy: *mut u8,
-                dsy: i32,
-                du: *mut u8,
-                dsu: i32,
-                dv: *mut u8,
-                dsv: i32,
-                dw: i32,
-                dh: i32,
-                filter: i32,
-            ) -> i32;
-        }
-        let (sy, su, sv) = source.strides();
-        let (y, u, v) = source.data();
-        let (dsy, dsu, dsv) = destination.strides();
-        let (dw, dh) = (destination.width(), destination.height());
-        let (dy, du, dv) = destination.data_mut();
-        // These planes belong to dimension-validated I420 buffers and do not alias.
-        // kFilterBox (3) matches WebRTC I420Buffer::ScaleFrom used by scale().
-        let result = unsafe {
-            I420Scale(
-                y.as_ptr(),
-                sy as i32,
-                u.as_ptr(),
-                su as i32,
-                v.as_ptr(),
-                sv as i32,
-                source.width() as i32,
-                source.height() as i32,
-                dy.as_mut_ptr(),
-                dsy as i32,
-                du.as_mut_ptr(),
-                dsu as i32,
-                dv.as_mut_ptr(),
-                dsv as i32,
-                dw as i32,
-                dh as i32,
-                3,
-            )
-        };
-        ensure!(result == 0, "Could not scale video frame");
-        Ok(())
-    }
-
-    #[test]
-    fn reused_scaling_matches_webrtc() {
-        for (width, height, dw, dh) in [
-            (1920, 1080, 1280, 720),
-            (1279, 719, 1278, 718),
-            (853, 481, 426, 240),
-        ] {
-            let mut source = I420Buffer::new(width, height);
-            let mut destination = I420Buffer::new(dw, dh);
-            for seed in [17, 93] {
-                let (y, u, v) = source.data_mut();
-                for plane in [y, u, v] {
-                    for (i, pixel) in plane.iter_mut().enumerate() {
-                        *pixel = (i.wrapping_mul(seed) % 251) as u8;
-                    }
-                }
-                let expected = source.scale(dw as i32, dh as i32);
-                scale_i420(&source, &mut destination).unwrap();
-                assert_eq!(destination.data(), expected.data());
-            }
-        }
     }
 
     fn summarize_stats(stats: &[RtcStats]) -> Stats {
