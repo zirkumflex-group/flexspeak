@@ -178,6 +178,7 @@ pub mod ty {
     pub const BODY_STRONG: TextStyle = TextStyle::new(13.0, 560.0);
     pub const LABEL: TextStyle = TextStyle::new(13.0, 400.0);
     pub const SMALL: TextStyle = TextStyle::new(11.5, 400.0);
+    pub const SMALL_STRONG: TextStyle = TextStyle::new(11.5, 600.0);
     pub const CAPTION: TextStyle = TextStyle::new(11.0, 400.0);
     pub const OVERLINE: TextStyle = TextStyle::new(11.0, 600.0);
     pub const VALUE: TextStyle = TextStyle::new(15.0, 560.0).features("'tnum' 1");

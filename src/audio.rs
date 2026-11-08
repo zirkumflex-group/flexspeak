@@ -564,9 +564,9 @@ impl AudioEngine {
         Ok(packets)
     }
 
-    /// Plays a short cue over whatever is playing.
-    pub fn cue(&mut self, cue: Cue) {
-        self.chime = cue_samples(cue).into();
+    /// Plays a short sound over whatever is playing, replacing one already going.
+    pub fn play(&mut self, samples: Vec<f32>) {
+        self.chime = samples.into();
     }
 
     pub fn level(&self) -> f32 {
@@ -746,16 +746,10 @@ pub enum Cue {
     MicOn,
     SoundOff,
     SoundOn,
-}
-
-impl Cue {
-    pub const ALL: [Self; 5] = [
-        Self::Poke,
-        Self::MicOff,
-        Self::MicOn,
-        Self::SoundOff,
-        Self::SoundOn,
-    ];
+    Joined,
+    Moved,
+    ViewerJoined,
+    ViewerLeft,
 }
 
 /// Sine notes, each with a quick attack and a soft decay.
@@ -773,7 +767,115 @@ fn tones(notes: &[(f32, usize)], gain: f32) -> Vec<f32> {
         .collect()
 }
 
-fn cue_samples(cue: Cue) -> Vec<f32> {
+/// The character of a Soft sound. Each kind of action has its own, so it can be told by ear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voice {
+    Felt,
+    Wood,
+    Hum,
+    Bell,
+    Glass,
+    Drop,
+}
+
+/// Attack and length in seconds, then each partial's frequency ratio, level and decay.
+struct Shape {
+    attack: f32,
+    seconds: f32,
+    partials: [(f32, f32, f32); 3],
+}
+
+impl Voice {
+    fn shape(self) -> Shape {
+        let (attack, seconds, partials) = match self {
+            Self::Felt => (
+                0.014,
+                0.62,
+                [(1.0, 1.0, 7.0), (2.0, 0.16, 16.0), (3.0, 0.04, 30.0)],
+            ),
+            Self::Wood => (
+                0.003,
+                0.24,
+                [(1.0, 1.0, 24.0), (4.0, 0.22, 70.0), (2.0, 0.0, 1.0)],
+            ),
+            Self::Hum => (
+                0.06,
+                0.7,
+                [(1.0, 1.0, 4.5), (2.0, 0.22, 7.0), (3.0, 0.0, 1.0)],
+            ),
+            Self::Bell => (
+                0.004,
+                0.85,
+                [(1.0, 1.0, 5.0), (2.76, 0.22, 9.0), (5.4, 0.06, 18.0)],
+            ),
+            Self::Glass => (
+                0.004,
+                0.5,
+                [(1.0, 1.0, 9.0), (3.0, 0.18, 22.0), (4.2, 0.06, 40.0)],
+            ),
+            Self::Drop => (
+                0.006,
+                0.22,
+                [(1.0, 1.0, 14.0), (2.0, 0.1, 30.0), (3.0, 0.0, 1.0)],
+            ),
+        };
+        Shape {
+            attack,
+            seconds,
+            partials,
+        }
+    }
+}
+
+/// One Soft sound: MIDI notes this far apart, each bending by `glide` semitones.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SoftCue {
+    pub voice: Voice,
+    pub notes: &'static [u8],
+    pub step_ms: usize,
+    pub glide: f32,
+    pub gain: f32,
+}
+
+fn soft_note(voice: Voice, frequency: f32, glide: f32, gain: f32) -> Vec<f32> {
+    let shape = voice.shape();
+    let length = (RATE as f32 * shape.seconds) as usize;
+    let tau = std::f32::consts::TAU;
+    let mut phases = [0.0_f32; 3];
+    (0..length)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let bend = 2_f32.powf(glide / 12.0 * (t / (shape.seconds * 0.5)).min(1.0));
+            let attack = 0.5 - 0.5 * (std::f32::consts::PI * (t / shape.attack).min(1.0)).cos();
+            let fade = ((length - i) as f32 / (RATE as f32 * 0.05)).min(1.0);
+            let mut sample = 0.0;
+            for (phase, (ratio, level, decay)) in phases.iter_mut().zip(shape.partials) {
+                *phase = (*phase + tau * frequency * bend * ratio / RATE as f32) % tau;
+                sample += phase.sin() * level * (-t * decay).exp();
+            }
+            sample * attack * fade * gain
+        })
+        .collect()
+}
+
+/// The notes overlap and settle, each a little quieter than the last.
+pub fn soft_samples(cue: SoftCue) -> Vec<f32> {
+    let step = RATE * cue.step_ms / 1000;
+    let mut mix = Vec::new();
+    for (index, &note) in cue.notes.iter().enumerate() {
+        let frequency = 440.0 * 2_f32.powf((f32::from(note) - 69.0) / 12.0);
+        let gain = cue.gain * 0.9_f32.powi(index as i32);
+        let samples = soft_note(cue.voice, frequency, cue.glide, gain);
+        let start = step * index;
+        mix.resize(mix.len().max(start + samples.len()), 0.0);
+        for (out, sample) in mix[start..].iter_mut().zip(samples) {
+            *out += sample;
+        }
+    }
+    mix
+}
+
+pub fn cue_samples(cue: Cue) -> Vec<f32> {
     let step = RATE * 9 / 100;
     match cue {
         // A5 then E6.
@@ -782,6 +884,10 @@ fn cue_samples(cue: Cue) -> Vec<f32> {
         Cue::MicOn => tones(&[(440.0, step), (659.3, step)], 0.2),
         Cue::SoundOff => tones(&[(392.0, step), (261.6, step)], 0.2),
         Cue::SoundOn => tones(&[(261.6, step), (392.0, step)], 0.2),
+        Cue::Joined => tones(&[(523.3, step), (784.0, step)], 0.2),
+        Cue::Moved => tones(&[(659.3, step), (523.3, step), (659.3, step)], 0.2),
+        Cue::ViewerJoined => tones(&[(784.0, step), (1046.5, step)], 0.16),
+        Cue::ViewerLeft => tones(&[(1046.5, step), (784.0, step)], 0.16),
     }
 }
 
@@ -972,9 +1078,19 @@ mod tests {
 
     #[test]
     fn mute_and_deafen_cues_are_short_quiet_and_all_different() {
-        let cues = [Cue::MicOff, Cue::MicOn, Cue::SoundOff, Cue::SoundOn].map(cue_samples);
+        let cues = [
+            Cue::MicOff,
+            Cue::MicOn,
+            Cue::SoundOff,
+            Cue::SoundOn,
+            Cue::Joined,
+            Cue::Moved,
+            Cue::ViewerJoined,
+            Cue::ViewerLeft,
+        ]
+        .map(cue_samples);
         for cue in &cues {
-            assert!(cue.len() < RATE / 4, "brief enough to repeat quickly");
+            assert!(cue.len() < RATE * 3 / 10, "brief enough to repeat quickly");
             assert!(cue.iter().all(|sample| sample.abs() <= 0.2));
             assert!(cue.iter().any(|sample| sample.abs() > 0.08));
         }

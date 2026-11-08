@@ -12,12 +12,12 @@ use rune_kit::{Checkbox, Dialog, Kit};
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
     Range, Variant, button, card, faint, group, group_note, group_title, icon_button, lit_dot,
-    meter, muted, picker, pulse, scroll_page, slider, title,
+    meter, muted, picker, pulse, scroll_page, slider,
 };
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
     self, Strip, Watching,
-    publishing::{Access, Preset, Resolution},
+    publishing::{Access, Preset, PreviewState, Resolution, SourceKind},
 };
 use crate::{App, Message, usage};
 
@@ -27,51 +27,61 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
     share_dialog(s, cx, t, k, layer);
     drag_ghost(s, t, layer);
     let watching = s.server().streaming.active();
-    let mut pane = col()
-        .key("streams")
-        .w_full()
-        .h_full()
-        .child(header(s, t, supported, watching));
-    if s.server().streaming.sharing.status.active {
-        pane = pane.child(sharing_banner(s, t));
-    }
+    let mut pane = col().key("streams").w_full().h_full();
     if watching || !unwatched(s).is_empty() {
         let room = pane_size(s, cx);
-        pane = pane.child(stage(s, t, k, supported, room));
+        pane = pane.child(
+            col()
+                .key("stage-area")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .on_hover_change(|s: &mut App, hovering, _| s.ui.streams_hover = hovering)
+                .child(stage(s, t, k, supported, room))
+                .children(
+                    s.ui.streams_hover
+                        .then(|| stage_tools(s, t, supported, watching)),
+                ),
+        );
     } else {
-        pane = pane.child(scroll_page(k, "streams-scroll", no_streams(t, supported)));
+        pane = pane
+            .child(
+                row()
+                    .key("streams-header")
+                    .w_full()
+                    .px(size::PAGE)
+                    .pt(10.0)
+                    .pb(8.0)
+                    .child(el().grow(1.0))
+                    .child(tools(s, t, supported, watching)),
+            )
+            .child(scroll_page(k, "streams-scroll", no_streams(t, supported)));
     }
     pane
 }
 
-fn header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
-    let mut bar = row()
-        .key("streams-header")
+/// The toolbar floating over the streams, at the top right; each stream's own button is at its
+/// top left. The solid, frosted backing keeps the icons readable over any picture.
+fn stage_tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
+    row()
+        .key("stage-tools")
+        .absolute(0.0, size::PAGE + 8.0)
         .w_full()
-        .px(size::PAGE)
-        .pt(16.0)
-        .pb(10.0)
-        .gap(10.0)
-        .center_y()
+        .px(size::PAGE + 8.0)
+        .child(el().grow(1.0))
         .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(2.0)
-                .child(title(t, "Streams"))
-                .child(muted(
-                    t,
-                    format!(
-                        "Server {} · {}",
-                        s.server().state.server_version,
-                        s.server()
-                            .state
-                            .current
-                            .as_ref()
-                            .map_or("No channel", |channel| channel.name.as_str())
-                    ),
-                )),
-        );
+            tools(s, t, supported, watching)
+                .padding(4.0)
+                .radius(radius::CARD)
+                .fill(t.surface.alpha(0.86))
+                .border(1.0, t.hairline)
+                .backdrop_blur(12.0)
+                .transition(Transition::opacity()),
+        )
+}
+
+fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
+    let mut bar = row().key("streams-tools").gap(10.0).center_y();
     if watching {
         let on = s.server().streaming.show_stats;
         bar = bar.child(icon_button(
@@ -221,109 +231,111 @@ fn no_streams(t: &Theme, supported: bool) -> El {
         ))
 }
 
-/// Your own share while it runs: viewers, requests to watch, and the way to stop.
-fn sharing_banner(s: &App, t: &Theme) -> El {
+/// Your own share while it runs, for the voice panel: viewers, requests to watch, and the way to
+/// stop. The source comes last so a narrow sidebar only loses the end of it.
+pub fn sharing_status(s: &App, t: &Theme) -> El {
     let status = &s.server().streaming.sharing.status;
-    let mut banner = col()
-        .key("sharing-banner")
+    let source = if status.detail.is_empty() {
+        s.server().streaming.sharing.quality.label()
+    } else {
+        let detail = status.detail.strip_prefix("Sharing ");
+        detail.unwrap_or(&status.detail).to_owned()
+    };
+    let mut tile = col()
+        .key("sharing-status")
         .w_full()
-        .gap(8.0)
-        .px(size::PAGE)
-        .pb(10.0)
-        .transition(Transition::opacity());
-    let mut line = row()
-        .w_full()
-        .gap(10.0)
-        .padding(10.0)
-        .center_y()
+        .gap(6.0)
+        .padding(8.0)
         .radius(radius::ROW)
         .fill(t.live.alpha(0.08))
         .border(1.0, t.live.alpha(0.35))
-        .child(lit_dot(t.live))
+        .transition(Transition::opacity())
         .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(2.0)
-                .child(text("You are sharing").font(ty::BODY_STRONG).color(t.text))
-                .child(faint(
+            row()
+                .w_full()
+                .gap(6.0)
+                .center_y()
+                .child(lit_dot(t.live))
+                .child(
+                    text("You are sharing")
+                        .font(ty::BODY_STRONG)
+                        .color(t.text)
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .truncate_fade(),
+                )
+                .child(icon_button(
                     t,
-                    format!(
-                        "{} · {} / {} viewers",
-                        if status.detail.is_empty() {
-                            s.server().streaming.sharing.quality.label()
-                        } else {
-                            status.detail.clone()
-                        },
-                        status.viewers.len(),
-                        streaming::publishing::MAX_VIEWERS
-                    ),
+                    "manage-share",
+                    &icons::INFO,
+                    "Sharing details",
+                    Variant::Ghost,
+                    Some(Message::OpenShare),
+                ))
+                .child(icon_button(
+                    t,
+                    "stop-sharing",
+                    &icons::STOP,
+                    "Stop sharing",
+                    Variant::Danger,
+                    Some(Message::StopSharing),
                 )),
         )
-        .child(button(
-            t,
-            "manage-share",
-            "Details",
-            None,
-            Variant::Secondary,
-            Some(Message::OpenShare),
-        ))
-        .child(button(
-            t,
-            "stop-sharing",
-            "Stop",
-            Some(&icons::STOP),
-            Variant::Danger,
-            Some(Message::StopSharing),
-        ));
+        .child(
+            faint(
+                t,
+                format!(
+                    "{} / {} viewers · {source}",
+                    status.viewers.len(),
+                    streaming::publishing::MAX_VIEWERS
+                ),
+            )
+            .truncate_fade(),
+        );
     if status.audio_frames > 0 {
-        line = line.child(el().w(60.0).child(meter(
-            t,
-            "share-audio",
-            status.audio_level.min(1.0),
-            t.live,
-        )));
+        tile = tile.child(meter(t, "share-audio", status.audio_level.min(1.0), t.live));
     }
-    banner = banner.child(line);
     for (id, name) in &status.requests {
-        banner = banner.child(request_row(t, status, *id, name));
+        tile = tile.child(request_row(t, status, *id, name));
     }
-    banner
+    tile
 }
 
 fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name: &str) -> El {
-    row()
+    col()
         .key(format!("request-{id}"))
         .w_full()
-        .gap(8.0)
-        .center_y()
-        .padding(10.0)
-        .radius(radius::ROW)
-        .fill(t.accent.alpha(0.08))
+        .gap(6.0)
         .transition(Transition::opacity().combined(Transition::scale(0.98)))
         .child(
             text(format!("{name} wants to watch"))
                 .font(ty::BODY_STRONG)
                 .color(t.text)
-                .grow(1.0),
+                .truncate_fade(),
         )
-        .child(button(
-            t,
-            "allow",
-            "Allow",
-            None,
-            Variant::Primary,
-            (status.viewers.len() < streaming::publishing::MAX_VIEWERS)
-                .then_some(Message::DecideViewer(id, true)),
-        ))
-        .child(button(
-            t,
-            "deny",
-            "Deny",
-            None,
-            Variant::Secondary,
-            Some(Message::DecideViewer(id, false)),
-        ))
+        .child(
+            row()
+                .w_full()
+                .gap(6.0)
+                .child(el().grow(1.0))
+                .child(button(
+                    t,
+                    "allow",
+                    "Allow",
+                    None,
+                    Variant::Primary,
+                    (status.viewers.len() < streaming::publishing::MAX_VIEWERS)
+                        .then_some(Message::DecideViewer(id, true)),
+                ))
+                .child(button(
+                    t,
+                    "deny",
+                    "Deny",
+                    None,
+                    Variant::Secondary,
+                    Some(Message::DecideViewer(id, false)),
+                )),
+        )
 }
 
 /// Streams watched and not yet joined: one on the stage with the rest beneath it, or a grid.
@@ -336,6 +348,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         .min_h(0.0)
         .w_full()
         .px(size::PAGE)
+        .pt(size::PAGE)
         .pb(size::PAGE)
         .gap(10.0);
     let Some(main) = s.server().streaming.stage() else {
@@ -448,14 +461,14 @@ const GRID_GAP: f32 = 10.0;
 const TILE_BAR: f32 = 46.0;
 /// Below this picture width the grid stops squeezing streams in and scrolls instead.
 const MIN_PICTURE_WIDTH: f32 = 200.0;
-/// Everything around the stage in the window: header, pane title, footer and margins.
-const CHROME_HEIGHT: f32 = 200.0;
+/// Everything around the stage in the window: header, footer and margins.
+const CHROME_HEIGHT: f32 = 150.0;
 const MIN_CELL_WITH_SLIDER: f32 = 260.0;
 /// The stage's slider is wider, and it has a button more.
 const MIN_STAGE_WITH_SLIDER: f32 = 360.0;
 
-/// The room inside the stage. Reading its layout re-runs the view when the window resizes or
-/// the sharing banner comes and goes; until it has been laid out, estimate from the window.
+/// The room inside the stage. Reading its layout re-runs the view when the window resizes;
+/// until it has been laid out, estimate from the window.
 fn pane_size(s: &App, cx: &mut Cx<App>) -> (f32, f32) {
     cx.layout_size("stage").map_or_else(
         || {
@@ -465,7 +478,7 @@ fn pane_size(s: &App, cx: &mut Cx<App>) -> (f32, f32) {
                 height - CHROME_HEIGHT,
             )
         },
-        |[width, height]| (width - 2.0 * size::PAGE, height - size::PAGE),
+        |[width, height]| (width - 2.0 * size::PAGE, height - 2.0 * size::PAGE),
     )
 }
 
@@ -693,7 +706,6 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
                 .absolute(0.0, 0.0)
                 .w_full()
                 .padding(6.0)
-                .child(el().grow(1.0))
                 .child(icon_button(
                     t,
                     "focus",
@@ -701,7 +713,8 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
                     "Make this the large stream",
                     Variant::Secondary,
                     Some(Message::FocusStream(Some(id.clone()))),
-                )),
+                ))
+                .child(el().grow(1.0)),
         );
     }
     let drag = s.ui.tile_drag.as_ref();
@@ -1015,6 +1028,40 @@ fn stats(s: &App, watch: &Watching) -> El {
     panel
 }
 
+/// The one picture of the chosen source, taken when the dialog opened or it was picked.
+fn source_preview(s: &App, t: &Theme) -> Option<El> {
+    let sharing = &s.server().streaming.sharing;
+    let source = sharing.selected.as_ref()?;
+    if source.kind == SourceKind::Screen(None) {
+        return Some(faint(
+            t,
+            "Your Mac shows its own previews when you start sharing.",
+        ));
+    }
+    let caption = |words: &'static str| text(words).font(ty::SMALL).color(Color::WHITE.alpha(0.7));
+    let content = match sharing.preview(source) {
+        Some(PreviewState::Ready(pixels)) => {
+            el().w_full().h_full().pixels_fit(pixels, SurfaceFit::Fit)
+        }
+        Some(PreviewState::Unavailable) => caption("No preview available"),
+        _ => col()
+            .gap(8.0)
+            .center()
+            .child(pulse(t.accent))
+            .child(caption("Taking a preview…")),
+    };
+    Some(
+        el().key("share-preview")
+            .w_full()
+            .h(SHARE_PREVIEW_HEIGHT)
+            .radius(radius::ROW)
+            .clip_rounded(radius::ROW)
+            .fill(Color::BLACK)
+            .center()
+            .child(content),
+    )
+}
+
 /// Choosing what to share, its quality and audio; or, while sharing, who watches.
 pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     if !s.server().streaming.share_open {
@@ -1133,6 +1180,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                         (!sharing.loading).then_some(Message::RefreshShareSources),
                     )),
             )
+            .children(source_preview(s, t))
             .child(field_label(t, "Preset"))
             .child(preset_picker(s, k, &mut menus))
             .child(
@@ -1351,6 +1399,7 @@ fn resolution_picker(s: &App, k: &Kit, menus: &mut Vec<El>) -> El {
 
 /// The share dialog's pickers span its width.
 const SHARE_PICKER: f32 = 480.0;
+const SHARE_PREVIEW_HEIGHT: f32 = 200.0;
 
 fn field_label(t: &Theme, label: &str) -> El {
     text(label.to_owned())

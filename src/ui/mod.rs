@@ -147,6 +147,12 @@ pub struct UiState {
     pub tile_drag: Option<TileDrag>,
     /// The pointer is over the update notice, which then lists what's new.
     pub update_hover: bool,
+    /// Whether the pointer is over the streams, which shows their toolbar.
+    pub streams_hover: bool,
+    /// Whether the pointer is over the server log, which shows its search button.
+    pub log_hover: bool,
+    pub log_people: bool,
+    pub log_search: TextEdit,
     /// Where the current press started, in window points.
     pub press_point: (f32, f32),
     /// The window position of the member row or stream last under the pointer, to place drags.
@@ -174,6 +180,10 @@ impl Default for UiState {
             drag: None,
             tile_drag: None,
             update_hover: false,
+            streams_hover: false,
+            log_hover: false,
+            log_people: false,
+            log_search: TextEdit::new(""),
             user_volume: None,
             press_point: (0.0, 0.0),
             row_origin: (0.0, 0.0),
@@ -198,6 +208,8 @@ impl App {
         mirror(&mut self.ui.channel_password, &channel_password);
         mirror(&mut self.ui.key_capture, "");
         mirror(&mut self.ui.settings_search, &self.settings_query);
+        let log_query = self.server().log.query().to_owned();
+        mirror(&mut self.ui.log_search, &log_query);
         let editor = self.server_editor.clone().unwrap_or_default();
         mirror(&mut self.ui.server_name, &editor.name);
         mirror(&mut self.ui.server_address, &editor.address);
@@ -379,6 +391,11 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
     // ⌘, opens Settings, as in every Mac app.
     if key.is_command(',') && s.onboarding.is_none() && s.settings_page.is_none() {
         dispatch(s, tx, Message::OpenSettings(s.settings_recent));
+        return true;
+    }
+    // Escape leaves the log's search, wherever the focus is.
+    if key.key == rune::Key::Escape && s.server().log.searching && s.settings_page.is_none() {
+        dispatch(s, tx, Message::LogSearch(false));
         return true;
     }
     // Escape drops a member selection first.

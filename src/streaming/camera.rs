@@ -1,5 +1,5 @@
 //! Native camera lifetime: callbacks stop before their Rust context is released.
-use super::publishing::{Quality, ShareSource, SourceKind};
+use super::publishing::{Quality, ShareSource, SourceKind, Still};
 use anyhow::{Result, anyhow, ensure};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr::NonNull;
@@ -75,6 +75,29 @@ type FrameHandler = Box<dyn Fn(&[u8], u32, i32, i32) + Send + Sync>;
 struct Context {
     frame: FrameHandler,
 }
+/// One picture from a camera, which is released again straight after.
+pub fn still(id: &str) -> Result<Still> {
+    // A camera's first frames are dark while it settles on an exposure.
+    const SETTLE_FRAMES: u32 = 12;
+    let (taken, picture) = std::sync::mpsc::sync_channel(1);
+    let seen = std::sync::atomic::AtomicU32::new(0);
+    let capture = Capture::open(
+        id,
+        Quality::default(),
+        move |data, stride, width, height| {
+            if seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == SETTLE_FRAMES {
+                let _ = taken.try_send(Still::from_bgra(data, stride, width, height));
+            }
+        },
+    )?;
+    let still = picture
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .ok()
+        .flatten();
+    drop(capture);
+    still.ok_or_else(|| anyhow!("The camera did not give a picture"))
+}
+
 pub struct Capture {
     native: NonNull<c_void>,
     // Stable address, retained until StopCapture drains the native callback queue.

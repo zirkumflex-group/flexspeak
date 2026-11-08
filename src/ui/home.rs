@@ -1,7 +1,12 @@
 //! The window shell, the saved-server home, the connected sidebar and performance mode.
 
-use rune::{Cx, El, PointerPress, Transition, Tx, col, el, icon, row, text};
-use rune_kit::{Kit, MenuItem, context_menu};
+use std::borrow::Cow;
+
+use rune::{
+    Cx, El, GrowthSpec, PointerPress, ScrollSpec, Span, Transition, Tx, col, el, icon, rich, row,
+    text,
+};
+use rune_kit::{Kit, MenuItem, TextInput, context_menu};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
@@ -132,7 +137,7 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
             .w_full()
             .h_full()
             .child(server_rail(s, t, k))
-            .child(sidebar(s, t, k, layer))
+            .child(sidebar(s, cx, t, k, layer))
             .child(el().w(1.0).h_full().fill(t.hairline))
             .child(
                 col()
@@ -588,7 +593,7 @@ fn connecting_pane(s: &App, t: &Theme) -> El {
         ))
 }
 
-fn sidebar(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     members::menu(s, t, k, layer);
     members::ghost(s, t, layer);
     let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
@@ -650,7 +655,316 @@ fn sidebar(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
             channel_tree(s, t).pr(10.0).pb(8.0),
         ))
         .children(selection_bar(s, t))
+        .children(server_log(s, cx, t, k))
         .child(voice_controls(s, t))
+}
+
+const LOG_ROW: f32 = 22.0;
+const LOG_ROWS: f32 = 6.0;
+/// Below this the channel list needs the room more.
+const LOG_MIN_WINDOW: f32 = 680.0;
+
+/// What has happened on this server, by hour. It follows the newest entry unless scrolled
+/// back or searching; a magnifier appears on hover to search it.
+fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
+    let log = &s.server().log;
+    let height = cx
+        .layout_size("window")
+        .map_or(s.window_size.1, |size| size[1]);
+    if log.is_empty() || height < LOG_MIN_WINDOW {
+        return None;
+    }
+    let body = if log.sections().is_empty() {
+        col()
+            .key("log-none")
+            .w_full()
+            .h(LOG_ROW * LOG_ROWS)
+            .gap(6.0)
+            .center()
+            .child(faint(t, "No events match"))
+            .child(button(
+                t,
+                "log-clear",
+                "Clear search",
+                None,
+                Variant::Ghost,
+                Some(Message::LogClear),
+            ))
+    } else {
+        let theme = *t;
+        let rows = col()
+            .key("log-rows")
+            .w_full()
+            .growth(GrowthSpec::default())
+            .virtual_rows(
+                log.sections().len(),
+                LOG_ROW * 8.0,
+                log_key,
+                move |s: &App, index| log_section(s, &theme, index),
+            );
+        let following = !log.filtering();
+        k.scroll_bar(
+            col()
+                .key(if following { "log-scroll" } else { "log-found" })
+                .w_full()
+                .h(LOG_ROW * LOG_ROWS)
+                .scroll(ScrollSpec {
+                    stick_bottom: following,
+                })
+                .scroll_edge_fade(12.0)
+                .child(rows),
+        )
+    };
+    Some(
+        col()
+            .key("server-log")
+            .w_full()
+            .gap(4.0)
+            .on_hover_change(|s: &mut App, hovering, _| s.ui.log_hover = hovering)
+            .child(log_bar(s, t, k))
+            .child(body)
+            .children(s.ui.log_people.then(|| log_people(s, t, k))),
+    )
+}
+
+/// The heading, or while searching the search field and the person filter.
+fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
+    let log = &s.server().log;
+    let bar = row().w_full().h(size::CONTROL).gap(6.0).center_y();
+    if !log.searching {
+        return bar
+            .child(overline(t, "Server log").ml(6.0).grow(1.0))
+            .children(s.ui.log_hover.then(|| {
+                icon_button(
+                    t,
+                    "log-search-open",
+                    &icons::SEARCH,
+                    "Search the log",
+                    Variant::Ghost,
+                    Some(Message::LogSearch(true)),
+                )
+                .transition(Transition::opacity())
+            }));
+    }
+    let placeholder = match log.person() {
+        Some(person) => format!("Search {person}"),
+        None => "Search the log".to_owned(),
+    };
+    let input = TextInput::new(&s.ui.log_search)
+        .placeholder(&placeholder)
+        .label("Search the server log")
+        .leading_icon(&icons::SEARCH)
+        .width(None)
+        .height(size::CONTROL)
+        .on_edit(|s: &mut App| &mut s.ui.log_search)
+        .on_change(|s: &mut App, tx: &mut Tx| {
+            let value = s.ui.log_search.text.clone();
+            dispatch(s, tx, Message::LogQuery(value));
+        })
+        .trailing(icon_button(
+            t,
+            "log-search-close",
+            &icons::X,
+            "Close search · Esc",
+            Variant::Ghost,
+            Some(Message::LogSearch(false)),
+        ))
+        .build(k);
+    let person = match log.person() {
+        Some(person) => {
+            let short: String = person.chars().take(10).collect();
+            let name = if short.len() < person.len() {
+                format!("{short}…")
+            } else {
+                short
+            };
+            button(
+                t,
+                "log-person-chip",
+                &name,
+                Some(&icons::X),
+                Variant::Active,
+                Some(Message::LogPerson(None)),
+            )
+        }
+        None => icon_button(
+            t,
+            "log-people",
+            &icons::USER,
+            "Filter by person",
+            if s.ui.log_people {
+                Variant::Active
+            } else {
+                Variant::Secondary
+            },
+            Some(Message::LogPeople),
+        ),
+    };
+    bar.child(el().grow(1.0).min_w(0.0).child(input))
+        .child(person)
+}
+
+/// Everyone in the log, to narrow it to one of them.
+fn log_people(s: &App, t: &Theme, k: &Kit) -> El {
+    const ROW: f32 = 26.0;
+    const WIDTH: f32 = 170.0;
+    let people = s.server().log.people();
+    let everyone: usize = people.iter().map(|(_, count)| count).sum();
+    let line = |key: String, name: String, count: usize, message: Message| {
+        row()
+            .key(key)
+            .w_full()
+            .h(ROW)
+            .px(8.0)
+            .gap(8.0)
+            .center_y()
+            .radius(radius::ROW)
+            .hover(t.wash(0.08))
+            .on_press_tx(send(message))
+            .child(
+                text(name)
+                    .font(ty::SMALL)
+                    .color(t.text)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .truncate_fade(),
+            )
+            .child(text(count.to_string()).font(ty::NUMERIC).color(t.faint))
+    };
+    let mut items = col().w_full().child(line(
+        "log-person-all".to_owned(),
+        "Everyone".to_owned(),
+        everyone,
+        Message::LogPerson(None),
+    ));
+    let rows = people.len() + 1;
+    for (index, (name, count)) in people.into_iter().enumerate() {
+        let message = Message::LogPerson(Some(name.clone()));
+        items = items.child(line(format!("log-person-{index}"), name, count, message));
+    }
+    col()
+        .key("log-people-menu")
+        .absolute(size::SIDEBAR - 24.0 - WIDTH, size::CONTROL + 4.0)
+        .w(WIDTH)
+        .padding(4.0)
+        .radius(radius::CONTROL)
+        .fill(t.raised)
+        .border(1.0, t.hairline)
+        .transition(Transition::opacity())
+        .child(
+            k.scroll_bar(
+                col()
+                    .key("log-people-scroll")
+                    .w_full()
+                    .h(rows.min(5) as f32 * ROW)
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .child(items),
+            ),
+        )
+}
+
+fn log_key(s: &App, index: usize) -> Cow<'_, str> {
+    let section = s.server().log.sections().get(index);
+    Cow::Borrowed(section.map_or("", |section| section.key.as_str()))
+}
+
+/// One hour: its heading, pinned while the hour scrolls by, and its events.
+fn log_section(s: &App, t: &Theme, index: usize) -> El {
+    let log = &s.server().log;
+    let Some(section) = log.sections().get(index) else {
+        return el();
+    };
+    let count = section.entries.len();
+    let noun = match (log.filtering(), count) {
+        (true, 1) => "match",
+        (true, _) => "matches",
+        (false, 1) => "event",
+        (false, _) => "events",
+    };
+    let mut hour = col().w_full();
+    if let Some(day) = &section.day {
+        hour = hour.child(faint(t, day.clone()).pl(6.0).py(4.0));
+    }
+    hour = hour.child(
+        row()
+            .w_full()
+            .h(20.0)
+            .pl(21.0)
+            .pr(10.0)
+            .center_y()
+            .fill(t.chrome)
+            .sticky_top(0.0)
+            .child(
+                text(section.label.clone())
+                    .font(ty::SMALL_STRONG)
+                    .color(t.faint)
+                    .grow(1.0),
+            )
+            .child(faint(t, format!("{count} {noun}"))),
+    );
+    for entry in &section.entries {
+        hour = hour.child(log_row(s, t, *entry));
+    }
+    hour
+}
+
+fn log_row(s: &App, t: &Theme, index: usize) -> El {
+    use crate::server_log::{Tone, find};
+    let log = &s.server().log;
+    let Some(entry) = log.get(index) else {
+        return el();
+    };
+    let color = match entry.tone {
+        Tone::Arrived => t.good,
+        Tone::Moved => t.fair,
+        Tone::Left => t.poor,
+        Tone::Stream => t.accent,
+    };
+    let marker = el()
+        .w(7.0)
+        .h(LOG_ROW)
+        .center()
+        .child(el().absolute(3.0, 0.0).w(1.0).h_full().fill(t.hairline))
+        .child(el().size(7.0, 7.0).radius(3.5).fill(color));
+    let lead = if entry.name.is_empty() {
+        0
+    } else {
+        entry.name.len() + 1
+    };
+    let words = if entry.name.is_empty() {
+        entry.action.clone()
+    } else {
+        format!("{} {}", entry.name, entry.action)
+    };
+    let mut spans = Vec::new();
+    if lead > 0 {
+        spans.push(Span::new(0, entry.name.len()).bold());
+    }
+    let mark = |range: std::ops::Range<usize>| {
+        Span::new(range.start, range.end).bg(t.fair.alpha(0.35), 1.0)
+    };
+    spans.extend(find(&entry.name, log.query()).map(mark));
+    spans.extend(
+        find(&entry.action, log.query()).map(|range| mark(range.start + lead..range.end + lead)),
+    );
+    row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .pl(6.0)
+        .pr(10.0)
+        .child(marker)
+        .child(
+            rich(words, spans)
+                .font(ty::SMALL)
+                .color(t.text)
+                .grow(1.0)
+                .min_w(0.0)
+                .truncate_fade(),
+        )
+        .child(text(entry.time.clone()).font(ty::NUMERIC).color(t.faint))
 }
 
 /// While several members are picked: how many, and how to drop the selection.
@@ -762,7 +1076,11 @@ fn voice_controls(s: &App, t: &Theme) -> El {
                 t.hairline
             },
         )
-        .motion(motion::SETTLE)
+        .motion(motion::SETTLE);
+    if s.server().streaming.sharing.status.active {
+        panel = panel.child(streams::sharing_status(s, t));
+    }
+    panel = panel
         .child(controls)
         .child(meter(t, "mic-level", speaking, t.good))
         .child(faint(

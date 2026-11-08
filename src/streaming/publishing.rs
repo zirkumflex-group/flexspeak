@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow, ensure};
 use publish_media::PeerKey;
+use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
@@ -45,7 +46,8 @@ impl SourceKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Access {
     Public,
     #[default]
@@ -269,6 +271,82 @@ mod tests {
         assert!(!active.load(Ordering::Acquire));
     }
     #[test]
+    fn stills_swap_channels_skip_padding_and_shrink_to_fit() {
+        // Two BGRA pixels and four bytes of row padding.
+        let data = [1, 2, 3, 9, 4, 5, 6, 9, 7, 7, 7, 7];
+        let still = Still::from_bgra(&data, 12, 2, 1).unwrap();
+        assert_eq!(still.rgba, [3, 2, 1, 255, 6, 5, 4, 255]);
+
+        let large = vec![100_u8; 3840 * 4 * 2160];
+        let still = Still::from_bgra(&large, 3840 * 4, 3840, 2160).unwrap();
+        assert_eq!((still.width, still.height), (640, 360));
+        assert_eq!(&still.rgba[..4], [100, 100, 100, 255]);
+
+        assert!(Still::from_bgra(&data, 12, -2, 1).is_none());
+        assert!(
+            Still::from_bgra(&data, 4, 2, 1).is_none(),
+            "stride too small"
+        );
+        assert!(
+            Still::from_bgra(&data, 12, 2, 2).is_none(),
+            "buffer too short"
+        );
+    }
+
+    #[test]
+    fn each_source_gets_one_picture_and_the_system_picker_none() {
+        let mut ui = Ui::default();
+        let camera = ShareSource {
+            kind: SourceKind::Camera("c".into()),
+            name: "Camera".into(),
+        };
+        let picker = ShareSource {
+            kind: SourceKind::Screen(None),
+            name: "Choose".into(),
+        };
+        assert!(!ui.begin_preview(&picker));
+        assert!(ui.begin_preview(&camera));
+        assert!(!ui.begin_preview(&camera), "only once");
+        ui.finish_preview(&camera, None);
+        assert!(matches!(
+            ui.preview(&camera),
+            Some(PreviewState::Unavailable)
+        ));
+
+        ui.previews.clear();
+        ui.finish_preview(&camera, None);
+        assert!(ui.preview(&camera).is_none(), "closed while being taken");
+    }
+
+    #[test]
+    fn share_defaults_round_trip_and_only_apply_while_idle() {
+        let defaults = ShareDefaults {
+            quality: Preset::Sharp.quality(),
+            access: Access::Public,
+            audio: false,
+        };
+        let json = serde_json::to_string(&defaults).unwrap();
+        assert!(
+            json.contains("\"p1080\"") && json.contains("\"public\""),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<ShareDefaults>(&json).unwrap(),
+            defaults
+        );
+
+        let mut ui = Ui::default();
+        ui.apply(defaults);
+        assert_eq!(ui.quality.preset(), Some(Preset::Sharp));
+        assert_eq!(ui.access, Access::Public);
+        assert!(!ui.audio);
+
+        ui.status.active = true;
+        ui.apply(ShareDefaults::default());
+        assert_eq!(ui.quality.preset(), Some(Preset::Sharp), "not mid-share");
+    }
+
+    #[test]
     fn ui_stop_bypasses_the_voice_command_queue() {
         let (mut publisher, _commands, _output) = fixture();
         publisher.emit();
@@ -327,7 +405,8 @@ pub struct Options {
     pub access: Access,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Resolution {
     P480,
     #[default]
@@ -366,7 +445,8 @@ impl Resolution {
 }
 
 /// Independent encoder ceilings. Presets just fill these values; changing one leaves the rest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Quality {
     pub resolution: Resolution,
     pub frame_rate: u32,
@@ -468,6 +548,95 @@ pub struct Status {
     pub audio_level: f32,
 }
 
+/// What sharing starts with, kept between runs. Which source is left out: windows come and go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShareDefaults {
+    pub quality: Quality,
+    pub access: Access,
+    pub audio: bool,
+}
+impl Default for ShareDefaults {
+    fn default() -> Self {
+        Self {
+            quality: Quality::default(),
+            access: Access::default(),
+            audio: true,
+        }
+    }
+}
+impl ShareDefaults {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// One picture of a source, small enough for the share dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Still {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", test)),
+    allow(dead_code)
+)]
+impl Still {
+    const MAX_SIZE: (usize, usize) = (640, 360);
+
+    /// Averages captured BGRA down to fit. `None` for a buffer that can't be this size.
+    pub fn from_bgra(data: &[u8], stride: u32, width: i32, height: i32) -> Option<Self> {
+        let (stride, width) = (stride as usize, usize::try_from(width).ok()?);
+        let height = usize::try_from(height).ok()?;
+        if !(1..=8192).contains(&width)
+            || !(1..=8192).contains(&height)
+            || stride < width * 4
+            || data.len() < stride * height
+        {
+            return None;
+        }
+        let step = width
+            .div_ceil(Self::MAX_SIZE.0)
+            .max(height.div_ceil(Self::MAX_SIZE.1));
+        let (out_width, out_height) = ((width / step).max(1), (height / step).max(1));
+        let mut rgba = Vec::with_capacity(out_width * out_height * 4);
+        for row in 0..out_height {
+            for column in 0..out_width {
+                let mut sum = [0_usize; 3];
+                for y in row * step..((row + 1) * step).min(height) {
+                    for x in column * step..((column + 1) * step).min(width) {
+                        let pixel = &data[y * stride + x * 4..][..3];
+                        sum.iter_mut()
+                            .zip(pixel)
+                            .for_each(|(s, p)| *s += *p as usize);
+                    }
+                }
+                let count = (((row + 1) * step).min(height) - row * step)
+                    * (((column + 1) * step).min(width) - column * step);
+                rgba.extend([sum[2], sum[1], sum[0]].map(|s| (s / count) as u8));
+                rgba.push(255);
+            }
+        }
+        Some(Self {
+            width: out_width as u32,
+            height: out_height as u32,
+            rgba,
+        })
+    }
+}
+
+pub enum PreviewState {
+    Taking,
+    Ready(rune::Pixels),
+    Unavailable,
+}
+
+pub struct SourcePreview {
+    pub source: ShareSource,
+    pub state: PreviewState,
+}
+
 pub struct Ui {
     pub sources: Vec<ShareSource>,
     pub selected: Option<ShareSource>,
@@ -477,6 +646,8 @@ pub struct Ui {
     pub quality: Quality,
     pub access: Access,
     pub status: Status,
+    /// One still per source chosen since the dialog opened.
+    pub previews: Vec<SourcePreview>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -489,10 +660,55 @@ impl Default for Ui {
             quality: Quality::default(),
             access: Access::default(),
             status: Status::default(),
+            previews: Vec::new(),
         }
     }
 }
 impl Ui {
+    /// Starts from what was last used. A chosen camera keeps sharing without system sound.
+    pub fn apply(&mut self, defaults: ShareDefaults) {
+        if self.status.active {
+            return;
+        }
+        self.quality = defaults.quality;
+        self.access = defaults.access;
+        if !self.selected.as_ref().is_some_and(|s| s.kind.is_camera()) {
+            self.audio = defaults.audio;
+        }
+    }
+
+    pub fn preview(&self, source: &ShareSource) -> Option<&PreviewState> {
+        let found = self.previews.iter().find(|p| &p.source == source);
+        found.map(|preview| &preview.state)
+    }
+
+    /// Whether this source still needs its one picture. Marks it as being taken.
+    pub fn begin_preview(&mut self, source: &ShareSource) -> bool {
+        if source.kind == SourceKind::Screen(None) || self.preview(source).is_some() {
+            return false;
+        }
+        self.previews.push(SourcePreview {
+            source: source.clone(),
+            state: PreviewState::Taking,
+        });
+        true
+    }
+
+    /// Stores a finished picture, unless the dialog closed while it was being taken.
+    pub fn finish_preview(&mut self, source: &ShareSource, still: Option<Still>) {
+        let Some(preview) = self.previews.iter_mut().find(|p| &p.source == source) else {
+            return;
+        };
+        preview.state = match still {
+            Some(still) => {
+                let pixels = rune::Pixels::new();
+                pixels.set(still.width, still.height, still.rgba);
+                PreviewState::Ready(pixels)
+            }
+            None => PreviewState::Unavailable,
+        };
+    }
+
     pub fn stop_capture(&self) {
         if let Some(stop) = &self.status.stop {
             stop.stop();

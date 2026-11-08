@@ -8,7 +8,7 @@ use std::{
     collections::HashSet,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tsclientlib::{ClientId, audio::AudioHandler};
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf};
 
-use crate::audio::{AudioEngine, Cue, DeviceChoice, PlaybackVolume};
+use crate::audio::{AudioEngine, DeviceChoice, PlaybackVolume};
 use crate::profiler::{self, Category};
 use crate::streaming::Surfaces;
 
@@ -86,8 +86,8 @@ struct Shared {
     level: AtomicU32,
     transmitting: AtomicBool,
     buffer_bytes: AtomicUsize,
-    /// The next cue to play, as one past its place in `Cue::ALL`; zero for none.
-    cue: AtomicU8,
+    /// The next sound to play, already at its final volume.
+    sound: Mutex<Option<Vec<f32>>>,
 }
 
 struct Device {
@@ -110,6 +110,13 @@ impl AudioHub {
     pub fn set_active(&self, id: Option<SessionId>) {
         self.active
             .store(id.map_or(0, |id| id.0), Ordering::Release);
+    }
+
+    /// Plays a short sound on the shared device. Nothing plays until a server has opened it.
+    pub fn play(&self, samples: Vec<f32>) {
+        if let Some(device) = self.device.lock().unwrap().as_ref() {
+            *device.shared.sound.lock().unwrap() = Some(samples);
+        }
     }
 
     fn active(&self) -> u64 {
@@ -290,12 +297,6 @@ impl Link {
         *self.line.incoming.lock().unwrap() = AudioHandler::new();
     }
 
-    /// Plays a cue on the shared device, whichever server asked for it.
-    pub fn cue(&self, cue: Cue) {
-        let place = Cue::ALL.iter().position(|known| *known == cue).unwrap_or(0);
-        self.shared.cue.store(place as u8 + 1, Ordering::Release);
-    }
-
     pub fn level(&self) -> f32 {
         f32::from_bits(self.shared.level.load(Ordering::Relaxed))
     }
@@ -406,11 +407,8 @@ impl Core {
         self.engine.set_capture(capture)?;
         self.surfaces
             .set_audio_enabled(active.is_some_and(|line| !line.silent.load(Ordering::Acquire)));
-        if let Some(cue) = (shared.cue.swap(0, Ordering::AcqRel) as usize)
-            .checked_sub(1)
-            .and_then(|place| Cue::ALL.get(place))
-        {
-            self.engine.cue(*cue);
+        if let Some(samples) = shared.sound.lock().unwrap().take() {
+            self.engine.play(samples);
         }
         let surfaces = self.surfaces.clone();
         let packets = self.engine.tick(false, |stereo| {
