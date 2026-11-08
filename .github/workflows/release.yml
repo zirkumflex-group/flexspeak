@@ -44,7 +44,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          shared-key: release-${{ matrix.platform }}
+          # A Mac cache from another image holds that image's Xcode paths and won't link.
+          shared-key: release-${{ matrix.platform }}${{ runner.os == 'macOS' && '-26' || '' }}
       # rust-cache prunes unknown directories under target/, so Opus lives (and is cached) elsewhere.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
