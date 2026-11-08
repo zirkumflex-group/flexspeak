@@ -37,6 +37,15 @@ pub const SCENES: &[Scene] = &[
     ("settings", settings_page),
     ("settings-appearance", settings_appearance),
     ("settings-omarchy", settings_omarchy),
+    ("settings-sounds", settings_sounds),
+    ("settings-sounds-pack", settings_sounds_pack),
+    ("server-log", server_log),
+    ("server-log-hover", server_log_hover),
+    ("server-log-search", server_log_search),
+    ("server-log-people", server_log_people),
+    ("server-log-person", server_log_person),
+    ("server-log-none", server_log_none),
+    ("settings-sounds-no-teamspeak", settings_sounds_no_teamspeak),
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
     ("settings-picker", settings_picker),
@@ -67,6 +76,7 @@ pub const SCENES: &[Scene] = &[
     ("share", share),
     ("sharing", sharing),
     ("watching", watching),
+    ("watching-toolbar", watching_toolbar),
     ("streams-live", streams_live),
     ("sharing-watching", sharing_watching),
     ("watching-five", watching_five),
@@ -457,6 +467,89 @@ fn settings_more_themes(s: &mut App) {
     s.settings_query = "mocha".into();
 }
 
+/// Searching brings the list of sounds into view.
+fn settings_sounds(s: &mut App) {
+    connected(s);
+    s.settings_page = Some(SettingsPage::Audio);
+    s.settings_query = "sound cues".into();
+}
+
+/// Ten hours of a busy server, running past midnight.
+fn server_log(s: &mut App) {
+    use crate::server_log::Tone;
+    use chrono::{Duration, NaiveDate};
+    connected(s);
+    let start = NaiveDate::from_ymd_opt(2026, 11, 8)
+        .unwrap()
+        .and_hms_opt(14, 16, 0)
+        .unwrap();
+    let people = ["Mara", "Theo", "Ines", "Lukas", "Priya with a long name"];
+    let happenings = [
+        (Tone::Arrived, "connected"),
+        (Tone::Moved, "→ Raid night"),
+        (Tone::Stream, "started streaming"),
+        (Tone::Moved, "→ Lobby"),
+        (Tone::Stream, "stopped streaming"),
+        (Tone::Left, "lost connection"),
+        (Tone::Arrived, "connected"),
+        (Tone::Left, "disconnected"),
+    ];
+    let log = &mut s.server_mut().log;
+    log.add_at(start, Tone::Arrived, "", "Connected");
+    for index in 0..240 {
+        let (tone, action) = happenings[index % happenings.len()];
+        let at = start + Duration::minutes(index as i64 * 5 / 2 + 2);
+        log.add_at(at, tone, people[index * 3 % people.len()], action);
+    }
+}
+
+fn server_log_hover(s: &mut App) {
+    server_log(s);
+    s.ui.log_hover = true;
+}
+
+fn server_log_search(s: &mut App) {
+    server_log(s);
+    s.server_mut().log.searching = true;
+    s.server_mut().log.set_query("raid".into());
+    s.sync_fields();
+}
+
+fn server_log_people(s: &mut App) {
+    server_log(s);
+    s.server_mut().log.searching = true;
+    s.ui.log_people = true;
+}
+
+fn server_log_person(s: &mut App) {
+    server_log(s);
+    s.server_mut().log.searching = true;
+    s.server_mut().log.set_person(Some("Mara".into()));
+}
+
+fn server_log_none(s: &mut App) {
+    server_log(s);
+    s.server_mut().log.searching = true;
+    s.server_mut().log.set_query("zzz".into());
+    s.sync_fields();
+}
+
+/// The Soft pack chosen, with the pack menu open.
+fn settings_sounds_pack(s: &mut App) {
+    settings_sounds(s);
+    for sound in crate::sounds::Sound::ALL {
+        s.sounds.set_source(sound, crate::sounds::Source::Soft);
+    }
+    s.ui.open = Some("sound-pack");
+}
+
+/// On a computer without TeamSpeak, with the pack menu open.
+fn settings_sounds_no_teamspeak(s: &mut App) {
+    settings_sounds(s);
+    s.sound_bank = crate::sounds::Bank::default();
+    s.ui.open = Some("sound-pack");
+}
+
 /// On an Omarchy desktop, following its Nord theme.
 fn settings_omarchy(s: &mut App) {
     settings_appearance(s);
@@ -701,6 +794,30 @@ fn share_sources(s: &mut App) {
     ];
     s.server_mut().streaming.sharing.selected =
         s.server_mut().streaming.sharing.sources.first().cloned();
+    let source = s.server().streaming.sharing.selected.clone().unwrap();
+    let (width, height) = (320_u32, 180_u32);
+    let rgba = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let band = ((x + y) / 24).is_multiple_of(2);
+            [
+                30,
+                if band { 70 } else { 90 },
+                if band { 130 } else { 160 },
+                255_u8,
+            ]
+        })
+        .collect();
+    let sharing = &mut s.server_mut().streaming.sharing;
+    assert!(sharing.begin_preview(&source));
+    sharing.finish_preview(
+        &source,
+        Some(crate::streaming::publishing::Still {
+            width,
+            height,
+            rgba,
+        }),
+    );
 }
 
 fn share(s: &mut App) {
@@ -830,6 +947,12 @@ fn watching_five_beside_drag(s: &mut App) {
         at: (420.0, 330.0),
         target: Some("s2".into()),
     });
+}
+
+/// The pointer over the streams, with their toolbar showing.
+fn watching_toolbar(s: &mut App) {
+    watching_grid(s);
+    s.ui.streams_hover = true;
 }
 
 fn watching(s: &mut App) {
@@ -1466,7 +1589,7 @@ mod tests {
     #[test]
     fn five_streams_arrange_themselves_to_the_window() {
         let row_of = |rt: &Runtime<App>, id: &str| rt.find(&format!("tile-{id}")).unwrap().1;
-        let mut wide = runtime(watching_five, (1400.0, 900.0));
+        let mut wide = runtime(watching_five, (1700.0, 900.0));
         settle(&mut wide);
         assert_eq!(row_of(&wide, "s1"), row_of(&wide, "s3"), "three across");
         let mut normal = runtime(watching_five, (900.0, 790.0));
@@ -1480,8 +1603,58 @@ mod tests {
     }
 
     #[test]
+    fn hovering_the_server_log_offers_search_and_escape_closes_it() {
+        let mut rt = runtime(server_log, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("log-search-open").is_none(), "hidden at rest");
+        click(&mut rt, "server-log");
+        settle(&mut rt);
+        click(&mut rt, "log-search-open");
+        settle(&mut rt);
+        assert!(rt.state.server().log.searching);
+        assert!(rt.state.ui.log_search.focused);
+        click(&mut rt, "log-people");
+        settle(&mut rt);
+        click(&mut rt, "log-person-0");
+        settle(&mut rt);
+        assert!(rt.state.server().log.person().is_some());
+        assert!(rt.find("log-people-menu").is_none(), "closes on choosing");
+        key(&mut rt, rune::Key::Escape, false);
+        settle(&mut rt);
+        assert!(!rt.state.server().log.searching);
+        assert!(!rt.state.server().log.filtering());
+    }
+
+    #[test]
+    fn the_server_log_stays_out_of_small_windows() {
+        let mut rt = runtime(server_log, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("server-log").is_some());
+        let mut small = runtime(server_log, crate::MIN_SIZE);
+        settle(&mut small);
+        assert!(small.find("server-log").is_none());
+    }
+
+    #[test]
+    fn the_streams_toolbar_appears_while_the_pointer_is_over_them() {
+        let mut rt = runtime(watching, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("refresh-streams").is_none(), "hidden at rest");
+        let (x, y) = rt.find("stage").unwrap();
+        rt.pointer_move(x, y);
+        settle(&mut rt);
+        assert!(rt.find("refresh-streams").is_some());
+        rt.pointer_move(1.0, 1.0);
+        settle(&mut rt);
+        assert!(rt.find("refresh-streams").is_none(), "hidden again");
+    }
+
+    #[test]
     fn the_mouse_switches_layouts_focuses_and_rearranges_streams() {
         let mut rt = runtime(watching_five, (900.0, 790.0));
+        settle(&mut rt);
+        let (x, y) = rt.find("stage").unwrap();
+        rt.pointer_move(x, y);
         settle(&mut rt);
 
         drag(&mut rt, "tile-s1", "tile-s2");

@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tsclientlib::{
     ChannelId, ChannelPermissionHint, ClientId, ClientPermissionHint, Codec, Connection,
     DisconnectOptions, Identity, StreamItem,
-    events::{Event as BookEvent, PropertyId},
+    events::{Event as BookEvent, PropertyId, PropertyValue},
     prelude::*,
 };
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio};
@@ -62,8 +62,6 @@ pub struct Config {
 #[derive(Debug)]
 pub enum Command {
     Stop,
-    /// Plays a short sound on the shared audio device.
-    Cue(crate::audio::Cue),
     Mute(bool),
     Deafen(bool),
     Join(u64, String),
@@ -139,8 +137,130 @@ impl Snapshot {
     }
 }
 
+/// What the status says when the connection dropped and is being re-established.
+pub const CONNECTION_LOST: &str = "Connection lost. Reconnecting…";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Connected,
+    Disconnected,
+    LostConnection,
+    Moved,
+    KickedFromChannel,
+    KickedFromServer,
+    Banned,
+}
+
+/// Something a person did on the server, for the log and its sounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Activity {
+    pub kind: ActivityKind,
+    pub name: String,
+    pub channel: String,
+    pub is_self: bool,
+    pub entered_yours: bool,
+    pub left_yours: bool,
+}
+
+use tsclientlib::Reason;
+
+/// How someone left, or `None` when they only went out of view.
+fn leaving(reason: Option<Reason>) -> Option<ActivityKind> {
+    match reason {
+        Some(Reason::LostConnection) => Some(ActivityKind::LostConnection),
+        Some(Reason::KickChannel) => Some(ActivityKind::KickedFromChannel),
+        Some(Reason::KickServer) => Some(ActivityKind::KickedFromServer),
+        Some(Reason::KickServerBan) => Some(ActivityKind::Banned),
+        Some(
+            Reason::Moved | Reason::Subscription | Reason::Channelupdate | Reason::Channeledit,
+        ) => None,
+        _ => Some(ActivityKind::Disconnected),
+    }
+}
+
+/// How someone arrived, or `None` when they only came into view.
+fn arriving(reason: Option<Reason>) -> Option<ActivityKind> {
+    match reason {
+        None | Some(Reason::None) => Some(ActivityKind::Connected),
+        Some(Reason::Moved) => Some(ActivityKind::Moved),
+        _ => None,
+    }
+}
+
+fn activity(state: &tsclientlib::data::Connection, change: &BookEvent) -> Option<Activity> {
+    let clean = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect::<String>()
+    };
+    let channel_name = |id| {
+        state
+            .channels
+            .get(&id)
+            .map_or_else(String::new, |c: &tsclientlib::data::Channel| clean(&c.name))
+    };
+    let yours = state
+        .clients
+        .get(&state.own_client)
+        .map(|client| client.channel);
+    match change {
+        BookEvent::PropertyAdded {
+            id: PropertyId::Client(id),
+            extra,
+            ..
+        } if *id != state.own_client => {
+            let client = state.clients.get(id)?;
+            Some(Activity {
+                kind: arriving(extra.reason)?,
+                name: clean(&client.name),
+                channel: channel_name(client.channel),
+                is_self: false,
+                entered_yours: Some(client.channel) == yours,
+                left_yours: false,
+            })
+        }
+        BookEvent::PropertyChanged {
+            id: PropertyId::ClientChannel(id),
+            old: PropertyValue::ChannelId(old),
+            extra,
+            ..
+        } => {
+            let client = state.clients.get(id)?;
+            Some(Activity {
+                kind: if extra.reason == Some(Reason::KickChannel) {
+                    ActivityKind::KickedFromChannel
+                } else {
+                    ActivityKind::Moved
+                },
+                name: clean(&client.name),
+                channel: channel_name(client.channel),
+                is_self: *id == state.own_client,
+                entered_yours: Some(client.channel) == yours,
+                left_yours: Some(*old) == yours,
+            })
+        }
+        BookEvent::PropertyRemoved {
+            id: PropertyId::Client(id),
+            old: PropertyValue::Client(client),
+            extra,
+            ..
+        } => Some(Activity {
+            kind: leaving(extra.reason)?,
+            name: clean(&client.name),
+            channel: channel_name(client.channel),
+            is_self: *id == state.own_client,
+            entered_yours: false,
+            left_yours: Some(client.channel) == yours,
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
+    /// People arriving, moving and leaving since the last update.
+    Activity(Vec<Activity>),
     Status(String),
     Connected(String),
     State(Snapshot),
@@ -653,7 +773,6 @@ async fn run_connection(
                     if !connected { continue; }
                     let state = connection.get_state()?;
                     match command {
-                        Command::Cue(cue) => audio.cue(cue),
                         Command::Mute(value) => {
                             controls.desired.muted = value;
                             if value { audio.set_can_send(false); }
@@ -744,6 +863,8 @@ async fn run_connection(
                 },
                 Step::Network(Some(Ok(event))) => match event {
                     StreamItem::BookEvents(changes) => {
+                        // The first batch is everyone already here, not people arriving.
+                        let first_batch = !connected;
                         if !connected {
                             connected = true;
                             traffic.reset_transport(Instant::now());
@@ -762,11 +883,16 @@ async fn run_connection(
                             .map(|client| client.id));
                         // Deliver membership first so new-channel samples cannot populate the old view.
                         let _ = events.try_send(Event::State(snapshot(&connection)?));
+                        if !first_batch {
+                            let happened: Vec<_> = changes.iter().filter_map(|change| activity(state, change)).collect();
+                            if !happened.is_empty() {
+                                let _ = events.try_send(Event::Activity(happened));
+                            }
+                        }
                         for change in &changes {
                             if let BookEvent::Message { target: tsclientlib::MessageTarget::Poke(_), invoker, message } = change {
                                 let clean = |text: &str, limit: usize| text.chars().filter(|c| !c.is_control()).take(limit).collect::<String>();
                                 let _ = events.try_send(Event::Poked { from: clean(&invoker.name, 64), message: clean(message, 200) });
-                                audio.cue(crate::audio::Cue::Poke);
                                 continue;
                             }
                             if let BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }
@@ -813,7 +939,7 @@ async fn run_connection(
                         speakers.clear();
                         let network = traffic.reset_transport(Instant::now());
                         let _ = events.try_send(Event::Usage { network, connection: ConnectionUsage::default() });
-                        let _ = events.try_send(Event::Status("Connection lost. Reconnecting…".into()));
+                        let _ = events.try_send(Event::Status(CONNECTION_LOST.into()));
                     },
                     StreamItem::MessageResult(handle, result) => {
                         let reply = flow.borrow_mut().result(handle, result, Instant::now());
@@ -1143,6 +1269,28 @@ mod tests {
         sent.clear();
         report(&mut speakers, &mut sent, now + Speakers::HOLD, true);
         assert_eq!(sent.pop(), Some(BTreeSet::new()), "silence ends speech");
+    }
+
+    #[test]
+    fn leaving_tells_kicks_and_bans_from_going_out_of_view() {
+        use ActivityKind::*;
+        assert_eq!(leaving(Some(Reason::KickServer)), Some(KickedFromServer));
+        assert_eq!(leaving(Some(Reason::KickServerBan)), Some(Banned));
+        assert_eq!(leaving(Some(Reason::LostConnection)), Some(LostConnection));
+        assert_eq!(leaving(Some(Reason::Clientdisconnect)), Some(Disconnected));
+        assert_eq!(
+            leaving(Some(Reason::Subscription)),
+            None,
+            "only out of view"
+        );
+        assert_eq!(leaving(Some(Reason::Moved)), None, "moved out of view");
+        assert_eq!(arriving(Some(Reason::None)), Some(Connected));
+        assert_eq!(arriving(Some(Reason::Moved)), Some(Moved));
+        assert_eq!(
+            arriving(Some(Reason::Subscription)),
+            None,
+            "only came into view"
+        );
     }
 
     #[test]

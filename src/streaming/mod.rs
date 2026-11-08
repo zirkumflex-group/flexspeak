@@ -6,6 +6,7 @@ mod session;
 #[cfg(target_os = "macos")]
 pub use publish_media::request_system_audio_access;
 pub use publish_media::sources as share_sources;
+pub use publish_media::still as share_still;
 
 pub(crate) use rtc::Output as MediaEvent;
 pub use session::Session;

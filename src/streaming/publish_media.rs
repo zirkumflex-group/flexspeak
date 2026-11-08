@@ -1,6 +1,6 @@
 use super::{
     protocol,
-    publishing::{Options, ShareSource},
+    publishing::{Options, ShareSource, Still},
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -89,8 +89,21 @@ pub fn sources() -> Result<Vec<ShareSource>> {
     anyhow::bail!("Screen sharing is available on Mac and Windows")
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub async fn still(_: ShareSource) -> Result<Option<Still>> {
+    Ok(None)
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn start(_: Options) -> Result<Publisher> {
     anyhow::bail!("Screen sharing is available on Mac and Windows")
+}
+
+/// One picture of a source for the share dialog. `None` when it can't be known in advance.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub async fn still(source: ShareSource) -> Result<Option<Still>> {
+    if source.kind.is_camera() {
+        native::camera_access().await?;
+    }
+    tokio::task::spawn_blocking(move || native::still(&source)).await?
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -200,6 +213,43 @@ mod native {
             anyhow!("Screen capture is unavailable. Check screen-recording permission.")
         })
     }
+    pub async fn camera_access() -> Result<()> {
+        camera::request_access().await
+    }
+
+    pub fn still(source: &ShareSource) -> Result<Option<Still>> {
+        let (window, id) = match &source.kind {
+            SourceKind::Camera(id) => return camera::still(id).map(Some),
+            // The system picker chooses the screen or window only once sharing starts.
+            SourceKind::Screen(None) => return Ok(None),
+            SourceKind::Screen(Some(id)) => (false, *id),
+            SourceKind::Window(id) => (true, *id),
+        };
+        let mut desktop = capturer(window)?;
+        let selected = desktop
+            .get_source_list()
+            .into_iter()
+            .find(|source| source.id() == id)
+            .ok_or_else(|| anyhow!("The selected screen or window is no longer available"))?;
+        let taken = std::sync::Arc::new(Mutex::new(None));
+        let slot = taken.clone();
+        desktop.start_capture(Some(selected), move |frame| {
+            if let Ok(frame) = frame {
+                *slot.lock().unwrap() =
+                    Still::from_bgra(frame.data(), frame.stride(), frame.width(), frame.height());
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            desktop.capture_frame();
+            if let Some(still) = taken.lock().unwrap().take() {
+                return Ok(Some(still));
+            }
+            ensure!(Instant::now() < deadline, "No picture arrived in time");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     pub fn sources() -> Result<Vec<ShareSource>> {
         #[cfg(target_os = "macos")]
         {
