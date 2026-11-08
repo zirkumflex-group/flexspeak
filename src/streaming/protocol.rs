@@ -117,7 +117,8 @@ pub fn setup(
     let mut packet = command("setupstream");
     packet.write_arg("name", &name);
     packet.write_arg("type", &source.wire_type());
-    packet.write_arg("bitrate", &quality.bitrate());
+    // The server keeps this in 16 bits, so it must be kbit/s; bit/s wraps around.
+    packet.write_arg("bitrate", &(quality.bitrate() / 1000));
     packet.write_arg("accessibility", &access.wire_value());
     packet.write_arg("mode", &1_u8);
     packet.write_arg("viewer_limit", &super::publishing::MAX_VIEWERS);
@@ -242,7 +243,7 @@ mod tests {
         let args = parse("setupstream", str::from_utf8(packet.0.content()).unwrap()).unwrap();
         assert_eq!(args[0]["type"], "1");
         assert_eq!(args[0]["accessibility"], "1");
-        assert_eq!(args[0]["bitrate"], "8200000");
+        assert_eq!(args[0]["bitrate"], "8200");
         assert_eq!(args[0]["audio"], "0");
     }
 
@@ -264,7 +265,7 @@ mod tests {
             ("accessibility", "3"),
             ("mode", "1"),
             ("viewer_limit", "4"),
-            ("bitrate", "2500000"),
+            ("bitrate", "2500"),
         ] {
             assert_eq!(args[0][key], value);
         }

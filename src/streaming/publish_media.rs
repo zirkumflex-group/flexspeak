@@ -448,7 +448,7 @@ mod native {
     async fn add_peer(
         factory: &PeerConnectionFactory,
         video: &RtcVideoTrack,
-        audio: Option<&RtcAudioTrack>,
+        audio: &RtcAudioTrack,
         id: PeerKey,
         callbacks: mpsc::Sender<Callback>,
         overflow: Arc<AtomicBool>,
@@ -500,10 +500,8 @@ mod native {
             .collect::<Vec<_>>();
         ensure!(!codecs.is_empty(), "The native VP8 encoder is unavailable");
         transceiver.set_codec_preferences(codecs)?;
-        if let Some(audio) = audio {
-            peer.pc
-                .add_transceiver(MediaStreamTrack::Audio(audio.clone()), init())?;
-        }
+        peer.pc
+            .add_transceiver(MediaStreamTrack::Audio(audio.clone()), init())?;
         let offer = peer.pc.create_offer(OfferOptions::default()).await?;
         let wire = offer.to_string();
         protocol::offer(&wire)?;
@@ -550,13 +548,10 @@ mod native {
             !options.source.kind.is_camera(),
         );
         let video_track = factory.create_video_track("shared-video", video.clone());
-        let audio = options
-            .audio
-            .as_ref()
-            .map(|_| NativeAudioSource::new(AudioSourceOptions::default(), 48000, 2, 50));
-        let audio_track = audio
-            .as_ref()
-            .map(|source| factory.create_audio_track("system-audio", source.clone()));
+        // The official TS6 client silently drops an offer without an audio section, so a share
+        // without system audio still negotiates this track and simply never feeds it.
+        let audio = NativeAudioSource::new(AudioSourceOptions::default(), 48000, 2, 50);
+        let audio_track = factory.create_audio_track("system-audio", audio.clone());
         let quality = options.quality;
         quality.validate()?;
         let max_size = quality.max_size();
@@ -648,7 +643,7 @@ mod native {
                             match command {
                                 Input::Add(id) if !peers.contains_key(&id) => {
                                     ensure!(peers.len() < MAX_VIEWERS,"Too many viewers");
-                                    let peer = add_peer(&factory,&video_track,audio_track.as_ref(),id,callbacks.clone(),overflow.clone(),events,
+                                    let peer = add_peer(&factory,&video_track,&audio_track,id,callbacks.clone(),overflow.clone(),events,
                                         vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()],quality).await?;
                                     peers.insert(id,peer);
                                 },
@@ -695,11 +690,11 @@ mod native {
                         let stalled_camera = options.source.kind.is_camera() && frames > 0 && last_video.elapsed() > Duration::from_secs(5);
                         ensure!(!stalled_camera, "Camera stopped delivering video. Check its connection and start sharing again.");
                         ensure!(frames > 0 || last_video.elapsed() < Duration::from_secs(60),"No video frames arrived. Check capture permission and choose an available source.");
-                        if let (Some(capture),Some(source)) = (&mut system_audio,&audio) {
+                        if let Some(capture) = &mut system_audio {
                             for _ in 0..4 {
                                 let Some((frame,peak)) = capture.next()? else { break; };
                                 if !peers.is_empty() {
-                                    tokio::select! { _ = cancel.changed() => return Ok(()), result = tokio::time::timeout(Duration::from_secs(1),source.capture_frame(&frame)) => result.context("System audio delivery stalled")?? }
+                                    tokio::select! { _ = cancel.changed() => return Ok(()), result = tokio::time::timeout(Duration::from_secs(1),audio.capture_frame(&frame)) => result.context("System audio delivery stalled")?? }
                                 }
                                 level = level.max(peak); audio_frames += 1;
                             }
@@ -716,12 +711,8 @@ mod native {
         }.await;
         active.store(false, Ordering::Release);
         video_track.set_enabled(false);
-        if let Some(track) = audio_track {
-            track.set_enabled(false);
-        }
-        if let Some(audio) = audio {
-            audio.clear_buffer();
-        }
+        audio_track.set_enabled(false);
+        audio.clear_buffer();
         peers.clear();
         drop(capture);
         drop(camera_capture);
@@ -811,7 +802,7 @@ mod native {
             let sender = add_peer(
                 &factory,
                 &video_track,
-                Some(&audio_track),
+                &audio_track,
                 key,
                 callbacks,
                 Arc::new(AtomicBool::new(false)),
