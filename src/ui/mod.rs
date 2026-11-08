@@ -34,6 +34,12 @@ pub use theme::Theme;
 pub type StreamJob = dyn FnOnce(&dyn Fn(Message)) -> Message + Send;
 
 /// What an update asks the window or a worker thread to do after it returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupsMenu {
+    Server,
+    Channel,
+}
+
 pub enum Task {
     None,
     Batch(Vec<Task>),
@@ -91,6 +97,7 @@ impl Task {
 pub enum Field {
     ChannelPassword,
     PokeMessage,
+    ModerationReason,
 }
 
 /// Members being dragged onto a channel.
@@ -135,6 +142,7 @@ pub struct UiState {
     pub server_address: TextEdit,
     pub server_password: TextEdit,
     pub poke_message: TextEdit,
+    pub moderation_reason: TextEdit,
     /// The device or source picker whose list is open.
     pub open: Option<&'static str>,
     /// The member a context menu is open for, and where it opened.
@@ -143,6 +151,8 @@ pub struct UiState {
     pub rail_menu: Option<(crate::hub::SessionId, rune::PointerPress)>,
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
+    /// Which group submenu of the member menu is open.
+    pub groups_menu: Option<GroupsMenu>,
     pub drag: Option<MemberDrag>,
     pub tile_drag: Option<TileDrag>,
     /// The pointer is over the update notice, which then lists what's new.
@@ -182,10 +192,12 @@ impl Default for UiState {
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
             poke_message: TextEdit::new(""),
+            moderation_reason: TextEdit::new(""),
             open: None,
             member_menu: None,
             rail_menu: None,
             move_menu: false,
+            groups_menu: None,
             drag: None,
             tile_drag: None,
             update_hover: false,
@@ -234,6 +246,12 @@ impl App {
             .as_ref()
             .map_or(String::new(), |draft| draft.message.clone());
         mirror(&mut self.ui.poke_message, &poke);
+        let reason = self
+            .server()
+            .moderation
+            .as_ref()
+            .map_or(String::new(), |draft| draft.reason.clone());
+        mirror(&mut self.ui.moderation_reason, &reason);
     }
 }
 
@@ -285,6 +303,7 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
         Task::Copy(text) => tx.copy(text),
         Task::Focus(Field::ChannelPassword) => s.ui.channel_password.focused = true,
         Task::Focus(Field::PokeMessage) => s.ui.poke_message.focused = true,
+        Task::Focus(Field::ModerationReason) => s.ui.moderation_reason.focused = true,
         Task::Perform(job) => {
             let handle = s.handle.clone();
             let spawned = std::thread::Builder::new()
@@ -466,6 +485,7 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         && !s.server().selected_members.is_empty()
         && s.settings_page.is_none()
         && s.ui.member_menu.is_none()
+        && s.server().moderation.is_none()
     {
         dispatch(s, tx, Message::ClearSelection);
         return true;

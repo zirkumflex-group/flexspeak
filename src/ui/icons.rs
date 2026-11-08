@@ -355,3 +355,13 @@ pub static FLEXSPEAK: Icon = Icon {
     view: 24.0,
     body: r#"<path d="M9.88 3.36 L14.94 3.36 L23.00 16.32 L17.95 16.32 Z" fill="currentColor" fill-opacity="0.6"/><path d="M1.00 20.64 L6.54 20.64 L14.94 3.36 L9.39 3.36 Z" fill="currentColor"/>"#,
 };
+pub static BAN: Icon = Icon {
+    name: "lucide-ban",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="m4.9 4.9 14.2 14.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+pub static USER_X: Icon = Icon {
+    name: "lucide-user-x",
+    view: 24.0,
+    body: r#"<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="9" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="17" x2="22" y1="8" y2="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="22" x2="17" y1="8" y2="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};

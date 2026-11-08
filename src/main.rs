@@ -261,6 +261,10 @@ struct ServerSession {
     selected_members: BTreeSet<u16>,
     /// The poke being written.
     poke: Option<PokeDraft>,
+    /// The kick or ban awaiting confirmation.
+    moderation: Option<ModerationDraft>,
+    /// The group ticks in the open member menu, shown until the server confirms them.
+    group_edit: Option<GroupEditDraft>,
     /// Pokes received and not yet read, oldest first.
     pokes: Vec<Poke>,
     /// Pokes that arrived while another server was active, for the marker on the rail.
@@ -319,6 +323,8 @@ impl ServerSession {
             collapsed_channels: HashSet::new(),
             selected_members: BTreeSet::new(),
             poke: None,
+            moderation: None,
+            group_edit: None,
             pokes: Vec::new(),
             unseen_pokes: 0,
             expanded_client: None,
@@ -381,6 +387,41 @@ struct PokeDraft {
     id: u16,
     name: String,
     message: String,
+}
+
+/// A kick or ban, waiting for its reason and confirmation.
+#[derive(Debug, Clone)]
+struct ModerationDraft {
+    ids: Vec<u16>,
+    action: client::Moderation,
+    reason: String,
+}
+
+/// Group ticks in the open member menu; each one applies to everyone in `ids` at once.
+#[derive(Debug, Clone, Default)]
+struct GroupEditDraft {
+    ids: Vec<u16>,
+    /// The server groups touched so far: added when true, removed when false.
+    wanted: BTreeMap<u64, bool>,
+    channel_group: Option<u64>,
+}
+
+/// Whether the people being edited hold a server group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupMark {
+    On,
+    Off,
+    Mixed,
+}
+
+impl GroupMark {
+    fn of(wanted: Option<bool>, held: GroupMark) -> GroupMark {
+        match wanted {
+            Some(true) => GroupMark::On,
+            Some(false) => GroupMark::Off,
+            None => held,
+        }
+    }
 }
 
 /// A poke someone sent you.
@@ -718,6 +759,15 @@ enum Message {
     SubmitPoke,
     CancelPoke,
     DismissPoke,
+    /// Asks to kick or ban these clients; nothing happens until it's confirmed.
+    OpenModeration(Vec<u16>, client::Moderation),
+    ModerationReason(String),
+    ModerationBan(Option<u64>),
+    SubmitModeration,
+    CancelModeration,
+    OpenGroups(Vec<u16>),
+    ToggleServerGroup(u64),
+    PickChannelGroup(u64),
     Install,
     Installed(Result<(), String>),
     /// Closes the install dialog; `true` also stops it asking at launch.
@@ -967,6 +1017,7 @@ impl App {
         self.ui.open = None;
         self.ui.member_menu = None;
         self.ui.move_menu = false;
+        self.ui.groups_menu = None;
         self.ui.drag = None;
         self.ui.tile_drag = None;
         self.ui.server_picker = false;
@@ -2712,6 +2763,111 @@ impl App {
                     self.server_mut().pokes.remove(0);
                 }
             }
+            Message::OpenModeration(ids, action) => {
+                let ids: Vec<u16> = ids
+                    .into_iter()
+                    .filter(|id| self.find_member(*id).is_some_and(|member| !member.is_self))
+                    .collect();
+                if self.live() && !ids.is_empty() {
+                    self.server_mut().moderation = Some(ModerationDraft {
+                        ids,
+                        action,
+                        reason: String::new(),
+                    });
+                    return Task::Focus(ui::Field::ModerationReason);
+                }
+            }
+            Message::ModerationReason(value) => {
+                if let Some(draft) = &mut self.server_mut().moderation {
+                    draft.reason = value.chars().take(80).collect();
+                }
+            }
+            Message::ModerationBan(seconds) => {
+                if let Some(draft) = &mut self.server_mut().moderation
+                    && matches!(draft.action, client::Moderation::Ban(_))
+                {
+                    draft.action = client::Moderation::Ban(seconds);
+                }
+            }
+            Message::SubmitModeration => {
+                if let Some(draft) = self.server_mut().moderation.take() {
+                    self.server_mut().selected_members.clear();
+                    self.begin_alert(Source::Moderate);
+                    self.command(client::Command::Moderate(
+                        draft.ids,
+                        draft.action,
+                        draft.reason,
+                    ));
+                }
+            }
+            Message::CancelModeration => self.server_mut().moderation = None,
+            Message::OpenGroups(ids) => {
+                let unchanged = self
+                    .server()
+                    .group_edit
+                    .as_ref()
+                    .is_some_and(|draft| draft.ids == ids);
+                if self.live() && !ids.is_empty() && !unchanged {
+                    self.server_mut().group_edit = Some(GroupEditDraft {
+                        ids,
+                        ..Default::default()
+                    });
+                    let state = &self.server().state;
+                    if state.server_groups.is_empty() || state.channel_groups.is_empty() {
+                        self.command(client::Command::RequestGroups);
+                    }
+                }
+            }
+            Message::ToggleServerGroup(group) => {
+                if let Some(draft) = &self.server().group_edit {
+                    let ids = draft.ids.clone();
+                    let held = self.server_group_mark(&ids, group);
+                    let waiting = draft
+                        .wanted
+                        .get(&group)
+                        .is_some_and(|wanted| GroupMark::of(Some(*wanted), held) != held);
+                    if !waiting {
+                        let add = held != GroupMark::On;
+                        if let Some(draft) = &mut self.server_mut().group_edit {
+                            draft.wanted.insert(group, add);
+                        }
+                        let (added, removed) = if add {
+                            (vec![group], Vec::new())
+                        } else {
+                            (Vec::new(), vec![group])
+                        };
+                        self.send_group_edit(
+                            ids,
+                            client::GroupEdit {
+                                add: added,
+                                remove: removed,
+                                channel_group: None,
+                            },
+                        );
+                    }
+                }
+            }
+            Message::PickChannelGroup(group) => {
+                if let Some(draft) = &self.server().group_edit {
+                    let ids = draft.ids.clone();
+                    let shared = self.shared_channel_group(&ids);
+                    let waiting = draft
+                        .channel_group
+                        .is_some_and(|picked| Some(picked) != shared);
+                    if !waiting && shared != Some(group) {
+                        if let Some(draft) = &mut self.server_mut().group_edit {
+                            draft.channel_group = Some(group);
+                        }
+                        self.send_group_edit(
+                            ids,
+                            client::GroupEdit {
+                                channel_group: Some(group),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
             Message::Install => {
                 if let Some(offer) = self.install_offer.clone()
                     && !self.installing
@@ -3020,6 +3176,18 @@ impl App {
                 {
                     session.poke = None;
                 }
+                if session.moderation.as_mut().is_some_and(|draft| {
+                    draft.ids.retain(present);
+                    draft.ids.is_empty()
+                }) {
+                    session.moderation = None;
+                }
+                if session.group_edit.as_mut().is_some_and(|draft| {
+                    draft.ids.retain(present);
+                    draft.ids.is_empty()
+                }) {
+                    session.group_edit = None;
+                }
                 session.state = state;
                 let mut join = None;
                 if session.connected
@@ -3120,7 +3288,16 @@ impl App {
                     self.audio_buffer_bytes = audio_buffer_bytes;
                 }
             }
-            client::Event::Warning { source, detail } => self.raise_for(id, source, detail),
+            client::Event::Warning { source, detail } => {
+                // A refused change must not keep showing as ticked.
+                if matches!(source, Source::Groups | Source::Flood)
+                    && let Some(draft) = &mut session.group_edit
+                {
+                    draft.wanted.clear();
+                    draft.channel_group = None;
+                }
+                self.raise_for(id, source, detail)
+            }
             client::Event::Recovered(source) => match source.server_scoped() {
                 true => self.alerts.recover_in(id.0, source),
                 false => self.alerts.recover(source),
@@ -3334,6 +3511,41 @@ impl App {
                 self.find_member(*id)
                     .is_some_and(|member| member.is_self || member.can_move != Some(false))
             })
+    }
+    /// One person's name, or how many people these are.
+    fn people(&self, ids: &[u16]) -> String {
+        match ids {
+            [one] => self
+                .find_member(*one)
+                .map_or_else(|| "1 person".to_owned(), |member| member.name.clone()),
+            many => format!("{} people", many.len()),
+        }
+    }
+    /// Whether all, none or some of these clients are in a server group.
+    fn server_group_mark(&self, ids: &[u16], group: u64) -> GroupMark {
+        let holds = |id: &u16| {
+            self.find_member(*id)
+                .is_some_and(|member| member.server_groups.contains(&group))
+        };
+        if ids.iter().all(holds) {
+            GroupMark::On
+        } else if ids.iter().any(holds) {
+            GroupMark::Mixed
+        } else {
+            GroupMark::Off
+        }
+    }
+    /// The channel group these clients share, if they all have the same one.
+    fn shared_channel_group(&self, ids: &[u16]) -> Option<u64> {
+        let mut groups = ids
+            .iter()
+            .map(|id| self.find_member(*id).map(|member| member.channel_group));
+        let first = groups.next()??;
+        groups.all(|group| group == Some(first)).then_some(first)
+    }
+    fn send_group_edit(&mut self, ids: Vec<u16>, edit: client::GroupEdit) {
+        self.begin_alert(Source::Groups);
+        self.command(client::Command::SetGroups(ids, edit));
     }
     /// Whether the member is sharing a stream; the catalog only covers your current channel.
     fn is_streaming(&self, member: &client::Member) -> bool {
@@ -4351,6 +4563,162 @@ mod tests {
         assert_eq!(log.get(2).unwrap().action, "connected");
     }
 
+    fn moderation_app() -> (App, mpsc::Receiver<client::Command>) {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let (_, commands) = connection(&mut app);
+        let person = |id: u16, is_self: bool, groups: &[u64], channel_group: u64| client::Member {
+            id,
+            name: format!("Person {id}"),
+            is_self,
+            server_groups: groups.to_vec(),
+            channel_group,
+            ..Default::default()
+        };
+        app.server_mut().connected = true;
+        app.server_mut().state.channels = vec![client::Channel {
+            id: 1,
+            members: vec![
+                person(1, true, &[], 5),
+                person(2, false, &[7, 8], 5),
+                person(3, false, &[8], 6),
+            ],
+            ..Default::default()
+        }];
+        (app, commands)
+    }
+
+    #[test]
+    fn a_kick_waits_for_confirmation_and_skips_yourself() {
+        let (mut app, mut commands) = moderation_app();
+        let action = client::Moderation::KickServer;
+        assert!(matches!(
+            app.update(Message::OpenModeration(vec![1, 2, 3], action)),
+            Task::Focus(ui::Field::ModerationReason)
+        ));
+        assert_eq!(app.server().moderation.as_ref().unwrap().ids, vec![2, 3]);
+        assert!(commands.try_recv().is_err(), "Opening sends nothing");
+        let _ = app.update(Message::ModerationReason("x".repeat(100)));
+        assert_eq!(app.server().moderation.as_ref().unwrap().reason.len(), 80);
+        let _ = app.update(Message::ModerationReason("Spam".into()));
+        let _ = app.update(Message::SubmitModeration);
+        match commands.try_recv().unwrap() {
+            client::Command::Moderate(ids, sent, reason) => {
+                assert_eq!((ids, sent, reason.as_str()), (vec![2, 3], action, "Spam"));
+            }
+            other => panic!("Unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_ban_length_only_changes_a_ban() {
+        let (mut app, _commands) = moderation_app();
+        let _ = app.update(Message::OpenModeration(
+            vec![2],
+            client::Moderation::KickChannel,
+        ));
+        let _ = app.update(Message::ModerationBan(None));
+        assert_eq!(
+            app.server().moderation.as_ref().unwrap().action,
+            client::Moderation::KickChannel
+        );
+        let _ = app.update(Message::OpenModeration(
+            vec![2],
+            client::Moderation::Ban(Some(60)),
+        ));
+        let _ = app.update(Message::ModerationBan(None));
+        assert_eq!(
+            app.server().moderation.as_ref().unwrap().action,
+            client::Moderation::Ban(None)
+        );
+    }
+
+    fn sent_edit(commands: &mut mpsc::Receiver<client::Command>) -> client::GroupEdit {
+        match commands.try_recv().unwrap() {
+            client::Command::SetGroups(ids, edit) => {
+                assert_eq!(ids, vec![2, 3]);
+                edit
+            }
+            other => panic!("Unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_group_tick_applies_to_everyone_right_away() {
+        let (mut app, mut commands) = moderation_app();
+        let _ = app.update(Message::OpenGroups(vec![2, 3]));
+        assert!(commands.try_recv().is_ok(), "Asks for the missing lists");
+        assert_eq!(app.server_group_mark(&[2, 3], 8), GroupMark::On);
+        assert_eq!(app.server_group_mark(&[2, 3], 7), GroupMark::Mixed);
+        assert_eq!(app.server_group_mark(&[2, 3], 9), GroupMark::Off);
+        assert_eq!(app.shared_channel_group(&[2, 3]), None);
+
+        let _ = app.update(Message::ToggleServerGroup(9));
+        assert_eq!(sent_edit(&mut commands).add, vec![9]);
+        let _ = app.update(Message::OpenGroups(vec![2, 3]));
+        assert_eq!(
+            app.server().group_edit.as_ref().unwrap().wanted.len(),
+            1,
+            "Switching submenus keeps your ticks"
+        );
+        let _ = app.update(Message::ToggleServerGroup(8));
+        assert_eq!(sent_edit(&mut commands).remove, vec![8]);
+        let _ = app.update(Message::ToggleServerGroup(7));
+        assert_eq!(sent_edit(&mut commands).add, vec![7], "Mixed adds to all");
+        let _ = app.update(Message::PickChannelGroup(6));
+        assert_eq!(sent_edit(&mut commands).channel_group, Some(6));
+        assert!(app.server().group_edit.is_some(), "The menu stays usable");
+    }
+
+    #[test]
+    fn a_group_waits_for_the_server_before_it_can_flip_back() {
+        let (mut app, mut commands) = moderation_app();
+        let _ = app.update(Message::OpenGroups(vec![2, 3]));
+        let _ = commands.try_recv();
+        let _ = app.update(Message::ToggleServerGroup(9));
+        let _ = sent_edit(&mut commands);
+        let _ = app.update(Message::ToggleServerGroup(9));
+        assert!(commands.try_recv().is_err(), "Still waiting for the server");
+
+        for member in &mut app.server_mut().state.channels[0].members {
+            member.server_groups.push(9);
+        }
+        let _ = app.update(Message::ToggleServerGroup(9));
+        assert_eq!(sent_edit(&mut commands).remove, vec![9]);
+    }
+
+    #[test]
+    fn a_refused_group_change_stops_showing_as_ticked() {
+        let (mut app, mut commands) = moderation_app();
+        let _ = app.update(Message::OpenGroups(vec![2, 3]));
+        let _ = commands.try_recv();
+        let _ = app.update(Message::ToggleServerGroup(9));
+        let id = app.active.unwrap();
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Warning {
+                source: Source::Groups,
+                detail: "Denied".into(),
+            },
+        ));
+        assert!(app.server().group_edit.as_ref().unwrap().wanted.is_empty());
+    }
+
+    #[test]
+    fn someone_leaving_drops_them_from_open_dialogs() {
+        let (mut app, _commands) = moderation_app();
+        let _ = app.update(Message::OpenGroups(vec![2]));
+        let _ = app.update(Message::OpenModeration(
+            vec![2],
+            client::Moderation::KickChannel,
+        ));
+        let id = app.active.unwrap();
+        let mut state = app.server().state.clone();
+        state.channels[0].members.retain(|member| member.id != 2);
+        let _ = app.update(Message::Backend(id, client::Event::State(state)));
+        assert!(app.server().moderation.is_none());
+        assert!(app.server().group_edit.is_none());
+    }
+
     #[test]
     fn being_kicked_and_losing_the_connection_are_logged_and_heard() {
         let (mut app, _commands) = session_fixture();
@@ -4461,6 +4829,7 @@ mod tests {
             sound_muted: false,
             can_poke: Some(true),
             can_move,
+            ..Default::default()
         };
         let lobby = client::Channel {
             id: 1,
@@ -4791,6 +5160,7 @@ mod tests {
                         sound_muted: false,
                         can_poke: None,
                         can_move: None,
+                        ..Default::default()
                     }],
                     ..Default::default()
                 })
