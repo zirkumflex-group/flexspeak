@@ -17,16 +17,24 @@ impl TrackedAllocator {
     }
 
     fn add(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
         #[cfg(test)]
         thread_delta(bytes as i64);
         let live = self
             .live
             .fetch_add(bytes as u64, Ordering::Relaxed)
             .saturating_add(bytes as u64);
-        self.peak.fetch_max(live, Ordering::Relaxed);
+        if live > self.peak.load(Ordering::Relaxed) {
+            self.peak.fetch_max(live, Ordering::Relaxed);
+        }
     }
 
     fn sub(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
         #[cfg(test)]
         thread_delta(-(bytes as i64));
         self.live.fetch_sub(bytes as u64, Ordering::Relaxed);

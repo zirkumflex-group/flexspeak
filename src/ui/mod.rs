@@ -306,7 +306,20 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
                 .name("flexspeak-events".into())
                 .spawn(move || {
                     while let Some(event) = events.blocking_recv() {
-                        handle.update(move |s, tx| dispatch(s, tx, Message::Backend(id, event)));
+                        let mut batch = vec![event];
+                        // Bound the drain to the events already queued, so a busy producer
+                        // cannot postpone delivery indefinitely.
+                        for _ in 0..events.len() {
+                            let Ok(event) = events.try_recv() else {
+                                break;
+                            };
+                            batch.push(event);
+                        }
+                        handle.update(move |s, tx| {
+                            for event in batch {
+                                dispatch(s, tx, Message::Backend(id, event));
+                            }
+                        });
                     }
                 });
             if let Err(error) = spawned {
