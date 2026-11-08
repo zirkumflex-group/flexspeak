@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use nnnoiseless::DenoiseState;
 use serde::{Deserialize, Serialize};
 
@@ -215,29 +215,20 @@ impl Processor {
         Ok(())
     }
 
-    fn delay(&self, captured: Option<Instant>, now: Instant) -> Result<Option<i32>> {
-        let captured = captured.ok_or_else(|| anyhow::anyhow!(
-            "Echo cancellation cannot read microphone timing. Disable it or choose another microphone."
-        ))?;
-        ensure!(
-            captured <= now && now.duration_since(captured) <= Duration::from_millis(500),
-            "Echo microphone timing is out of range. Reconnect or disable echo cancellation."
-        );
-        if let Some((played, analyzed)) = self.reference {
-            ensure!(
-                now.saturating_duration_since(analyzed) <= Duration::from_millis(250),
-                "Echo playback reference stopped. Reconnect or disable echo cancellation."
-            );
-            let delay = signed_ms(played, analyzed) + signed_ms(now, captured);
-            if (0.0..=500.0).contains(&delay) {
-                return Ok(Some(delay.round() as i32));
-            }
+    /// The playback-to-microphone delay to hint to echo cancellation, or `None` to let it find
+    /// the delay itself. The hint only speeds it up: some devices, wireless headsets in
+    /// particular, report timestamps that put it out of range, and that must not stop the
+    /// microphone or the connection.
+    fn delay(&self, captured: Option<Instant>, now: Instant) -> Option<i32> {
+        let captured = captured.filter(|captured| {
+            *captured <= now && now.duration_since(*captured) <= Duration::from_millis(500)
+        })?;
+        let (played, analyzed) = self.reference?;
+        if now.saturating_duration_since(analyzed) > Duration::from_millis(250) {
+            return None;
         }
-        // Discard startup capture until the first usable render history arrives.
-        if now.saturating_duration_since(self.started) <= Duration::from_millis(500) {
-            return Ok(None);
-        }
-        bail!("Echo timing is unavailable or out of range. Reconnect or disable echo cancellation.")
+        let delay = signed_ms(played, analyzed) + signed_ms(now, captured);
+        (0.0..=500.0).contains(&delay).then(|| delay.round() as i32)
     }
 
     pub fn capture(
@@ -259,10 +250,18 @@ impl Processor {
             if self.capture_len == SAMPLES {
                 self.capture_len = 0;
                 let delay = if self.echo_enabled() {
-                    let Some(delay) = self.delay(self.captured_at, Instant::now())? else {
+                    let now = Instant::now();
+                    // Discard startup capture until the first playback reference arrives.
+                    if self.reference.is_none()
+                        && now.saturating_duration_since(self.started) <= Duration::from_millis(500)
+                    {
                         continue;
-                    };
-                    Some(delay)
+                    }
+                    let delay = self.delay(self.captured_at, now);
+                    if delay.is_none() {
+                        tracing::trace!("Echo delay unknown; echo cancellation estimates it");
+                    }
+                    delay
                 } else {
                     None
                 };
@@ -447,52 +446,48 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn echo_delay_accounts_for_both_devices_and_rejects_missing_or_stale_reference() -> Result<()> {
+    fn echo_delay_accounts_for_both_devices_and_drops_the_hint_when_timing_is_unusable()
+    -> Result<()> {
         let mut processor = Processor::new(Settings {
             echo_cancellation: true,
             ..Settings::default()
         })?;
         let now = Instant::now();
-        assert_eq!(processor.delay(Some(now), now)?, None);
-        assert!(processor.delay(None, now).is_err());
+        assert_eq!(processor.delay(Some(now), now), None);
+        assert_eq!(processor.delay(None, now), None);
         processor.reference = Some((
             now + Duration::from_millis(20),
             now - Duration::from_millis(5),
         ));
         assert_eq!(
-            processor.delay(Some(now - Duration::from_millis(15)), now)?,
+            processor.delay(Some(now - Duration::from_millis(15)), now),
             Some(40)
         );
-        assert!(
-            processor
-                .delay(Some(now + Duration::from_millis(1)), now)
-                .is_err()
+        // Future, too old, or a stalled reference: no hint, never an error.
+        assert_eq!(
+            processor.delay(Some(now + Duration::from_millis(1)), now),
+            None
         );
-        assert!(
-            processor
-                .delay(Some(now - Duration::from_millis(501)), now)
-                .is_err()
+        assert_eq!(
+            processor.delay(Some(now - Duration::from_millis(501)), now),
+            None
         );
-        assert!(
-            processor
-                .delay(
-                    Some(now - Duration::from_millis(15)),
-                    now + Duration::from_millis(300)
-                )
-                .is_err()
+        assert_eq!(
+            processor.delay(
+                Some(now - Duration::from_millis(15)),
+                now + Duration::from_millis(300)
+            ),
+            None
         );
+        // At startup, microphone audio waits for the first playback reference.
         processor.reset()?;
-        processor.started = now - Duration::from_secs(1);
         let mut output = VecDeque::new();
-        assert!(
-            processor
-                .capture(&[0.4; SAMPLES], Some(now), &mut output)
-                .is_err()
-        );
-        assert!(
-            output.is_empty(),
-            "Missing reference must not leak unprocessed microphone audio"
-        );
+        processor.capture(&[0.4; SAMPLES], Some(Instant::now()), &mut output)?;
+        assert!(output.is_empty());
+        // Once that wait is over, the microphone keeps working even without usable timing.
+        processor.started = now - Duration::from_secs(1);
+        processor.capture(&[0.4; SAMPLES], Some(Instant::now()), &mut output)?;
+        assert_eq!(output.len(), SAMPLES);
         Ok(())
     }
 

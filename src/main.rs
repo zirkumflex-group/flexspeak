@@ -5185,6 +5185,14 @@ mod tests {
         };
         assert_eq!(app.footer_connection_status().1, "Offline");
         app.server_mut().connected = true;
+        // A problem shows once it has held, as readings arriving each second make it do.
+        let reading = app.server().connection_usage.health();
+        let start = Instant::now();
+        app.server_mut().connection_health.update(reading, start);
+        assert_eq!(app.footer_connection_status().0, usage::Health::Good);
+        app.server_mut()
+            .connection_health
+            .update(reading, start + usage::HEALTH_HOLD);
         let (health, label, details) = app.footer_connection_status();
         assert_eq!(health, usage::Health::Poor);
         assert_eq!(label, "Poor");

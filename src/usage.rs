@@ -434,38 +434,49 @@ impl Health {
 pub const HEALTH_HOLD: Duration = Duration::from_secs(4);
 
 /// Connection health as shown. Readings arrive every second or so and wobble across the
-/// thresholds while someone talks, so a new state only appears once it has lasted
-/// `HEALTH_HOLD`; a reading back at the shown state cancels the change.
-#[derive(Debug, Clone, Copy, Default)]
+/// thresholds while someone talks, and the first ones after connecting or joining are taken
+/// over a handful of packets, where one lost packet already reads as heavy loss. So it starts
+/// at Good, a new state only appears once it has lasted `HEALTH_HOLD`, and a reading back at
+/// the shown state cancels the change.
+#[derive(Debug, Clone, Copy)]
 pub struct SteadyHealth {
-    shown: Option<Health>,
+    shown: Health,
     /// When readings started to differ from `shown`.
     since: Option<Instant>,
 }
 
+impl Default for SteadyHealth {
+    fn default() -> Self {
+        Self {
+            shown: Health::Good,
+            since: None,
+        }
+    }
+}
+
 impl SteadyHealth {
     pub fn update(&mut self, reading: Health, now: Instant) {
-        match self.shown {
-            Some(shown) if shown != reading => {
-                let since = *self.since.get_or_insert(now);
-                if now.saturating_duration_since(since) >= HEALTH_HOLD {
-                    self.shown = Some(reading);
-                    self.since = None;
-                }
-            }
-            _ => {
-                self.shown = Some(reading);
-                self.since = None;
-            }
+        // Missing data shows as it is (see `show`) and says nothing about the connection.
+        if reading == Health::Unknown {
+            return;
+        }
+        if reading == self.shown {
+            self.since = None;
+            return;
+        }
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_duration_since(since) >= HEALTH_HOLD {
+            self.shown = reading;
+            self.since = None;
         }
     }
 
-    /// What to show while the latest reading is `reading`. Missing data shows at once, as
-    /// does the first reading.
+    /// What to show while the latest reading is `reading`. Missing data shows at once.
     pub fn show(&self, reading: Health) -> Health {
-        match self.shown {
-            Some(shown) if reading != Health::Unknown => shown,
-            _ => reading,
+        if reading == Health::Unknown {
+            Health::Unknown
+        } else {
+            self.shown
         }
     }
 }
@@ -678,7 +689,11 @@ mod tests {
         let start = Instant::now();
         let at = |seconds: u64| start + Duration::from_secs(seconds);
         let mut steady = SteadyHealth::default();
-        assert_eq!(steady.show(Health::Good), Health::Good);
+        // The first readings after joining are noisy: a bad one is held back like any other.
+        steady.update(Health::Poor, at(0));
+        assert_eq!(steady.show(Health::Poor), Health::Good);
+        // Missing data neither shows as a problem nor counts toward one.
+        steady.update(Health::Unknown, at(0));
         steady.update(Health::Good, at(0));
         // One jittery reading, then back: never shown.
         steady.update(Health::Fair, at(1));
