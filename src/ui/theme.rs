@@ -149,10 +149,13 @@ pub mod size {
     pub const HEADER: f32 = 52.0;
     pub const SIDEBAR: f32 = 260.0;
     pub const CHART_MIN_WIDTH: f32 = 110.0;
-    pub const CHART_GAP: f32 = 12.0;
 }
 
 pub mod radius {
+    /// The window's own cards: the sidebar, the main pane and Statistics.
+    pub const PANE: f32 = 12.0;
+    /// A card nested in a pane, such as the voice panel: between `PANE` and the controls in it.
+    pub const NESTED: f32 = 8.0;
     pub const CARD: f32 = 10.0;
     pub const CONTROL: f32 = 6.0;
     pub const ROW: f32 = 6.0;
@@ -173,6 +176,8 @@ pub mod ty {
     use rune::TextStyle;
     pub const DISPLAY: TextStyle = TextStyle::new(22.0, 650.0).tracking(-0.3);
     pub const TITLE: TextStyle = TextStyle::new(17.0, 620.0).tracking(-0.2);
+    /// A card's title: the server in the sidebar.
+    pub const SUBTITLE: TextStyle = TextStyle::new(14.0, 620.0).tracking(-0.1);
     pub const HEADING: TextStyle = TextStyle::new(13.0, 600.0);
     pub const BODY: TextStyle = TextStyle::new(13.0, 400.0);
     pub const BODY_STRONG: TextStyle = TextStyle::new(13.0, 560.0);

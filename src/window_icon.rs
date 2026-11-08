@@ -30,6 +30,7 @@ pub fn apply() {
                 return 1;
             }
             install_resize_handler(hwnd);
+            round_corners(hwnd);
             let module = GetModuleHandleW(std::ptr::null());
             for (kind, width, height) in [
                 (ICON_BIG, SM_CXICON, SM_CYICON),
@@ -71,6 +72,26 @@ pub fn apply() {
 
 #[cfg(not(windows))]
 pub fn apply() {}
+
+/// Windows 11 rounds a borderless window's corners only when asked. Windows 10 does not know
+/// the attribute and refuses it, which leaves its square corners as they were.
+#[cfg(windows)]
+unsafe fn round_corners(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    };
+    let preference = DWMWCP_ROUND;
+    // SAFETY: `hwnd` is the live main window, and the attribute reads a 4-byte value from
+    // `preference` during the call.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&preference as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
 
 /// A full client area has no native resize border; return native edge hits at its perimeter.
 #[cfg(windows)]
@@ -158,6 +179,19 @@ pub fn toggle_maximized() {
             },
         );
     });
+}
+
+/// Whether the main window is maximized, so the caption shows Restore instead of Maximize.
+/// False before the window exists, as in headless previews.
+#[cfg(windows)]
+pub fn is_maximized() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsZoomed;
+    static ZOOMED: AtomicBool = AtomicBool::new(false);
+    ZOOMED.store(false, Ordering::Relaxed);
+    // SAFETY: `main_window` passes a live window owned by this UI thread.
+    main_window(|hwnd| unsafe { ZOOMED.store(IsZoomed(hwnd) != 0, Ordering::Relaxed) });
+    ZOOMED.load(Ordering::Relaxed)
 }
 
 /// Runs `action` on this UI thread's visible window titled "Flexspeak".

@@ -149,6 +149,8 @@ struct App {
     subscribe_all: Arc<AtomicBool>,
     /// Saved straight to settings when toggled, not held until the Settings page saves.
     footer_hidden: bool,
+    /// The server log's size; saved when a resize ends or it folds, like `footer_hidden`.
+    log_pane: settings::LogPane,
     /// Saved straight to settings when changed, like `footer_hidden`.
     appearance: settings::Appearance,
     user_audio: BTreeMap<String, settings::UserAudio>,
@@ -649,6 +651,10 @@ enum Message {
     LogPerson(Option<String>),
     LogPeople,
     LogClear,
+    /// Folds the server log down to its heading, or opens it again.
+    ToggleLog,
+    /// A resize of the server log ended: keep its size.
+    SaveLogPane,
     SharePreview(
         streaming::publishing::ShareSource,
         Option<streaming::publishing::Still>,
@@ -820,6 +826,7 @@ impl App {
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
+            log_pane: settings::LogPane::default(),
             appearance: settings::Appearance::default(),
             user_audio: BTreeMap::new(),
             user_gains: client::UserGains::default(),
@@ -1462,6 +1469,7 @@ impl App {
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
+        self.log_pane = saved.log_pane;
         self.updater.auto_download = saved.auto_download_updates;
         self.appearance = saved.appearance;
         self.user_audio = saved.user_audio;
@@ -1497,6 +1505,7 @@ impl App {
             input_device_id: self.input.as_ref().map(|device| device.id.clone()),
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
+            log_pane: self.log_pane,
             auto_download_updates: self.updater.auto_download,
             appearance: self.appearance.clone(),
             custom_themes: self.custom_themes.clone(),
@@ -1553,6 +1562,15 @@ impl App {
         self.save_preference(
             |saved| saved.footer_hidden = hidden,
             "The footer choice applies for now but was not saved",
+        );
+    }
+
+    /// Stores the server log's size and fold, leaving unsaved edits alone.
+    fn save_log_pane(&mut self) {
+        let pane = self.log_pane;
+        self.save_preference(
+            |saved| saved.log_pane = pane,
+            "The server log's size applies for now but was not saved",
         );
     }
 
@@ -2827,6 +2845,11 @@ impl App {
             }
             Message::LogPeople => self.ui.log_people = !self.ui.log_people,
             Message::LogClear => self.server_mut().log.clear_filter(),
+            Message::ToggleLog => {
+                self.log_pane.collapsed = !self.log_pane.collapsed;
+                self.save_log_pane();
+            }
+            Message::SaveLogPane => self.save_log_pane(),
             Message::PreviewSound(sound) => self.preview_sound(sound),
             Message::SoundCues(on) => {
                 self.sound_cues = on;

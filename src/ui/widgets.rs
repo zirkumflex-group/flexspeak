@@ -14,8 +14,10 @@ pub enum Variant {
     Secondary,
     Danger,
     Ghost,
-    /// A toggled-on control (a selected page, a muted microphone).
+    /// A toggled-on control (a selected page).
     Active,
+    /// Ending the call: a solid danger fill.
+    Hangup,
 }
 
 struct Skin {
@@ -60,6 +62,14 @@ fn skin(t: &Theme, v: Variant) -> Skin {
             ink: t.muted,
             hover: t.wash(0.06),
             press: t.wash(0.10),
+        },
+        Variant::Hangup => Skin {
+            fill: t.poor,
+            top: Color::WHITE.alpha(0.25),
+            bottom: Color::BLACK.alpha(0.15),
+            ink: t.on_accent,
+            hover: Color::WHITE.alpha(0.10),
+            press: Color::BLACK.alpha(0.12),
         },
         Variant::Active => Skin {
             fill: t.accent.alpha(0.16),
@@ -288,12 +298,13 @@ pub fn health_dot(t: &Theme, health: Health, help: impl Into<String>) -> El {
     )
 }
 
-/// A ring that fills and glows softly while the client is heard.
+/// A ring that fills and glows softly while the client is heard, in the same green as a
+/// server tile's ring and the voice panel's edge.
 pub fn speaking_dot(t: &Theme, talking: bool) -> El {
     let (ring, fill, glow) = if talking {
-        (t.accent, t.accent, t.accent.alpha(0.6))
+        (t.good, t.good, t.good.alpha(0.55))
     } else {
-        (t.faint.alpha(0.7), t.accent.alpha(0.0), t.accent.alpha(0.0))
+        (t.faint.alpha(0.7), t.good.alpha(0.0), t.good.alpha(0.0))
     };
     el().w(12.0)
         .h(20.0)

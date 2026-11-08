@@ -32,6 +32,7 @@ pub const SCENES: &[Scene] = &[
     ("permissions-windows", permissions_windows),
     ("home", home),
     ("connected", connected),
+    ("connected-quiet", connected_quiet),
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
@@ -41,6 +42,8 @@ pub const SCENES: &[Scene] = &[
     ("settings-sounds-pack", settings_sounds_pack),
     ("server-log", server_log),
     ("server-log-hover", server_log_hover),
+    ("server-log-tall", server_log_tall),
+    ("server-log-folded", server_log_folded),
     ("server-log-search", server_log_search),
     ("server-log-people", server_log_people),
     ("server-log-person", server_log_person),
@@ -113,6 +116,8 @@ fn dark(s: &mut App) {
 fn saved(s: &mut App) {
     dark(s);
     s.onboarding = None;
+    // Previews start from the default log, whatever this machine last left it at.
+    s.log_pane = Default::default();
     let servers = vec![
         settings::Server {
             name: "Zirkumflex".into(),
@@ -422,6 +427,20 @@ fn connected(s: &mut App) {
     }];
 }
 
+/// No one is sharing, and you are muted and deafened: the channel header over the empty state.
+fn connected_quiet(s: &mut App) {
+    connected(s);
+    s.server_mut().streaming.catalog.clear();
+    s.server_mut().muted = true;
+    s.server_mut().deafened = true;
+    s.server_mut().server_controls = Some(crate::command_flow::AudioState {
+        muted: true,
+        deafened: true,
+    });
+    s.level = 0.0;
+    s.transmitting = false;
+}
+
 /// The hidden footer under load: CPU red, footprint amber.
 fn footer_hidden(s: &mut App) {
     connected(s);
@@ -501,6 +520,18 @@ fn server_log(s: &mut App) {
         let at = start + Duration::minutes(index as i64 * 5 / 2 + 2);
         log.add_at(at, tone, people[index * 3 % people.len()], action);
     }
+}
+
+/// The log dragged up to take more of the sidebar.
+fn server_log_tall(s: &mut App) {
+    server_log(s);
+    s.log_pane.height = 300;
+}
+
+/// The log folded down to its heading, giving the channels the sidebar.
+fn server_log_folded(s: &mut App) {
+    server_log(s);
+    s.log_pane.collapsed = true;
 }
 
 fn server_log_hover(s: &mut App) {

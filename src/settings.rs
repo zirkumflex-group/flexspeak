@@ -55,6 +55,34 @@ pub struct Settings {
     /// A release running from Downloads or a disk image no longer offers to install itself.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub skip_install_prompt: bool,
+    /// The server log's height under the channel list, and whether it is folded away.
+    #[serde(skip_serializing_if = "LogPane::is_default")]
+    pub log_pane: LogPane,
+}
+
+/// How much of the sidebar the server log takes. Saved straight away, like `footer_hidden`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogPane {
+    /// The height of its list, in points. The sidebar caps it to leave the channels room.
+    pub height: u16,
+    /// Only its heading shows.
+    pub collapsed: bool,
+}
+
+impl Default for LogPane {
+    fn default() -> Self {
+        Self {
+            height: 144,
+            collapsed: false,
+        }
+    }
+}
+
+impl LogPane {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// A saved server: an optional name to show, and the address to connect to.
@@ -238,6 +266,7 @@ impl Default for Settings {
             input_device_id: None,
             output_device_id: None,
             footer_hidden: false,
+            log_pane: LogPane::default(),
             auto_download_updates: true,
             appearance: Appearance::default(),
             user_audio: BTreeMap::new(),

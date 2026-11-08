@@ -151,6 +151,11 @@ pub struct UiState {
     pub streams_hover: bool,
     /// Whether the pointer is over the server log, which shows its search button.
     pub log_hover: bool,
+    /// Whether the pointer is over the window's close button, which turns its glyph white.
+    #[cfg(windows)]
+    pub close_hover: bool,
+    /// The server log's splitter is being dragged.
+    pub log_resizing: bool,
     pub log_people: bool,
     pub log_search: TextEdit,
     /// Where the current press started, in window points.
@@ -182,6 +187,9 @@ impl Default for UiState {
             update_hover: false,
             streams_hover: false,
             log_hover: false,
+            #[cfg(windows)]
+            close_hover: false,
+            log_resizing: false,
             log_people: false,
             log_search: TextEdit::new(""),
             user_volume: None,
@@ -485,7 +493,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             .child(content),
     );
     #[cfg(windows)]
-    layer.push(window_controls(&t));
+    layer.push(window_controls(s, &t));
     rune_kit::root(base, layer)
         .hover_motion_within(rune::Spring::new(0.12, 0.0), rune::Spring::new(0.28, 0.0))
 }
@@ -548,10 +556,12 @@ pub fn is_tool_flag(arg: &str) -> bool {
     )
 }
 
-/// Keep native window actions reachable in setup, Settings and modal dialogs too.
+/// Keep native window actions reachable in setup, Settings and modal dialogs too. They follow
+/// Windows 11's caption buttons: 46 pt wide, thin 10 pt glyphs, a soft wash on hover, and the
+/// system's red under a white glyph on Close. Maximize turns into Restore while maximized.
 #[cfg(windows)]
-fn window_controls(t: &Theme) -> El {
-    use rune::{icon, row, text};
+fn window_controls(s: &App, t: &Theme) -> El {
+    use rune::{Color, icon, row};
     let control = |key: &str, label: &str| {
         el().key(key.to_owned())
             .role("button")
@@ -561,25 +571,56 @@ fn window_controls(t: &Theme) -> El {
             .center()
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
-            .hover(t.wash(0.08))
+            .hover(t.wash(if t.dark { 0.06 } else { 0.05 }))
+            .press(t.wash(if t.dark { 0.04 } else { 0.03 }))
+    };
+    let maximized = crate::window_icon::is_maximized();
+    let glyph = if s.ui.close_hover {
+        Color::WHITE
+    } else {
+        t.text
     };
     row()
         .key("window-controls")
         .pin(None, Some(0.0), Some(0.0), None)
         .child(
             control("window-minimize", "Minimize")
-                .child(text("−").font(theme::ty::BODY).color(t.text).a11y_hidden())
+                .child(
+                    icon(&icons::CAPTION_MINIMIZE, 10.0)
+                        .color(t.text)
+                        .a11y_hidden(),
+                )
                 .on_press_tx(|_: &mut App, _| crate::window_icon::minimize()),
         )
         .child(
-            control("window-maximize", "Maximize or restore")
-                .child(icon(&icons::MAXIMIZE, 14.0).color(t.text).a11y_hidden())
-                .on_press_tx(|_: &mut App, _| crate::window_icon::toggle_maximized()),
+            control(
+                "window-maximize",
+                if maximized {
+                    "Restore down"
+                } else {
+                    "Maximize"
+                },
+            )
+            .child(
+                icon(
+                    if maximized {
+                        &icons::CAPTION_RESTORE
+                    } else {
+                        &icons::CAPTION_MAXIMIZE
+                    },
+                    10.0,
+                )
+                .color(t.text)
+                .a11y_hidden(),
+            )
+            .on_press_tx(|_: &mut App, _| crate::window_icon::toggle_maximized()),
         )
         .child(
             control("window-close", "Close Flexspeak")
-                .hover(t.poor.alpha(0.25))
-                .child(icon(&icons::X, 16.0).color(t.text).a11y_hidden())
+                .hover(theme::rgb(0xc42b1c))
+                .press(theme::rgb(0xc42b1c).alpha(0.9))
+                .on_hover_change(|s: &mut App, hovering, _| s.ui.close_hover = hovering)
+                .child(icon(&icons::CAPTION_CLOSE, 10.0).color(glyph).a11y_hidden())
                 .on_press_tx(send(Message::Close)),
         )
 }

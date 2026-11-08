@@ -55,6 +55,8 @@ pub struct Session {
     supported: bool,
     channel: Option<ChannelId>,
     members: HashSet<u16>,
+    /// Remember flags from subscribed channels before we join them.
+    streaming_flags: HashMap<u16, bool>,
     catalog: BTreeMap<String, StreamInfo>,
     discovery: VecDeque<u16>,
     flow: Rc<RefCell<Flow>>,
@@ -84,6 +86,7 @@ impl Session {
             supported: false,
             channel: None,
             members: HashSet::new(),
+            streaming_flags: HashMap::new(),
             catalog: BTreeMap::new(),
             discovery: VecDeque::new(),
             flow,
@@ -170,6 +173,8 @@ impl Session {
             })
             .collect();
         self.supported = state.server.version.starts_with("6.");
+        self.streaming_flags
+            .retain(|id, _| state.clients.contains_key(&ClientId(*id)));
         let members: HashSet<_> = state
             .clients
             .values()
@@ -205,16 +210,56 @@ impl Session {
         if self.catalog.len() != previous {
             self.publish_catalog();
         }
+        self.sync_members(members);
+        self.publisher.sync(own, names);
+    }
+
+    fn sync_members(&mut self, members: HashSet<u16>) {
         self.discovery.retain(|id| members.contains(id));
+        self.pending.retain(|ticket, (kind, _)| {
+            if matches!(kind, Pending::Discovery { client, channel }
+                if *channel != self.channel || !members.contains(client))
+            {
+                self.flow.borrow_mut().cancel(*ticket);
+                false
+            } else {
+                true
+            }
+        });
         if self.foreground() && self.supported {
-            for id in members.difference(&self.members) {
-                if self.discovery.len() < 128 {
-                    self.discovery.push_back(*id);
-                }
+            let added: Vec<_> = members.difference(&self.members).copied().collect();
+            for id in added {
+                self.queue_discovery(id);
             }
         }
         self.members = members;
-        self.publisher.sync(own, names);
+    }
+
+    fn queue_discovery(&mut self, id: u16) {
+        if self.streaming_flags.get(&id) == Some(&false)
+            || self.pending.values().any(|(kind, _)| {
+                matches!(kind, Pending::Discovery { client, channel }
+                    if *client == id && *channel == self.channel)
+            })
+        {
+            return;
+        }
+        self.discovery.retain(|queued| *queued != id);
+        if self.streaming_flags.get(&id) == Some(&true) {
+            self.discovery.push_front(id);
+            self.discovery.truncate(128);
+        } else if self.discovery.len() < 128 {
+            self.discovery.push_back(id);
+        }
+    }
+
+    fn cancel_discovery(&mut self, id: u16) {
+        self.discovery.retain(|queued| *queued != id);
+        // Keep sent requests until their acknowledgement, including recovery reporting.
+        self.pending.retain(|ticket, (kind, _)| {
+            !matches!(kind, Pending::Discovery { client, .. } if *client == id)
+                || !self.flow.borrow_mut().cancel(*ticket)
+        });
     }
 
     pub fn refresh(&mut self, connection: &mut Connection) {
@@ -223,8 +268,9 @@ impl Session {
         self.discovery_failed = false;
         self.discovery.clear();
         if self.supported {
-            self.discovery
-                .extend(self.members.iter().copied().take(128));
+            for id in self.members.clone() {
+                self.queue_discovery(id);
+            }
         }
     }
 
@@ -359,6 +405,7 @@ impl Session {
         }
         self.catalog.clear();
         self.members.clear();
+        self.streaming_flags.clear();
         self.discovery.clear();
         for ticket in self.pending.keys() {
             self.flow.borrow_mut().cancel(*ticket);
@@ -417,20 +464,37 @@ impl Session {
         }
         if visible
             && self.supported
-            && self.flow.borrow().optional_ready(Instant::now())
-            && self.last_request.elapsed() >= Duration::from_secs(1)
-            && let Some(id) = self.discovery.pop_front()
+            && let Some(&id) = self.discovery.front()
         {
-            self.last_request = Instant::now();
-            if self.members.contains(&id) {
-                let _ = self.send(
-                    protocol::request_info(id),
-                    Pending::Discovery {
-                        client: id,
-                        channel: self.channel,
-                    },
-                    Operation::Discovery,
-                );
+            // The server has said this member is streaming, so the user is waiting on the
+            // answer: send it at the normal command pace. Members without a flag are only a
+            // fallback probe and stay paced behind other background requests.
+            let flagged = self.streaming_flags.get(&id) == Some(&true);
+            let due = flagged
+                || (self
+                    .flow
+                    .borrow()
+                    .optional_ready(Operation::Discovery, Instant::now())
+                    && self.last_request.elapsed() >= Duration::from_secs(1));
+            if due {
+                self.discovery.pop_front();
+                if !flagged {
+                    self.last_request = Instant::now();
+                }
+                if self.members.contains(&id) {
+                    let _ = self.send(
+                        protocol::request_info(id),
+                        Pending::Discovery {
+                            client: id,
+                            channel: self.channel,
+                        },
+                        if flagged {
+                            Operation::StreamInfo
+                        } else {
+                            Operation::Discovery
+                        },
+                    );
+                }
             }
         }
     }
@@ -538,19 +602,21 @@ impl Session {
                     if let Some(id) = args
                         .get("clid")
                         .and_then(|id| id.parse().ok())
-                        .filter(|id| self.members.contains(id))
+                        .filter(|id| *id != 0)
                     {
-                        if args
-                            .get("client_is_streaming")
-                            .is_some_and(|value| value == "1")
-                        {
-                            if self.discovery.len() < 128 && !self.discovery.contains(&id) {
-                                self.discovery.push_back(id);
-                            }
-                        } else if args
-                            .get("client_is_streaming")
-                            .is_some_and(|value| value == "0")
-                        {
+                        let streaming = match args.get("client_is_streaming").map(String::as_str) {
+                            Some("1") => true,
+                            Some("0") => false,
+                            _ => continue,
+                        };
+                        self.streaming_flags.insert(id, streaming);
+                        if !self.members.contains(&id) {
+                            continue;
+                        }
+                        if streaming {
+                            self.queue_discovery(id);
+                        } else {
+                            self.cancel_discovery(id);
                             self.catalog.retain(|_, info| info.publisher != id);
                             self.publish_catalog();
                             self.stop_where(
@@ -579,13 +645,18 @@ impl Session {
                         );
                         self.catalog
                             .retain(|id, old| old.publisher != info.publisher || *id == info.id);
+                        self.streaming_flags.insert(info.publisher, true);
+                        self.cancel_discovery(info.publisher);
                         self.catalog.insert(info.id.clone(), info);
                         self.publish_catalog();
                     }
                 }
                 "notifystreamstopped" => {
                     if let Some(id) = args.get("id") {
-                        self.catalog.remove(id);
+                        if let Some(info) = self.catalog.remove(id) {
+                            self.streaming_flags.insert(info.publisher, false);
+                            self.cancel_discovery(info.publisher);
+                        }
                         self.publish_catalog();
                         self.stop_where(
                             connection,
