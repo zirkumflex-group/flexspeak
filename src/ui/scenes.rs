@@ -1485,6 +1485,8 @@ mod tests {
         peek.open(base + Duration::from_millis(ms))
     }
 
+    // Sharing, and so its chips, only exists on Mac and Windows.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn the_quick_share_chips_hide_once_you_are_live() {
         let mut rt = runtime(share_quick, (900.0, 790.0));
