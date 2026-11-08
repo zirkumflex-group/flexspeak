@@ -78,7 +78,9 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
         Tab::Home => ("Flexspeak", t.text),
         Tab::Statistics => ("Usage & Statistics", t.text),
     };
-    bar = bar.child(text(title).font(ty::HEADING).color(ink).truncate());
+    bar = bar
+        .child(icon(&icons::FLEXSPEAK, 18.0).color(t.accent).a11y_hidden())
+        .child(text(title).font(ty::HEADING).color(ink).truncate());
     bar = bar.child(el().grow(1.0));
     let statistics = s.tab == Tab::Statistics;
     bar = bar.child(icon_button(
