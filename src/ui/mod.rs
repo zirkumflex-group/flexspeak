@@ -17,6 +17,7 @@ mod settings;
 mod statistics;
 mod streams;
 mod theme;
+pub(crate) use theme::rgb;
 mod updates;
 mod widgets;
 
@@ -134,6 +135,8 @@ pub struct UiState {
     pub move_menu: bool,
     pub drag: Option<MemberDrag>,
     pub tile_drag: Option<TileDrag>,
+    /// The pointer is over the update notice, which then lists what's new.
+    pub update_hover: bool,
     /// Where the pressed stream is in the window, for the length of a press.
     pub tile_origin: (f32, f32),
     /// The window position of the member row or stream last under the pointer, to place drags.
@@ -159,6 +162,7 @@ impl Default for UiState {
             move_menu: false,
             drag: None,
             tile_drag: None,
+            update_hover: false,
             tile_origin: (0.0, 0.0),
             row_origin: (0.0, 0.0),
         }
@@ -376,11 +380,20 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
 /// The palette for the chosen scheme and theme.
 pub fn theme(s: &App) -> Theme {
     let dark = s.appearance.is_dark(s.system_dark);
-    Theme::new(s.appearance.theme(dark), dark)
+    s.appearance
+        .extra_theme(dark)
+        .and_then(|id| s.theme_library.find(id)?.colors(dark))
+        .map_or_else(
+            || Theme::new(s.appearance.theme(dark), dark),
+            |colors| Theme::extra(colors, dark),
+        )
 }
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let _trace = crate::profiler::scope(crate::profiler::Category::Ui, "ui.view");
+    // Left off, the system's own Reduce Motion setting still applies.
+    let reduced = s.appearance.disable_animations || cx.system_reduced_motion();
+    cx.reduced_motion(reduced);
     let t = theme(s);
     let k = t.kit();
     let mut layer = Vec::new();

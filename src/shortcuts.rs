@@ -95,17 +95,7 @@ pub enum Recorded {
     Ignored,
     Cancel,
     Clear,
-    /// A key that would stop you typing it anywhere else, pressed without Ctrl, Alt or Command.
-    NeedsModifier,
     Shortcut(String),
-}
-
-/// Keys that type nothing, so they can be a shortcut on their own.
-fn stands_alone(key: &str) -> bool {
-    matches!(key, "Insert" | "Pause" | "ScrollLock")
-        || key
-            .strip_prefix('F')
-            .is_some_and(|number| number.parse::<u8>().is_ok())
 }
 
 /// The key's name in the shortcut grammar. The physical key is the same whatever the keyboard
@@ -151,9 +141,6 @@ pub fn record(key: &KeyEvent, physical: Option<PhysicalKeyCode>) -> Recorded {
     let Some(name) = key_name(key, physical) else {
         return Recorded::Ignored;
     };
-    if !(control || command || mods.alt) && !stands_alone(&name) {
-        return Recorded::NeedsModifier;
-    }
     let mut parts = Vec::new();
     if control {
         parts.push("Ctrl");
@@ -377,39 +364,30 @@ mod tests {
     }
 
     #[test]
-    fn recording_keeps_typing_keys_free_and_has_ways_out() {
+    fn recording_takes_a_single_key_and_keeps_its_ways_out() {
         let plain = rune::Mods::default();
-        let shift = rune::Mods {
-            shift: true,
-            ..plain
-        };
+        let single = |key, physical| record(&pressed(key, plain), Some(physical));
         assert_eq!(
-            record(
-                &pressed(Key::Text("m".into()), plain),
-                Some(PhysicalKeyCode::KeyM)
-            ),
-            Recorded::NeedsModifier,
+            single(Key::Text("m".into()), PhysicalKeyCode::KeyM),
+            Recorded::Shortcut("M".into()),
         );
         assert_eq!(
-            record(
-                &pressed(Key::Text("M".into()), shift),
-                Some(PhysicalKeyCode::KeyM)
-            ),
-            Recorded::NeedsModifier,
-        );
-        assert_eq!(
-            record(&pressed(Key::Function(8), plain), Some(PhysicalKeyCode::F8)),
+            single(Key::Function(8), PhysicalKeyCode::F8),
             Recorded::Shortcut("F8".into()),
         );
         assert_eq!(
-            record(&pressed(Key::Escape, plain), Some(PhysicalKeyCode::Escape)),
-            Recorded::Cancel,
+            single(Key::Text(" ".into()), PhysicalKeyCode::Space),
+            Recorded::Shortcut("Space".into()),
+        );
+        for shortcut in ["M", "F8", "Space"] {
+            assert!(shortcut.parse::<HotKey>().is_ok());
+        }
+        assert_eq!(
+            single(Key::Escape, PhysicalKeyCode::Escape),
+            Recorded::Cancel
         );
         assert_eq!(
-            record(
-                &pressed(Key::Backspace, plain),
-                Some(PhysicalKeyCode::Backspace)
-            ),
+            single(Key::Backspace, PhysicalKeyCode::Backspace),
             Recorded::Clear,
         );
     }

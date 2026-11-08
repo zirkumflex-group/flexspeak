@@ -21,6 +21,7 @@ mod settings;
 mod shortcuts;
 mod streaming;
 mod system_appearance;
+mod themes;
 mod transmission;
 mod ts6_import;
 mod ui;
@@ -146,6 +147,9 @@ struct App {
     footer_hidden: bool,
     /// Saved straight to settings when changed, like `footer_hidden`.
     appearance: settings::Appearance,
+    /// `custom_themes` as written in the settings file.
+    custom_themes: Vec<serde_json::Value>,
+    theme_library: themes::Library,
     /// Whether the system is in dark mode, refreshed with each usage tick.
     system_dark: bool,
     window_size: (f32, f32),
@@ -635,6 +639,8 @@ impl App {
             subscribe_all: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
             appearance: settings::Appearance::default(),
+            custom_themes: Vec::new(),
+            theme_library: themes::Library::new(&[]),
             system_dark: true,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -1133,6 +1139,8 @@ impl App {
         self.footer_hidden = saved.footer_hidden;
         self.updater.auto_download = saved.auto_download_updates;
         self.appearance = saved.appearance;
+        self.theme_library = themes::Library::new(&saved.custom_themes);
+        self.custom_themes = saved.custom_themes;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -1152,7 +1160,8 @@ impl App {
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
             auto_download_updates: self.updater.auto_download,
-            appearance: self.appearance,
+            appearance: self.appearance.clone(),
+            custom_themes: self.custom_themes.clone(),
             skip_install_prompt: self
                 .saved
                 .as_ref()
@@ -1207,7 +1216,7 @@ impl App {
 
     /// Changes the colour scheme or themes and stores only that choice.
     fn set_appearance(&mut self, appearance: settings::Appearance) {
-        self.appearance = appearance;
+        self.appearance = appearance.clone();
         self.save_preference(
             |saved| saved.appearance = appearance,
             "The appearance choice applies for now but was not saved",
@@ -1696,11 +1705,6 @@ impl App {
                     shortcuts::Recorded::Ignored => return Task::none(),
                     shortcuts::Recorded::Cancel => {
                         self.end_recording();
-                        return Task::none();
-                    }
-                    shortcuts::Recorded::NeedsModifier => {
-                        capture.error =
-                            Some("Add Ctrl, Alt or Command, or use a function key.".into());
                         return Task::none();
                     }
                     shortcuts::Recorded::Clear if binding == shortcuts::Binding::PushToTalk => {
@@ -2237,7 +2241,12 @@ impl App {
                 self.server_mut().channel_password.clear();
             }
             Message::ToggleFooter => self.set_footer_hidden(!self.footer_hidden),
-            Message::Updater(event) => return self.update_software(event),
+            Message::Updater(event) => {
+                if matches!(event, updater::Event::Dismiss) {
+                    self.ui.update_hover = false;
+                }
+                return self.update_software(event);
+            }
             Message::Resume => return self.resume(),
             Message::SelectMember(id, toggle) => {
                 if toggle {
@@ -3437,8 +3446,11 @@ mod tests {
             scheme: settings::ColorScheme::Light,
             light_theme: settings::ThemeName::Ocean,
             dark_theme: settings::ThemeName::Ember,
+            disable_animations: true,
+            dark_theme_id: Some("catppuccin-mocha".into()),
+            ..settings::Appearance::default()
         };
-        let _ = app.update(Message::Appearance(chosen));
+        let _ = app.update(Message::Appearance(chosen.clone()));
         let stored = settings::load(&path).unwrap().unwrap();
         assert_eq!(stored.appearance, chosen);
         assert_eq!(stored.nickname, settings::Settings::default().nickname);

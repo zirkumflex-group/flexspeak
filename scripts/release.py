@@ -32,6 +32,27 @@ def sha256(path):
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
+def notes(commit, output):
+    """Release notes from a commit message: its `New:`, `Fixed:` and `Changed:` lines, or the
+    subject under Changed when it has none. The in-app update notice reads these sections."""
+    lines = commit.read_text().splitlines()
+    sections = {"New": [], "Fixed": [], "Changed": []}
+    for line in lines[1:]:
+        match = re.fullmatch(r"\s*(?:[-*]\s*)?(New|Fixed|Changed):\s+(.+?)\s*", line, re.I)
+        if match:
+            sections[match[1].capitalize()].append(match[2])
+    if not any(sections.values()):
+        sections["Changed"].append(re.sub(r"\s*\(#\d+\)$", "", lines[0]).strip())
+    output.write_text(
+        "\n\n".join(
+            f"## {name}\n\n" + "\n".join(f"- {item}" for item in items)
+            for name, items in sections.items()
+            if items
+        )
+        + "\n"
+    )
+
+
 def download(url, destination, attempts=5):
     """Fetch through a temporary name, so an interrupted download is never mistaken for
     the finished file, and retry the transient TLS resets hosted runners see."""
@@ -262,7 +283,9 @@ if __name__ == "__main__":
         build()
     elif sys.argv[1:] == ["checksums"]:
         checksums()
+    elif len(sys.argv) == 4 and sys.argv[1] == "notes":
+        notes(Path(sys.argv[2]), Path(sys.argv[3]))
     elif len(sys.argv) == 4 and sys.argv[1] == "cask":
         cask(json.loads(Path(sys.argv[2]).read_text()), Path(sys.argv[3]))
     else:
-        sys.exit("Usage: release.py build | checksums | cask RELEASE_JSON OUTPUT_RB")
+        sys.exit("Usage: release.py build | checksums | notes COMMIT OUTPUT | cask RELEASE_JSON OUTPUT_RB")

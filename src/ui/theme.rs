@@ -225,6 +225,27 @@ impl Theme {
         }
     }
 
+    /// A palette from the More Themes section, over the shared edges and status colours.
+    pub fn extra(colors: &crate::themes::Colors, dark: bool) -> Self {
+        let base = Self::new(ThemeName::default(), dark);
+        Self {
+            canvas: colors.canvas,
+            chrome: colors.chrome,
+            surface: colors.surface,
+            raised: colors.raised,
+            text: colors.text,
+            muted: colors.muted,
+            faint: colors.faint,
+            accent: colors.accent,
+            on_accent: colors.on_accent,
+            hairline: colors.border.unwrap_or(base.hairline),
+            poor: colors.error.unwrap_or(base.poor),
+            fair: colors.warning.unwrap_or(base.fair),
+            good: colors.success.unwrap_or(base.good),
+            ..base
+        }
+    }
+
     /// The dark palette's edges, overlays and status colours, around Flexspeak's neutrals.
     fn dark_status() -> Self {
         Self {

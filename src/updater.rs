@@ -177,11 +177,93 @@ pub struct Release {
     pub build: Build,
     pub asset: Asset,
     pub checksums_url: String,
+    /// Boxed because `Release` travels inside event enums.
+    pub notes: Box<Notes>,
+}
+
+/// What a release changed, from the `## New`, `## Fixed` and `## Changed` sections of its notes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Notes {
+    pub new: Vec<String>,
+    pub fixed: Vec<String>,
+    pub changed: Vec<String>,
+}
+
+impl Notes {
+    pub fn is_empty(&self) -> bool {
+        self.new.is_empty() && self.fixed.is_empty() && self.changed.is_empty()
+    }
+
+    /// Adds a release's notes. Bodies without these sections add nothing.
+    fn add(&mut self, body: &str) {
+        let mut section = None;
+        for line in body.lines().map(str::trim) {
+            if let Some(heading) = line.strip_prefix('#') {
+                let heading = heading.trim_start_matches('#').trim();
+                section = match heading.to_ascii_lowercase().as_str() {
+                    "new" => Some(&mut self.new),
+                    "fixed" => Some(&mut self.fixed),
+                    "changed" => Some(&mut self.changed),
+                    _ => None,
+                };
+            } else if let (Some(list), Some(item)) = (
+                section.as_deref_mut(),
+                line.strip_prefix("- ").or(line.strip_prefix("* ")),
+            ) {
+                let item: String = item
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_NOTE_CHARS)
+                    .collect();
+                if list.len() < MAX_NOTES && !item.is_empty() && !list.contains(&item) {
+                    list.push(item);
+                }
+            }
+        }
+    }
+}
+
+const MAX_NOTES: usize = 40;
+const MAX_NOTE_CHARS: usize = 200;
+
+/// Combines the notes of every published build after `running`, up to `target`, newest first.
+fn notes_between(json: &str, running: Build, target: Build) -> Option<Notes> {
+    let releases: Vec<GitHubRelease> = serde_json::from_str(json).ok()?;
+    let mut notes = Notes::default();
+    for release in &releases {
+        if !release.draft
+            && !release.prerelease
+            && Build::parse_tag(&release.tag_name).is_some_and(|b| b > running && b <= target)
+            && let Some(body) = &release.body
+        {
+            notes.add(body);
+        }
+    }
+    Some(notes)
+}
+
+/// Notes covering every build being skipped. Only worth a request when more than the latest
+/// is missing, and a failure just leaves the latest build's own notes.
+async fn missed_notes(url: &str, running: Build, target: Build) -> Option<Notes> {
+    let response = client()
+        .ok()?
+        .get(format!("{}?per_page=30", url.strip_suffix("/latest")?))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    notes_between(&response.text().await.ok()?, running, target)
 }
 
 #[derive(Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     draft: bool,
     #[serde(default)]
@@ -246,6 +328,8 @@ pub fn select(json: &str, running: Build, asset_name: &str) -> Result<Option<Rel
                 .ok_or_else(|| format!("GitHub reports an unusable digest for {asset_name}."))?,
         ),
     };
+    let mut notes = Notes::default();
+    notes.add(release.body.as_deref().unwrap_or_default());
     Ok(Some(Release {
         tag: release.tag_name.clone(),
         build,
@@ -256,6 +340,7 @@ pub fn select(json: &str, running: Build, asset_name: &str) -> Result<Option<Rel
             digest,
         },
         checksums_url: checksums.browser_download_url.clone(),
+        notes: Box::new(notes),
     }))
 }
 
@@ -716,9 +801,15 @@ async fn check_at(
         return Err(format!("GitHub answered {status}."));
     }
     let body = response.text().await.map_err(describe)?;
-    let Some(release) = select(&body, running, package.asset())? else {
+    let Some(mut release) = select(&body, running, package.asset())? else {
         return Ok(None);
     };
+    if let Some(notes) = missed_notes(url, running, release.build)
+        .await
+        .filter(|notes| !notes.is_empty())
+    {
+        *release.notes = notes;
+    }
     forget_other_downloads(cache, &release.tag);
     let staged = staged(&cache.join(&release.tag), &release, package);
     Ok(Some(Found { release, staged }))
@@ -1201,6 +1292,31 @@ pub fn block_on<T>(future: impl Future<Output = Result<T, String>>) -> Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_are_sorted_into_sections_and_combined_across_skipped_builds() {
+        let mut one = Notes::default();
+        one.add("## New\n\n- Themes\n- Themes\n\n## Fixed\n* A crash\n\n## Other\n- Ignored");
+        assert_eq!(one.new, ["Themes"]);
+        assert_eq!(one.fixed, ["A crash"]);
+        assert!(one.changed.is_empty());
+        let mut old = Notes::default();
+        old.add("Automatic build from main.\n\n- A plain list isn't a section");
+        assert!(old.is_empty());
+
+        let json = r###"[
+            {"tag_name":"v0.1.0-build.23","body":"## New\n- Too new"},
+            {"tag_name":"v0.1.0-build.22","body":"## New\n- Latest\n## Changed\n- Tweak"},
+            {"tag_name":"v0.1.0-build.21","body":"## Fixed\n- Older fix"},
+            {"tag_name":"v0.1.0-build.20","body":"## New\n- Already have it"}
+        ]"###;
+        let build = |n: &str| Build::parse_tag(&format!("v0.1.0-build.{n}")).unwrap();
+        let notes = notes_between(json, build("20"), build("22")).unwrap();
+        assert_eq!(notes.new, ["Latest"]);
+        assert_eq!(notes.fixed, ["Older fix"]);
+        assert_eq!(notes.changed, ["Tweak"]);
+        assert!(notes_between("not json", build("20"), build("22")).is_none());
+    }
 
     const RUNNING: Build = Build {
         major: 0,
@@ -1734,6 +1850,7 @@ mod tests {
                 digest: Some(digest(&payload)),
             },
             checksums_url: format!("{base}/sums"),
+            notes: Box::default(),
         };
         let cache = scratch("verified");
         let dir = cache.join(&release.tag);
@@ -1799,6 +1916,7 @@ mod tests {
                 digest: None,
             },
             checksums_url: format!("{base}/sums"),
+            notes: Box::default(),
         };
         let dir = scratch("corrupt");
         let error = block_on(download_into(

@@ -70,6 +70,28 @@ class HomebrewReleaseTests(unittest.TestCase):
             self.assertEqual(digest, release.sha256(self.root / name))
 
 
+class NotesTests(unittest.TestCase):
+    def render(self, message):
+        with tempfile.TemporaryDirectory() as directory:
+            commit = Path(directory, "commit.txt")
+            output = Path(directory, "notes.md")
+            commit.write_text(message)
+            release.notes(commit, output)
+            return output.read_text()
+
+    def test_commit_lines_become_sections_in_a_fixed_order(self):
+        notes = self.render(
+            "Subject (#9)\n\nFixed: A crash\nSome prose\nnew: Themes\n- Changed: Single keys\n"
+        )
+        self.assertEqual(
+            notes,
+            "## New\n\n- Themes\n\n## Fixed\n\n- A crash\n\n## Changed\n\n- Single keys\n",
+        )
+
+    def test_a_commit_without_lines_falls_back_to_its_subject(self):
+        self.assertEqual(self.render("Tidy the footer (#12)\n\nProse.\n"), "## Changed\n\n- Tidy the footer\n")
+
+
 class DownloadTests(unittest.TestCase):
     def test_a_reset_connection_is_retried_and_never_leaves_a_partial_file(self):
         with tempfile.TemporaryDirectory() as directory:

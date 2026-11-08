@@ -1,0 +1,715 @@
+[
+  {
+    "id": "tokyo-night-night",
+    "label": "Night",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#0C0E14",
+      "chrome": "#16161e",
+      "surface": "#1a1b26",
+      "surfaceRaised": "#292e42",
+      "text": "#c0caf5",
+      "textMuted": "#a9b1d6",
+      "placeholder": "#737aa2",
+      "accent": "#7aa2f7",
+      "accentForeground": "#0C0E14",
+      "error": "#f7768e",
+      "warning": "#e0af68",
+      "success": "#9ece6a"
+    },
+    "collection": {
+      "id": "tokyo-night",
+      "label": "Tokyo Night"
+    }
+  },
+  {
+    "id": "tokyo-night-storm",
+    "label": "Storm",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#1b1e2d",
+      "chrome": "#1f2335",
+      "surface": "#24283b",
+      "surfaceRaised": "#292e42",
+      "text": "#c0caf5",
+      "textMuted": "#a9b1d6",
+      "placeholder": "#737aa2",
+      "accent": "#7aa2f7",
+      "accentForeground": "#000000",
+      "error": "#f7768e",
+      "warning": "#e0af68",
+      "success": "#9ece6a"
+    },
+    "collection": {
+      "id": "tokyo-night",
+      "label": "Tokyo Night"
+    }
+  },
+  {
+    "id": "tokyo-night-moon",
+    "label": "Moon",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#191B29",
+      "chrome": "#1e2030",
+      "surface": "#222436",
+      "surfaceRaised": "#2f334d",
+      "text": "#c8d3f5",
+      "textMuted": "#828bb8",
+      "placeholder": "#737aa2",
+      "accent": "#82aaff",
+      "accentForeground": "#000000",
+      "error": "#ff757f",
+      "warning": "#ffc777",
+      "success": "#c3e88d"
+    },
+    "collection": {
+      "id": "tokyo-night",
+      "label": "Tokyo Night"
+    }
+  },
+  {
+    "id": "tokyo-night-day",
+    "label": "Day",
+    "appearance": "light",
+    "colors": {
+      "canvas": "#d0d5e3",
+      "chrome": "#c1c9df",
+      "surface": "#e1e2e7",
+      "surfaceRaised": "#d0d5e3",
+      "text": "#264386",
+      "textMuted": "#4c62a1",
+      "placeholder": "#68709a",
+      "accent": "#2e7de9",
+      "accentForeground": "#000000",
+      "error": "#f52a65",
+      "warning": "#8c6c3e",
+      "success": "#587539"
+    },
+    "collection": {
+      "id": "tokyo-night",
+      "label": "Tokyo Night"
+    }
+  },
+  {
+    "id": "catppuccin-latte",
+    "label": "Latte",
+    "appearance": "light",
+    "colors": {
+      "canvas": "#e6e9ef",
+      "chrome": "#dce0e8",
+      "surface": "#eff1f5",
+      "surfaceRaised": "#e0e2e8",
+      "text": "#4c4f69",
+      "textMuted": "#696c82",
+      "placeholder": "#84889b",
+      "accent": "#8839ef",
+      "accentForeground": "#ffffff",
+      "error": "#d20f39",
+      "warning": "#ba7e30",
+      "success": "#419c2e"
+    },
+    "collection": {
+      "id": "catppuccin",
+      "label": "Catppuccin"
+    }
+  },
+  {
+    "id": "catppuccin-frappe",
+    "label": "Frappé",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#232634",
+      "chrome": "#292c3c",
+      "surface": "#303446",
+      "surfaceRaised": "#414559",
+      "text": "#c6d0f5",
+      "textMuted": "#a5adce",
+      "placeholder": "#777d99",
+      "accent": "#ca9ee6",
+      "accentForeground": "#000000",
+      "error": "#e78284",
+      "warning": "#e5c890",
+      "success": "#a6d189"
+    },
+    "collection": {
+      "id": "catppuccin",
+      "label": "Catppuccin"
+    }
+  },
+  {
+    "id": "catppuccin-macchiato",
+    "label": "Macchiato",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#181926",
+      "chrome": "#1e2030",
+      "surface": "#24273a",
+      "surfaceRaised": "#363a4f",
+      "text": "#cad3f5",
+      "textMuted": "#a5adcb",
+      "placeholder": "#6e738d",
+      "accent": "#c6a0f6",
+      "accentForeground": "#000000",
+      "error": "#ed8796",
+      "warning": "#eed49f",
+      "success": "#a6da95"
+    },
+    "collection": {
+      "id": "catppuccin",
+      "label": "Catppuccin"
+    }
+  },
+  {
+    "id": "catppuccin-mocha",
+    "label": "Mocha",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#11111b",
+      "chrome": "#181825",
+      "surface": "#1e1e2e",
+      "surfaceRaised": "#313244",
+      "text": "#cdd6f4",
+      "textMuted": "#a6adc8",
+      "placeholder": "#6c7086",
+      "accent": "#cba6f7",
+      "accentForeground": "#000000",
+      "error": "#f38ba8",
+      "warning": "#f9e2af",
+      "success": "#a6e3a1"
+    },
+    "collection": {
+      "id": "catppuccin",
+      "label": "Catppuccin"
+    }
+  },
+  {
+    "id": "omarchy-catppuccin",
+    "label": "Catppuccin",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#101019",
+      "chrome": "#161622",
+      "surface": "#1e1e2e",
+      "surfaceRaised": "#313244",
+      "text": "#cdd6f4",
+      "textMuted": "#989fb9",
+      "placeholder": "#6c7086",
+      "accent": "#89b4fa",
+      "accentForeground": "#101019",
+      "error": "#f38ba8",
+      "warning": "#f9e2af",
+      "success": "#a6e3a1"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-catppuccin-latte",
+    "label": "Catppuccin Latte",
+    "appearance": "light",
+    "colors": {
+      "canvas": "#e3e4e8",
+      "chrome": "#d7d8dc",
+      "surface": "#eff1f5",
+      "surfaceRaised": "#e3e4e8",
+      "text": "#4c4f69",
+      "textMuted": "#696c82",
+      "placeholder": "#84889b",
+      "accent": "#1e66f5",
+      "accentForeground": "#ffffff",
+      "error": "#d20f39",
+      "warning": "#ba7e30",
+      "success": "#419c2e"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-ethereal",
+    "label": "Ethereal",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#030610",
+      "chrome": "#040816",
+      "surface": "#060B1E",
+      "surfaceRaised": "#131a3a",
+      "text": "#ffcead",
+      "textMuted": "#b49482",
+      "placeholder": "#6d7db6",
+      "accent": "#7d82d9",
+      "accentForeground": "#030610",
+      "error": "#ED5B5A",
+      "warning": "#E9BB4F",
+      "success": "#92a593"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-everforest",
+    "label": "Everforest",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#181d20",
+      "chrome": "#21272c",
+      "surface": "#2d353b",
+      "surfaceRaised": "#343f44",
+      "text": "#d3c6aa",
+      "textMuted": "#a49c8b",
+      "placeholder": "#7d7e79",
+      "accent": "#7fbbb3",
+      "accentForeground": "#000000",
+      "error": "#e67e80",
+      "warning": "#dbbc7f",
+      "success": "#a7c080"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-flexoki-light",
+    "label": "Flexoki Light",
+    "appearance": "light",
+    "colors": {
+      "canvas": "#f2efe4",
+      "chrome": "#e5e2d8",
+      "surface": "#FFFCF0",
+      "surfaceRaised": "#f2efe4",
+      "text": "#100F0F",
+      "textMuted": "#585652",
+      "placeholder": "#878580",
+      "accent": "#205EA6",
+      "accentForeground": "#f2efe4",
+      "error": "#D14D41",
+      "warning": "#b38c14",
+      "success": "#879A39"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-gruvbox",
+    "label": "Gruvbox",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#161616",
+      "chrome": "#1e1e1e",
+      "surface": "#282828",
+      "surfaceRaised": "#3c3836",
+      "text": "#d4be98",
+      "textMuted": "#a09176",
+      "placeholder": "#7c6f64",
+      "accent": "#7daea3",
+      "accentForeground": "#000000",
+      "error": "#ea6962",
+      "warning": "#d8a657",
+      "success": "#a9b665"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-hackerman",
+    "label": "Hackerman",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#06060c",
+      "chrome": "#080910",
+      "surface": "#0B0C16",
+      "surfaceRaised": "#151828",
+      "text": "#ddf7ff",
+      "textMuted": "#9eb0b9",
+      "placeholder": "#6a6e95",
+      "accent": "#82FB9C",
+      "accentForeground": "#06060c",
+      "error": "#50f872",
+      "warning": "#50f7d4",
+      "success": "#4fe88f"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-jade-horse",
+    "label": "Jade Horse",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#0a1713",
+      "chrome": "#0f1e19",
+      "surface": "#142620",
+      "surfaceRaised": "#203b31",
+      "text": "#f0faf4",
+      "textMuted": "#dfede5",
+      "placeholder": "#91ad9f",
+      "accent": "#8bcbb1",
+      "accentForeground": "#000000",
+      "error": "#d88d91",
+      "warning": "#c5cc91",
+      "success": "#8bcbb1"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-kanagawa",
+    "label": "Kanagawa",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#111116",
+      "chrome": "#17171e",
+      "surface": "#1f1f28",
+      "surfaceRaised": "#223249",
+      "text": "#dcd7ba",
+      "textMuted": "#a3a08e",
+      "placeholder": "#727169",
+      "accent": "#dcd7ba",
+      "accentForeground": "#000000",
+      "error": "#c34043",
+      "warning": "#c0a36e",
+      "success": "#76946a"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-last-horizon",
+    "label": "Last Horizon",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#060606",
+      "chrome": "#090809",
+      "surface": "#0c0b0c",
+      "surfaceRaised": "#1f1e1f",
+      "text": "#e2dddc",
+      "textMuted": "#FAFCFB",
+      "placeholder": "#665c5f",
+      "accent": "#b59790",
+      "accentForeground": "#060606",
+      "error": "#c38b7b",
+      "warning": "#6B5E73",
+      "success": "#87a9b0"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-lumon",
+    "label": "Lumon",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#0b1216",
+      "chrome": "#101b21",
+      "surface": "#16242d",
+      "surfaceRaised": "#1b2d40",
+      "text": "#f2fcff",
+      "textMuted": "#d6e2ee",
+      "placeholder": "#4d86b0",
+      "accent": "#8bc9eb",
+      "accentForeground": "#000000",
+      "error": "#4d86b0",
+      "warning": "#6fa4c9",
+      "success": "#5e95bc"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-lupine",
+    "label": "Lupine",
+    "appearance": "light",
+    "colors": {
+      "canvas": "#ececec",
+      "chrome": "#dedede",
+      "surface": "#fafafa",
+      "surfaceRaised": "#ececec",
+      "text": "#000000",
+      "textMuted": "#212121",
+      "placeholder": "#757575",
+      "accent": "#3264eb",
+      "accentForeground": "#ffffff",
+      "error": "#c900c4",
+      "warning": "#026fde",
+      "success": "#4a2fd0"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-matte-black",
+    "label": "Matte Black",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#090909",
+      "chrome": "#0d0d0d",
+      "surface": "#121212",
+      "surfaceRaised": "#1e1e1e",
+      "text": "#bebebe",
+      "textMuted": "#8a8a8a",
+      "placeholder": "#656565",
+      "accent": "#e68e0d",
+      "accentForeground": "#090909",
+      "error": "#D35F5F",
+      "warning": "#ba2c2c",
+      "success": "#FFC107"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-miasma",
+    "label": "Miasma",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#121212",
+      "chrome": "#191919",
+      "surface": "#222222",
+      "surfaceRaised": "#2c2c2c",
+      "text": "#c2c2b0",
+      "textMuted": "#929285",
+      "placeholder": "#70706c",
+      "accent": "#78824b",
+      "accentForeground": "#121212",
+      "error": "#7a6c58",
+      "warning": "#b36d43",
+      "success": "#5f875f"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-nord",
+    "label": "Nord",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#191c23",
+      "chrome": "#222730",
+      "surface": "#2e3440",
+      "surfaceRaised": "#3b4252",
+      "text": "#d8dee9",
+      "textMuted": "#a5abb6",
+      "placeholder": "#778090",
+      "accent": "#81a1c1",
+      "accentForeground": "#000000",
+      "error": "#bf616a",
+      "warning": "#ebcb8b",
+      "success": "#a3be8c"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-retro-82",
+    "label": "Retro 82",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#020c17",
+      "chrome": "#031222",
+      "surface": "#05182e",
+      "surfaceRaised": "#0a2540",
+      "text": "#f6dcac",
+      "textMuted": "#aea186",
+      "placeholder": "#3f8f8a",
+      "accent": "#faa968",
+      "accentForeground": "#020c17",
+      "error": "#f85525",
+      "warning": "#e97b3c",
+      "success": "#028391"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-ristretto",
+    "label": "Ristretto",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#181414",
+      "chrome": "#211b1b",
+      "surface": "#2c2525",
+      "surfaceRaised": "#3d2f2a",
+      "text": "#e6d9db",
+      "textMuted": "#aea3a4",
+      "placeholder": "#786f70",
+      "accent": "#f38d70",
+      "accentForeground": "#000000",
+      "error": "#fd6883",
+      "warning": "#f9cc6c",
+      "success": "#adda78"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-rose-pine",
+    "label": "Rosé Pine",
+    "appearance": "light",
+    "colors": {
+      "canvas": "#ede7e1",
+      "chrome": "#e1dbd5",
+      "surface": "#faf4ed",
+      "surfaceRaised": "#ede7e1",
+      "text": "#534e73",
+      "textMuted": "#575279",
+      "placeholder": "#8e899e",
+      "accent": "#56949f",
+      "accentForeground": "#000000",
+      "error": "#b4637a",
+      "warning": "#b5814a",
+      "success": "#286983"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-solitude",
+    "label": "Solitude",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#080a0b",
+      "chrome": "#0c0e10",
+      "surface": "#101315",
+      "surfaceRaised": "#1d2123",
+      "text": "#a5aeb4",
+      "textMuted": "#cacccc",
+      "placeholder": "#62666d",
+      "accent": "#798186",
+      "accentForeground": "#080a0b",
+      "error": "#5e6568",
+      "warning": "#d9dbdc",
+      "success": "#9fa5a9"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-starship",
+    "label": "Starship",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#0e0e10",
+      "chrome": "#161618",
+      "surface": "#1c1c1e",
+      "surfaceRaised": "#2c2c2e",
+      "text": "#ffffff",
+      "textMuted": "#f5f5f7",
+      "placeholder": "#98989d",
+      "accent": "#ff9f0a",
+      "accentForeground": "#0e0e10",
+      "error": "#ff5f4a",
+      "warning": "#ffc27a",
+      "success": "#ff9f0a"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-tokyo-night",
+    "label": "Tokyo Night",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#0e0e14",
+      "chrome": "#13141c",
+      "surface": "#1a1b26",
+      "surfaceRaised": "#24283b",
+      "text": "#c0caf5",
+      "textMuted": "#a9b1d6",
+      "placeholder": "#616a94",
+      "accent": "#7aa2f7",
+      "accentForeground": "#0e0e14",
+      "error": "#f7768e",
+      "warning": "#e0af68",
+      "success": "#9ece6a"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-vantablack",
+    "label": "Vantablack",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#070707",
+      "chrome": "#090909",
+      "surface": "#000000",
+      "surfaceRaised": "#1a1a1a",
+      "text": "#ffffff",
+      "textMuted": "#b2b2b2",
+      "placeholder": "#626262",
+      "accent": "#8d8d8d",
+      "accentForeground": "#070707",
+      "error": "#a4a4a4",
+      "warning": "#cecece",
+      "success": "#b6b6b6"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  },
+  {
+    "id": "omarchy-white",
+    "label": "White",
+    "appearance": "light",
+    "colors": {
+      "canvas": "#f5f5f5",
+      "chrome": "#e8e8e8",
+      "surface": "#ffffff",
+      "surfaceRaised": "#f5f5f5",
+      "text": "#000000",
+      "textMuted": "#4c4c4c",
+      "placeholder": "#909090",
+      "accent": "#6e6e6e",
+      "accentForeground": "#f5f5f5",
+      "error": "#2a2a2a",
+      "warning": "#4a4a4a",
+      "success": "#3a3a3a"
+    },
+    "collection": {
+      "id": "omarchy",
+      "label": "Omarchy"
+    }
+  }
+]

@@ -156,7 +156,7 @@ fn sections(
 ) -> Vec<Section> {
     match page {
         SettingsPage::Server => vec![servers_section(s, t), identity_section(s, t, k)],
-        SettingsPage::Appearance => appearance_sections(s, t),
+        SettingsPage::Appearance => appearance_sections(s, t, k),
         SettingsPage::Audio => vec![
             Section::boxed(
                 "audio",
@@ -922,8 +922,8 @@ fn install_section(s: &App, t: &Theme) -> Section {
 }
 
 /// The colour scheme, then a theme for light and one for dark. Choices apply and save at once.
-fn appearance_sections(s: &App, t: &Theme) -> Vec<Section> {
-    let current = s.appearance;
+fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
+    let current = &s.appearance;
     let schemes = row()
         .w_full()
         .gap(12.0)
@@ -968,10 +968,167 @@ fn appearance_sections(s: &App, t: &Theme) -> Vec<Section> {
             t,
             "Pick one theme for light and one for dark. System switches between them with your computer.",
         )),
+        Section::boxed(
+            "motion",
+            "Motion",
+            "animation animations motion effects reduce",
+            vec![item(
+                "disable animations",
+                form_row(
+                    t,
+                    "Disable animations",
+                    Some("Stops movement and pulsing across the app."),
+                    switch(
+                        "disable-animations",
+                        "Disable animations",
+                        current.disable_animations,
+                        true,
+                        k,
+                        |s, disable_animations| {
+                            Message::Appearance(Appearance {
+                                disable_animations,
+                                ..s.appearance.clone()
+                            })
+                        },
+                    ),
+                ),
+            )],
+        ),
+        more_themes(s, t),
     ]
 }
 
-fn scheme_card(t: &Theme, current: Appearance, scheme: ColorScheme) -> El {
+/// The bundled collections and the user's own themes, one group each.
+fn more_themes(s: &App, t: &Theme) -> Section {
+    let groups = s.theme_library.collections();
+    let terms: String = groups
+        .iter()
+        .flat_map(|(_, themes)| themes.iter().map(|theme| theme.label.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rows = groups
+        .iter()
+        .map(|(name, themes)| {
+            let grid = row()
+                .w_full()
+                .gap(10.0)
+                .flex_wrap()
+                .children(themes.iter().map(|theme| extra_card(s, t, theme)))
+                // Empty cells keep a short last row's cards the width of the others.
+                .child(theme_cell().key("spacer-1").py(0.0).h(0.0).a11y_hidden())
+                .child(theme_cell().key("spacer-2").py(0.0).h(0.0).a11y_hidden());
+            item(
+                format!("{name} {terms}"),
+                col()
+                    .key(format!("collection-{name}"))
+                    .w_full()
+                    .gap(8.0)
+                    .child(super::widgets::faint(t, (*name).to_owned()))
+                    .child(grid),
+            )
+        })
+        .collect();
+    let mut note = col().w_full().gap(4.0).child(group_note(
+        t,
+        "Add your own under custom_themes in the settings file, in T3 Code's theme format, then press Reload on the Settings File page.",
+    ));
+    for problem in &s.theme_library.problems {
+        note = note.child(super::widgets::error_text(t, format!("Skipped {problem}")));
+    }
+    Section::open(
+        "more-themes",
+        "More Themes",
+        "appearance theme custom tokyo night catppuccin omarchy",
+        rows,
+    )
+    .note(note)
+}
+
+fn extra_card(s: &App, t: &Theme, theme: &crate::themes::Extra) -> El {
+    let mut swatches = row().gap(8.0);
+    for dark in [false, true] {
+        if let Some(colors) = theme.colors(dark) {
+            swatches = swatches.child(extra_orb(&s.appearance, t, theme, colors, dark));
+        }
+    }
+    theme_cell()
+        .key(format!("extra-{}", theme.id))
+        .padding(10.0)
+        .radius(radius::CARD)
+        .fill(t.surface)
+        .border(1.0, t.hairline)
+        .child(
+            row().w_full().gap(10.0).center_y().child(swatches).child(
+                text(theme.label.clone())
+                    .font(ty::BODY_STRONG)
+                    .color(t.text)
+                    .truncate_fade()
+                    .grow(1.0)
+                    .min_w(0.0),
+            ),
+        )
+}
+
+/// Pressing a swatch uses that theme for its mode. On a fixed scheme it also switches to that
+/// mode, so the choice shows at once; System keeps following the computer.
+fn extra_orb(
+    current: &Appearance,
+    t: &Theme,
+    theme: &crate::themes::Extra,
+    colors: &crate::themes::Colors,
+    dark: bool,
+) -> El {
+    const SIZE: f32 = 30.0;
+    let palette = Theme::extra(colors, dark);
+    let selected = current.extra_theme(dark) == Some(theme.id.as_str());
+    let mode = if dark { "dark" } else { "light" };
+    let help = format!("Use {} in {mode} mode", theme.label);
+    let mut next = current.clone();
+    if dark {
+        next.dark_theme_id = Some(theme.id.clone());
+    } else {
+        next.light_theme_id = Some(theme.id.clone());
+    }
+    if next.scheme != ColorScheme::System {
+        next.scheme = if dark {
+            ColorScheme::Dark
+        } else {
+            ColorScheme::Light
+        };
+    }
+    let mut orb = el()
+        .key(format!("{}-{mode}", theme.id))
+        .role("radio")
+        .label(help.clone())
+        .help(help)
+        .checked(selected)
+        .size(SIZE, SIZE)
+        .radius(SIZE / 2.0)
+        .fill(palette.surface)
+        .radial_gradient(
+            [0.62, 0.32],
+            SIZE * 0.78,
+            [
+                (0.0, palette.accent),
+                (0.45, palette.accent.alpha(0.55)),
+                (1.0, palette.accent.alpha(0.0)),
+            ],
+        )
+        .border(1.0, palette.hairline)
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .hover(t.wash(0.08))
+        .press(t.wash(0.14))
+        .focus_ring(2.0, 3.0, t.accent.alpha(0.7))
+        .motion(motion::QUICK)
+        .on_press_tx(send(Message::Appearance(next)));
+    if selected {
+        orb = orb.outline(2.0, 3.0, t.accent);
+    }
+    orb
+}
+
+fn scheme_card(t: &Theme, current: &Appearance, scheme: ColorScheme) -> El {
     let selected = current.scheme == scheme;
     let light = Theme::new(current.light_theme, false);
     let dark = Theme::new(current.dark_theme, true);
@@ -1003,7 +1160,10 @@ fn scheme_card(t: &Theme, current: Appearance, scheme: ColorScheme) -> El {
         .press(t.wash(0.08))
         .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
         .motion(motion::QUICK)
-        .on_press_tx(send(Message::Appearance(Appearance { scheme, ..current })))
+        .on_press_tx(send(Message::Appearance(Appearance {
+            scheme,
+            ..current.clone()
+        })))
         .child(
             el().w_full()
                 .h(76.0)
@@ -1080,7 +1240,7 @@ fn theme_cell() -> El {
         .border(1.0, Color::TRANSPARENT)
 }
 
-fn theme_card(t: &Theme, current: Appearance, name: ThemeName) -> El {
+fn theme_card(t: &Theme, current: &Appearance, name: ThemeName) -> El {
     theme_cell()
         .key(format!("theme-{}", name.title()))
         .gap(12.0)
@@ -1100,21 +1260,23 @@ fn theme_card(t: &Theme, current: Appearance, name: ThemeName) -> El {
 }
 
 /// A swatch of `name`'s light or dark palette. Pressing it uses that theme for that mode.
-fn orb(t: &Theme, current: Appearance, name: ThemeName, dark: bool) -> El {
+fn orb(t: &Theme, current: &Appearance, name: ThemeName, dark: bool) -> El {
     const SIZE: f32 = 52.0;
     let p = Theme::new(name, dark);
-    let selected = current.theme(dark) == name;
+    let selected = current.extra_theme(dark).is_none() && current.theme(dark) == name;
     let mode = if dark { "dark" } else { "light" };
     let help = format!("Use {} in {mode} mode", name.title());
     let next = if dark {
         Appearance {
             dark_theme: name,
-            ..current
+            dark_theme_id: None,
+            ..current.clone()
         }
     } else {
         Appearance {
             light_theme: name,
-            ..current
+            light_theme_id: None,
+            ..current.clone()
         }
     };
     let mut e = el()
