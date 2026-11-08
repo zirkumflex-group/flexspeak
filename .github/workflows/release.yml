@@ -103,9 +103,11 @@ jobs:
               gh release download "$tag" --dir dist/releases --clobber
             fi
           else
+            git log -1 --format=%B "$GITHUB_SHA" > "$RUNNER_TEMP/commit.txt"
+            python3 scripts/release.py notes "$RUNNER_TEMP/commit.txt" "$RUNNER_TEMP/notes.md"
             gh release create "$tag" dist/releases/* --draft --target "$GITHUB_SHA" \
               --title "Flexspeak ${version} — build ${GITHUB_RUN_NUMBER}" \
-              --notes-file docs/release-notes.md
+              --notes-file "$RUNNER_TEMP/notes.md"
           fi
           gh release edit "$tag" --draft=false --latest=false
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$RUNNER_TEMP/release.json"

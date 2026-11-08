@@ -37,6 +37,9 @@ pub struct Settings {
     /// Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Appearance::is_default")]
     pub appearance: Appearance,
+    /// Kept as written, so one bad entry can't stop the settings from loading.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_themes: Vec<serde_json::Value>,
     /// A release running from Downloads or a disk image no longer offers to install itself.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub skip_install_prompt: bool,
@@ -124,12 +127,20 @@ impl ThemeName {
 }
 
 /// The colour scheme, and the theme used while the window is light and while it is dark.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Appearance {
     pub scheme: ColorScheme,
     pub light_theme: ThemeName,
     pub dark_theme: ThemeName,
+    /// A theme from the More Themes section, used instead of the built-in one above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_theme_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dark_theme_id: Option<String>,
+    /// Written only when on, so settings stay readable by builds without this option.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disable_animations: bool,
 }
 
 impl Appearance {
@@ -143,6 +154,15 @@ impl Appearance {
             ColorScheme::System => system_dark,
             ColorScheme::Light => false,
             ColorScheme::Dark => true,
+        }
+    }
+
+    /// The More Themes entry chosen for that appearance, if any.
+    pub fn extra_theme(&self, dark: bool) -> Option<&str> {
+        if dark {
+            self.dark_theme_id.as_deref()
+        } else {
+            self.light_theme_id.as_deref()
         }
     }
 
@@ -175,6 +195,7 @@ impl Default for Settings {
             footer_hidden: false,
             auto_download_updates: true,
             appearance: Appearance::default(),
+            custom_themes: Vec::new(),
             skip_install_prompt: false,
         }
     }
@@ -273,6 +294,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn animations_default_on_and_the_option_is_only_written_when_used() {
+        let appearance = Appearance {
+            scheme: ColorScheme::Light,
+            ..Appearance::default()
+        };
+        let json = serde_json::to_string(&appearance).unwrap();
+        assert!(!json.contains("disable_animations"));
+        let read: Appearance = serde_json::from_str(&json).unwrap();
+        assert!(!read.disable_animations);
+    }
+
+    #[test]
     fn settings_are_portable_and_missing_fields_have_defaults() -> Result<()> {
         assert_eq!(
             serde_json::from_str::<Settings>(include_str!("../settings.example.json"))?,
@@ -313,6 +346,8 @@ mod tests {
                 scheme: ColorScheme::Light,
                 light_theme: ThemeName::Grove,
                 dark_theme: ThemeName::Iris,
+                disable_animations: true,
+                ..Appearance::default()
             },
             ..Settings::default()
         };

@@ -8,7 +8,7 @@ use rune_kit::{Kit, Switch};
 use super::theme::{Theme, radius, shadow, size, ty};
 use super::widgets::{Variant, button, faint, form_row, group, icon_button, pulse};
 use super::{dispatch, icons};
-use crate::updater::{Event, Phase, Progress, Retry};
+use crate::updater::{Event, Notes, Phase, Progress, Retry};
 use crate::usage::format_bytes;
 use crate::{App, Message};
 
@@ -93,13 +93,55 @@ fn shorten(detail: &str) -> String {
     }
 }
 
+/// How many entries each section shows before summing up the rest.
+const NOTES_SHOWN: usize = 5;
+
+/// What the update brings, under New, Fixed and Changed.
+fn whats_new(t: &Theme, notes: &Notes) -> El {
+    let sections = [
+        ("New", t.accent, &notes.new),
+        ("Fixed", t.good, &notes.fixed),
+        ("Changed", t.fair, &notes.changed),
+    ];
+    let mut list = col().key("update-notes").w_full().gap(10.0);
+    for (name, tint, items) in sections {
+        if items.is_empty() {
+            continue;
+        }
+        let mut section = col()
+            .key(name)
+            .w_full()
+            .gap(3.0)
+            .child(text(name).font(ty::SMALL).color(tint));
+        for item in items.iter().take(NOTES_SHOWN) {
+            section = section.child(
+                text(format!("• {item}"))
+                    .font(ty::SMALL)
+                    .color(t.text)
+                    .wrap()
+                    .w_full(),
+            );
+        }
+        if items.len() > NOTES_SHOWN {
+            section = section.child(faint(t, format!("and {} more", items.len() - NOTES_SHOWN)));
+        }
+        list = list.child(section);
+    }
+    list
+}
+
 /// The floating notice, while there's an update to act on and it hasn't been dismissed.
 pub fn notice(s: &App, t: &Theme) -> Option<El> {
     let u = &s.updater;
     if s.onboarding.is_some() || !u.notice_visible() {
         return None;
     }
-    let version = format!("Flexspeak {}", u.release.as_ref()?.build.label());
+    let release = u.release.as_ref()?;
+    let version = format!("Flexspeak {}", release.build.label());
+    let has_notes = matches!(
+        u.phase,
+        Phase::Available | Phase::Downloading(_) | Phase::Ready
+    ) && !release.notes.is_empty();
     let (glyph, tint, title, detail) = match &u.phase {
         Phase::Idle => return None,
         Phase::Available | Phase::Downloading(_) => {
@@ -147,7 +189,10 @@ pub fn notice(s: &App, t: &Theme) -> Option<El> {
                 .gap(3.0)
                 .pt(1.0)
                 .child(text(title).font(ty::BODY_STRONG).color(t.text).truncate())
-                .child(text(detail).font(ty::SMALL).color(t.muted).wrap().w_full()),
+                .child(text(detail).font(ty::SMALL).color(t.muted).wrap().w_full())
+                .children(
+                    (has_notes && !s.ui.update_hover).then(|| faint(t, "Hover to see what's new")),
+                ),
         )
         .child(
             icon_button(
@@ -250,7 +295,9 @@ pub fn notice(s: &App, t: &Theme) -> Option<El> {
             .border_gradient(1.0, t.bevel_top, t.bevel_bottom)
             .box_shadow(shadow(0.0, 12.0, 32.0, Color::BLACK.alpha(0.45)))
             .pin(None, Some(size::HEADER + 10.0), Some(16.0), None)
+            .on_hover_change(|s: &mut App, hovering, _| s.ui.update_hover = hovering)
             .child(top)
+            .children((has_notes && s.ui.update_hover).then(|| whats_new(t, &release.notes)))
             .child(footer)
             .transition(rune::Transition::opacity()),
     )

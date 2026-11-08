@@ -76,6 +76,7 @@ pub const SCENES: &[Scene] = &[
     ("password", password),
     ("alert", alert),
     ("update-available", update_available),
+    ("update-whats-new", update_whats_new),
     ("update-downloading", update_downloading),
     ("update-ready", update_ready),
     ("update-installing", update_installing),
@@ -904,6 +905,7 @@ fn with_update(s: &mut App, phase: Phase) {
             digest: None,
         },
         checksums_url: String::new(),
+        notes: Box::default(),
     });
     u.phase = phase;
     s.updater = u;
@@ -915,6 +917,25 @@ fn downloading() -> Phase {
         total: Some(25_237_970),
         bytes_per_second: Some(3_420_000.0),
     })
+}
+
+fn update_whats_new(s: &mut App) {
+    update_available(s);
+    if let Some(release) = &mut s.updater.release {
+        *release.notes = demo_notes();
+    }
+    s.ui.update_hover = true;
+}
+
+fn demo_notes() -> updater::Notes {
+    updater::Notes {
+        new: vec![
+            "Tokyo Night, Catppuccin and Omarchy themes".into(),
+            "Your own themes in the settings file".into(),
+        ],
+        fixed: vec!["The channel error after restarting".into()],
+        changed: vec!["Shortcuts can be a single key".into()],
+    }
 }
 
 fn update_available(s: &mut App) {
@@ -1122,6 +1143,66 @@ mod tests {
     }
 
     #[test]
+    fn hovering_the_update_notice_shows_what_changed() {
+        fn scene(s: &mut App) {
+            update_available(s);
+            if let Some(release) = &mut s.updater.release {
+                *release.notes = demo_notes();
+            }
+        }
+        let mut rt = runtime(scene, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("update-notes").is_none(), "hidden until hovered");
+        let (x, y) = rt.find("update-notice").expect("the notice");
+        rt.pointer_move(x, y);
+        settle(&mut rt);
+        assert!(rt.find("update-notes").is_some());
+        rt.pointer_move(20.0, 700.0);
+        settle(&mut rt);
+        assert!(rt.find("update-notes").is_none());
+    }
+
+    #[test]
+    fn choosing_a_bundled_theme_uses_it_and_a_builtin_replaces_it() {
+        let mut rt = runtime(settings_appearance, (1000.0, 1500.0));
+        settle(&mut rt);
+        click(&mut rt, "tokyo-night-storm-dark");
+        assert_eq!(
+            rt.state.appearance.dark_theme_id.as_deref(),
+            Some("tokyo-night-storm")
+        );
+        let chosen = super::super::theme(&rt.state);
+        let expected = super::super::theme::Theme::extra(
+            rt.state
+                .theme_library
+                .find("tokyo-night-storm")
+                .and_then(|theme| theme.dark.as_ref())
+                .unwrap(),
+            true,
+        );
+        assert_eq!(chosen.surface, expected.surface);
+    }
+
+    #[test]
+    fn animations_stay_on_until_switched_off_in_appearance() {
+        let mut rt = runtime(settings_appearance, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(!rt.state.appearance.disable_animations, "on by default");
+        let root = std::env::temp_dir().join(format!("flexspeak-motion-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        crate::settings::save(&path, &crate::settings::Settings::default()).unwrap();
+        rt.state.settings_path = Some(path.clone());
+        click(&mut rt, "disable-animations");
+        assert!(rt.state.appearance.disable_animations);
+        let saved = crate::settings::load(&path).unwrap().unwrap();
+        assert!(saved.appearance.disable_animations, "saved right away");
+        click(&mut rt, "disable-animations");
+        assert!(!rt.state.appearance.disable_animations);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn pressing_change_records_the_next_key_combination() {
         use crate::shortcuts::Binding;
         let ctrl_shift = rune::Mods {
@@ -1143,20 +1224,20 @@ mod tests {
             "the recorder takes the keys"
         );
         rt.key(rune::KeyEvent {
-            key: rune::Key::Text("k".into()),
+            key: rune::Key::Text("j".into()),
             mods: rune::Mods::default(),
         });
         settle(&mut rt);
         assert_eq!(
-            rt.state.keybind_draft, before,
-            "a bare letter would block typing"
+            rt.state.keybind_draft.toggle_mute, "J",
+            "a single key is enough"
         );
-        assert!(rt.state.key_capture.as_ref().unwrap().error.is_some());
         assert!(
             rt.state.ui.key_capture.text.is_empty(),
             "keys aren't typed in"
         );
 
+        click(&mut rt, "change-Mute");
         rt.key(rune::KeyEvent {
             key: rune::Key::Text("k".into()),
             mods: ctrl_shift,

@@ -47,7 +47,7 @@ Open **Settings** using the gear icon at the top right, or **⌘,** (**Ctrl+,** 
 
 The two actions must use different shortcuts. Invalid syntax is rejected. New keys are registered before old keys are released; an ordinary registration conflict preserves the previous working keys and leaves the file unchanged. The Settings page shows registration/save errors and the last shortcut received, so the keys can be checked while disconnected.
 
-Each shortcut has a **Change** button: press it, then press the new key combination, and it is recorded and saved at once. Keys are read by their physical position, so a shortcut does not depend on the keyboard layout. Letters, digits and other typing keys need Ctrl, Alt or Command, because a global shortcut takes that key from every other app; function keys can stand alone. Escape cancels, and Backspace clears push-to-talk. The existing shortcuts are released while recording, so they can be pressed and reassigned.
+Each shortcut has a **Change** button: press it, then press the new key combination, and it is recorded and saved at once. Keys are read by their physical position, so a shortcut does not depend on the keyboard layout. A single key works as a shortcut, but a global shortcut takes that key from every other app while Flexspeak runs, so a plain letter can no longer be typed elsewhere; function keys avoid this. Escape cancels, and Backspace clears push-to-talk. The existing shortcuts are released while recording, so they can be pressed and reassigned.
 
 Global shortcuts use the native event loop on macOS and Windows, and X11 on Linux. Native Wayland is not supported by the selected hotkey library and is reported as unavailable; settings can still be saved there. The app's event bridge is driven by key presses, with no periodic hotkey polling.
 
@@ -102,6 +102,30 @@ CPU, RAM and the platform-specific memory detail stay in the bottom bar while th
 ## Appearance
 
 **Settings → Appearance** holds **Color Scheme** (System, Light or Dark) and **Themes**. Five themes ship with the app — Flexspeak (blue), Grove (green), Ocean (teal), Ember (orange) and Iris (violet) — and each has a light and a dark palette. Each theme card shows two swatches: press the light one to use that theme while the window is light, and the dark one for while it is dark. The two choices are independent, so Grove can be the light theme and Ember the dark one. System follows the computer's appearance: on macOS the app's effective appearance (including Auto), on Windows the app mode in Personalisation, and on Linux GNOME's `color-scheme`, read once at launch. macOS and Windows are checked with each usage tick, so a change shows within a second (ten in performance mode).
+
+**More Themes** lists the bundled Tokyo Night, Catppuccin and Omarchy palettes, and any themes you add under `custom_themes` in the settings file; press Reload on the Settings File page to pick up edits. The format is T3 Code's, and its roles beyond these are ignored, so its themes can be pasted in:
+
+```json
+{
+  "custom_themes": [{
+    "id": "my-theme",
+    "label": "My Theme",
+    "appearance": "dark",
+    "colors": {
+      "canvas": "#101014", "chrome": "#16161c", "surface": "#1c1c24", "surfaceRaised": "#2a2a34",
+      "text": "#e8e8f0", "textMuted": "#a0a0b0", "placeholder": "#707080",
+      "accent": "#8ea8ff", "accentForeground": "#0b0f1c",
+      "border": "#ffffff14", "error": "#ff7a8a", "warning": "#f2c46b", "success": "#6fdc9a"
+    },
+    "variants": { "light": { "canvas": "#ffffff", "surface": "#ffffff", "text": "#000000", "accent": "#264adc" } },
+    "collection": { "id": "mine", "label": "Mine" }
+  }]
+}
+```
+
+`canvas`, `surface`, `text` and `accent` are required; the rest fall back sensibly. Colours may be `#rgb`, `#rrggbb` (either with alpha), `rgb()` or `oklch()`. A theme that can't be read is skipped and named under the section, and never stops the settings from loading. A theme with the same `id` as a bundled one replaces it. Palettes are derived from [Tokyo Night](https://github.com/folke/tokyonight.nvim) (Apache-2.0), [Catppuccin](https://github.com/catppuccin/palette) (MIT) and [Omarchy](https://github.com/basecamp/omarchy) (MIT), with neutrals and contrast adjusted to Flexspeak's roles.
+
+**Motion** has **Disable animations**, off by default. Turning it on stops movement and pulsing across the app; opacity and colour changes keep a very brief fade. Left off, the system's Reduce Motion setting still applies.
 
 Like the footer choice, appearance applies and saves immediately without saving other unsaved Settings edits. It is stored as an optional `appearance` object and left out of the file while it is the default:
 
