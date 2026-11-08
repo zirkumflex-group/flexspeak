@@ -2,6 +2,42 @@
 adds itself and any build missing here from its commit's New:/Fixed:/Changed: lines
 (`scripts/release.py`), so this file only needs editing to reword an entry. -->
 
+# v0.1.0-build.29 · 2026-11-08
+
+## Fixed
+
+- Someone sharing several streams at once now shows all of them, not just the newest
+
+# v0.1.0-build.28 · 2026-11-08
+
+## New
+
+- Kick from channel, kick from server and ban people from their right-click menu, with a reason
+- Tick server groups and set a channel group from the right-click menu, for one person or a whole selection
+
+# v0.1.0-build.27 · 2026-11-08
+
+## New
+
+- A round app icon, and the Flexspeak mark beside the name in the title bar
+- Hover CPU in the status bar to see the load as a share of all cores, as Task Manager shows it
+
+## Changed
+
+- Screen shares show at their own resolution and frame rate instead of at most 720p and 30 FPS
+- Flexspeak uses noticeably less CPU while you're connected and watching streams
+- Clearer buttons to make a stream large and to go back to the grid
+
+# v0.1.0-build.26 · 2026-11-08
+
+## New
+
+- See what changed in each version under Settings → Updates, back to the first build
+
+## Fixed
+
+- Opening Settings for the first time no longer freezes the window
+
 # v0.1.0-build.25 · 2026-11-08
 
 ## New

@@ -17,6 +17,7 @@ mod settings;
 mod statistics;
 mod streams;
 mod theme;
+mod video;
 pub(crate) use theme::rgb;
 mod updates;
 mod widgets;

@@ -110,7 +110,7 @@ mod native {
         rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
         session_description::{SdpType, SessionDescription},
         stats::{IceCandidatePairState, RtcStats},
-        video_frame::{BoxVideoFrame, VideoFormatType, native::VideoFrameBufferExt},
+        video_frame::BoxVideoFrame,
         video_stream::native::NativeVideoStream,
     };
     use serde_json::json;
@@ -338,25 +338,58 @@ mod native {
             converted = frame.buffer.to_i420();
             &converted
         };
-        let mut rgba = vec![0; width as usize * height as usize * 4];
-        // libyuv ABGR is RGBA byte order on the supported little-endian targets.
-        buffer.to_argb(
-            VideoFormatType::ABGR,
-            &mut rgba,
-            width * 4,
-            width as i32,
-            height as i32,
-        );
-        surface.publish(
+        // The decoded size, every frame: the GPU scales and converts it where it is drawn.
+        let (y, u, v) = buffer.data();
+        let (sy, su, sv) = buffer.strides();
+        surface.publish_i420(
             generation,
-            crate::streaming::Image {
-                width,
-                height,
-                pixels: rgba,
-            },
+            (width, height),
+            [y, u, v],
+            [sy as usize, su as usize, sv as usize],
             (frame.rotation as i32 as f32).to_radians(),
         );
         Ok(())
+    }
+
+    #[test]
+    fn gpu_i601_math_matches_libyuv() {
+        use libwebrtc::video_frame::{I420Buffer, VideoFormatType, native::VideoFrameBufferExt};
+        let mut maximum = 0u8;
+        for (w, h) in [(2, 2), (7, 5), (64, 32)] {
+            for seed in [0usize, 17, 93, 255] {
+                let mut source = I420Buffer::new(w, h);
+                let (y, u, v) = source.data_mut();
+                for (n, plane) in [y, u, v].into_iter().enumerate() {
+                    for (i, p) in plane.iter_mut().enumerate() {
+                        *p = (i * 73 + seed + n * 41) as u8;
+                    }
+                }
+                let mut expected = vec![0; (w * h * 4) as usize];
+                source.to_argb(
+                    VideoFormatType::ABGR,
+                    &mut expected,
+                    w * 4,
+                    w as i32,
+                    h as i32,
+                );
+                let (y, u, v) = source.data();
+                let (sy, su, sv) = source.strides();
+                for row in 0..h as usize {
+                    for x in 0..w as usize {
+                        let actual = crate::streaming::i601_pixel(
+                            y[row * sy as usize + x],
+                            u[(row / 2) * su as usize + x / 2],
+                            v[(row / 2) * sv as usize + x / 2],
+                        );
+                        for c in 0..4 {
+                            maximum = maximum
+                                .max(actual[c].abs_diff(expected[(row * w as usize + x) * 4 + c]));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(maximum <= 1, "maximum channel difference {maximum}");
     }
 
     fn summarize_stats(stats: &[RtcStats]) -> Stats {

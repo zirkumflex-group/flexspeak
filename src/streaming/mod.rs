@@ -300,7 +300,7 @@ impl View {
             }
         }
     }
-    /// Notes the newest frame each decoder showed. Pixels reach the GPU without the UI thread;
+    /// Notes the newest frame each decoder showed. Planes reach the GPU without the UI thread;
     /// this only tracks what the view describes. True when a picture appeared or changed shape.
     pub fn sync_frame(&mut self) -> bool {
         let mut changed = false;
@@ -364,7 +364,7 @@ impl Surfaces {
 /// Generations are unique across surfaces, so a stream's events can't reach another's view.
 static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Decoded RGBA, rows top first. Only the native receivers (macOS, Windows) produce one.
+/// RGBA scene fixture (rows top first), converted once to I420 when published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub struct Image {
@@ -373,7 +373,7 @@ pub struct Image {
     pub pixels: Vec<u8>,
 }
 
-/// What the view knows about the picture; the pixels themselves live in [`Surface::pixels`].
+/// Picture metadata; the planar pixels live in the surface mailbox.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Frame {
     pub generation: u64,
@@ -389,6 +389,7 @@ struct SurfaceState {
     active: bool,
     sequence: u64,
     frame: Option<Frame>,
+    planes: [Vec<u8>; 3],
     #[cfg(test)]
     image: Option<Image>,
     audio: std::collections::VecDeque<[f32; 2]>,
@@ -408,24 +409,14 @@ impl Default for Volume {
 #[derive(Default)]
 pub struct Surface {
     state: Mutex<SurfaceState>,
-    pixels: rune::Pixels,
     waker: Mutex<Option<rune::Waker>>,
     volume: Volume,
 }
 
 impl Surface {
-    /// The image the stream view draws. Publishing replaces it in place.
-    pub fn pixels(&self) -> &rune::Pixels {
-        &self.pixels
-    }
-    /// Wakes the window when the picture first appears or changes shape.
+    /// Wakes the window for each new planar upload.
     pub fn set_waker(&self, waker: rune::Waker) {
         *self.waker.lock().unwrap() = Some(waker);
-    }
-    fn release_pixels(&self) {
-        if self.pixels.size() != (0, 0) {
-            self.pixels.set(0, 0, Vec::new());
-        }
     }
     /// This stream's playback volume, 0–1, on top of the app's playback volume.
     pub fn set_volume(&self, volume: f32) {
@@ -442,10 +433,14 @@ impl Surface {
         state.active = true;
         state.sequence = 0;
         state.frame = None;
+        #[cfg(test)]
+        {
+            state.image = None;
+        }
         state.audio.clear();
         let generation = state.generation;
         drop(state);
-        self.release_pixels();
+
         generation
     }
     pub fn end(&self, generation: u64) {
@@ -453,38 +448,126 @@ impl Surface {
         if state.generation == generation {
             state.active = false;
             state.frame = None;
+            #[cfg(test)]
+            {
+                state.image = None;
+            }
             state.audio.clear();
             drop(state);
-            self.release_pixels();
         }
     }
-    pub fn publish(&self, generation: u64, image: Image, rotation: f32) {
+    /// Copies tightly packed planes into a reusable latest-frame mailbox. The decoder may
+    /// immediately reuse its borrowed buffers after this call returns.
+    pub fn publish_i420(
+        &self,
+        generation: u64,
+        size: (u32, u32),
+        planes: [&[u8]; 3],
+        strides: [usize; 3],
+        rotation: f32,
+    ) {
         let mut state = self.state.lock().unwrap();
         if !state.active || state.generation != generation {
             return;
         }
+        let (width, height) = size;
+        for (n, source) in planes.into_iter().enumerate() {
+            let w = if n == 0 { width } else { width.div_ceil(2) } as usize;
+            let h = if n == 0 { height } else { height.div_ceil(2) } as usize;
+            state.planes[n].resize(w * h, 0);
+            for row in 0..h {
+                state.planes[n][row * w..(row + 1) * w]
+                    .copy_from_slice(&source[row * strides[n]..row * strides[n] + w]);
+            }
+        }
+        #[cfg(test)]
+        {
+            let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let chroma = (y / 2) * width.div_ceil(2) as usize + x / 2;
+                    pixels.extend(i601_pixel(
+                        state.planes[0][y * width as usize + x],
+                        state.planes[1][chroma],
+                        state.planes[2][chroma],
+                    ));
+                }
+            }
+            state.image = Some(Image {
+                width,
+                height,
+                pixels,
+            });
+        }
         state.sequence += 1;
-        let frame = Frame {
+        state.frame = Some(Frame {
             generation,
             sequence: state.sequence,
             rotation,
-            width: image.width,
-            height: image.height,
-        };
-        let reshaped = state.frame.is_none_or(|previous| {
-            (previous.width, previous.height, previous.rotation)
-                != (frame.width, frame.height, frame.rotation)
+            width,
+            height,
         });
-        state.frame = Some(frame);
+        drop(state);
+        if let Some(waker) = self.waker.lock().unwrap().as_ref() {
+            waker();
+        }
+    }
+    pub(crate) fn with_planes(&self, f: impl FnOnce(Frame, &[Vec<u8>; 3])) {
+        let state = self.state.lock().unwrap();
+        if let Some(frame) = state.frame {
+            f(frame, &state.planes);
+        }
+    }
+    /// Synthetic scene pictures take the same GPU path as received video.
+    pub fn publish(&self, generation: u64, image: Image, rotation: f32) {
+        let (w, h) = (image.width as usize, image.height as usize);
+        let cw = w.div_ceil(2);
+        let mut planes = [
+            vec![0; w * h],
+            vec![0; cw * h.div_ceil(2)],
+            vec![0; cw * h.div_ceil(2)],
+        ];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let [r, g, b] =
+                    [image.pixels[i], image.pixels[i + 1], image.pixels[i + 2]].map(i32::from);
+                planes[0][y * w + x] =
+                    (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+            }
+        }
+        for y in (0..h).step_by(2) {
+            for x in (0..w).step_by(2) {
+                let mut rgb = [0i32; 3];
+                let mut count = 0;
+                for yy in y..(y + 2).min(h) {
+                    for xx in x..(x + 2).min(w) {
+                        for (c, sum) in rgb.iter_mut().enumerate() {
+                            *sum += i32::from(image.pixels[(yy * w + xx) * 4 + c]);
+                        }
+                        count += 1;
+                    }
+                }
+                let [r, g, b] = rgb.map(|v| (v + count / 2) / count);
+                let i = (y / 2) * cw + x / 2;
+                planes[1][i] =
+                    (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                planes[2][i] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+            }
+        }
+        self.publish_i420(
+            generation,
+            (image.width, image.height),
+            [&planes[0], &planes[1], &planes[2]],
+            [w, cw, cw],
+            rotation,
+        );
         #[cfg(test)]
         {
-            state.image = Some(image.clone());
-        }
-        // Hold the lock while replacing the pixels, so a concurrent `end` cannot be overtaken.
-        self.pixels.set(image.width, image.height, image.pixels);
-        drop(state);
-        if reshaped && let Some(waker) = self.waker.lock().unwrap().as_ref() {
-            waker();
+            let mut state = self.state.lock().unwrap();
+            if state.active && state.generation == generation {
+                state.image = Some(image);
+            }
         }
     }
     /// The newest frame's description, if a session is showing one.
@@ -532,6 +615,17 @@ impl Surface {
             frame[1] += right * volume;
         }
     }
+}
+
+/// CPU transcription of video.wgsl's fixed-point conversion, for the colour oracle.
+#[cfg(test)]
+pub(crate) fn i601_pixel(y: u8, u: u8, v: u8) -> [u8; 4] {
+    let l = ((i32::from(y) * 257 * 18997) >> 16) - 1160;
+    let u = i32::from(u) - 128;
+    let v = i32::from(v) - 128;
+    let [r, g, b] =
+        [l + 102 * v, l - 25 * u - 52 * v, l + 128 * u].map(|c| (c >> 6).clamp(0, 255) as u8);
+    [r, g, b, 255]
 }
 
 #[cfg(test)]
@@ -585,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn the_view_tracks_the_newest_frame_and_only_wakes_for_shape_changes() {
+    fn the_view_tracks_the_newest_frame_and_wakes_for_every_upload() {
         let mut view = View::default();
         let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = wakes.clone();
@@ -602,7 +696,7 @@ mod tests {
         assert!(!view.sync_frame(), "No picture before the first frame");
         surface.publish(generation, image(4, 2), 0.0);
         assert!(view.sync_frame(), "The first frame shows the picture");
-        assert_eq!(surface.pixels().size(), (4, 2));
+        assert_eq!(surface.latest().map(|f| (f.width, f.height)), Some((4, 2)));
         for _ in 0..3 {
             surface.publish(generation, image(4, 2), 0.0);
         }
@@ -611,13 +705,13 @@ mod tests {
             "Same-shape frames redraw without the view"
         );
         assert_eq!(view.watching[0].ui_updates, 4);
-        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 4);
         surface.publish(generation, image(2, 4), 0.0);
         assert!(view.sync_frame());
-        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 5);
         view.clear_picture();
         assert!(view.watching.is_empty());
-        assert_eq!(surface.pixels().size(), (0, 0));
+        assert_eq!(surface.latest(), None);
         surface.publish(generation, image(4, 2), 0.0);
         assert!(
             !view.sync_frame(),

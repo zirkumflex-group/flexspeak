@@ -86,6 +86,7 @@ pub const SCENES: &[Scene] = &[
     ("sharing", sharing),
     ("watching", watching),
     ("watching-toolbar", watching_toolbar),
+    ("watching-1440p", watching_1440p),
     ("streams-live", streams_live),
     ("sharing-watching", sharing_watching),
     ("watching-five", watching_five),
@@ -1083,6 +1084,39 @@ fn watching(s: &mut App) {
             has_audio: false,
             server_relayed: false,
         });
+}
+
+/// A 2560x1440 source shrunk into the stage: one-pixel lines show whether downscaling
+/// averages them or aliases.
+fn watching_1440p(s: &mut App) {
+    watching(s);
+    let surface = s.server().streaming.surfaces.get(0).clone();
+    let Some(frame) = surface.latest() else {
+        return;
+    };
+    let (width, height) = (2560_u32, 1440_u32);
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            // Alternating one-pixel columns on the left, rows on the right, a grid below.
+            let line = if y >= height / 2 {
+                x % 8 == 0 || y % 8 == 0
+            } else if x < width / 2 {
+                x % 2 == 0
+            } else {
+                y % 2 == 0
+            };
+            let v = if line { 235 } else { 30 };
+            pixels.extend([v, v, v, 255]);
+        }
+    }
+    let image = crate::streaming::Image {
+        width,
+        height,
+        pixels,
+    };
+    surface.publish(frame.generation, image, 0.0);
+    s.server_mut().streaming.sync_frame();
 }
 
 /// Streams running in the channel that you haven't joined.
