@@ -1,6 +1,7 @@
 //! The window shell, the saved-server home, the connected sidebar and performance mode.
 
 use std::borrow::Cow;
+use std::time::Instant;
 
 use rune::{
     Cx, Drag, El, GrowthSpec, Phase, PointerPress, ScrollSpec, Span, Transition, Tx, col, el, icon,
@@ -13,7 +14,7 @@ use super::widgets::{
     Variant, body, button, card, divider, faint, heading, health_dot, icon_button, labelled, meter,
     muted, overline, pulse, scroll_page, speaking_dot,
 };
-use super::{dispatch, footer, icons, members, send, statistics, streams};
+use super::{RailPeek, dispatch, footer, icons, members, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -134,12 +135,18 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
                 .child(server_rail(s, t, k))
                 .child(pane(t).grow(1.0).min_w(0.0).child(connecting_pane(s, t)));
         }
+        // One server has nothing to switch between, so the rail waits behind the edge.
+        let hidden = s.rail_sessions().count() < 2;
+        if hidden {
+            rail_edge(s, t, k, layer);
+        }
         return row()
             .w_full()
             .h_full()
+            .pl(if hidden { INSET } else { 0.0 })
             .pr(INSET)
             .gap(INSET)
-            .child(server_rail(s, t, k))
+            .children((!hidden).then(|| server_rail(s, t, k)))
             .child(sidebar(s, cx, t, k, layer))
             .child(
                 pane(t)
@@ -569,6 +576,81 @@ fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
         .w(RAIL)
         .h_full()
         .child(scroll_page(k, "rail-scroll", tiles))
+}
+
+/// Reaches into the sidebar's empty padding: Windows keeps the outer 8 pt for resizing.
+const RAIL_EDGE: f32 = 20.0;
+/// The tile, its status icons, the divider and the +, with the rail's own padding.
+const RAIL_PEEK_HEIGHT: f32 = 150.0;
+
+/// The rail while hidden: a handle on the window's edge that opens it on hover.
+fn rail_edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    let peek = s.ui.rail_peek;
+    let open = peek.open(Instant::now()) || s.ui.rail_menu.is_some();
+    let near = peek.inside();
+    let height = (s.window_size.1 - size::HEADER - 40.0).max(80.0);
+    let (width, length) = if near { (5.0, 60.0) } else { (3.0, 44.0) };
+    let ink = if !s.server().talking.is_empty() {
+        t.good
+    } else if near {
+        t.muted
+    } else {
+        t.faint
+    };
+    let mut strip = el()
+        .key("rail-edge")
+        .role("button")
+        .label("Show servers")
+        .absolute(0.0, size::HEADER)
+        .size(RAIL_EDGE, height)
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .on_hover_change(|s: &mut App, inside, tx: &mut Tx| {
+            s.ui.rail_peek
+                .hover(Instant::now(), |peek| peek.strip = inside);
+            RailPeek::WAKE
+                .into_iter()
+                .for_each(|wake| tx.wake_after(wake));
+        })
+        .on_press(|s: &mut App| s.ui.rail_peek.press());
+    if !open {
+        strip = strip.child(
+            el().absolute(2.0, (height - length) / 2.0)
+                .size(width, length)
+                .radius(width / 2.0)
+                .fill(ink)
+                .motion(motion::QUICK)
+                .a11y_hidden(),
+        );
+    }
+    layer.push(strip);
+    if open {
+        layer.push(
+            col()
+                .key("rail-peek")
+                .absolute(INSET, size::HEADER + 4.0)
+                .w(RAIL)
+                .h(RAIL_PEEK_HEIGHT)
+                .radius(radius::PANE)
+                .fill(t.raised)
+                .border(1.0, t.hairline)
+                .box_shadow(super::theme::shadow(
+                    0.0,
+                    8.0,
+                    24.0,
+                    rune::Color::BLACK.alpha(0.4),
+                ))
+                .transition(rune::Transition::opacity().combined(rune::Transition::scale(0.98)))
+                .on_hover_change(|s: &mut App, inside, tx: &mut Tx| {
+                    s.ui.rail_peek
+                        .hover(Instant::now(), |peek| peek.card = inside);
+                    RailPeek::WAKE
+                        .into_iter()
+                        .for_each(|wake| tx.wake_after(wake));
+                })
+                .child(server_rail(s, t, k)),
+        );
+    }
 }
 
 /// The main pane while the server on screen is still connecting or reconnecting.

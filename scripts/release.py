@@ -254,6 +254,8 @@ def build():
         # Build 16 shipped without an icon: CI's actool exited 0 but wrote nothing.
         if not (resources / "Flexspeak.icns").is_file():
             raise ValueError("Flexspeak.app has no Flexspeak.icns; Finder would show a blank icon")
+        if not (resources / "Assets.car").is_file():
+            raise ValueError("Flexspeak.app has no Assets.car; macOS 26 would lose the Liquid Glass icon")
         for name in ("THIRD-PARTY-LICENSES.txt", "BUILD-INFO.json", "README.md", "settings.example.json"):
             shutil.copy2(stage / name, resources)
         run("codesign", "--force", "--sign", "-", app)

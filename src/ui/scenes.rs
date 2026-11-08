@@ -18,6 +18,10 @@ pub const SCENES: &[Scene] = &[
     ("setup", setup),
     ("devices", devices),
     ("servers", servers_rail),
+    ("rail-edge", rail_edge),
+    ("rail-edge-hover", rail_edge_hover),
+    ("rail-edge-open", rail_edge_open),
+    ("rail-edge-talking", rail_edge_talking),
     ("servers-poked", servers_poked),
     ("servers-switched", servers_switched),
     ("servers-connecting", servers_connecting),
@@ -221,6 +225,29 @@ fn servers(s: &mut App) -> [hub::SessionId; 3] {
         session.status = "Resolving server and connecting…".into();
     }
     [raid, work, friends]
+}
+
+/// One server: the rail waits behind the left edge.
+fn rail_edge(s: &mut App) {
+    connected_quiet(s);
+    s.server_mut().talking.clear();
+}
+
+fn rail_edge_hover(s: &mut App) {
+    rail_edge(s);
+    s.ui.rail_peek.strip = true;
+    // Still waiting out the delay however long the capture takes.
+    s.ui.rail_peek.changed = Some(Instant::now() + std::time::Duration::from_secs(3600));
+}
+
+fn rail_edge_open(s: &mut App) {
+    connected_quiet(s);
+    s.ui.rail_peek.pinned = true;
+}
+
+fn rail_edge_talking(s: &mut App) {
+    connected_quiet(s);
+    s.server_mut().talking = [2].into();
 }
 
 fn servers_rail(s: &mut App) {
@@ -1364,6 +1391,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn peek_at(peek: &super::super::RailPeek, base: Instant, ms: u64) -> bool {
+        peek.open(base + Duration::from_millis(ms))
+    }
+
+    #[test]
+    fn the_hidden_rail_opens_after_a_pause_and_forgives_a_slip() {
+        let base = Instant::now();
+        let at = |ms| base + Duration::from_millis(ms);
+        let mut peek = super::super::RailPeek::default();
+        assert!(!peek.open(base));
+        peek.hover(at(0), |peek| peek.strip = true);
+        assert!(
+            !peek_at(&peek, base, 100),
+            "crossing the edge doesn't open it"
+        );
+        assert!(peek_at(&peek, base, 200));
+
+        peek.hover(at(200), |peek| peek.card = true);
+        peek.hover(at(210), |peek| peek.strip = false);
+        assert!(
+            peek_at(&peek, base, 2000),
+            "resting on the open rail keeps it"
+        );
+
+        peek.hover(at(2000), |peek| peek.card = false);
+        assert!(peek_at(&peek, base, 2100), "a brief slip keeps it");
+        peek.hover(at(2100), |peek| peek.card = true);
+        assert!(peek_at(&peek, base, 2500), "coming back keeps it");
+        peek.hover(at(2500), |peek| peek.card = false);
+        assert!(!peek_at(&peek, base, 2900));
+
+        peek.hover(at(3000), |peek| peek.strip = true);
+        peek.hover(at(3050), |peek| peek.strip = false);
+        assert!(
+            !peek_at(&peek, base, 3400),
+            "leaving before the pause cancels it"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_opens_the_hidden_rail_until_pressed_again() {
+        let now = Instant::now();
+        let mut peek = super::super::RailPeek::default();
+        peek.press();
+        assert!(peek.open(now));
+        assert!(peek.unpin());
+        assert!(!peek.open(now));
+    }
+
+    #[test]
+    fn one_server_hides_the_rail_and_a_second_brings_it_back() {
+        let mut rt = runtime(connected_quiet, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("server-rail").is_none());
+        let (x, y) = rt.find("rail-edge").expect("the handle");
+        rt.poll = Some(super::super::poll);
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(
+            rt.find("rail-peek").is_none(),
+            "not until the pause is over"
+        );
+        assert!(
+            rt.wake_deadline().is_some(),
+            "something will wake the window"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        settle(&mut rt);
+        assert!(
+            rt.find("rail-peek").is_some(),
+            "the delay redraws by itself"
+        );
+        assert!(rt.find("rail-add").is_some(), "the + stays reachable");
+
+        let mut rt = runtime(servers_rail, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("server-rail").is_some());
+        assert!(rt.find("rail-edge").is_none());
     }
 
     #[test]

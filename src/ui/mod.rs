@@ -22,7 +22,7 @@ pub(crate) use theme::rgb;
 mod updates;
 mod widgets;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rune::{AppSpec, Cx, Drag, El, Phase, TextEdit, Tx, Waker, col, el};
 use tokio::sync::mpsc;
@@ -35,6 +35,75 @@ pub use theme::Theme;
 pub type StreamJob = dyn FnOnce(&dyn Fn(Message)) -> Message + Send;
 
 /// What an update asks the window or a worker thread to do after it returns.
+/// The server rail while it hides behind the left edge: with one server it only needs to show
+/// when asked. Derived from when the pointer last came or went, so views stay pure.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RailPeek {
+    /// The pointer is over the edge strip.
+    strip: bool,
+    /// The pointer is over the open rail.
+    card: bool,
+    /// Opened from the keyboard, so no pointer will close it.
+    pinned: bool,
+    was_open: bool,
+    changed: Option<Instant>,
+    /// What the view last drew, so `poll` redraws when a delay runs out.
+    drawn: bool,
+}
+
+impl RailPeek {
+    /// Long enough that crossing the edge on the way somewhere else doesn't open it.
+    const OPEN_AFTER: Duration = Duration::from_millis(160);
+    /// Forgives the pointer briefly slipping off the rail.
+    const CLOSE_AFTER: Duration = Duration::from_millis(280);
+    /// A wake just past either delay redraws the rail in its new state.
+    const WAKE: [Duration; 2] = [Duration::from_millis(170), Duration::from_millis(290)];
+
+    fn inside(&self) -> bool {
+        self.strip || self.card
+    }
+
+    pub fn open(&self, now: Instant) -> bool {
+        let waited = self
+            .changed
+            .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        self.pinned
+            || if self.inside() {
+                self.was_open || waited >= Self::OPEN_AFTER
+            } else {
+                self.was_open && waited < Self::CLOSE_AFTER
+            }
+    }
+
+    fn hover(&mut self, now: Instant, change: impl FnOnce(&mut Self)) {
+        let (open, inside) = (self.open(now), self.inside());
+        change(self);
+        if self.inside() != inside {
+            self.was_open = open;
+            self.changed = Some(now);
+        }
+    }
+
+    /// A click opens it at once; from the keyboard it stays until it's pressed again or Escape.
+    fn press(&mut self) {
+        if self.inside() {
+            self.was_open = true;
+        } else {
+            self.pinned = !self.pinned;
+        }
+    }
+
+    /// Whether the rail's delay has run out since the last draw.
+    fn expired(&mut self, now: Instant) -> bool {
+        let open = self.open(now);
+        std::mem::replace(&mut self.drawn, open) != open
+    }
+
+    fn unpin(&mut self) -> bool {
+        std::mem::take(&mut self.pinned)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupsMenu {
     Server,
@@ -152,6 +221,7 @@ pub struct UiState {
     pub rail_menu: Option<(crate::hub::SessionId, rune::PointerPress)>,
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
+    pub rail_peek: RailPeek,
     /// Which group submenu of the member menu is open.
     pub groups_menu: Option<GroupsMenu>,
     pub drag: Option<MemberDrag>,
@@ -198,6 +268,7 @@ impl Default for UiState {
             member_menu: None,
             rail_menu: None,
             move_menu: false,
+            rail_peek: RailPeek::default(),
             groups_menu: None,
             drag: None,
             tile_drag: None,
@@ -457,7 +528,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     if s.server_mut().streaming.sync_frame() {
         changed = true;
     }
-    changed
+    changed | s.ui.rail_peek.expired(now)
 }
 
 fn on_close(s: &mut App, tx: &mut Tx) {
@@ -479,6 +550,9 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
     // Escape leaves the log's search, wherever the focus is.
     if key.key == rune::Key::Escape && s.server().log.searching && s.settings_page.is_none() {
         dispatch(s, tx, Message::LogSearch(false));
+        return true;
+    }
+    if key.key == rune::Key::Escape && s.ui.rail_peek.unpin() {
         return true;
     }
     // Escape drops a member selection first.

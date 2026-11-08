@@ -2646,6 +2646,7 @@ impl App {
             }
             Message::OpenServerPicker => {
                 if self.onboarding.is_none() && !self.loopback {
+                    self.ui.rail_peek = ui::RailPeek::default();
                     self.ui.server_picker = true;
                 }
             }

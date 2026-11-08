@@ -22,16 +22,24 @@ mv -f "$app/Contents/MacOS/flexspeak.new" "$app/Contents/MacOS/flexspeak"
 # Always ship the Finder/Dock fallback (16–1024 px, rendered from the Icon Composer icon).
 # CI's actool can exit 0 without writing anything, which shipped build 16 with no icon.
 cp assets/icon/Flexspeak.icns "$app/Contents/Resources/Flexspeak.icns"
-# Icon Composer adds Liquid Glass on macOS 26 and newer.
-if ! xcrun actool assets/icon/Flexspeak.icon --compile "$app/Contents/Resources" \
+# Icon Composer adds Liquid Glass on macOS 26 and newer. It needs Xcode 26 or later, and CI's
+# default is older, so FLEXSPEAK_ICON_XCODE names one for this step alone. Compiling elsewhere
+# keeps actool's own Flexspeak.icns, which stops at 256 px, from replacing the fallback above.
+icon_build="$(mktemp -d)"
+if DEVELOPER_DIR="${FLEXSPEAK_ICON_XCODE:-$(xcode-select -p)}" \
+    xcrun actool assets/icon/Flexspeak.icon --compile "$icon_build" \
     --output-format human-readable-text --errors --app-icon Flexspeak --include-all-app-icons \
-    --output-partial-info-plist "$app/Contents/Resources/.icon-info.plist" \
+    --output-partial-info-plist "$icon_build/info.plist" \
     --enable-on-demand-resources NO --development-region en --target-device mac \
-    --minimum-deployment-target 14.2 --platform macosx >/dev/null 2>&1; then
+    --minimum-deployment-target 14.2 --platform macosx >"$icon_build/log" 2>&1 \
+    && [ -f "$icon_build/Assets.car" ]; then
+    mv "$icon_build/Assets.car" "$app/Contents/Resources/Assets.car"
+else
+    cat "$icon_build/log" >&2
     echo "actool could not compile assets/icon/Flexspeak.icon; using assets/icon/Flexspeak.icns" >&2
     rm -f "$app/Contents/Resources/Assets.car"
 fi
-rm -f "$app/Contents/Resources/.icon-info.plist"
+rm -rf "$icon_build"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
