@@ -1,3 +1,9 @@
+// Globally unique versions also distinguish histories belonging to different sessions.
+pub(crate) fn next_revision() -> u64 {
+    static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -50,6 +56,7 @@ impl Metric {
 pub struct ConnectionHistory {
     samples: VecDeque<(Instant, ConnectionUsage)>,
     now: Instant,
+    pub revision: u64,
 }
 
 impl ConnectionHistory {
@@ -57,6 +64,7 @@ impl ConnectionHistory {
         Self {
             samples: VecDeque::new(),
             now: Instant::now(),
+            revision: next_revision(),
         }
     }
 
@@ -66,6 +74,7 @@ impl ConnectionHistory {
     }
 
     pub fn advance(&mut self, now: Instant) {
+        self.revision = next_revision();
         self.now = now;
         while self
             .samples
@@ -220,5 +229,23 @@ mod tests {
         );
         history.advance(start + Duration::from_secs(69));
         assert!(history.samples.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    #[test]
+    fn chart_versions_distinguish_histories_samples_and_time() {
+        let mut history = ConnectionHistory::new();
+        assert_ne!(history.revision, ConnectionHistory::new().revision);
+        let initial = history.revision;
+        let now = history.now;
+        history.push(now, ConnectionUsage::default());
+        assert_ne!(history.revision, initial);
+        let sampled = history.revision;
+        history.advance(now + Duration::from_secs(1));
+        assert_ne!(history.revision, sampled);
     }
 }

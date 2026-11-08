@@ -7,6 +7,15 @@ use super::widgets::{card, faint, well};
 use crate::connection_charts::{ChartPaint, ConnectionHistory, Metric};
 use crate::{App, usage};
 
+fn color_key(color: Color) -> [u32; 4] {
+    [
+        color.r.to_bits(),
+        color.g.to_bits(),
+        color.b.to_bits(),
+        color.a.to_bits(),
+    ]
+}
+
 fn paint(t: &Theme) -> ChartPaint {
     ChartPaint {
         grid: t.wash(0.05),
@@ -30,11 +39,21 @@ pub fn history(
     height: f32,
 ) -> El {
     let w = width(cx, key);
-    canvas(history.chart(w, height, color, t.wash(0.05)))
-        .key(key.to_owned())
-        .w_full()
-        .h(height)
-        .a11y_hidden()
+    rune::memo(
+        format!("chart-{key}"),
+        (
+            history.revision,
+            w.to_bits(),
+            height.to_bits(),
+            color_key(color),
+            color_key(t.wash(0.05)),
+        ),
+        || canvas(history.chart(w, height, color, t.wash(0.05))),
+    )
+    .key(key.to_owned())
+    .w_full()
+    .h(height)
+    .a11y_hidden()
 }
 
 struct Reading {
@@ -138,10 +157,22 @@ pub fn inline(
                         .a11y_hidden(),
                 )
                 .child(
-                    canvas(history.chart(reading.metric, SPARK_WIDTH, 16.0, &p))
-                        .w(SPARK_WIDTH)
-                        .h(16.0)
-                        .a11y_hidden(),
+                    rune::memo(
+                        format!("spark-{scope}-{}", reading.short),
+                        (
+                            history.revision,
+                            reading.metric as u8,
+                            SPARK_WIDTH.to_bits(),
+                            16.0_f32.to_bits(),
+                            color_key(p.grid),
+                            color_key(p.band),
+                            p.health.map(color_key),
+                        ),
+                        || canvas(history.chart(reading.metric, SPARK_WIDTH, 16.0, &p)),
+                    )
+                    .w(SPARK_WIDTH)
+                    .h(16.0)
+                    .a11y_hidden(),
                 )
         })
         .collect()
@@ -166,11 +197,23 @@ pub fn connection(
         let color = t.health(reading.health);
         let key = format!("{scope}-{}", reading.short);
         let w = width(cx, &key);
-        let chart = canvas(history.chart(reading.metric, w, 32.0, &p))
-            .key(key)
-            .w_full()
-            .h(32.0)
-            .a11y_hidden();
+        let chart = rune::memo(
+            format!("chart-{key}"),
+            (
+                history.revision,
+                reading.metric as u8,
+                w.to_bits(),
+                32.0_f32.to_bits(),
+                color_key(p.grid),
+                color_key(p.band),
+                p.health.map(color_key),
+            ),
+            || canvas(history.chart(reading.metric, w, 32.0, &p)),
+        )
+        .key(key)
+        .w_full()
+        .h(32.0)
+        .a11y_hidden();
         column = column.child(
             well(t)
                 .padding(8.0)

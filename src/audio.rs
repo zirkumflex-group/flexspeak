@@ -1040,18 +1040,62 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
     target_gain: f32,
     gain_step: f32,
 ) {
-    for frame in data.chunks_exact_mut(channels) {
-        *gain += (target_gain - *gain).clamp(-gain_step, gain_step);
-        let [left, right] = queue.pop().unwrap_or([0.0; 2]);
-        frame.fill(T::EQUILIBRIUM);
-        frame[0] = T::from_sample(if channels == 1 {
-            (left + right) * 0.5 * *gain
-        } else {
-            left * *gain
-        });
-        if channels > 1 {
-            frame[1] = T::from_sample(right * *gain);
+    fn write<T: SizedSample + FromSample<f32>>(
+        data: &mut [T],
+        channels: usize,
+        queue: &ArrayQueue<[f32; 2]>,
+        gain: &mut f32,
+        target: f32,
+        step: f32,
+        mut frame_out: impl FnMut(&mut [T], [f32; 2], f32),
+    ) {
+        let mut frames = data.chunks_exact_mut(channels);
+        while *gain != target {
+            let Some(frame) = frames.next() else { return };
+            *gain += (target - *gain).clamp(-step, step);
+            frame_out(frame, queue.pop().unwrap_or([0.0; 2]), *gain);
         }
+        for frame in frames {
+            frame_out(frame, queue.pop().unwrap_or([0.0; 2]), *gain);
+        }
+    }
+    match channels {
+        1 => write(
+            data,
+            channels,
+            queue,
+            gain,
+            target_gain,
+            gain_step,
+            |frame, [left, right], gain| {
+                frame[0] = T::from_sample((left + right) * 0.5 * gain);
+            },
+        ),
+        2 => write(
+            data,
+            channels,
+            queue,
+            gain,
+            target_gain,
+            gain_step,
+            |frame, [left, right], gain| {
+                frame[0] = T::from_sample(left * gain);
+                frame[1] = T::from_sample(right * gain);
+            },
+        ),
+        _ => write(
+            data,
+            channels,
+            queue,
+            gain,
+            target_gain,
+            gain_step,
+            |frame, [left, right], gain| {
+                frame[0] = T::from_sample(left * gain);
+                frame[1] = T::from_sample(right * gain);
+                frame[2..].fill(T::EQUILIBRIUM);
+            },
+        ),
     }
 }
 
@@ -1061,6 +1105,43 @@ mod tests {
     use audiopus::coder::Decoder;
     use tsclientlib::{ClientId, audio::AudioHandler};
     use tsproto_packets::packets::{AudioData, InAudioBuf};
+
+    #[test]
+    fn playback_matches_the_original_ramp_and_channel_conversion() {
+        for channels in [1, 2, 6] {
+            for (initial, target) in [(0.0_f32, 1.0_f32), (1.0, 0.0), (0.37, 0.37)] {
+                let queue = ArrayQueue::new(700);
+                let mut expected = vec![0_i16; 800 * channels];
+                let mut old_gain = initial;
+                for (index, frame) in expected.chunks_exact_mut(channels).enumerate() {
+                    old_gain += (target - old_gain).clamp(-1.0_f32 / 240.0, 1.0 / 240.0);
+                    let [left, right] = if index < 700 {
+                        let value = [index as f32 / 1000.0, -(index as f32) / 2000.0];
+                        queue.push(value).unwrap();
+                        value
+                    } else {
+                        [0.0; 2]
+                    };
+                    frame[0] = i16::from_sample(if channels == 1 {
+                        (left + right) * 0.5 * old_gain
+                    } else {
+                        left * old_gain
+                    });
+                    if channels > 1 {
+                        frame[1] = i16::from_sample(right * old_gain);
+                    }
+                }
+                let mut actual = vec![123_i16; expected.len()];
+                let mut gain = initial;
+                for chunk in actual.chunks_mut(channels * 137) {
+                    write_playback(chunk, channels, &queue, &mut gain, target, 1.0 / 240.0);
+                }
+                assert_eq!(actual, expected);
+                assert_eq!(gain, old_gain);
+                assert!(queue.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn the_soft_limit_leaves_normal_levels_alone_and_keeps_peaks_inside_full_scale() {

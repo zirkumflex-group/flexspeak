@@ -78,7 +78,9 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
         Tab::Home => ("Flexspeak", t.text),
         Tab::Statistics => ("Usage & Statistics", t.text),
     };
-    bar = bar.child(text(title).font(ty::HEADING).color(ink).truncate());
+    bar = bar
+        .child(icon(&icons::FLEXSPEAK, 18.0).color(t.accent).a11y_hidden())
+        .child(text(title).font(ty::HEADING).color(ink).truncate());
     bar = bar.child(el().grow(1.0));
     let statistics = s.tab == Tab::Statistics;
     bar = bar.child(icon_button(
@@ -991,6 +993,31 @@ fn log_section(s: &App, t: &Theme, index: usize) -> El {
     let Some(section) = log.sections().get(index) else {
         return el();
     };
+    let entries: Vec<_> = section
+        .entries
+        .iter()
+        .filter_map(|index| log.get(*index))
+        .collect();
+    rune::memo(
+        format!("log-section-{}", section.key),
+        (
+            section,
+            entries,
+            log.query(),
+            log.person(),
+            [
+                t.surface, t.faint, t.text, t.good, t.fair, t.poor, t.accent, t.hairline,
+            ],
+        ),
+        || log_section_content(s, t, index),
+    )
+}
+
+fn log_section_content(s: &App, t: &Theme, index: usize) -> El {
+    let log = &s.server().log;
+    let Some(section) = log.sections().get(index) else {
+        return el();
+    };
     let count = section.entries.len();
     let noun = match (log.filtering(), count) {
         (true, 1) => "match",
@@ -1289,143 +1316,184 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             .current
             .as_ref()
             .is_some_and(|value| value.id == channel.id);
-        let hint = if current {
-            "Current channel"
-        } else {
-            match channel.join_access {
-                client::JoinAccess::Denied => "You do not have permission to join this channel",
-                client::JoinAccess::UnsupportedCodec => {
-                    "This channel uses an unsupported audio codec"
-                }
-                _ if channel.has_password => "Click to join · a password will be requested",
-                _ => "Click to join this channel",
-            }
-        };
-        let joinable = (!s.server().stopping && current) || s.can_request_join(channel.id);
-        let ink = if current {
-            t.accent
-        } else if joinable {
-            t.text
-        } else {
-            t.faint
-        };
-        let mut name = row()
-            .key("name")
-            .role("button")
-            .label(channel.name.clone())
-            .help(hint)
-            .grow(1.0)
-            .min_w(0.0)
-            .h(size::ROW)
-            .px(8.0)
-            .gap(8.0)
-            .center_y()
-            .radius(radius::ROW)
-            .motion(motion::QUICK)
-            .child(
-                icon(
-                    if channel.has_password {
-                        &icons::LOCK
-                    } else {
-                        &icons::VOLUME
-                    },
-                    14.0,
+        let member_versions: Vec<_> = channel
+            .members
+            .iter()
+            .map(|member| {
+                let (health, detail) = s.member_health(member, current);
+                (
+                    health as u8,
+                    detail,
+                    s.server().talking.contains(&member.id),
+                    s.server().selected_members.contains(&member.id),
+                    s.ui.drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.ids.contains(&member.id)),
+                    s.is_streaming(member),
+                    s.user_audio(&member.uid).muted,
                 )
-                .color(if current { t.accent } else { t.faint })
-                .a11y_hidden(),
-            )
-            .child(
-                text(channel.name.clone())
-                    .font(ty::BODY_STRONG)
-                    .color(ink)
-                    .truncate_fade()
+            })
+            .collect();
+        let node = rune::memo(
+            // The memo keys what it returns, so its id is the channel's own key.
+            format!("channel-{}", channel.id),
+            (
+                channel,
+                collapsed,
+                current,
+                member_versions,
+                t,
+                s.can_request_join(channel.id),
+                s.server().stopping,
+                s.server().connected,
+                s.loopback,
+                s.server().deafened,
+                s.microphone_icon() == crate::Icon::MicOff,
+                s.ui.drag.as_ref().and_then(|drag| drag.target),
+            ),
+            || {
+                let hint = if current {
+                    "Current channel"
+                } else {
+                    match channel.join_access {
+                        client::JoinAccess::Denied => {
+                            "You do not have permission to join this channel"
+                        }
+                        client::JoinAccess::UnsupportedCodec => {
+                            "This channel uses an unsupported audio codec"
+                        }
+                        _ if channel.has_password => "Click to join · a password will be requested",
+                        _ => "Click to join this channel",
+                    }
+                };
+                let joinable = (!s.server().stopping && current) || s.can_request_join(channel.id);
+                let ink = if current {
+                    t.accent
+                } else if joinable {
+                    t.text
+                } else {
+                    t.faint
+                };
+                let mut name = row()
+                    .key("name")
+                    .role("button")
+                    .label(channel.name.clone())
+                    .help(hint)
                     .grow(1.0)
                     .min_w(0.0)
-                    .a11y_hidden(),
-            );
-        if !channel.members_visible {
-            name = name.child(
-                el().help("You can't see who is in this channel")
-                    .label("Members not visible")
-                    .child(icon(&icons::EYE_OFF, 13.0).color(t.faint)),
-            );
-        }
-        let dropping =
-            s.ui.drag
-                .as_ref()
-                .is_some_and(|drag| drag.target == Some(channel.id));
-        if dropping {
-            name = name
-                .fill(t.accent.alpha(0.24))
-                .border(1.0, t.accent.alpha(0.6));
-        } else if current {
-            name = name.fill(t.accent.alpha(0.16));
-        }
-        if joinable {
-            name = name
-                .focusable(true)
-                .cursor(rune::Cursor::Pointer)
-                .hover(t.wash(0.05))
-                .press(t.wash(0.09))
-                .on_press_tx(send(Message::Join(channel.id)));
-        }
-        let disclosure = el()
-            .key("disclosure")
-            .role("button")
-            .label(if collapsed {
-                "Expand channel"
-            } else {
-                "Collapse channel"
-            })
-            .expanded(!collapsed)
-            .size(18.0, size::ROW)
-            .center()
-            .radius(6.0)
-            .focusable(true)
-            .cursor(rune::Cursor::Pointer)
-            .hover(t.wash(0.06))
-            .on_press_tx(send(Message::ToggleChannel(channel.id)))
-            .child(
-                icon(&icons::CHEVRON_RIGHT, 12.0)
-                    .color(t.faint)
-                    .rotate(if collapsed {
-                        0.0
-                    } else {
-                        std::f32::consts::FRAC_PI_2
-                    })
+                    .h(size::ROW)
+                    .px(8.0)
+                    .gap(8.0)
+                    .center_y()
+                    .radius(radius::ROW)
                     .motion(motion::QUICK)
-                    .a11y_hidden(),
-            );
-        let mut node = col()
-            .key(format!("channel-{}", channel.id))
-            .w_full()
-            .gap(2.0)
-            .pl(channel.depth.min(8) as f32 * 14.0)
-            .child(
-                row()
+                    .child(
+                        icon(
+                            if channel.has_password {
+                                &icons::LOCK
+                            } else {
+                                &icons::VOLUME
+                            },
+                            14.0,
+                        )
+                        .color(if current { t.accent } else { t.faint })
+                        .a11y_hidden(),
+                    )
+                    .child(
+                        text(channel.name.clone())
+                            .font(ty::BODY_STRONG)
+                            .color(ink)
+                            .truncate_fade()
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .a11y_hidden(),
+                    );
+                if !channel.members_visible {
+                    name = name.child(
+                        el().help("You can't see who is in this channel")
+                            .label("Members not visible")
+                            .child(icon(&icons::EYE_OFF, 13.0).color(t.faint)),
+                    );
+                }
+                let dropping =
+                    s.ui.drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.target == Some(channel.id));
+                if dropping {
+                    name = name
+                        .fill(t.accent.alpha(0.24))
+                        .border(1.0, t.accent.alpha(0.6));
+                } else if current {
+                    name = name.fill(t.accent.alpha(0.16));
+                }
+                if joinable {
+                    name = name
+                        .focusable(true)
+                        .cursor(rune::Cursor::Pointer)
+                        .hover(t.wash(0.05))
+                        .press(t.wash(0.09))
+                        .on_press_tx(send(Message::Join(channel.id)));
+                }
+                let disclosure = el()
+                    .key("disclosure")
+                    .role("button")
+                    .label(if collapsed {
+                        "Expand channel"
+                    } else {
+                        "Collapse channel"
+                    })
+                    .expanded(!collapsed)
+                    .size(18.0, size::ROW)
+                    .center()
+                    .radius(6.0)
+                    .focusable(true)
+                    .cursor(rune::Cursor::Pointer)
+                    .hover(t.wash(0.06))
+                    .on_press_tx(send(Message::ToggleChannel(channel.id)))
+                    .child(
+                        icon(&icons::CHEVRON_RIGHT, 12.0)
+                            .color(t.faint)
+                            .rotate(if collapsed {
+                                0.0
+                            } else {
+                                std::f32::consts::FRAC_PI_2
+                            })
+                            .motion(motion::QUICK)
+                            .a11y_hidden(),
+                    );
+                let mut node = col()
+                    .key(format!("channel-{}", channel.id))
                     .w_full()
                     .gap(2.0)
-                    .center_y()
-                    .child(disclosure)
-                    .child(name),
-            );
-        if !collapsed {
-            let mut members = col()
-                .key("members")
-                .w_full()
-                .gap(2.0)
-                .pl(20.0)
-                .transition(Transition::opacity());
-            for member in &channel.members {
-                members = members.child(members::interactive(
-                    s,
-                    t,
-                    member,
-                    member_row(s, t, member, current),
-                ));
-            }
-            node = node.child(members);
-        }
+                    .pl(channel.depth.min(8) as f32 * 14.0)
+                    .child(
+                        row()
+                            .w_full()
+                            .gap(2.0)
+                            .center_y()
+                            .child(disclosure)
+                            .child(name),
+                    );
+                if !collapsed {
+                    let mut members = col()
+                        .key("members")
+                        .w_full()
+                        .gap(2.0)
+                        .pl(20.0)
+                        .transition(Transition::opacity());
+                    for member in &channel.members {
+                        members = members.child(members::interactive(
+                            s,
+                            t,
+                            member,
+                            member_row(s, t, member, current),
+                        ));
+                    }
+                    node = node.child(members);
+                }
+                node
+            },
+        );
         tree = tree.child(node);
     }
     tree

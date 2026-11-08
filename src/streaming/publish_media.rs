@@ -294,12 +294,31 @@ mod native {
             Ok(sources)
         }
     }
+    #[cfg(test)]
     fn video_buffer(
         data: &[u8],
         stride: u32,
         width: i32,
         height: i32,
         (max_width, max_height): (u32, u32),
+    ) -> Result<I420Buffer> {
+        video_buffer_reusing(
+            data,
+            stride,
+            width,
+            height,
+            (max_width, max_height),
+            &mut None,
+        )
+    }
+
+    fn video_buffer_reusing(
+        data: &[u8],
+        stride: u32,
+        width: i32,
+        height: i32,
+        (max_width, max_height): (u32, u32),
+        intermediate: &mut Option<I420Buffer>,
     ) -> Result<I420Buffer> {
         ensure!(
             (1..=8192).contains(&width) && (1..=8192).contains(&height),
@@ -311,7 +330,13 @@ mod native {
                 && data.len() >= stride as usize * height as usize,
             "Invalid capture buffer"
         );
-        let mut buffer = I420Buffer::new(width as u32, height as u32);
+        let mut buffer = intermediate
+            .take()
+            .filter(|buffer| {
+                use libwebrtc::video_frame::VideoBuffer;
+                buffer.width() == width as u32 && buffer.height() == height as u32
+            })
+            .unwrap_or_else(|| I420Buffer::new(width as u32, height as u32));
         let (sy, su, sv) = buffer.strides();
         let (y, u, v) = buffer.data_mut();
         // DesktopFrame stores little-endian ARGB (BGRA bytes), including row padding.
@@ -322,10 +347,13 @@ mod native {
             .min(f64::from(max_height) / height as f64)
             .min(1.0);
         if scale < 1.0 {
-            Ok(buffer.scale(
+            let scaled = buffer.scale(
                 ((width as f64 * scale) as i32 / 2 * 2).max(2),
                 ((height as f64 * scale) as i32 / 2 * 2).max(2),
-            ))
+            );
+            // Only the scaled destination escapes the callback.
+            *intermediate = Some(buffer);
+            Ok(scaled)
         } else {
             Ok(buffer)
         }
@@ -611,11 +639,19 @@ mod native {
         let slot = latest.clone();
         let failed = failure.clone();
         let running = active.clone();
+        let intermediate = Mutex::new(None);
         let receive = move |data: &[u8], stride, width, height| {
             if !running.load(Ordering::Acquire) {
                 return;
             }
-            match video_buffer(data, stride, width, height, max_size) {
+            match video_buffer_reusing(
+                data,
+                stride,
+                width,
+                height,
+                max_size,
+                &mut intermediate.lock().unwrap(),
+            ) {
                 Ok(buffer) => *slot.lock().unwrap() = Some(buffer),
                 Err(error) => *failed.lock().unwrap() = Some(error.to_string()),
             }
@@ -676,7 +712,11 @@ mod native {
         let mut frames = 0;
         let mut audio_frames = 0;
         let mut level = 0.0_f32;
-        let mut tick = tokio::time::interval(Duration::from_millis(10));
+        let mut tick = tokio::time::interval(if system_audio.is_some() {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_secs(1)
+        });
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut video_tick = tokio::time::interval(frame_interval);
         video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

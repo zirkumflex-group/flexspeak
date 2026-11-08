@@ -453,15 +453,43 @@ impl AudioQueue {
 					"Speed-up buffer"
 				);
 				let start = self.decoded_buffer.len() - self.last_packet_samples * CHANNEL_NUM;
-				for i in 0..(self.last_packet_samples / SPEED_CHANGE_STEPS) {
-					let i = start + i * (SPEED_CHANGE_STEPS - 1) * CHANNEL_NUM;
-					self.decoded_buffer.drain(i..(i + CHANNEL_NUM));
-				}
+				compact_catch_up(&mut self.decoded_buffer, start, self.last_packet_samples);
 			}
 		}
 
 		self.decoded_pos = len;
 		Ok((&self.decoded_buffer[..len], false))
+	}
+}
+
+fn compact_catch_up(buffer: &mut Vec<f32>, start: usize, frames: usize) {
+	let removed = frames / SPEED_CHANGE_STEPS;
+	let mut write = start;
+	for frame in 0..frames {
+		if frame % SPEED_CHANGE_STEPS == 0 && frame / SPEED_CHANGE_STEPS < removed {
+			continue;
+		}
+		let read = start + frame * CHANNEL_NUM;
+		buffer.copy_within(read..read + CHANNEL_NUM, write);
+		write += CHANNEL_NUM;
+	}
+	buffer.truncate(write);
+}
+
+#[test]
+fn catch_up_keeps_the_same_samples() {
+	for frames in 0..SPEED_CHANGE_STEPS * 4 {
+		for start in [0, 2, 18] {
+			let mut expected: Vec<f32> =
+				(0..start + frames * CHANNEL_NUM).map(|i| i as f32).collect();
+			let mut actual = expected.clone();
+			for i in 0..frames / SPEED_CHANGE_STEPS {
+				let i = start + i * (SPEED_CHANGE_STEPS - 1) * CHANNEL_NUM;
+				expected.drain(i..i + CHANNEL_NUM);
+			}
+			compact_catch_up(&mut actual, start, frames);
+			assert_eq!(actual, expected);
+		}
 	}
 }
 

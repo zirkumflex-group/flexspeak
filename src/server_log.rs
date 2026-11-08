@@ -8,7 +8,7 @@ use chrono::{Local, NaiveDate, NaiveDateTime, Timelike};
 /// Enough for a very long session; the oldest go first.
 const LIMIT: usize = 1000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tone {
     Arrived,
     Moved,
@@ -16,7 +16,7 @@ pub enum Tone {
     Stream,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Entry {
     pub id: u64,
     pub at: NaiveDateTime,
@@ -27,7 +27,7 @@ pub struct Entry {
 }
 
 /// One hour with something to show. `entries` index into the log.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Section {
     pub key: String,
     pub label: String,

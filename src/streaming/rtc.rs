@@ -245,8 +245,8 @@ mod native {
             }
             let started = Instant::now();
             let mut first_frame = false;
-            let mut last_presented = Instant::now() - Duration::from_secs(1);
             let mut candidate_count = 0;
+            let mut stats_request = None;
             let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
             stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -283,9 +283,9 @@ mod native {
                     },
                     frame = async { match &mut video { Some(stream) => stream.next().await, None => std::future::pending().await } } => {
                         let Some(frame) = frame else { bail!("The video track ended"); };
-                        if last_presented.elapsed() < Duration::from_millis(33) { continue; }
+                        // Every decoded frame, at its decoded size: the picture keeps the source's
+                        // resolution and frame rate. Rune shows the newest one each time it draws.
                         present_frame(frame, generation, &surface)?;
-                        last_presented = Instant::now();
                         if !first_frame { first_frame = true; send(output, Output::Playing)?; }
                     },
                     frame = async { match &mut audio { Some(stream) => stream.next().await, None => std::future::pending().await } } => {
@@ -295,7 +295,13 @@ mod native {
                     },
                     _ = stats_tick.tick() => {
                         ensure!(first_frame || started.elapsed() < Duration::from_secs(30), "No decoded video arrived within 30 seconds");
-                        if let Ok(Ok(stats)) = tokio::time::timeout(Duration::from_secs(2), pc.get_stats()).await {
+                        if stats_request.is_none() {
+                            stats_request = Some(Box::pin(tokio::time::timeout(Duration::from_secs(2), pc.get_stats())));
+                        }
+                    },
+                    result = async { match &mut stats_request { Some(request) => request.await, None => std::future::pending().await } } => {
+                        stats_request = None;
+                        if let Ok(Ok(stats)) = result {
                             let _ = output.try_send(Output::Stats(summarize_stats(&stats)));
                         }
                     }
@@ -325,27 +331,27 @@ mod native {
             width >= 2 && height >= 2 && width <= 7680 && height <= 4320,
             "Unsupported video frame dimensions"
         );
-        let scale = (1280.0 / width as f64).min(720.0 / height as f64).min(1.0);
-        let display_width = ((width as f64 * scale) as u32).max(2) & !1;
-        let display_height = ((height as f64 * scale) as u32).max(2) & !1;
-        let mut buffer = frame.buffer.to_i420();
-        if display_width != width || display_height != height {
-            buffer = buffer.scale(display_width as i32, display_height as i32);
-        }
-        let mut rgba = vec![0; display_width as usize * display_height as usize * 4];
+        let converted;
+        let buffer = if let Some(buffer) = frame.buffer.as_i420() {
+            buffer
+        } else {
+            converted = frame.buffer.to_i420();
+            &converted
+        };
+        let mut rgba = vec![0; width as usize * height as usize * 4];
         // libyuv ABGR is RGBA byte order on the supported little-endian targets.
         buffer.to_argb(
             VideoFormatType::ABGR,
             &mut rgba,
-            display_width * 4,
-            display_width as i32,
-            display_height as i32,
+            width * 4,
+            width as i32,
+            height as i32,
         );
         surface.publish(
             generation,
             crate::streaming::Image {
-                width: display_width,
-                height: display_height,
+                width,
+                height,
                 pixels: rgba,
             },
             (frame.rotation as i32 as f32).to_radians(),

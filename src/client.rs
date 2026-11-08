@@ -78,7 +78,7 @@ pub enum Command {
     Move(Vec<u16>, u64),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum JoinAccess {
     Allowed,
     Denied,
@@ -93,7 +93,7 @@ impl JoinAccess {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Member {
     pub id: u16,
     /// Their identity as text; empty until the server has sent it.
@@ -107,7 +107,7 @@ pub struct Member {
     pub can_move: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Channel {
     pub id: u64,
     pub name: String,
@@ -736,6 +736,7 @@ async fn run_connection(
         let mut sent = 0;
         let mut received = 0;
         let mut last_meter = Instant::now();
+        let mut meter = MeterDelivery::default();
         let mut last_usage = Instant::now();
         let mut last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
         let mut server_usage: Option<ServerUsage> = None;
@@ -1123,7 +1124,7 @@ async fn run_connection(
                             }
                         }
                         if last_meter.elapsed() >= Duration::from_millis(100) {
-                            let _ = events.try_send(Event::Meter { level: audio.level(), sent, received, audio_buffer_bytes: audio.buffer_bytes() });
+                            meter.send(events, audio.level(), sent, received, audio.buffer_bytes());
                             last_meter = Instant::now();
                         }
                         if connected {
@@ -1173,6 +1174,7 @@ async fn run_loopback(
     let mut tick = tokio::time::interval(Duration::from_millis(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_meter = Instant::now();
+    let mut meter = MeterDelivery::default();
     loop {
         tokio::select! {
             command = commands.recv() => if matches!(command, None | Some(Command::Stop)) { break; },
@@ -1183,7 +1185,7 @@ async fn run_loopback(
                 audio.tick(true, |_| {}).map_err(AudioFailure)?;
                 report_transmission(events, &mut reported_transmission, audio.transmitting());
                 if last_meter.elapsed() >= Duration::from_millis(100) {
-                    let _ = events.try_send(Event::Meter { level: audio.level(), sent: 0, received: 0, audio_buffer_bytes: audio.buffer_bytes() });
+                    meter.send(events, audio.level(), 0, 0, audio.buffer_bytes());
                     last_meter = Instant::now();
                 }
             }
@@ -1555,5 +1557,49 @@ mod tests {
         );
         assert_eq!(identity.counter(), restored.counter());
         Ok(())
+    }
+}
+
+// Cache only delivered samples: a full channel must not swallow a final zero.
+#[derive(Default)]
+struct MeterDelivery(Option<(f32, u64, u64, usize)>);
+impl MeterDelivery {
+    fn send(
+        &mut self,
+        events: &tokio::sync::mpsc::Sender<Event>,
+        level: f32,
+        sent: u64,
+        received: u64,
+        audio_buffer_bytes: usize,
+    ) {
+        let sample = (level, sent, received, audio_buffer_bytes);
+        if self.0 != Some(sample)
+            && events
+                .try_send(Event::Meter {
+                    level,
+                    sent,
+                    received,
+                    audio_buffer_bytes,
+                })
+                .is_ok()
+        {
+            self.0 = Some(sample);
+        }
+    }
+}
+#[cfg(test)]
+mod meter_delivery_tests {
+    use super::*;
+    #[test]
+    fn unchanged_samples_are_skipped_and_final_zero_is_retried() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut meter = MeterDelivery::default();
+        meter.send(&tx, 1.0, 0, 0, 0);
+        meter.send(&tx, 0.0, 0, 0, 0);
+        assert!(matches!(rx.try_recv(), Ok(Event::Meter { level: 1.0, .. })));
+        meter.send(&tx, 0.0, 0, 0, 0);
+        assert!(matches!(rx.try_recv(), Ok(Event::Meter { level: 0.0, .. })));
+        meter.send(&tx, 0.0, 0, 0, 0);
+        assert!(rx.try_recv().is_err());
     }
 }

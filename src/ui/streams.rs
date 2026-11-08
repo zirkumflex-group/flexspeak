@@ -997,7 +997,7 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
         bar = bar.child(icon_button(
             t,
             "unfocus",
-            &icons::MINIMIZE,
+            &icons::LAYOUT_GRID,
             "Show every stream side by side",
             Variant::Ghost,
             Some(Message::FocusStream(None)),

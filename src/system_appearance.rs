@@ -43,17 +43,17 @@ pub fn is_dark() -> Option<bool> {
 pub fn is_dark() -> Option<bool> {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-    let value = wide("AppsUseLightTheme");
+    let key =
+        windows_sys::core::w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let value = windows_sys::core::w!("AppsUseLightTheme");
     let mut light: u32 = 1;
     let mut size = std::mem::size_of::<u32>() as u32;
     // SAFETY: both strings are NUL-terminated and `light` holds the `size` bytes it is given.
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
-            key.as_ptr(),
-            value.as_ptr(),
+            key,
+            value,
             RRF_RT_REG_DWORD,
             std::ptr::null_mut(),
             (&raw mut light).cast(),
