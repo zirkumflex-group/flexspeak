@@ -1588,8 +1588,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
                 member.name.clone()
             })
             .font(ty::BODY)
-            .color(if talking { t.good } else { t.text })
-            .motion(motion::QUICK)
+            .color(t.text)
             .truncate_fade()
             .grow(1.0)
             .min_w(0.0),
@@ -1636,36 +1635,37 @@ fn signal_bars(t: &Theme, lit: usize, colour: rune::Color) -> El {
     bars
 }
 
-/// What you'll hear from someone, in one place: a grey mic while quiet, green and lit while
-/// they talk, red mic-off when muted, red headphones-off when their sound is off too.
+/// What you'll hear from someone, in one place: red headphones-off when their sound is off,
+/// red mic-off when muted, otherwise a ring that fills and glows green while they talk.
 fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> El {
-    let (glyph, colour, help) = if sound_muted {
-        (&icons::HEADPHONE_OFF, t.poor, "Sound muted")
+    let slot = el().key("voice").size(20.0, 20.0).center();
+    let muted = if sound_muted {
+        Some((&icons::HEADPHONE_OFF, "Sound muted"))
     } else if mic_muted {
-        (&icons::MIC_OFF, t.poor, "Microphone muted")
-    } else if talking {
-        (&icons::MIC, t.good, "Speaking")
+        Some((&icons::MIC_OFF, "Microphone muted"))
     } else {
-        (&icons::MIC, t.faint, "Microphone on")
+        None
     };
-    let lit = talking && !mic_muted && !sound_muted;
-    el().key("voice")
-        .size(20.0, 20.0)
-        .radius(10.0)
-        .center()
-        .fill(if lit {
-            t.good.alpha(0.16)
-        } else {
-            t.good.alpha(0.0)
-        })
-        .shadow(0.0, 8.0, t.good.alpha(if lit { 0.45 } else { 0.0 }))
-        .motion(motion::QUICK)
-        .help(help)
-        .label(help)
-        .child(
-            icon(glyph, 13.0)
-                .color(colour)
-                .motion(motion::QUICK)
-                .a11y_hidden(),
-        )
+    if let Some((glyph, help)) = muted {
+        return slot
+            .help(help)
+            .label(help)
+            .child(icon(glyph, 13.0).key("muted").color(t.poor).a11y_hidden());
+    }
+    let (ring, fill, glow) = if talking {
+        (t.good, t.good, t.good.alpha(0.55))
+    } else {
+        (t.faint.alpha(0.7), t.good.alpha(0.0), t.good.alpha(0.0))
+    };
+    let help = if talking { "Speaking" } else { "Not speaking" };
+    slot.help(help).label(help).child(
+        el().key("ring")
+            .size(8.0, 8.0)
+            .radius(4.0)
+            .fill(fill)
+            .border(1.5, ring)
+            .shadow(0.0, 8.0, glow)
+            .motion(motion::QUICK)
+            .a11y_hidden(),
+    )
 }
