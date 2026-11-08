@@ -635,16 +635,7 @@ impl Session {
                         if self.catalog.len() >= 128 && !self.catalog.contains_key(&info.id) {
                             continue;
                         }
-                        self.stop_where(
-                            connection,
-                            |watch| {
-                                watch.info.publisher == info.publisher && watch.info.id != info.id
-                            },
-                            Phase::Stopped,
-                            "The publisher started a different stream",
-                        );
-                        self.catalog
-                            .retain(|id, old| old.publisher != info.publisher || *id == info.id);
+                        // One publisher may share several streams at once: each is its own entry.
                         self.streaming_flags.insert(info.publisher, true);
                         self.cancel_discovery(info.publisher);
                         self.catalog.insert(info.id.clone(), info);
@@ -654,7 +645,12 @@ impl Session {
                 "notifystreamstopped" => {
                     if let Some(id) = args.get("id") {
                         if let Some(info) = self.catalog.remove(id) {
-                            self.streaming_flags.insert(info.publisher, false);
+                            // Still streaming while any of their other streams runs.
+                            let streaming = self
+                                .catalog
+                                .values()
+                                .any(|other| other.publisher == info.publisher);
+                            self.streaming_flags.insert(info.publisher, streaming);
                             self.cancel_discovery(info.publisher);
                         }
                         self.publish_catalog();
@@ -990,6 +986,44 @@ mod tests {
         session.visible.store(false, Ordering::Relaxed);
         session.tick(&mut connection);
         assert!(!session.publisher.active());
+    }
+
+    #[test]
+    fn one_publisher_can_share_several_streams_at_once() {
+        let (mut session, mut connection, _) = fixture();
+        session.notification(
+            &mut connection,
+            "notifystreaminfo",
+            "notifystreaminfo id=stream-a clid=7 name=Screen|id=stream-b clid=7 name=Game",
+        );
+        assert_eq!(
+            session.catalog.len(),
+            2,
+            "a second stream doesn't replace the first"
+        );
+        active(&mut session);
+        session.notification(
+            &mut connection,
+            "notifystreamstarted",
+            "notifystreamstarted id=stream-c clid=7 name=Camera",
+        );
+        assert_eq!(session.catalog.len(), 3);
+        assert_eq!(
+            session.watches.len(),
+            1,
+            "watching one isn't ended by another starting"
+        );
+        session.notification(
+            &mut connection,
+            "notifystreamstopped",
+            "notifystreamstopped id=stream-b",
+        );
+        assert_eq!(session.catalog.len(), 2);
+        assert_eq!(
+            session.streaming_flags.get(&7),
+            Some(&true),
+            "still streaming the others"
+        );
     }
 
     #[test]
