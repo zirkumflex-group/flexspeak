@@ -158,6 +158,10 @@ pub struct UiState {
     pub log_resizing: bool,
     pub log_people: bool,
     pub log_search: TextEdit,
+    /// The first frame still has to build the frosted backdrop's pipelines.
+    pub warm_blur: bool,
+    /// Settings → Updates lists every release, not only the latest.
+    pub changelog_open: bool,
     /// Where the current press started, in window points.
     pub press_point: (f32, f32),
     /// The window position of the member row or stream last under the pointer, to place drags.
@@ -192,6 +196,8 @@ impl Default for UiState {
             log_resizing: false,
             log_people: false,
             log_search: TextEdit::new(""),
+            warm_blur: true,
+            changelog_open: false,
             user_volume: None,
             press_point: (0.0, 0.0),
             row_origin: (0.0, 0.0),
@@ -494,8 +500,25 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     );
     #[cfg(windows)]
     layer.push(window_controls(s, &t));
+    if s.ui.warm_blur {
+        layer.push(blur_warm_up(&t));
+    }
     rune_kit::root(base, layer)
         .hover_motion_within(rune::Spring::new(0.12, 0.0), rune::Spring::new(0.28, 0.0))
+}
+
+/// A one-point speck of frosted glass in the canvas colour, for the first frame only. The
+/// renderer builds its blur pipelines the first time it draws one, which froze the window for
+/// a moment when Settings first opened; drawn here, launch absorbs that wait instead. The fade
+/// makes it a layer, as Settings is while it opens, which has a pipeline of its own.
+fn blur_warm_up(t: &Theme) -> El {
+    el().key("blur-warm-up")
+        .absolute(0.0, 0.0)
+        .size(1.0, 1.0)
+        .opacity(0.5)
+        .fill(t.canvas)
+        .a11y_hidden()
+        .child(el().size(1.0, 1.0).backdrop_blur(1.0).fill(t.canvas))
 }
 
 /// Opens the window and runs until the app quits.

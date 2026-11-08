@@ -3,6 +3,7 @@
 mod alerts;
 mod audio;
 mod audio_processing;
+mod changelog;
 mod client;
 mod command_flow;
 mod connection_charts;

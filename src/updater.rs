@@ -195,7 +195,7 @@ impl Notes {
     }
 
     /// Adds a release's notes. Bodies without these sections add nothing.
-    fn add(&mut self, body: &str) {
+    pub(crate) fn add(&mut self, body: &str) {
         let mut section = None;
         for line in body.lines().map(str::trim) {
             if let Some(heading) = line.strip_prefix('#') {
