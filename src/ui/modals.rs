@@ -4,9 +4,10 @@
 use rune::{El, col, el, row, text};
 use rune_kit::{Dialog, Kit};
 
+use super::UserVolumeTarget;
 use super::icons;
 use super::theme::{Theme, size, ty};
-use super::widgets::{Variant, button, error_text, faint, field, muted};
+use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider};
 use crate::{App, Message, Poke};
 
 /// Offers to copy a release that runs from Downloads or a disk image to where apps live.
@@ -183,6 +184,80 @@ fn server_picker(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
 }
 
 /// Writing a poke: an optional short message, sent with Return.
+const USER_VOLUME: Range = Range {
+    min: 0,
+    max: crate::settings::UserAudio::MAX_PERCENT as i32,
+    step: 1,
+    key_step: 5,
+};
+
+/// One person's volume, for you alone. Their voice is amplified above 100%.
+fn user_volume(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, target: &UserVolumeTarget) {
+    let percent = s.user_audio(&target.uid).volume_percent;
+    let body = col()
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(12.0)
+        .child(
+            row()
+                .w_full()
+                .gap(12.0)
+                .center_y()
+                .child(el().grow(1.0).min_w(0.0).child(slider(
+                    t,
+                    "user-volume",
+                    "Volume",
+                    i32::from(percent),
+                    format!("{percent}%"),
+                    USER_VOLUME,
+                    |s: &App| {
+                        s.ui.user_volume.as_ref().map_or(100, |target| {
+                            i32::from(s.user_audio(&target.uid).volume_percent)
+                        })
+                    },
+                    |value| Message::UserVolume(value.clamp(0, USER_VOLUME.max) as u16),
+                )))
+                .child(text(format!("{percent}%")).font(ty::NUMERIC).color(t.text)),
+        )
+        .child(
+            row()
+                .w_full()
+                .gap(size::GAP)
+                .justify_end()
+                .child(button(
+                    t,
+                    "reset-user-volume",
+                    "Reset",
+                    None,
+                    Variant::Secondary,
+                    (percent != 100).then_some(Message::UserVolume(100)),
+                ))
+                .child(
+                    button(
+                        t,
+                        "close-user-volume",
+                        "Done",
+                        None,
+                        Variant::Primary,
+                        Some(Message::CloseUserVolume),
+                    )
+                    .default_button(),
+                ),
+        );
+    Dialog::new("user-volume-dialog", format!("Volume for {}", target.name))
+        .description("Only changes what you hear.")
+        .open(true)
+        .fit()
+        .width(380.0)
+        .on_close(|s: &mut App| {
+            let _ = s.update(Message::CloseUserVolume);
+            s.sync_fields();
+        })
+        .child(body)
+        .build(k, layer);
+}
+
 fn poke(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, name: &str) {
     let length = s
         .server()
@@ -309,6 +384,12 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
 }
 
 pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    if let Some(target) = &s.ui.user_volume
+        && s.alerts.current().is_none()
+    {
+        user_volume(s, t, k, layer, target);
+        return;
+    }
     if s.install_prompt
         && let Some(offer) = &s.install_offer
         && s.alerts.current().is_none()

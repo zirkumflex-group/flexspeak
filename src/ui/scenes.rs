@@ -36,6 +36,8 @@ pub const SCENES: &[Scene] = &[
     ("statistics", statistics),
     ("settings", settings_page),
     ("settings-appearance", settings_appearance),
+    ("settings-omarchy", settings_omarchy),
+    ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
     ("settings-picker", settings_picker),
     ("server-add", server_add),
@@ -55,6 +57,9 @@ pub const SCENES: &[Scene] = &[
     ("push-to-talk", push_to_talk_page),
     ("push-to-talk-connected", push_to_talk_connected),
     ("member-menu", member_menu),
+    ("servers-menu", servers_menu),
+    ("member-volume", member_volume),
+    ("member-muted", member_muted),
     ("member-selection", member_selection),
     ("member-drag", member_drag),
     ("poke", poke),
@@ -290,6 +295,7 @@ fn home(s: &mut App) {
 
 fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member {
     client::Member {
+        uid: format!("uid-{id}"),
         id,
         name: name.into(),
         is_self,
@@ -444,6 +450,25 @@ fn settings_at(s: &mut App, page: SettingsPage) {
     s.open_settings(page);
 }
 
+/// Searching brings the long theme list and its note into view.
+fn settings_more_themes(s: &mut App) {
+    settings_appearance(s);
+    s.settings_path = Some("/home/jan/.config/flexspeak/settings.json".into());
+    s.settings_query = "mocha".into();
+}
+
+/// On an Omarchy desktop, following its Nord theme.
+fn settings_omarchy(s: &mut App) {
+    settings_appearance(s);
+    s.settings_path = Some("/home/jan/.config/flexspeak/settings.json".into());
+    let nord = s.theme_library.find("omarchy-nord").and_then(|t| t.dark);
+    s.omarchy = nord.map(|colors| crate::omarchy::Current {
+        name: "Nord".into(),
+        dark: true,
+        colors,
+    });
+}
+
 fn settings_appearance(s: &mut App) {
     settings_at(s, SettingsPage::Appearance);
 }
@@ -596,6 +621,38 @@ fn member_selection(s: &mut App) {
     s.server_mut().selected_members = [2, 4].into();
     s.ui.member_menu = Some((4, rune::PointerPress { x: 150.0, y: 240.0 }));
     s.ui.move_menu = true;
+}
+
+fn member_volume(s: &mut App) {
+    connected(s);
+    s.user_audio.insert(
+        "uid-3".into(),
+        settings::UserAudio {
+            volume_percent: 65,
+            muted: false,
+        },
+    );
+    s.ui.user_volume = Some(super::UserVolumeTarget {
+        uid: "uid-3".into(),
+        name: "Theo".into(),
+    });
+}
+
+fn member_muted(s: &mut App) {
+    connected(s);
+    s.user_audio.insert(
+        "uid-2".into(),
+        settings::UserAudio {
+            volume_percent: 100,
+            muted: true,
+        },
+    );
+}
+
+/// Right-clicked a server in the rail.
+fn servers_menu(s: &mut App) {
+    let [_, raid, _] = servers(s);
+    s.ui.rail_menu = Some((raid, rune::PointerPress { x: 60.0, y: 180.0 }));
 }
 
 fn member_drag(s: &mut App) {
@@ -1143,6 +1200,55 @@ mod tests {
     }
 
     #[test]
+    fn right_clicking_a_server_in_the_rail_offers_disconnect() {
+        let mut rt = runtime(servers_rail, (900.0, 790.0));
+        settle(&mut rt);
+        let second = rt.state.rail_sessions().nth(1).unwrap();
+        let (id, active) = (second.id, rt.state.active);
+        let key = format!("rail-{}", id.0);
+        let (x, y) = rt.find(&key).unwrap_or_else(|| panic!("no {key}"));
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.secondary_down(x, y);
+        rt.secondary_up(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.rail_menu.map(|(open, _)| open), Some(id));
+        assert_eq!(rt.state.active, active, "right-clicking doesn't switch");
+        click(&mut rt, "rail-menu-item1");
+        assert!(rt.state.ui.rail_menu.is_none());
+        assert!(rt.state.session(id).is_none_or(|session| session.stopping));
+    }
+
+    /// Crossing other rows on the way must not throw off where the drop lands.
+    #[test]
+    fn dragging_someone_targets_the_channel_under_the_cursor() {
+        let mut rt = runtime(connected, (900.0, 790.0));
+        settle(&mut rt);
+        let (x, y) = rt.find("member-2").expect("Mara");
+        let (past_x, past_y) = rt.find("member-3").expect("Theo");
+        let (to_x, to_y) = rt.find("channel-2").expect("Raid night");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.pointer_down(x, y);
+        rt.pointer_move(past_x, past_y);
+        rt.frame(1.0 / 60.0);
+        rt.pointer_move(to_x, to_y);
+        rt.frame(1.0 / 60.0);
+        rt.frame(1.0 / 60.0);
+        let drag = rt.state.ui.drag.clone().expect("dragging");
+        assert_eq!(drag.target, Some(2), "the channel under the cursor");
+        assert!(
+            (drag.at.0 - to_x).abs() < 1.0 && (drag.at.1 - to_y).abs() < 1.0,
+            "the drag follows the cursor: {:?} against {:?}",
+            drag.at,
+            (to_x, to_y),
+        );
+        rt.pointer_up(to_x, to_y);
+        settle(&mut rt);
+        assert!(rt.state.ui.drag.is_none());
+    }
+
+    #[test]
     fn hovering_the_update_notice_shows_what_changed() {
         fn scene(s: &mut App) {
             update_available(s);
@@ -1160,6 +1266,33 @@ mod tests {
         rt.pointer_move(20.0, 700.0);
         settle(&mut rt);
         assert!(rt.find("update-notes").is_none());
+    }
+
+    #[test]
+    fn omarchy_sets_the_theme_until_switched_off() {
+        let mut rt = runtime(settings_omarchy, (1000.0, 1500.0));
+        settle(&mut rt);
+        let nord = rt.state.omarchy.as_ref().unwrap().colors;
+        assert_eq!(super::super::theme(&rt.state).surface, nord.surface);
+        click(&mut rt, "follow-omarchy");
+        assert!(rt.state.appearance.ignore_omarchy);
+        assert_ne!(super::super::theme(&rt.state).surface, nord.surface);
+    }
+
+    #[test]
+    fn searching_narrows_more_themes_to_one_collection_and_keeps_open_folder() {
+        let mut rt = runtime(settings_more_themes, (1000.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("extra-catppuccin-mocha").is_some());
+        assert!(rt.find("extra-tokyo-night-night").is_none());
+        assert!(rt.find("open-settings-folder").is_some());
+    }
+
+    #[test]
+    fn the_omarchy_section_only_shows_on_omarchy() {
+        let mut rt = runtime(settings_appearance, (1000.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("follow-omarchy").is_none());
     }
 
     #[test]

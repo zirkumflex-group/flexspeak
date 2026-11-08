@@ -103,7 +103,13 @@ CPU, RAM and the platform-specific memory detail stay in the bottom bar while th
 
 **Settings → Appearance** holds **Color Scheme** (System, Light or Dark) and **Themes**. Five themes ship with the app — Flexspeak (blue), Grove (green), Ocean (teal), Ember (orange) and Iris (violet) — and each has a light and a dark palette. Each theme card shows two swatches: press the light one to use that theme while the window is light, and the dark one for while it is dark. The two choices are independent, so Grove can be the light theme and Ember the dark one. System follows the computer's appearance: on macOS the app's effective appearance (including Auto), on Windows the app mode in Personalisation, and on Linux GNOME's `color-scheme`, read once at launch. macOS and Windows are checked with each usage tick, so a change shows within a second (ten in performance mode).
 
-**More Themes** lists the bundled Tokyo Night, Catppuccin and Omarchy palettes, and any themes you add under `custom_themes` in the settings file; press Reload on the Settings File page to pick up edits. The format is T3 Code's, and its roles beyond these are ignored, so its themes can be pasted in:
+Right-click a server in the rail to **Disconnect** from it without switching to it.
+
+Right-click someone in the channel tree to **Mute** them or set their **Volume** from 0 to 200%. This only changes what you hear, is remembered by their identity across servers and reconnects, and a person you muted shows a red speaker icon on their row. **Sound cues** under Settings → Audio plays a short sound for your own mute, unmute, deafen and undeafen, and is on by default.
+
+On an Omarchy desktop, Flexspeak follows the active Omarchy theme and updates within a second of a switch, including themes you installed yourself. An **Omarchy** section appears at the top of Appearance only there; turn off **Match Omarchy theme** to use the themes below instead.
+
+**More Themes** lists the bundled Tokyo Night, Catppuccin and Omarchy palettes, each marked light or dark, and any themes you add under `custom_themes` in the settings file. **Open Folder** shows the folder holding it; press Reload on the Settings File page to pick up edits. The format is T3 Code's, and its roles beyond these are ignored, so its themes can be pasted in:
 
 ```json
 {

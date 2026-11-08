@@ -8,6 +8,7 @@ use std::{
 use crate::shortcuts::Keybinds;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -37,6 +38,12 @@ pub struct Settings {
     /// Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Appearance::is_default")]
     pub appearance: Appearance,
+    /// What you've set for other people, by identity. Only changes what you hear.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_audio: BTreeMap<String, UserAudio>,
+    /// A short sound when you mute, unmute, deafen or undeafen.
+    #[serde(skip_serializing_if = "is_true")]
+    pub sound_cues: bool,
     /// Kept as written, so one bad entry can't stop the settings from loading.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_themes: Vec<serde_json::Value>,
@@ -138,6 +145,9 @@ pub struct Appearance {
     pub light_theme_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dark_theme_id: Option<String>,
+    /// Keeps the theme chosen here on an Omarchy desktop, instead of following Omarchy's.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_omarchy: bool,
     /// Written only when on, so settings stay readable by builds without this option.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disable_animations: bool,
@@ -176,6 +186,36 @@ impl Appearance {
     }
 }
 
+/// One person's playback on this computer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UserAudio {
+    pub volume_percent: u16,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
+}
+
+impl Default for UserAudio {
+    fn default() -> Self {
+        Self {
+            volume_percent: 100,
+            muted: false,
+        }
+    }
+}
+
+impl UserAudio {
+    pub const MAX_PERCENT: u16 = 200;
+
+    pub fn gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            f32::from(self.volume_percent.min(Self::MAX_PERCENT)) / 100.0
+        }
+    }
+}
+
 fn is_true(value: &bool) -> bool {
     *value
 }
@@ -195,6 +235,8 @@ impl Default for Settings {
             footer_hidden: false,
             auto_download_updates: true,
             appearance: Appearance::default(),
+            user_audio: BTreeMap::new(),
+            sound_cues: true,
             custom_themes: Vec::new(),
             skip_install_prompt: false,
         }

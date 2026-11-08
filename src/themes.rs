@@ -204,7 +204,7 @@ fn colors(roles: &Roles) -> Result<Colors, String> {
 }
 
 /// `#rgb`, `#rrggbb`, either with alpha, `rgb()`/`rgba()`, or `oklch()`.
-fn color(value: &str) -> Option<Color> {
+pub fn color(value: &str) -> Option<Color> {
     let value = value.trim();
     if let Some(hex) = value.strip_prefix('#') {
         return hex_color(hex);

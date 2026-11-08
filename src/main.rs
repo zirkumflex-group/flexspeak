@@ -13,6 +13,7 @@ mod memory;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_audio;
 mod notify;
+mod omarchy;
 mod onboarding;
 mod permissions;
 mod profiler;
@@ -31,7 +32,8 @@ mod window_icon;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -147,9 +149,15 @@ struct App {
     footer_hidden: bool,
     /// Saved straight to settings when changed, like `footer_hidden`.
     appearance: settings::Appearance,
+    user_audio: BTreeMap<String, settings::UserAudio>,
+    /// `user_audio` as the voice threads read it.
+    user_gains: client::UserGains,
+    sound_cues: bool,
     /// `custom_themes` as written in the settings file.
     custom_themes: Vec<serde_json::Value>,
     theme_library: themes::Library,
+    /// The desktop's theme, on Omarchy.
+    omarchy: Option<omarchy::Current>,
     /// Whether the system is in dark mode, refreshed with each usage tick.
     system_dark: bool,
     window_size: (f32, f32),
@@ -473,6 +481,14 @@ enum Message {
     ToggleSubscribeAll,
     ToggleFooter,
     Appearance(settings::Appearance),
+    OpenSettingsFolder,
+    /// Opens the volume dialog for a person in the channel tree.
+    OpenUserVolume(u16),
+    UserVolume(u16),
+    CloseUserVolume,
+    /// Silences or restores a person for you alone.
+    ToggleUserMute(u16),
+    SoundCues(bool),
     ToggleClient(u16),
     /// A server's connection reporting; once it has ended, these are dropped.
     Backend(hub::SessionId, client::Event),
@@ -554,6 +570,7 @@ impl App {
             Ok(path) => app.load_settings(path),
             Err(error) => app.alerts.raise(Source::SettingsLoad, format!("{error:#}")),
         }
+        app.omarchy = omarchy::poll(&app.theme_library);
         let (mut shortcuts, events) = shortcuts::Shortcuts::new(app.ptt.clone());
         if app.onboarding.is_none() {
             app.shortcut_error = shortcuts
@@ -639,8 +656,12 @@ impl App {
             subscribe_all: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
             appearance: settings::Appearance::default(),
+            user_audio: BTreeMap::new(),
+            user_gains: client::UserGains::default(),
+            sound_cues: true,
             custom_themes: Vec::new(),
             theme_library: themes::Library::new(&[]),
+            omarchy: None,
             system_dark: true,
             window_size: (900.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
@@ -855,6 +876,14 @@ impl App {
         {
             let value = !self.server().muted;
             self.set_muted(id, value);
+            self.play_cue(
+                id,
+                if value {
+                    audio::Cue::MicOff
+                } else {
+                    audio::Cue::MicOn
+                },
+            );
         }
     }
 
@@ -864,7 +893,54 @@ impl App {
         {
             let value = !self.server().deafened;
             self.set_deafened(id, value);
+            self.play_cue(
+                id,
+                if value {
+                    audio::Cue::SoundOff
+                } else {
+                    audio::Cue::SoundOn
+                },
+            );
         }
+    }
+
+    fn play_cue(&mut self, id: hub::SessionId, cue: audio::Cue) {
+        if self.sound_cues {
+            self.send_to(id, client::Command::Cue(cue));
+        }
+    }
+
+    /// What the voice threads play each person at. Everyone unset stays out of the map.
+    fn sync_user_gains(&self) {
+        *self.user_gains.lock().unwrap() = self
+            .user_audio
+            .iter()
+            .map(|(uid, audio)| (uid.clone(), audio.gain()))
+            .collect();
+    }
+
+    fn user_audio(&self, uid: &str) -> settings::UserAudio {
+        self.user_audio.get(uid).copied().unwrap_or_default()
+    }
+
+    /// Applies a change to one person, forgetting them again once they're back to normal.
+    fn change_user_audio(&mut self, uid: String, change: impl FnOnce(&mut settings::UserAudio)) {
+        let mut audio = self.user_audio(&uid);
+        change(&mut audio);
+        if audio == settings::UserAudio::default() {
+            self.user_audio.remove(&uid);
+        } else {
+            self.user_audio.insert(uid, audio);
+        }
+        self.sync_user_gains();
+    }
+
+    fn save_user_audio(&mut self) {
+        let audio = self.user_audio.clone();
+        self.save_preference(
+            |saved| saved.user_audio = audio,
+            "That volume applies for now but was not saved",
+        );
     }
 
     fn set_muted(&mut self, id: hub::SessionId, value: bool) {
@@ -1139,6 +1215,9 @@ impl App {
         self.footer_hidden = saved.footer_hidden;
         self.updater.auto_download = saved.auto_download_updates;
         self.appearance = saved.appearance;
+        self.user_audio = saved.user_audio;
+        self.sync_user_gains();
+        self.sound_cues = saved.sound_cues;
         self.theme_library = themes::Library::new(&saved.custom_themes);
         self.custom_themes = saved.custom_themes;
     }
@@ -1162,6 +1241,8 @@ impl App {
             auto_download_updates: self.updater.auto_download,
             appearance: self.appearance.clone(),
             custom_themes: self.custom_themes.clone(),
+            user_audio: self.user_audio.clone(),
+            sound_cues: self.sound_cues,
             skip_install_prompt: self
                 .saved
                 .as_ref()
@@ -1212,6 +1293,30 @@ impl App {
             |saved| saved.footer_hidden = hidden,
             "The footer choice applies for now but was not saved",
         );
+    }
+
+    /// Shows the folder holding the settings file, where custom themes are added.
+    fn open_settings_folder(&mut self) {
+        let Some(folder) = self.settings_path.as_deref().and_then(Path::parent) else {
+            return;
+        };
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(windows) {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        match Command::new(opener).arg(folder).spawn() {
+            // Waited on elsewhere so it can't linger as a zombie.
+            Ok(mut child) => {
+                std::thread::spawn(move || child.wait());
+            }
+            Err(error) => self.alerts.raise(
+                Source::SettingsLoad,
+                format!("Couldn't open the settings folder: {error}"),
+            ),
+        }
     }
 
     /// Changes the colour scheme or themes and stores only that choice.
@@ -1485,6 +1590,7 @@ impl App {
         let visible = self.home.streaming.visible.clone();
         let config = client::Config {
             id,
+            user_gains: self.user_gains.clone(),
             hub: self.hub.clone(),
             playback_volume: self.playback_volume.clone(),
             audio_processing: self.audio_processing,
@@ -2382,6 +2488,45 @@ impl App {
                 }
             }
             Message::Appearance(appearance) => self.set_appearance(appearance),
+            Message::OpenSettingsFolder => self.open_settings_folder(),
+            Message::OpenUserVolume(id) => {
+                if let Some(member) = self.find_member(id).filter(|m| !m.uid.is_empty()) {
+                    self.ui.user_volume = Some(ui::UserVolumeTarget {
+                        uid: member.uid.clone(),
+                        name: member.name.clone(),
+                    });
+                }
+            }
+            Message::UserVolume(percent) => {
+                if let Some(uid) = self.ui.user_volume.as_ref().map(|t| t.uid.clone()) {
+                    self.change_user_audio(uid, |audio| {
+                        audio.volume_percent = percent.min(settings::UserAudio::MAX_PERCENT);
+                    });
+                }
+            }
+            // Saved here rather than on every step of the slider.
+            Message::CloseUserVolume => {
+                if self.ui.user_volume.take().is_some() {
+                    self.save_user_audio();
+                }
+            }
+            Message::ToggleUserMute(id) => {
+                if let Some(uid) = self
+                    .find_member(id)
+                    .filter(|m| !m.uid.is_empty())
+                    .map(|m| m.uid.clone())
+                {
+                    self.change_user_audio(uid, |audio| audio.muted = !audio.muted);
+                    self.save_user_audio();
+                }
+            }
+            Message::SoundCues(on) => {
+                self.sound_cues = on;
+                self.save_preference(
+                    |saved| saved.sound_cues = on,
+                    "The sound cue choice applies for now but was not saved",
+                );
+            }
             Message::ToggleSubscribeAll => {
                 self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
             }
@@ -3647,6 +3792,66 @@ mod tests {
     }
 
     #[test]
+    fn each_person_has_their_own_volume_and_mute_for_you_alone() {
+        let (mut app, _commands) = session_fixture();
+        let other = app
+            .server()
+            .state
+            .current_members()
+            .iter()
+            .find(|member| !member.is_self)
+            .unwrap()
+            .clone();
+        let gain = |app: &App| app.user_gains.lock().unwrap().get(&other.uid).copied();
+        assert_eq!(gain(&app), None, "full volume by default");
+
+        let _ = app.update(Message::OpenUserVolume(other.id));
+        let _ = app.update(Message::UserVolume(40));
+        assert_eq!(gain(&app), Some(0.4));
+        let _ = app.update(Message::CloseUserVolume);
+        assert!(app.ui.user_volume.is_none());
+
+        let _ = app.update(Message::ToggleUserMute(other.id));
+        assert_eq!(gain(&app), Some(0.0));
+        assert_eq!(
+            app.user_audio(&other.uid).volume_percent,
+            40,
+            "kept while muted"
+        );
+        let _ = app.update(Message::ToggleUserMute(other.id));
+        assert_eq!(gain(&app), Some(0.4));
+
+        let _ = app.update(Message::OpenUserVolume(other.id));
+        let _ = app.update(Message::UserVolume(100));
+        assert_eq!(gain(&app), None, "back to normal is forgotten");
+        assert!(app.edited_settings().user_audio.is_empty());
+    }
+
+    #[test]
+    fn muting_and_deafening_play_a_cue_unless_turned_off() {
+        let (mut app, mut commands) = session_fixture();
+        let cues = |commands: &mut mpsc::Receiver<client::Command>| {
+            let mut found = Vec::new();
+            while let Ok(command) = commands.try_recv() {
+                if let client::Command::Cue(cue) = command {
+                    found.push(cue);
+                }
+            }
+            found
+        };
+        let _ = app.update(Message::Mute);
+        let _ = app.update(Message::Mute);
+        let _ = app.update(Message::Deafen);
+        let _ = app.update(Message::Deafen);
+        let played = cues(&mut commands);
+        assert_eq!(played.len(), 4, "{played:?}");
+        assert!(played[0] != played[1] && played[2] != played[3]);
+        let _ = app.update(Message::SoundCues(false));
+        let _ = app.update(Message::Mute);
+        assert!(cues(&mut commands).is_empty());
+    }
+
+    #[test]
     fn resuming_waits_to_learn_your_channel_and_skips_the_join_if_you_are_there() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let (sender, mut commands) = mpsc::channel(8);
@@ -3693,6 +3898,7 @@ mod tests {
         app.server_mut().connected = true;
         let person = |id: u16, name: &str, is_self: bool, can_move: Option<bool>| client::Member {
             id,
+            uid: format!("uid-{id}"),
             name: name.into(),
             is_self,
             mic_muted: false,
@@ -4022,6 +4228,7 @@ mod tests {
                     id,
                     members: vec![client::Member {
                         id: id as u16 + 10,
+                        uid: String::new(),
                         name: format!("Client {id}"),
                         is_self: false,
                         mic_muted: true,
@@ -4268,6 +4475,7 @@ mod tests {
     #[test]
     fn mute_and_deafen_toggles_preserve_state_and_ignore_inactive_sessions() {
         let mut app = App::with_devices(audio::Devices::default(), None);
+        app.sound_cues = false;
         let (sender, mut commands) = mpsc::channel(16);
         live(&mut app, sender);
         let _ = app.update(Message::Shortcut(shortcuts::Action::Mute));

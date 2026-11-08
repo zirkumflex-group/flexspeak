@@ -56,7 +56,7 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
             s.ui.move_menu = false;
         })
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
-            let at = (s.ui.row_origin.0 + d.x, s.ui.row_origin.1 + d.y);
+            let at = super::drag_point(s, d);
             match d.phase {
                 Phase::Down => s.ui.drag = None,
                 Phase::Move => {
@@ -121,7 +121,7 @@ fn close(s: &mut App) {
 }
 
 /// The member context menu: poke one person, or move everyone picked to a channel.
-pub fn menu(s: &App, _t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     let Some((id, point)) = s.ui.member_menu else {
         return;
     };
@@ -136,6 +136,10 @@ pub fn menu(s: &App, _t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     } else {
         member.name.clone()
     };
+    // Colour tells the actions apart at a glance; anything unavailable stays grey.
+    let tinted = |glyph: &'static rune::Icon, color: rune::Color, enabled: bool| {
+        icon(glyph, 14.0).color(if enabled { color } else { t.faint })
+    };
     let mut menu = context_menu("member-menu", el(), Some(point))
         .min_width(200.0)
         .on_close(close)
@@ -143,7 +147,7 @@ pub fn menu(s: &App, _t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     if ids.len() == 1 && !member.is_self {
         let denied = member.can_poke == Some(false);
         let mut poke = MenuItem::new("Poke…")
-            .icon(&icons::HAND)
+            .lead(tinted(&icons::HAND, t.fair, !denied))
             .disabled(denied)
             .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                 close(s);
@@ -153,6 +157,31 @@ pub fn menu(s: &App, _t: &Theme, k: &Kit, layer: &mut Vec<El>) {
             poke = poke.description("The server doesn't let you poke them");
         }
         menu = menu.item(poke);
+    }
+    if ids.len() == 1 && !member.is_self && !member.uid.is_empty() {
+        let audio = s.user_audio(&member.uid);
+        menu = menu
+            .item(
+                MenuItem::new("Volume…")
+                    .lead(tinted(&icons::VOLUME_2, t.accent, true))
+                    .description(format!("{}%", audio.volume_percent))
+                    .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                        close(s);
+                        dispatch(s, tx, Message::OpenUserVolume(id));
+                    }),
+            )
+            .item(
+                MenuItem::new(if audio.muted { "Unmute" } else { "Mute" })
+                    .lead(if audio.muted {
+                        tinted(&icons::VOLUME_2, t.good, true)
+                    } else {
+                        tinted(&icons::VOLUME_OFF, t.poor, true)
+                    })
+                    .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                        close(s);
+                        dispatch(s, tx, Message::ToggleUserMute(id));
+                    }),
+            );
     }
     let channels: Vec<MenuEntry> = s
         .server()
@@ -172,10 +201,10 @@ pub fn menu(s: &App, _t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                     "    ".repeat(channel.depth.min(6)),
                     channel.name
                 ))
-                .icon(if channel.has_password {
-                    &icons::LOCK
+                .lead(if channel.has_password {
+                    tinted(&icons::LOCK, t.fair, true)
                 } else {
-                    &icons::VOLUME
+                    tinted(&icons::VOLUME, t.muted, true)
                 })
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     close(s);
@@ -190,7 +219,7 @@ pub fn menu(s: &App, _t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     } else {
         "Move to channel"
     })
-    .icon(&icons::MOVE)
+    .lead(tinted(&icons::MOVE, t.cpu, movable))
     .disabled(!movable)
     .on_select(|s: &mut App| s.ui.move_menu = !s.ui.move_menu);
     if movable {
