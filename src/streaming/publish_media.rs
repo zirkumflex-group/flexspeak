@@ -676,7 +676,11 @@ mod native {
         let mut frames = 0;
         let mut audio_frames = 0;
         let mut level = 0.0_f32;
-        let mut tick = tokio::time::interval(Duration::from_millis(10));
+        let mut tick = tokio::time::interval(if system_audio.is_some() {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_secs(1)
+        });
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut video_tick = tokio::time::interval(frame_interval);
         video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

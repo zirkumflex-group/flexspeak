@@ -247,6 +247,7 @@ mod native {
             let mut first_frame = false;
             let mut last_presented = Instant::now() - Duration::from_secs(1);
             let mut candidate_count = 0;
+            let mut stats_request = None;
             let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
             stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -295,7 +296,13 @@ mod native {
                     },
                     _ = stats_tick.tick() => {
                         ensure!(first_frame || started.elapsed() < Duration::from_secs(30), "No decoded video arrived within 30 seconds");
-                        if let Ok(Ok(stats)) = tokio::time::timeout(Duration::from_secs(2), pc.get_stats()).await {
+                        if stats_request.is_none() {
+                            stats_request = Some(Box::pin(tokio::time::timeout(Duration::from_secs(2), pc.get_stats())));
+                        }
+                    },
+                    result = async { match &mut stats_request { Some(request) => request.await, None => std::future::pending().await } } => {
+                        stats_request = None;
+                        if let Ok(Ok(stats)) = result {
                             let _ = output.try_send(Output::Stats(summarize_stats(&stats)));
                         }
                     }
