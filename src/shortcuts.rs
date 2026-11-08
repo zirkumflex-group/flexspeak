@@ -5,6 +5,7 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
+use rune::{Key, KeyEvent, PhysicalKeyCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -57,6 +58,121 @@ impl Keybinds {
         }
         Ok(keys)
     }
+}
+
+/// Which shortcut a setting or recording is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    Mute,
+    Deafen,
+    PushToTalk,
+}
+
+impl Keybinds {
+    pub fn get(&self, binding: Binding) -> &str {
+        match binding {
+            Binding::Mute => &self.toggle_mute,
+            Binding::Deafen => &self.toggle_deafen,
+            Binding::PushToTalk => &self.push_to_talk,
+        }
+    }
+
+    pub fn with(&self, binding: Binding, shortcut: String) -> Self {
+        let mut next = self.clone();
+        match binding {
+            Binding::Mute => next.toggle_mute = shortcut,
+            Binding::Deafen => next.toggle_deafen = shortcut,
+            Binding::PushToTalk => next.push_to_talk = shortcut,
+        }
+        next
+    }
+}
+
+/// What a key press means while a shortcut is being recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recorded {
+    /// Nothing to act on yet, such as a key with no name.
+    Ignored,
+    Cancel,
+    Clear,
+    /// A key that would stop you typing it anywhere else, pressed without Ctrl, Alt or Command.
+    NeedsModifier,
+    Shortcut(String),
+}
+
+/// Keys that type nothing, so they can be a shortcut on their own.
+fn stands_alone(key: &str) -> bool {
+    matches!(key, "Insert" | "Pause" | "ScrollLock")
+        || key
+            .strip_prefix('F')
+            .is_some_and(|number| number.parse::<u8>().is_ok())
+}
+
+/// The key's name in the shortcut grammar. The physical key is the same whatever the keyboard
+/// layout and whichever modifiers are held, unlike the character it typed.
+fn key_name(key: &KeyEvent, physical: Option<PhysicalKeyCode>) -> Option<String> {
+    if let Some(physical) = physical {
+        let name = format!("{physical:?}");
+        let short = name
+            .strip_prefix("Key")
+            .or_else(|| name.strip_prefix("Digit"))
+            .filter(|rest| rest.len() == 1);
+        return Some(short.unwrap_or(&name).to_owned());
+    }
+    let character = match &key.key {
+        Key::Function(number) => return Some(format!("F{number}")),
+        Key::Enter => return Some("Enter".into()),
+        Key::Tab => return Some("Tab".into()),
+        Key::Command(character) => *character,
+        Key::Text(text) => text.chars().next()?,
+        _ => return None,
+    };
+    match character {
+        ' ' => Some("Space".into()),
+        character if character.is_ascii_alphanumeric() => {
+            Some(character.to_ascii_uppercase().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Turns one key press into a shortcut like `Ctrl+Shift+M`.
+pub fn record(key: &KeyEvent, physical: Option<PhysicalKeyCode>) -> Recorded {
+    let mods = key.mods;
+    let control = mods.ctrl || (mods.cmd && !cfg!(target_os = "macos"));
+    let command = mods.logo || (mods.cmd && cfg!(target_os = "macos"));
+    let plain = !(control || command || mods.alt || mods.shift);
+    match key.key {
+        Key::Modifier { .. } => return Recorded::Ignored,
+        Key::Escape if plain => return Recorded::Cancel,
+        Key::Backspace | Key::Delete if plain => return Recorded::Clear,
+        _ => {}
+    }
+    let Some(name) = key_name(key, physical) else {
+        return Recorded::Ignored;
+    };
+    if !(control || command || mods.alt) && !stands_alone(&name) {
+        return Recorded::NeedsModifier;
+    }
+    let mut parts = Vec::new();
+    if control {
+        parts.push("Ctrl");
+    }
+    if mods.alt {
+        parts.push("Alt");
+    }
+    if mods.shift {
+        parts.push("Shift");
+    }
+    if command {
+        parts.push(if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Super"
+        });
+    }
+    parts.push(&name);
+    Recorded::Shortcut(parts.join("+"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +309,23 @@ impl Shortcuts {
         Ok(())
     }
 
+    /// Releases every shortcut until the next `configure`, so that pressing one while recording
+    /// reaches the window instead of being taken by the system.
+    pub fn suspend(&mut self) {
+        let released = self.manager.as_ref().is_none_or(|manager| {
+            self.bindings
+                .iter()
+                .all(|key| manager.unregister(*key).is_ok())
+        });
+        if !released {
+            self.disable();
+            return;
+        }
+        self.ptt.store(false, Ordering::Release);
+        self.edges.lock().unwrap().bind(Vec::new());
+        self.bindings.clear();
+    }
+
     pub fn is_active(&self) -> bool {
         self.bindings.len() >= 2
     }
@@ -212,6 +345,74 @@ impl Shortcuts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pressed(key: Key, mods: rune::Mods) -> KeyEvent {
+        KeyEvent { key, mods }
+    }
+
+    #[test]
+    fn recording_names_the_physical_key_with_its_modifiers() {
+        let ctrl_shift = rune::Mods {
+            ctrl: true,
+            shift: true,
+            ..rune::Mods::default()
+        };
+        let shortcut = |key, physical, mods| record(&pressed(key, mods), Some(physical));
+        assert_eq!(
+            shortcut(Key::Text("\r".into()), PhysicalKeyCode::KeyM, ctrl_shift),
+            Recorded::Shortcut("Ctrl+Shift+M".into()),
+        );
+        // Shift+7 types "/" on a German layout; the shortcut is still the 7 key.
+        assert_eq!(
+            shortcut(Key::Text("/".into()), PhysicalKeyCode::Digit7, ctrl_shift),
+            Recorded::Shortcut("Ctrl+Shift+7".into()),
+        );
+        let Recorded::Shortcut(spoken) =
+            shortcut(Key::Text(" ".into()), PhysicalKeyCode::Space, ctrl_shift)
+        else {
+            panic!("Space is a key");
+        };
+        assert_eq!(spoken, "Ctrl+Shift+Space");
+        assert!(spoken.parse::<HotKey>().is_ok());
+    }
+
+    #[test]
+    fn recording_keeps_typing_keys_free_and_has_ways_out() {
+        let plain = rune::Mods::default();
+        let shift = rune::Mods {
+            shift: true,
+            ..plain
+        };
+        assert_eq!(
+            record(
+                &pressed(Key::Text("m".into()), plain),
+                Some(PhysicalKeyCode::KeyM)
+            ),
+            Recorded::NeedsModifier,
+        );
+        assert_eq!(
+            record(
+                &pressed(Key::Text("M".into()), shift),
+                Some(PhysicalKeyCode::KeyM)
+            ),
+            Recorded::NeedsModifier,
+        );
+        assert_eq!(
+            record(&pressed(Key::Function(8), plain), Some(PhysicalKeyCode::F8)),
+            Recorded::Shortcut("F8".into()),
+        );
+        assert_eq!(
+            record(&pressed(Key::Escape, plain), Some(PhysicalKeyCode::Escape)),
+            Recorded::Cancel,
+        );
+        assert_eq!(
+            record(
+                &pressed(Key::Backspace, plain),
+                Some(PhysicalKeyCode::Backspace)
+            ),
+            Recorded::Clear,
+        );
+    }
 
     #[test]
     fn rejects_invalid_or_equivalent_shortcuts() {

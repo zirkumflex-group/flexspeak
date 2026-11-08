@@ -21,6 +21,7 @@ mod shortcuts;
 mod streaming;
 mod system_appearance;
 mod transmission;
+mod ts6_import;
 mod ui;
 mod updater;
 mod usage;
@@ -122,6 +123,12 @@ struct App {
     shortcuts: Option<shortcuts::Shortcuts>,
     keybinds: shortcuts::Keybinds,
     keybind_draft: shortcuts::Keybinds,
+    /// The shortcut being recorded, if Change was pressed.
+    key_capture: Option<KeyCapture>,
+    /// TeamSpeak 6's settings file, if setup found one to offer.
+    ts6_path: Option<PathBuf>,
+    /// What was read from it, once the user chose to.
+    ts6: Option<ts6_import::Imported>,
     shortcut_error: Option<String>,
     settings_path: Option<PathBuf>,
     alerts: Alerts,
@@ -288,6 +295,12 @@ impl SettingsPage {
     }
 }
 
+/// A shortcut being recorded, and why the last key press wasn't accepted.
+pub struct KeyCapture {
+    binding: shortcuts::Binding,
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     SetupNext,
@@ -298,9 +311,14 @@ enum Message {
     OpenPermissionSettings(permissions::Kind),
     DismissError,
     Shortcut(shortcuts::Action),
-    MuteKeybind(String),
-    DeafenKeybind(String),
-    PttKeybind(String),
+    /// Fills in setup from the TeamSpeak 6 install it found.
+    ImportTs6,
+    /// Leaves a server found in TeamSpeak 6 out of the saved list.
+    DropTs6Server(String),
+    /// Starts listening for the next key press as this shortcut.
+    RecordShortcut(shortcuts::Binding),
+    CancelRecording,
+    Recorded(shortcuts::Recorded),
     SaveSettings,
     ReloadSettings,
     CopySettingsPath,
@@ -481,6 +499,9 @@ impl App {
             shortcuts: None,
             keybinds: shortcuts::Keybinds::default(),
             keybind_draft: shortcuts::Keybinds::default(),
+            key_capture: None,
+            ts6_path: None,
+            ts6: None,
             shortcut_error: None,
             settings_path: None,
             alerts,
@@ -617,7 +638,42 @@ impl App {
         self.settings_path = Some(path);
     }
 
+    /// Looks for a TeamSpeak 6 install to offer. Nothing is read until the user asks.
+    fn find_ts6(&mut self) {
+        self.ts6_path = ts6_import::path().filter(|path| path.exists());
+        self.ts6 = None;
+    }
+
+    /// Fills in setup from TeamSpeak 6; every value stays editable on its step.
+    fn apply_ts6(&mut self, imported: &ts6_import::Imported) {
+        if self.nickname.trim().is_empty()
+            && let Some(nickname) = &imported.nickname
+        {
+            self.nickname = nickname.clone();
+        }
+        if self.address.trim().is_empty()
+            && let Some(first) = imported.servers.first()
+        {
+            self.address = first.clone();
+        }
+        let find = |devices: &[audio::DeviceChoice], name: &Option<String>| {
+            let name = name.as_deref()?;
+            devices.iter().find(|device| device.name == name).cloned()
+        };
+        if let Some(input) = find(&self.devices.inputs, &imported.input) {
+            self.input = Some(input);
+        }
+        if let Some(output) = find(&self.devices.outputs, &imported.output) {
+            self.output = Some(output);
+        }
+        if imported.push_to_talk {
+            self.transmission.mode = transmission::Mode::PushToTalk;
+            self.transmission.ptt_release_ms = imported.ptt_release_ms;
+        }
+    }
+
     fn begin_setup(&mut self) {
+        self.find_ts6();
         self.onboarding = Some(onboarding::Step::Username);
         self.onboarding_error = None;
         self.saved = None;
@@ -631,7 +687,20 @@ impl App {
         self.sync_page_visibility();
     }
 
+    /// Stops listening for a shortcut and gives the saved ones back to the system.
+    fn end_recording(&mut self) {
+        if self.key_capture.take().is_none() {
+            return;
+        }
+        self.ui.key_capture.focused = false;
+        let keys = self.keybinds.clone();
+        if let Err(error) = self.configure_shortcuts(&keys) {
+            self.alerts.raise(Source::Shortcuts, format!("{error:#}"));
+        }
+    }
+
     fn open_settings(&mut self, page: SettingsPage) {
+        self.end_recording();
         self.settings_page = Some(page);
         self.settings_recent = page;
         self.settings_query.clear();
@@ -639,6 +708,7 @@ impl App {
     }
 
     fn close_settings(&mut self) {
+        self.end_recording();
         self.settings_page = None;
         self.settings_query.clear();
         self.server_editor = None;
@@ -832,6 +902,23 @@ impl App {
     /// The server list to save. First-run setup has no list yet, so its one server becomes the
     /// first; setup run again from Settings puts a new address at the front of the list.
     fn setup_servers(&self) -> Vec<settings::Server> {
+        let mut servers = self.chosen_servers();
+        if self.onboarding.is_some()
+            && let Some(imported) = &self.ts6
+        {
+            for address in &imported.servers {
+                if !servers
+                    .iter()
+                    .any(|server| server.address.trim() == address)
+                {
+                    servers.push(settings::Server::new(address));
+                }
+            }
+        }
+        servers
+    }
+
+    fn chosen_servers(&self) -> Vec<settings::Server> {
         let address = self.address.trim();
         if self.servers.is_empty() {
             return vec![settings::Server::new(address)];
@@ -1171,6 +1258,7 @@ impl App {
         let _trace = profiler::scope(profiler::Category::Ui, "ui.update");
         match message {
             Message::SetupNext => {
+                self.end_recording();
                 if self.session.is_some() || self.permissions.pending.is_some() {
                     return Task::none();
                 }
@@ -1195,7 +1283,32 @@ impl App {
                     }
                 }
             }
+            Message::ImportTs6 => {
+                let Some(path) = self.ts6_path.clone() else {
+                    return Task::none();
+                };
+                match ts6_import::read(&path) {
+                    Ok(imported) => {
+                        self.apply_ts6(&imported);
+                        self.ts6 = Some(imported);
+                        self.onboarding_error = None;
+                    }
+                    // TeamSpeak's format isn't documented, so this can happen after its updates.
+                    Err(_) => {
+                        self.onboarding_error = Some(
+                            "Couldn't read your TeamSpeak 6 settings. You can set things up here instead."
+                                .into(),
+                        );
+                    }
+                }
+            }
+            Message::DropTs6Server(address) => {
+                if let Some(imported) = &mut self.ts6 {
+                    imported.servers.retain(|server| *server != address);
+                }
+            }
             Message::SetupBack => {
+                self.end_recording();
                 if self.session.is_none()
                     && self.permissions.pending.is_none()
                     && let Some(previous) = self.onboarding.and_then(onboarding::Step::previous)
@@ -1286,17 +1399,56 @@ impl App {
                     self.settings_message = None;
                 }
             }
-            Message::PttKeybind(value) => {
-                self.keybind_draft.push_to_talk = value;
+            Message::RecordShortcut(binding) => {
+                if self.key_capture.is_none()
+                    && let Some(shortcuts) = &mut self.shortcuts
+                {
+                    shortcuts.suspend();
+                }
+                self.key_capture = Some(KeyCapture {
+                    binding,
+                    error: None,
+                });
+                self.ui.key_capture.focused = true;
                 self.settings_message = None;
             }
-            Message::MuteKeybind(value) => {
-                self.keybind_draft.toggle_mute = value;
-                self.settings_message = None;
-            }
-            Message::DeafenKeybind(value) => {
-                self.keybind_draft.toggle_deafen = value;
-                self.settings_message = None;
+            Message::CancelRecording => self.end_recording(),
+            Message::Recorded(recorded) => {
+                let Some(capture) = &mut self.key_capture else {
+                    return Task::none();
+                };
+                let binding = capture.binding;
+                let shortcut = match recorded {
+                    shortcuts::Recorded::Ignored => return Task::none(),
+                    shortcuts::Recorded::Cancel => {
+                        self.end_recording();
+                        return Task::none();
+                    }
+                    shortcuts::Recorded::NeedsModifier => {
+                        capture.error =
+                            Some("Add Ctrl, Alt or Command, or use a function key.".into());
+                        return Task::none();
+                    }
+                    shortcuts::Recorded::Clear if binding == shortcuts::Binding::PushToTalk => {
+                        String::new()
+                    }
+                    shortcuts::Recorded::Clear => {
+                        capture.error = Some("This shortcut can't be empty.".into());
+                        return Task::none();
+                    }
+                    shortcuts::Recorded::Shortcut(shortcut) => shortcut,
+                };
+                let next = self.keybind_draft.with(binding, shortcut);
+                if let Err(error) = next.parse() {
+                    capture.error = Some(format!("{error:#}"));
+                    return Task::none();
+                }
+                self.keybind_draft = next;
+                self.end_recording();
+                // Setup saves everything together at its last step.
+                if self.onboarding.is_none() {
+                    self.save_settings();
+                }
             }
             Message::SaveSettings => {
                 if self.onboarding.is_none() {
@@ -1878,6 +2030,7 @@ impl App {
                     self.close_settings();
                     self.tab = Tab::Home;
                     self.redoing_setup = true;
+                    self.find_ts6();
                     self.onboarding = Some(onboarding::Step::Username);
                     self.onboarding_error = None;
                     if let Some(first) = self.servers.first() {
@@ -2007,6 +2160,9 @@ impl App {
                     self.state = state;
                     if self.connected
                         && !self.state.channels.is_empty()
+                        // The channel list arrives before the server says where you are, and
+                        // asking for the channel you were put in is refused with an error.
+                        && self.state.current.is_some()
                         && let Some(resume) = self.resume.take()
                         && let Some(id) = resume.channel
                         && self.state.current.as_ref().map(|channel| channel.id) != Some(id)
@@ -2497,6 +2653,7 @@ mod tests {
         assert_eq!(app.password, "two-password");
         app.session = None;
         let _ = app.update(Message::Connect(0));
+        assert_eq!(app.nickname, "Alex");
         assert_eq!(app.address, "one.example");
         assert!(app.password.is_empty());
         std::fs::remove_dir_all(root).unwrap();
@@ -2541,8 +2698,8 @@ mod tests {
         let _ = app.update(Message::SetupNext);
         assert_eq!(app.onboarding, Some(onboarding::Step::Hotkeys));
         assert!(!path.exists());
-        let _ = app.update(Message::MuteKeybind("F8".into()));
-        let _ = app.update(Message::DeafenKeybind("F9".into()));
+        app.keybind_draft.toggle_mute = "F8".into();
+        app.keybind_draft.toggle_deafen = "F9".into();
         let _ = app.update(Message::SetupNext);
         assert!(app.onboarding.is_none() && app.session.is_none());
         assert_eq!(app.password, "temporary-test-password");
@@ -2793,6 +2950,96 @@ mod tests {
         }
         assert!(app.resume.is_none(), "only once");
         assert_eq!(app.channel_secret, Some((4, "channel secret".into())));
+    }
+
+    #[test]
+    fn teamspeak_6_settings_fill_in_setup_and_stay_changeable() {
+        let mic = |id: &str, name: &str| audio::DeviceChoice {
+            id: id.into(),
+            name: name.into(),
+        };
+        let devices = audio::Devices {
+            inputs: vec![mic("a", "Laptop Mic"), mic("b", "Desk Mic")],
+            outputs: vec![mic("c", "Speakers")],
+            input: Some(mic("a", "Laptop Mic")),
+            output: Some(mic("c", "Speakers")),
+        };
+        let mut app = App::with_devices(devices, None);
+        app.begin_setup();
+        app.input = Some(mic("a", "Laptop Mic"));
+        let imported = ts6_import::Imported {
+            nickname: Some("Alex".into()),
+            servers: vec!["one.example".into(), "two.example".into()],
+            input: Some("Desk Mic".into()),
+            output: Some("Unplugged Headset".into()),
+            push_to_talk: true,
+            ptt_release_ms: 200,
+        };
+        app.apply_ts6(&imported);
+        app.ts6 = Some(imported);
+        assert_eq!(app.address, "one.example");
+        assert_eq!(app.input.as_ref().unwrap().name, "Desk Mic");
+        assert_eq!(
+            app.output.as_ref().unwrap().name,
+            "Speakers",
+            "not on this computer"
+        );
+        assert_eq!(app.transmission.mode, transmission::Mode::PushToTalk);
+        assert_eq!(app.transmission.ptt_release_ms, 200);
+
+        // Your own choice comes first, and the rest of TeamSpeak's servers are kept.
+        let _ = app.update(Message::Address("mine.example".into()));
+        let saved = |app: &App| {
+            app.edited_settings()
+                .servers
+                .iter()
+                .map(|server| server.address.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(saved(&app), ["mine.example", "one.example", "two.example"]);
+        let _ = app.update(Message::DropTs6Server("one.example".into()));
+        assert_eq!(saved(&app), ["mine.example", "two.example"]);
+    }
+
+    #[test]
+    fn an_unreadable_teamspeak_6_file_leaves_setup_usable() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.begin_setup();
+        app.ts6_path = Some(std::env::temp_dir().join("flexspeak-no-such-folder/settings.db"));
+        let _ = app.update(Message::ImportTs6);
+        assert!(app.ts6.is_none());
+        assert!(app.onboarding_error.is_some());
+        assert_eq!(app.onboarding, Some(onboarding::Step::Username));
+    }
+
+    #[test]
+    fn resuming_waits_to_learn_your_channel_and_skips_the_join_if_you_are_there() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.resume = Some(resume::Resume {
+            channel: Some(1),
+            ..resume::Resume::default()
+        });
+        let (sender, mut commands) = mpsc::channel(8);
+        app.session = Some(sender);
+        app.connected = true;
+        let lobby = client::Channel {
+            id: 1,
+            join_access: client::JoinAccess::Allowed,
+            ..client::Channel::default()
+        };
+        let _ = app.update(Message::Backend(client::Event::State(client::Snapshot {
+            channels: vec![lobby.clone()],
+            current: None,
+            ..client::Snapshot::default()
+        })));
+        assert!(app.resume.is_some(), "still waiting to learn the channel");
+        let _ = app.update(Message::Backend(client::Event::State(client::Snapshot {
+            channels: vec![lobby.clone()],
+            current: Some(lobby),
+            ..client::Snapshot::default()
+        })));
+        assert!(app.resume.is_none());
+        assert!(commands.try_recv().is_err(), "already there, so no join");
     }
 
     /// A live session in Lobby with Mara and Theo, and an empty Games channel.

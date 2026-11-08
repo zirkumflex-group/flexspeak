@@ -4,7 +4,7 @@
 //! category's sections trail. Every section is a list of rows with search terms, so a query
 //! narrows the panel to the rows that match across all categories.
 
-use rune::{Color, Cx, El, Icon, TextEdit, Tx, col, el, icon, row, text};
+use rune::{Color, Cx, El, Icon, Tx, col, el, icon, row, text};
 use rune_kit::{Kit, Switch, TextInput};
 
 use super::theme::{Theme, motion, radius, shadow, size, ty};
@@ -1695,14 +1695,101 @@ fn permission_section(s: &App, t: &Theme) -> Section {
     Section::boxed("permissions", "Permissions", "privacy access", rows).note(group_note(t, note))
 }
 
-fn key_field(
+/// A shortcut and its Change button; pressed, the row listens for the new key combination.
+fn shortcut_row(
+    s: &App,
+    t: &Theme,
     k: &Kit,
-    edit: &TextEdit,
-    access: fn(&mut App) -> &mut TextEdit,
-    placeholder: &str,
-    change: fn(String) -> Message,
+    binding: shortcuts::Binding,
+    label: &str,
+    detail: Option<&str>,
 ) -> El {
-    trailing(field(k, edit, access, placeholder, Some(change), None))
+    let Some(capture) = s.key_capture.as_ref().filter(|c| c.binding == binding) else {
+        let current = s.keybind_draft.get(binding).trim();
+        let shown = row()
+            .key("shortcut-value")
+            .grow(1.0)
+            .min_w(0.0)
+            .h(size::CONTROL)
+            .px(10.0)
+            .center_y()
+            .radius(radius::CONTROL)
+            .fill(t.wash(0.05))
+            .border(1.0, t.hairline)
+            .child(
+                text(if current.is_empty() {
+                    "Not set"
+                } else {
+                    current
+                })
+                .font(ty::NUMERIC)
+                .color(if current.is_empty() { t.faint } else { t.text })
+                .truncate_fade(),
+            );
+        let change = button(
+            t,
+            &format!("change-{binding:?}"),
+            "Change",
+            None,
+            Variant::Secondary,
+            Some(Message::RecordShortcut(binding)),
+        );
+        return form_row(
+            t,
+            label,
+            detail,
+            trailing(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(shown)
+                    .child(change),
+            ),
+        );
+    };
+    let recorder = TextInput::new(&s.ui.key_capture)
+        .placeholder("Press a shortcut…")
+        .label(format!("Press the new shortcut for {label}"))
+        .width(None)
+        .height(size::CONTROL)
+        .on_edit(|s: &mut App| &mut s.ui.key_capture)
+        // Taking Return here keeps it from pressing the window's default button.
+        .on_submit(|_: &mut App, _: &mut Tx| {})
+        .on_key(|s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
+            let recorded = shortcuts::record(key, tx.physical_key());
+            dispatch(s, tx, Message::Recorded(recorded));
+            true
+        })
+        .build(k);
+    let mut control = col().w_full().gap(4.0).child(
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(el().grow(1.0).min_w(0.0).child(recorder))
+            .child(button(
+                t,
+                "cancel-recording",
+                "Cancel",
+                None,
+                Variant::Secondary,
+                Some(Message::CancelRecording),
+            )),
+    );
+    if let Some(error) = &capture.error {
+        control = control.child(super::widgets::error_text(t, error.clone()));
+    }
+    form_row(
+        t,
+        label,
+        Some(if binding == shortcuts::Binding::PushToTalk {
+            "Esc to cancel · Backspace to clear"
+        } else {
+            "Esc to cancel"
+        }),
+        trailing(control),
+    )
 }
 
 /// The mute and deafen shortcuts and their test. Onboarding shows it too.
@@ -1725,47 +1812,21 @@ fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
         vec![
             item(
                 "toggle microphone mute unmute",
-                form_row(
-                    t,
-                    "Toggle microphone",
-                    None,
-                    key_field(
-                        k,
-                        &s.ui.mute_key,
-                        |s| &mut s.ui.mute_key,
-                        "Ctrl+Shift+M",
-                        Message::MuteKeybind,
-                    ),
-                ),
+                shortcut_row(s, t, k, shortcuts::Binding::Mute, "Toggle microphone", None),
             ),
             item(
                 "toggle deafen undeafen",
-                form_row(
-                    t,
-                    "Toggle deafen",
-                    None,
-                    key_field(
-                        k,
-                        &s.ui.deafen_key,
-                        |s| &mut s.ui.deafen_key,
-                        "Ctrl+Shift+D",
-                        Message::DeafenKeybind,
-                    ),
-                ),
+                shortcut_row(s, t, k, shortcuts::Binding::Deafen, "Toggle deafen", None),
             ),
             item(
                 "push to talk ptt hold transmit",
-                form_row(
+                shortcut_row(
+                    s,
                     t,
+                    k,
+                    shortcuts::Binding::PushToTalk,
                     "Push to talk",
                     Some("Held, not toggled. Used in push-to-talk mode."),
-                    key_field(
-                        k,
-                        &s.ui.ptt_key,
-                        |s| &mut s.ui.ptt_key,
-                        "Ctrl+Shift+Space",
-                        Message::PttKeybind,
-                    ),
                 ),
             ),
             item(
@@ -1780,7 +1841,7 @@ fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
                         "Test Shortcuts",
                         None,
                         Variant::Secondary,
-                        Some(Message::TestHotkeys),
+                        s.key_capture.is_none().then_some(Message::TestHotkeys),
                     ),
                 )
                 .key("detected"),
