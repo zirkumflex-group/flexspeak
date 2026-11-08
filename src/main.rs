@@ -6,6 +6,7 @@ mod audio_processing;
 mod client;
 mod command_flow;
 mod connection_charts;
+mod hub;
 mod icons;
 mod install;
 mod memory;
@@ -133,6 +134,7 @@ struct App {
     settings_path: Option<PathBuf>,
     alerts: Alerts,
     settings_message: Option<String>,
+    hub: Arc<hub::AudioHub>,
     playback_volume: Arc<audio::PlaybackVolume>,
     audio_processing: audio_processing::Settings,
     transmission: transmission::Settings,
@@ -153,40 +155,18 @@ struct App {
     address: String,
     nickname: String,
     password: String,
-    channel_password: String,
-    password_channel: Option<u64>,
     devices: audio::Devices,
     input: Option<audio::DeviceChoice>,
     output: Option<audio::DeviceChoice>,
-    status: String,
-    password_error: Option<String>,
     /// Saved servers. Adding, editing or removing one saves the list straight away.
     servers: Vec<settings::Server>,
     /// Server passwords by address, kept until the app quits and never saved.
     server_passwords: HashMap<String, String>,
     /// The Add or Edit Server dialog, while it is open.
     server_editor: Option<ServerEditor>,
-    server_controls: Option<command_flow::AudioState>,
-    controls_pending: bool,
-    detail: String,
-    session: Option<mpsc::Sender<client::Command>>,
-    connected: bool,
     loopback: bool,
-    stopping: bool,
     closing: bool,
-    muted: bool,
-    deafened: bool,
     level: f32,
-    sent: u64,
-    received: u64,
-    state: client::Snapshot,
-    collapsed_channels: HashSet<u64>,
-    /// Members picked with ⌘/Ctrl-click, to move several at once.
-    selected_members: BTreeSet<u16>,
-    /// The poke being written.
-    poke: Option<PokeDraft>,
-    /// Pokes received and not yet read, oldest first.
-    pokes: Vec<Poke>,
     /// Where this release would install, while it runs from somewhere temporary.
     install_offer: Option<install::Offer>,
     /// The install dialog shows at launch until answered.
@@ -194,18 +174,10 @@ struct App {
     installing: bool,
     /// Setup was opened from Settings over a saved profile, so it can be cancelled.
     redoing_setup: bool,
-    expanded_client: Option<u16>,
-    /// Clients heard right now, including yourself while you transmit.
-    talking: BTreeSet<u16>,
-    client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
-    connection_history: ConnectionHistory,
-    client_history: ConnectionHistory,
     process_monitor: usage::ProcessMonitor,
     process_usage: usage::ProcessUsage,
     cpu_history: usage::MetricHistory,
     ram_history: usage::MetricHistory,
-    network_usage: usage::NetworkUsage,
-    connection_usage: usage::ConnectionUsage,
     tab: Tab,
     /// The open Settings window's category; Settings floats over whichever page is showing.
     settings_page: Option<SettingsPage>,
@@ -213,7 +185,6 @@ struct App {
     settings_recent: SettingsPage,
     /// What the Settings search field holds; empty shows the chosen category.
     settings_query: String,
-    streaming: streaming::View,
     heap_usage: memory::HeapUsage,
     audio_buffer_bytes: usize,
     recording: Option<profiler::Recording>,
@@ -224,8 +195,146 @@ struct App {
     /// Where to return after an update's restart, until it has been reached.
     resume: Option<resume::Resume>,
     resume_started: bool,
+    /// Every server connected or connecting, oldest first.
+    sessions: Vec<ServerSession>,
+    /// The server the window shows and the microphone goes to.
+    active: Option<hub::SessionId>,
+    /// Stands in for the active server while there is none: the saved-server page and setup.
+    home: ServerSession,
+    next_session: u64,
+}
+
+/// One server you're connected to, or connecting to, and what the window shows for it.
+struct ServerSession {
+    id: hub::SessionId,
+    /// The name it's saved under, if it has one.
+    name: String,
+    address: String,
+    password: String,
+    session: Option<mpsc::Sender<client::Command>>,
+    connected: bool,
+    stopping: bool,
+    muted: bool,
+    deafened: bool,
+    server_controls: Option<command_flow::AudioState>,
+    controls_pending: bool,
+    status: String,
+    detail: String,
+    sent: u64,
+    received: u64,
+    state: client::Snapshot,
+    collapsed_channels: HashSet<u64>,
+    /// Members picked with ⌘/Ctrl-click, to move several at once.
+    selected_members: BTreeSet<u16>,
+    /// The poke being written.
+    poke: Option<PokeDraft>,
+    /// Pokes received and not yet read, oldest first.
+    pokes: Vec<Poke>,
+    /// Pokes that arrived while another server was active, for the marker on the rail.
+    unseen_pokes: u32,
+    expanded_client: Option<u16>,
+    /// Clients heard right now, including yourself while you transmit.
+    talking: BTreeSet<u16>,
+    client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
+    connection_history: ConnectionHistory,
+    client_history: ConnectionHistory,
+    network_usage: usage::NetworkUsage,
+    connection_usage: usage::ConnectionUsage,
+    channel_password: String,
+    password_channel: Option<u64>,
+    password_error: Option<String>,
     /// The password last used to join a channel, so an update's restart can rejoin it.
     channel_secret: Option<(u64, String)>,
+    streaming: streaming::View,
+    /// Bring this server to the front once it connects, since you just asked for it.
+    activate_on_connect: bool,
+    /// Where to return this server after an update's restart.
+    resume: Option<resume::Server>,
+}
+
+impl ServerSession {
+    fn new(
+        id: hub::SessionId,
+        name: String,
+        address: String,
+        password: String,
+        surfaces: Arc<streaming::Surfaces>,
+        visible: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            address,
+            password,
+            session: None,
+            connected: false,
+            stopping: false,
+            muted: true,
+            deafened: false,
+            server_controls: None,
+            controls_pending: false,
+            status: "Ready to connect".into(),
+            detail: String::new(),
+            sent: 0,
+            received: 0,
+            state: client::Snapshot::default(),
+            collapsed_channels: HashSet::new(),
+            selected_members: BTreeSet::new(),
+            poke: None,
+            pokes: Vec::new(),
+            unseen_pokes: 0,
+            expanded_client: None,
+            talking: BTreeSet::new(),
+            client_usage: BTreeMap::new(),
+            connection_history: ConnectionHistory::new(),
+            client_history: ConnectionHistory::new(),
+            network_usage: usage::NetworkUsage::default(),
+            connection_usage: usage::ConnectionUsage::default(),
+            channel_password: String::new(),
+            password_channel: None,
+            password_error: None,
+            channel_secret: None,
+            streaming: streaming::View::sharing(surfaces, visible),
+            activate_on_connect: false,
+            resume: None,
+        }
+    }
+
+    /// What the rail calls this server: its saved name, else what the server calls itself.
+    fn title(&self) -> &str {
+        if !self.name.trim().is_empty() {
+            self.name.trim()
+        } else if !self.state.server.is_empty() {
+            &self.state.server
+        } else {
+            self.address.trim()
+        }
+    }
+
+    fn clear_client_details(&mut self) {
+        self.expanded_client = None;
+        self.client_history = ConnectionHistory::new();
+    }
+
+    fn can_request_join(&self, loopback: bool, id: u64) -> bool {
+        self.connected
+            && !loopback
+            && !self.stopping
+            && self
+                .state
+                .current
+                .as_ref()
+                .is_none_or(|current| current.id != id)
+            && self
+                .state
+                .channels
+                .iter()
+                .any(|channel| channel.id == id && channel.join_access.can_request())
+    }
+
+    fn microphone_off(&self) -> bool {
+        self.muted || self.deafened || !self.connected || !self.state.can_talk
+    }
 }
 
 /// A poke being written to one client.
@@ -334,8 +443,15 @@ enum Message {
     Input(audio::DeviceChoice),
     Output(audio::DeviceChoice),
     Refresh,
-    /// Connects to the saved server at this index; only one session runs at a time.
+    /// Connects to the saved server at this index, alongside any others.
     Connect(usize),
+    /// Shows this server: its channels, streams and voice panel, and sends your microphone there.
+    SwitchServer(hub::SessionId),
+    /// Ends one server's connection, or cancels it while it's still connecting.
+    StopServer(hub::SessionId),
+    /// The rail's + opens the list of saved servers to connect to, then closes.
+    OpenServerPicker,
+    CloseServerPicker,
     AddServer,
     EditServer(usize),
     ServerName(String),
@@ -354,7 +470,10 @@ enum Message {
     ToggleFooter,
     Appearance(settings::Appearance),
     ToggleClient(u16),
-    Backend(client::Event),
+    /// A server's connection reporting; once it has ended, these are dropped.
+    Backend(hub::SessionId, client::Event),
+    /// A background task failed before it could report anywhere else.
+    Alert(Source, String),
     Close,
     UsageTick,
     ShowTab(Tab),
@@ -506,6 +625,7 @@ impl App {
             settings_path: None,
             alerts,
             settings_message: None,
+            hub: Arc::new(hub::AudioHub::default()),
             playback_volume: Arc::new(audio::PlaybackVolume::default()),
             audio_processing: audio_processing::Settings::default(),
             transmission: transmission::Settings::default(),
@@ -526,51 +646,24 @@ impl App {
             address: "ts.zirkumflex.io".into(),
             nickname: "Flexspeak".into(),
             password: String::new(),
-            channel_password: String::new(),
-            password_channel: None,
-            status: "Ready to connect".into(),
-            password_error: None,
             servers: Vec::new(),
             server_passwords: HashMap::new(),
             server_editor: None,
-            server_controls: None,
-            controls_pending: false,
-            detail: String::new(),
-            session: None,
-            connected: false,
             loopback: false,
-            stopping: false,
             closing: false,
-            muted: true,
-            deafened: false,
             level: 0.0,
-            sent: 0,
-            received: 0,
-            state: client::Snapshot::default(),
-            collapsed_channels: HashSet::new(),
-            selected_members: BTreeSet::new(),
-            poke: None,
-            pokes: Vec::new(),
             install_offer: None,
             install_prompt: false,
             installing: false,
             redoing_setup: false,
-            expanded_client: None,
-            talking: BTreeSet::new(),
-            client_usage: BTreeMap::new(),
-            connection_history: ConnectionHistory::new(),
-            client_history: ConnectionHistory::new(),
             process_monitor,
             process_usage,
             cpu_history,
             ram_history,
-            network_usage: usage::NetworkUsage::default(),
-            connection_usage: usage::ConnectionUsage::default(),
             tab: Tab::Home,
             settings_page: None,
             settings_recent: SettingsPage::Server,
             settings_query: String::new(),
-            streaming: streaming::View::default(),
             heap_usage: memory::snapshot(),
             audio_buffer_bytes: 0,
             recording: None,
@@ -581,12 +674,161 @@ impl App {
             updater: updater::Updater::new(None, Err(String::new()), true),
             resume: None,
             resume_started: false,
-            channel_secret: None,
+            sessions: Vec::new(),
+            active: None,
+            next_session: 1,
+            home: ServerSession::new(
+                hub::SessionId(0),
+                String::new(),
+                String::new(),
+                String::new(),
+                Arc::new(streaming::Surfaces::default()),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        }
+    }
+
+    /// The server the window is showing, or a blank one on the saved-server page and in setup.
+    fn server(&self) -> &ServerSession {
+        self.active
+            .and_then(|id| self.session(id))
+            .unwrap_or(&self.home)
+    }
+
+    fn server_mut(&mut self) -> &mut ServerSession {
+        let active = self.active;
+        match self.sessions.iter_mut().find(|s| Some(s.id) == active) {
+            Some(session) => session,
+            None => &mut self.home,
+        }
+    }
+
+    fn session(&self, id: hub::SessionId) -> Option<&ServerSession> {
+        self.sessions.iter().find(|session| session.id == id)
+    }
+
+    fn session_mut(&mut self, id: hub::SessionId) -> Option<&mut ServerSession> {
+        self.sessions.iter_mut().find(|session| session.id == id)
+    }
+
+    /// No server connected or connecting, and no microphone test running.
+    fn idle(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
+    /// Whether the window is on a server you're connected to.
+    fn live(&self) -> bool {
+        self.server().connected && !self.loopback && !self.server().stopping
+    }
+
+    /// How many servers are connected right now.
+    fn connected_servers(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| s.connected && !s.stopping)
+            .count()
+    }
+
+    /// The servers on the rail, oldest first. One being disconnected leaves the rail at once,
+    /// unless it's the last one and the page is still showing it.
+    fn rail_sessions(&self) -> impl Iterator<Item = &ServerSession> {
+        let showing = self.active;
+        self.sessions
+            .iter()
+            .filter(move |session| !session.stopping || Some(session.id) == showing)
+    }
+
+    /// Makes a server the one shown and spoken to.
+    fn activate(&mut self, id: Option<hub::SessionId>) {
+        if self.active == id {
+            return;
+        }
+        let (strip, show_stats) = {
+            let old = self.server_mut();
+            // The session stops these streams itself; this clears them from the screen now.
+            old.streaming.clear_picture();
+            old.streaming.share_open = false;
+            (old.streaming.strip, old.streaming.show_stats)
+        };
+        self.active = id;
+        self.hub.set_active(id);
+        self.transmitting = false;
+        self.level = 0.0;
+        self.ui.open = None;
+        self.ui.member_menu = None;
+        self.ui.move_menu = false;
+        self.ui.drag = None;
+        self.ui.tile_drag = None;
+        self.ui.server_picker = false;
+        let new = self.server_mut();
+        new.streaming.strip = strip;
+        new.streaming.show_stats = show_stats;
+        new.unseen_pokes = 0;
+        new.activate_on_connect = false;
+        self.sync_page_visibility();
+    }
+
+    /// Picks another server to show after this one goes, or none.
+    fn next_active(&self, leaving: hub::SessionId) -> Option<hub::SessionId> {
+        self.sessions
+            .iter()
+            .find(|session| session.id != leaving && !session.stopping)
+            .map(|session| session.id)
+    }
+
+    /// Ends a server's connection and moves the window to another if there is one.
+    fn stop_session(&mut self, id: hub::SessionId) {
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        session.streaming.sharing.stop_capture();
+        self.send_to(id, client::Command::Stop);
+        if let Some(session) = self.session_mut(id) {
+            session.stopping = true;
+            session.status = "Disconnecting…".into();
+        }
+        if self.active == Some(id)
+            && let Some(next) = self.next_active(id)
+        {
+            self.activate(Some(next));
+        }
+    }
+
+    /// Files an alert under the active server, or the app when it isn't about a server.
+    fn raise_active(&mut self, source: Source, detail: impl AsRef<str>) {
+        match self.active.filter(|_| source.server_scoped()) {
+            Some(id) => self.raise_for(id, source, detail),
+            None => self.alerts.raise(source, detail),
+        }
+    }
+
+    fn raise_for(&mut self, id: hub::SessionId, source: Source, detail: impl AsRef<str>) {
+        if !source.server_scoped() {
+            return self.alerts.raise(source, detail);
+        }
+        // Say which server, unless there is only the one you're looking at.
+        let server = (self.sessions.len() > 1 || self.active != Some(id))
+            .then(|| self.session(id).map(|session| session.title().to_owned()))
+            .flatten();
+        self.alerts.raise_in(id.0, server, source, detail);
+    }
+
+    fn begin_alert(&mut self, source: Source) {
+        match self.active.filter(|_| source.server_scoped()) {
+            Some(id) => self.alerts.begin_in(id.0, source),
+            None => self.alerts.begin(source),
         }
     }
 
     fn command(&mut self, command: client::Command) -> bool {
-        let Some(sender) = &self.session else {
+        match self.active {
+            Some(id) => self.send_to(id, command),
+            None => false,
+        }
+    }
+
+    fn send_to(&mut self, id: hub::SessionId, command: client::Command) -> bool {
+        let Some(sender) = self.session(id).and_then(|session| session.session.clone()) else {
             return false;
         };
         if sender.try_send(command).is_err() {
@@ -602,24 +844,40 @@ impl App {
     }
 
     fn toggle_mute(&mut self) {
-        if self.connected && !self.loopback && !self.stopping {
-            let value = !self.muted;
-            self.alerts.begin(Source::Controls);
-            if self.command(client::Command::Mute(value)) {
-                self.muted = value;
-                self.controls_pending = true;
-            }
+        if self.live()
+            && let Some(id) = self.active
+        {
+            let value = !self.server().muted;
+            self.set_muted(id, value);
         }
     }
 
     fn toggle_deafen(&mut self) {
-        if self.connected && !self.loopback && !self.stopping {
-            let value = !self.deafened;
-            self.alerts.begin(Source::Controls);
-            if self.command(client::Command::Deafen(value)) {
-                self.deafened = value;
-                self.controls_pending = true;
-            }
+        if self.live()
+            && let Some(id) = self.active
+        {
+            let value = !self.server().deafened;
+            self.set_deafened(id, value);
+        }
+    }
+
+    fn set_muted(&mut self, id: hub::SessionId, value: bool) {
+        self.alerts.begin_in(id.0, Source::Controls);
+        if self.send_to(id, client::Command::Mute(value))
+            && let Some(session) = self.session_mut(id)
+        {
+            session.muted = value;
+            session.controls_pending = true;
+        }
+    }
+
+    fn set_deafened(&mut self, id: hub::SessionId, value: bool) {
+        self.alerts.begin_in(id.0, Source::Controls);
+        if self.send_to(id, client::Command::Deafen(value))
+            && let Some(session) = self.session_mut(id)
+        {
+            session.deafened = value;
+            session.controls_pending = true;
         }
     }
 
@@ -715,16 +973,19 @@ impl App {
         self.ui.open = None;
     }
 
-    /// The address of the server a session is running or starting for, if any.
-    fn session_address(&self) -> Option<&str> {
-        (self.session.is_some() && !self.loopback).then_some(self.address.trim())
+    /// The session running or starting for this saved address, if any.
+    fn session_at(&self, address: &str) -> Option<&ServerSession> {
+        let address = address.trim();
+        self.sessions
+            .iter()
+            .find(|session| !self.loopback && session.address.trim() == address)
     }
 
-    /// Whether the server at `index` is the one in use, so it can't be edited or removed.
+    /// Whether the server at `index` is in use, so it can't be edited or removed.
     fn server_in_use(&self, index: usize) -> bool {
         self.servers
             .get(index)
-            .is_some_and(|server| self.session_address() == Some(server.address.trim()))
+            .is_some_and(|server| self.session_at(&server.address).is_some())
     }
 
     /// Adds or updates the dialog's server and saves the list.
@@ -794,7 +1055,7 @@ impl App {
     /// Uses `servers` and saves only the list, leaving other unsaved edits alone.
     fn set_servers(&mut self, servers: Vec<settings::Server>) {
         self.servers = servers.clone();
-        if self.session.is_none()
+        if self.idle()
             && let Some(first) = servers.first()
         {
             self.address = first.address.clone();
@@ -819,7 +1080,8 @@ impl App {
 
     fn sync_page_visibility(&self) {
         let normal = self.onboarding.is_none();
-        self.streaming
+        self.server()
+            .streaming
             .visible
             .store(normal && self.tab == Tab::Home, Ordering::Relaxed);
         self.channel_health_visible.store(
@@ -834,9 +1096,8 @@ impl App {
             .first()
             .map(|server| server.address.clone())
             .unwrap_or_default();
-        if self.session.is_none() && self.address.trim() != first.trim() {
+        if self.idle() && self.address.trim() != first.trim() {
             self.password.clear();
-            self.channel_password.clear();
         }
         self.input = match &saved.input_device_id {
             Some(id) => self
@@ -858,7 +1119,7 @@ impl App {
         };
         self.saved = Some(saved.clone());
         // A running session keeps the address it connected to.
-        if self.session.is_none() {
+        if self.idle() {
             self.address = first;
         }
         self.servers = saved.servers;
@@ -1025,42 +1286,45 @@ impl App {
         }
     }
 
-    /// The page, session and channel to return to after an update's restart.
+    /// The page, servers and channels to return to after an update's restart.
     fn resume_snapshot(&self) -> resume::Resume {
-        let in_session = self.connected && !self.loopback && !self.stopping;
-        let channel = self
-            .state
-            .current
-            .as_ref()
-            .map(|channel| channel.id)
-            .filter(|_| in_session);
-        resume::Resume {
-            written_at: 0,
-            page: match self.tab {
+        let servers = self
+            .sessions
+            .iter()
+            .filter(|session| session.connected && !self.loopback && !session.stopping)
+            .map(|session| {
+                let channel = session.state.current.as_ref().map(|channel| channel.id);
+                resume::Server {
+                    address: session.address.clone(),
+                    password: session.password.clone(),
+                    channel,
+                    channel_password: session
+                        .channel_secret
+                        .as_ref()
+                        .filter(|(id, _)| Some(*id) == channel)
+                        .map(|(_, password)| password.clone())
+                        .unwrap_or_default(),
+                    muted: session.muted,
+                    deafened: session.deafened,
+                }
+            })
+            .collect();
+        resume::Resume::new(
+            match self.tab {
                 _ if self.settings_page.is_some() => resume::Page::Settings,
                 Tab::Home => resume::Page::Home,
                 Tab::Statistics => resume::Page::Statistics,
             },
-            server_address: in_session.then(|| self.address.clone()),
-            server_password: if in_session {
-                self.password.clone()
-            } else {
-                String::new()
-            },
-            channel,
-            channel_password: self
-                .channel_secret
-                .as_ref()
-                .filter(|(id, _)| Some(*id) == channel)
-                .map(|(_, password)| password.clone())
-                .unwrap_or_default(),
-            muted: self.muted,
-            deafened: self.deafened,
-        }
+            servers,
+            self.active
+                .and_then(|id| self.session(id))
+                .filter(|session| session.connected && !session.stopping)
+                .map(|session| session.address.clone()),
+        )
     }
 
     fn resume(&mut self) -> Task {
-        let Some(resume) = self.resume.clone() else {
+        let Some(resume) = self.resume.take() else {
             return Task::none();
         };
         let mut tasks = vec![self.update(Message::ShowTab(match resume.page {
@@ -1070,24 +1334,37 @@ impl App {
         if resume.page == resume::Page::Settings {
             self.open_settings(SettingsPage::Updates);
         }
-        // Only a saved server is reconnected, with the password it was joined with.
-        let address = resume.server_address.as_deref().map(str::trim);
-        if let Some(index) = self
-            .servers
-            .iter()
-            .position(|server| Some(server.address.trim()) == address)
-        {
+        let active = resume.active.as_deref().map(str::trim).map(str::to_owned);
+        for saved in resume.servers {
+            // Only a saved server is reconnected, with the password it was joined with.
+            let Some(index) = self
+                .servers
+                .iter()
+                .position(|server| server.address.trim() == saved.address.trim())
+            else {
+                continue;
+            };
             let address = self.servers[index].address.trim().to_owned();
-            if resume.server_password.is_empty() {
+            if saved.password.is_empty() {
                 self.server_passwords.remove(&address);
             } else {
                 self.server_passwords
-                    .insert(address, resume.server_password.clone());
+                    .insert(address.clone(), saved.password.clone());
             }
             tasks.push(self.update(Message::Connect(index)));
+            if let Some(id) = self.session_at(&address).map(|session| session.id)
+                && let Some(session) = self.session_mut(id)
+            {
+                session.activate_on_connect = false;
+                session.resume = Some(saved);
+            }
         }
-        if self.session.is_none() {
-            self.resume = None;
+        if let Some(id) = active
+            .as_deref()
+            .and_then(|address| self.session_at(address))
+            .map(|session| session.id)
+        {
+            self.activate(Some(id));
         }
         Task::batch(tasks)
     }
@@ -1151,7 +1428,9 @@ impl App {
     }
 
     fn start(&mut self, loopback: bool) -> Task {
-        if self.session.is_some()
+        // A microphone test is exclusive with server connections, in both directions.
+        if (loopback && !self.idle())
+            || (!loopback && self.loopback && !self.idle())
             || self.permissions.pending.is_some()
             || (!loopback && self.onboarding.is_some())
         {
@@ -1181,68 +1460,63 @@ impl App {
             return Task::none();
         };
         if !loopback && (self.address.trim().is_empty() || self.nickname.trim().is_empty()) {
-            self.alerts
-                .raise(Source::Connection, "Enter a server address and nickname.");
+            self.raise_active(Source::Connection, "Enter a server address and nickname.");
             return Task::none();
         }
+        let id = hub::SessionId(self.next_session);
+        self.next_session += 1;
+        let address = self.address.trim().to_owned();
+        let name = self
+            .servers
+            .iter()
+            .find(|server| server.address.trim() == address)
+            .map(|server| server.name.clone())
+            .unwrap_or_default();
+        let surfaces = self.home.streaming.surfaces.clone();
+        let visible = self.home.streaming.visible.clone();
         let config = client::Config {
+            id,
+            hub: self.hub.clone(),
             playback_volume: self.playback_volume.clone(),
             audio_processing: self.audio_processing,
             transmission: self.transmission,
             ptt: self.ptt.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
             subscribe_all: self.subscribe_all.clone(),
-            streaming_visible: self.streaming.visible.clone(),
-            video_surfaces: self.streaming.surfaces.clone(),
-            address: self.address.trim().into(),
+            streaming_visible: visible.clone(),
+            video_surfaces: surfaces.clone(),
+            address: address.clone(),
             nickname: self.nickname.trim().into(),
             password: self.password.clone(),
             input,
             output,
         };
-        self.ptt.store(false, Ordering::Release);
-        self.transmitting = false;
-        for source in [
-            Source::Connection,
-            Source::Audio,
-            Source::Worker,
-            Source::Join,
-            Source::Controls,
-            Source::Subscription,
-            Source::Flood,
-        ] {
-            self.alerts.begin(source);
+        if self.idle() {
+            self.ptt.store(false, Ordering::Release);
+            self.transmitting = false;
         }
-        self.server_controls = None;
-        self.controls_pending = !loopback;
-        self.loopback = loopback;
-        self.muted = true;
-        self.deafened = false;
-        self.sent = 0;
-        self.received = 0;
-        self.state = client::Snapshot::default();
-        self.streaming.reset();
-        self.password_channel = None;
-        self.channel_password.clear();
-        self.collapsed_channels.clear();
-        self.selected_members.clear();
-        self.poke = None;
-        self.clear_client_details();
-        self.client_usage.clear();
-        self.talking.clear();
-        self.connection_history = ConnectionHistory::new();
-        self.network_usage = usage::NetworkUsage::default();
-        self.connection_usage = usage::ConnectionUsage::default();
-        self.status = if loopback {
-            "Opening local microphone test…"
-        } else {
-            "Connecting…"
-        }
-        .into();
+        self.alerts.begin(Source::Audio);
+        self.alerts.begin(Source::Worker);
         match client::start(config, loopback) {
             Ok((sender, events)) => {
-                self.session = Some(sender);
-                Task::Events(events)
+                let mut session =
+                    ServerSession::new(id, name, address, self.password.clone(), surfaces, visible);
+                session.session = Some(sender);
+                session.controls_pending = !loopback;
+                session.status = if loopback {
+                    "Opening local microphone test…"
+                } else {
+                    "Connecting…"
+                }
+                .into();
+                // With a server on screen, it stays there until this one has connected.
+                session.activate_on_connect = self.active.is_some();
+                self.loopback = loopback;
+                self.sessions.push(session);
+                if self.active.is_none() {
+                    self.activate(Some(id));
+                }
+                Task::Events(id, events)
             }
             Err(error) => {
                 self.alerts.raise(
@@ -1259,7 +1533,7 @@ impl App {
         match message {
             Message::SetupNext => {
                 self.end_recording();
-                if self.session.is_some() || self.permissions.pending.is_some() {
+                if !self.idle() || self.permissions.pending.is_some() {
                     return Task::none();
                 }
                 if let Some(step) = self.onboarding {
@@ -1309,7 +1583,7 @@ impl App {
             }
             Message::SetupBack => {
                 self.end_recording();
-                if self.session.is_none()
+                if self.idle()
                     && self.permissions.pending.is_none()
                     && let Some(previous) = self.onboarding.and_then(onboarding::Step::previous)
                 {
@@ -1330,7 +1604,7 @@ impl App {
                 }
             }
             Message::RequestPermission(kind) => {
-                if self.session.is_none() && self.permissions.pending.is_none() {
+                if self.idle() && self.permissions.pending.is_none() {
                     self.permissions.pending = Some(kind);
                     self.permissions.messages[kind.index()] =
                         Some("Waiting for the operating system…".into());
@@ -1356,7 +1630,7 @@ impl App {
                 }
             }
             Message::OpenPermissionSettings(kind) => {
-                if self.permissions.pending.is_none() && self.session.is_none() {
+                if self.permissions.pending.is_none() && self.idle() {
                     self.permissions.pending = Some(kind);
                     return Task::perform(
                         async move {
@@ -1388,13 +1662,13 @@ impl App {
             }
             Message::AudioProcessing(options) => {
                 // Without WebRTC only typing suppression applies; refuse the other effects.
-                if self.session.is_none() && options.for_session(false) == options {
+                if self.idle() && options.for_session(false) == options {
                     self.audio_processing = options;
                     self.settings_message = None;
                 }
             }
             Message::Transmission(settings) => {
-                if self.session.is_none() && settings.validate().is_ok() {
+                if self.idle() && settings.validate().is_ok() {
                     self.transmission = settings;
                     self.settings_message = None;
                 }
@@ -1456,7 +1730,7 @@ impl App {
                 }
             }
             Message::ReloadSettings => {
-                if self.session.is_none()
+                if self.idle()
                     && let Some(path) = self.settings_path.clone()
                 {
                     self.alerts.begin(Source::SettingsLoad);
@@ -1487,15 +1761,18 @@ impl App {
                 if self.onboarding.is_some() {
                     return Task::none();
                 }
-                if tab != Tab::Statistics && self.expanded_client.is_some() {
+                if tab != Tab::Statistics && self.server().expanded_client.is_some() {
                     self.select_client(None);
                 }
                 self.tab = tab;
                 self.sync_page_visibility();
                 self.refresh_visible_permissions();
                 if tab != Tab::Home {
-                    self.streaming.sharing.stop_capture();
-                    self.streaming.clear_picture();
+                    // The server page going away ends sharing and watching everywhere.
+                    for session in &self.sessions {
+                        session.streaming.sharing.stop_capture();
+                    }
+                    self.server_mut().streaming.clear_picture();
                 }
             }
             Message::OpenSettings(page) => {
@@ -1510,97 +1787,103 @@ impl App {
                 }
             }
             Message::RefreshStreams => {
-                self.alerts.begin(Source::StreamDiscovery);
+                self.begin_alert(Source::StreamDiscovery);
                 self.command(client::Command::RefreshStreams);
             }
             Message::WatchStream(id) => {
-                if self.connected && !self.loopback && !self.stopping && self.tab == Tab::Home {
-                    self.alerts.begin(Source::StreamWatch);
-                    self.alerts.begin(Source::StreamFrame);
+                if self.live() && self.tab == Tab::Home {
+                    self.begin_alert(Source::StreamWatch);
+                    self.begin_alert(Source::StreamFrame);
                     self.command(client::Command::WatchStream(id));
                 }
             }
             Message::StopWatching(id) => {
                 if self.command(client::Command::StopWatching(id.clone())) {
                     match id {
-                        Some(id) => self.streaming.forget(&id),
-                        None => self.streaming.clear_picture(),
+                        Some(id) => self.server_mut().streaming.forget(&id),
+                        None => self.server_mut().streaming.clear_picture(),
                     }
                 }
             }
             Message::FocusStream(id) => {
-                self.streaming.focused = id.filter(|id| self.streaming.watching(id).is_some());
+                self.server_mut().streaming.focused =
+                    id.filter(|id| self.server().streaming.watching(id).is_some());
             }
-            Message::StreamLayout(None) => self.streaming.focused = None,
+            Message::StreamLayout(None) => self.server_mut().streaming.focused = None,
             Message::StreamLayout(Some(strip)) => {
-                self.streaming.strip = strip;
-                if self.streaming.stage().is_none() {
-                    self.streaming.focused = self
+                self.server_mut().streaming.strip = strip;
+                if self.server().streaming.stage().is_none() {
+                    self.server_mut().streaming.focused = self
+                        .server()
                         .streaming
                         .watching
                         .first()
                         .map(|watch| watch.stream.id.clone());
                 }
             }
-            Message::SwapStreams(from, to) => self.streaming.swap(&from, &to),
+            Message::SwapStreams(from, to) => self.server_mut().streaming.swap(&from, &to),
             Message::StreamVolume(publisher, percent) => {
-                self.streaming.set_volume(publisher, percent)
+                self.server_mut().streaming.set_volume(publisher, percent)
             }
-            Message::ToggleStreamStats => self.streaming.show_stats = !self.streaming.show_stats,
+            Message::ToggleStreamStats => {
+                self.server_mut().streaming.show_stats = !self.server().streaming.show_stats
+            }
             Message::OpenShare => {
-                if self.connected && !self.loopback && !self.stopping && self.tab == Tab::Home {
-                    self.streaming.share_open = true;
-                    if self.streaming.sharing.sources.is_empty() {
+                if self.live() && self.tab == Tab::Home {
+                    self.server_mut().streaming.share_open = true;
+                    if self.server().streaming.sharing.sources.is_empty() {
                         return self.update(Message::RefreshShareSources);
                     }
                 }
             }
             Message::CloseShare => {
-                self.streaming.share_open = false;
+                self.server_mut().streaming.share_open = false;
                 self.ui.open = None;
             }
             Message::ShareQuality(quality) => {
-                if !self.streaming.sharing.status.active && quality.validate().is_ok() {
-                    self.streaming.sharing.quality = quality;
+                if !self.server().streaming.sharing.status.active && quality.validate().is_ok() {
+                    self.server_mut().streaming.sharing.quality = quality;
                 }
             }
             Message::ShareResolution(resolution) => {
                 let quality = streaming::publishing::Quality {
                     resolution,
-                    ..self.streaming.sharing.quality
+                    ..self.server().streaming.sharing.quality
                 };
                 return self.update(Message::ShareQuality(quality));
             }
             Message::ShareFrameRate(frame_rate) => {
                 let quality = streaming::publishing::Quality {
                     frame_rate,
-                    ..self.streaming.sharing.quality
+                    ..self.server().streaming.sharing.quality
                 };
                 return self.update(Message::ShareQuality(quality));
             }
             Message::ShareVideoBitrate(video_kbps) => {
                 let quality = streaming::publishing::Quality {
                     video_kbps,
-                    ..self.streaming.sharing.quality
+                    ..self.server().streaming.sharing.quality
                 };
                 return self.update(Message::ShareQuality(quality));
             }
             Message::ShareAudioBitrate(audio_kbps) => {
                 let quality = streaming::publishing::Quality {
                     audio_kbps,
-                    ..self.streaming.sharing.quality
+                    ..self.server().streaming.sharing.quality
                 };
                 return self.update(Message::ShareQuality(quality));
             }
             Message::ShareAccess(access) => {
-                if !self.streaming.sharing.status.active {
-                    self.streaming.sharing.access = access;
+                if !self.server().streaming.sharing.status.active {
+                    self.server_mut().streaming.sharing.access = access;
                 }
             }
             Message::RefreshShareSources => {
-                if !self.streaming.sharing.status.active && !self.streaming.sharing.loading {
-                    self.streaming.sharing.loading = true;
-                    self.alerts.begin(Source::StreamPublish);
+                if !self.server().streaming.sharing.status.active
+                    && !self.server().streaming.sharing.loading
+                {
+                    self.server_mut().streaming.sharing.loading = true;
+                    self.begin_alert(Source::StreamPublish);
                     return Task::perform(
                         async {
                             tokio::task::spawn_blocking(streaming::share_sources)
@@ -1613,64 +1896,66 @@ impl App {
                 }
             }
             Message::ShareSources(result) => {
-                self.streaming.sharing.loading = false;
+                self.server_mut().streaming.sharing.loading = false;
                 match result {
                     Ok(sources) => {
                         if self
+                            .server()
                             .streaming
                             .sharing
                             .selected
                             .as_ref()
                             .is_some_and(|selected| !sources.contains(selected))
                         {
-                            self.streaming.sharing.selected = None;
+                            self.server_mut().streaming.sharing.selected = None;
                         }
                         if sources.len() == 1 {
-                            self.streaming.sharing.selected = sources.first().cloned();
+                            self.server_mut().streaming.sharing.selected = sources.first().cloned();
                         }
-                        self.streaming.sharing.sources = sources;
+                        self.server_mut().streaming.sharing.sources = sources;
                     }
-                    Err(error) => self.alerts.raise(Source::StreamPublish, error),
+                    Err(error) => self.raise_active(Source::StreamPublish, error),
                 }
             }
             Message::ShareSource(source) => {
-                if !self.streaming.sharing.status.active {
+                if !self.server().streaming.sharing.status.active {
                     // A camera share starts without system sound; voice chat remains separate.
                     if source.kind.is_camera() {
-                        self.streaming.sharing.audio = false;
+                        self.server_mut().streaming.sharing.audio = false;
                     }
-                    self.streaming.sharing.selected = Some(source);
+                    self.server_mut().streaming.sharing.selected = Some(source);
                 }
             }
             Message::ShareAudio(audio) => {
-                if !self.streaming.sharing.status.active {
-                    self.streaming.sharing.audio = audio;
+                if !self.server().streaming.sharing.status.active {
+                    self.server_mut().streaming.sharing.audio = audio;
                 }
             }
             Message::ShareAudioOutput(device) => {
-                if !self.streaming.sharing.status.active {
-                    self.streaming.sharing.audio_device = Some(device);
+                if !self.server().streaming.sharing.status.active {
+                    self.server_mut().streaming.sharing.audio_device = Some(device);
                 }
             }
             Message::StartSharing => {
-                if self.connected
-                    && !self.streaming.sharing.status.active
-                    && !self.streaming.sharing.loading
+                if self.server().connected
+                    && !self.server().streaming.sharing.status.active
+                    && !self.server().streaming.sharing.loading
                     && !self.loopback
-                    && !self.stopping
+                    && !self.server().stopping
                     && self.tab == Tab::Home
-                    && let Some(source) = self.streaming.sharing.selected.clone()
+                    && let Some(source) = self.server().streaming.sharing.selected.clone()
                 {
-                    self.alerts.begin(Source::StreamPublish);
-                    let audio = if self.streaming.sharing.audio {
+                    self.begin_alert(Source::StreamPublish);
+                    let audio = if self.server().streaming.sharing.audio {
                         let Some(device) = self
+                            .server()
                             .streaming
                             .sharing
                             .audio_device
                             .clone()
                             .or_else(|| self.devices.output.clone())
                         else {
-                            self.alerts.raise(
+                            self.raise_active(
                                 Source::StreamPublish,
                                 "Choose an output device for system audio",
                             );
@@ -1684,17 +1969,17 @@ impl App {
                         streaming::publishing::Options {
                             source,
                             audio,
-                            quality: self.streaming.sharing.quality,
-                            access: self.streaming.sharing.access,
+                            quality: self.server().streaming.sharing.quality,
+                            access: self.server().streaming.sharing.access,
                         },
                     )) {
-                        self.streaming.share_open = false;
+                        self.server_mut().streaming.share_open = false;
                         self.ui.open = None;
                     }
                 }
             }
             Message::StopSharing => {
-                self.streaming.sharing.stop_capture();
+                self.server().streaming.sharing.stop_capture();
                 self.command(client::Command::StopSharing);
             }
             Message::DecideViewer(id, allow) => {
@@ -1731,9 +2016,11 @@ impl App {
                 self.refresh_visible_permissions();
                 self.process_usage = self.process_monitor.sample();
                 let now = Instant::now();
-                if self.connected {
-                    self.connection_history.advance(now);
-                    self.client_history.advance(now);
+                for session in &mut self.sessions {
+                    if session.connected {
+                        session.connection_history.advance(now);
+                        session.client_history.advance(now);
+                    }
                 }
                 self.cpu_history
                     .push(now, self.process_usage.cpu_percent.map(f64::from));
@@ -1742,11 +2029,17 @@ impl App {
                     self.process_usage.memory_bytes.map(|bytes| bytes as f64),
                 );
                 self.heap_usage = memory::snapshot();
+                let (upload, download) = self.sessions.iter().fold((0.0, 0.0), |sum, session| {
+                    (
+                        sum.0 + session.network_usage.upload_per_second,
+                        sum.1 + session.network_usage.download_per_second,
+                    )
+                });
                 profiler::record_counters(
                     self.process_usage.memory_bytes,
                     self.audio_buffer_bytes,
-                    self.network_usage.upload_per_second,
-                    self.network_usage.download_per_second,
+                    upload,
+                    download,
                 );
                 if self
                     .recording
@@ -1757,36 +2050,35 @@ impl App {
                 }
             }
             Message::Address(value) => {
-                if self.session.is_none() {
+                if self.idle() {
                     if self.address != value {
                         self.password.clear();
-                        self.channel_password.clear();
                     }
                     self.address = value;
                     self.settings_message = None;
                 }
             }
             Message::Nickname(value) => {
-                if self.session.is_none() {
+                if self.idle() {
                     self.nickname = value;
                     self.settings_message = None;
                 }
             }
             Message::Password(value) => self.password = value,
-            Message::ChannelPassword(value) => self.channel_password = value,
+            Message::ChannelPassword(value) => self.server_mut().channel_password = value,
             Message::Input(value) => {
-                if self.session.is_none() {
+                if self.idle() {
                     self.input = Some(value);
                 }
             }
             Message::Output(value) => {
-                if self.session.is_none() {
+                if self.idle() {
                     self.output = Some(value);
                 }
             }
             Message::Refresh => {
                 self.alerts.begin(Source::Audio);
-                if self.session.is_none() {
+                if self.idle() {
                     match audio::devices() {
                         Ok(devices) => {
                             if !self
@@ -1813,17 +2105,17 @@ impl App {
                 }
             }
             Message::Connect(index) => {
-                // One session at a time: a running one is cancelled or disconnected first.
-                if self.onboarding.is_some() || self.session.is_some() {
+                if self.onboarding.is_some() || self.loopback {
                     return Task::none();
                 }
                 let Some(server) = self.servers.get(index) else {
                     return Task::none();
                 };
                 let address = server.address.trim().to_owned();
-                if self.address.trim() != address {
-                    self.channel_password.clear();
+                if self.session_at(&address).is_some() {
+                    return Task::none();
                 }
+                self.ui.server_picker = false;
                 self.password = self
                     .server_passwords
                     .get(&address)
@@ -1838,6 +2130,7 @@ impl App {
                 return self.start(false);
             }
             Message::AddServer => {
+                self.ui.server_picker = false;
                 if self.onboarding.is_none() {
                     if self.settings_page.is_none() {
                         self.open_settings(SettingsPage::Server);
@@ -1884,66 +2177,87 @@ impl App {
                 return self.start(true);
             }
             Message::Stop => {
-                self.streaming.sharing.stop_capture();
-                self.command(client::Command::Stop);
-                self.stopping = true;
-                self.status = "Disconnecting…".into();
+                if let Some(id) = self.active {
+                    self.stop_session(id);
+                }
             }
+            Message::StopServer(id) => self.stop_session(id),
+            Message::SwitchServer(id) => {
+                if self.session(id).is_some_and(|session| !session.stopping) {
+                    for session in &mut self.sessions {
+                        session.activate_on_connect = false;
+                    }
+                    self.activate(Some(id));
+                }
+            }
+            Message::OpenServerPicker => {
+                if self.onboarding.is_none() && !self.loopback {
+                    self.ui.server_picker = true;
+                }
+            }
+            Message::CloseServerPicker => self.ui.server_picker = false,
             Message::Mute => self.toggle_mute(),
             Message::Deafen => self.toggle_deafen(),
             Message::Join(id) => {
                 if self.can_request_join(id) {
-                    self.alerts.begin(Source::Join);
-                    self.password_error = None;
-                    self.channel_password.clear();
+                    self.begin_alert(Source::Join);
+                    self.server_mut().password_error = None;
+                    self.server_mut().channel_password.clear();
                     if self
+                        .server()
                         .state
                         .channels
                         .iter()
                         .any(|channel| channel.id == id && channel.has_password)
                     {
-                        self.password_channel = Some(id);
+                        self.server_mut().password_channel = Some(id);
                         return Task::Focus(ui::Field::ChannelPassword);
                     }
                     self.command(client::Command::Join(id, String::new()));
                 }
             }
             Message::SubmitChannelPassword => {
-                if let Some(id) = self.password_channel
+                if let Some(id) = self.server().password_channel
                     && self.can_request_join(id)
-                    && self.command(client::Command::Join(id, self.channel_password.clone()))
+                    && self.command(client::Command::Join(
+                        id,
+                        self.server().channel_password.clone(),
+                    ))
                 {
-                    self.channel_secret = Some((id, self.channel_password.clone()));
-                    self.password_error = None;
-                    self.password_channel = None;
-                    self.channel_password.clear();
+                    self.server_mut().channel_secret =
+                        Some((id, self.server().channel_password.clone()));
+                    self.server_mut().password_error = None;
+                    self.server_mut().password_channel = None;
+                    self.server_mut().channel_password.clear();
                 }
             }
             Message::CancelChannelPassword => {
-                self.password_channel = None;
-                self.password_error = None;
-                self.channel_password.clear();
+                self.server_mut().password_channel = None;
+                self.server_mut().password_error = None;
+                self.server_mut().channel_password.clear();
             }
             Message::ToggleFooter => self.set_footer_hidden(!self.footer_hidden),
             Message::Updater(event) => return self.update_software(event),
             Message::Resume => return self.resume(),
             Message::SelectMember(id, toggle) => {
                 if toggle {
-                    if !self.selected_members.remove(&id) {
-                        self.selected_members.insert(id);
+                    if !self.server_mut().selected_members.remove(&id) {
+                        self.server_mut().selected_members.insert(id);
                     }
-                } else if self.selected_members.len() == 1 && self.selected_members.contains(&id) {
-                    self.selected_members.clear();
+                } else if self.server().selected_members.len() == 1
+                    && self.server().selected_members.contains(&id)
+                {
+                    self.server_mut().selected_members.clear();
                 } else {
-                    self.selected_members = BTreeSet::from([id]);
+                    self.server_mut().selected_members = BTreeSet::from([id]);
                 }
             }
-            Message::ClearSelection => self.selected_members.clear(),
+            Message::ClearSelection => self.server_mut().selected_members.clear(),
             Message::MoveMembers(ids, channel) => {
-                if !(self.connected && !self.loopback && !self.stopping) {
+                if !(self.live()) {
                     return Task::none();
                 }
-                self.selected_members.clear();
+                self.server_mut().selected_members.clear();
                 let own = self.own_id();
                 let others: Vec<u16> = ids
                     .iter()
@@ -1951,7 +2265,7 @@ impl App {
                     .filter(|id| Some(*id) != own && self.member_channel(*id) != Some(channel))
                     .collect();
                 if !others.is_empty() {
-                    self.alerts.begin(Source::Move);
+                    self.begin_alert(Source::Move);
                     self.command(client::Command::Move(others, channel));
                 }
                 if own.is_some_and(|own| ids.contains(&own)) {
@@ -1960,10 +2274,10 @@ impl App {
             }
             Message::OpenPoke(id) => {
                 if let Some(member) = self.find_member(id).filter(|member| !member.is_self)
-                    && self.connected
+                    && self.server().connected
                     && !self.loopback
                 {
-                    self.poke = Some(PokeDraft {
+                    self.server_mut().poke = Some(PokeDraft {
                         id,
                         name: member.name.clone(),
                         message: String::new(),
@@ -1972,20 +2286,20 @@ impl App {
                 }
             }
             Message::PokeText(value) => {
-                if let Some(draft) = &mut self.poke {
+                if let Some(draft) = &mut self.server_mut().poke {
                     draft.message = value.chars().take(100).collect();
                 }
             }
             Message::SubmitPoke => {
-                if let Some(draft) = self.poke.take() {
-                    self.alerts.begin(Source::Poke);
+                if let Some(draft) = self.server_mut().poke.take() {
+                    self.begin_alert(Source::Poke);
                     self.command(client::Command::Poke(draft.id, draft.message));
                 }
             }
-            Message::CancelPoke => self.poke = None,
+            Message::CancelPoke => self.server_mut().poke = None,
             Message::DismissPoke => {
-                if !self.pokes.is_empty() {
-                    self.pokes.remove(0);
+                if !self.server().pokes.is_empty() {
+                    self.server_mut().pokes.remove(0);
                 }
             }
             Message::Install => {
@@ -2026,7 +2340,7 @@ impl App {
                 }
             }
             Message::RedoSetup => {
-                if self.session.is_none() && self.onboarding.is_none() {
+                if self.idle() && self.onboarding.is_none() {
                     self.close_settings();
                     self.tab = Tab::Home;
                     self.redoing_setup = true;
@@ -2046,7 +2360,7 @@ impl App {
             }
             Message::CancelSetup => {
                 if self.redoing_setup
-                    && self.session.is_none()
+                    && self.idle()
                     && self.permissions.pending.is_none()
                     && let Some(saved) = self.saved.clone()
                 {
@@ -2063,264 +2377,300 @@ impl App {
                 self.subscribe_all.fetch_xor(true, Ordering::Relaxed);
             }
             Message::ToggleChannel(id) => {
-                if !self.collapsed_channels.remove(&id) {
-                    self.collapsed_channels.insert(id);
+                if !self.server_mut().collapsed_channels.remove(&id) {
+                    self.server_mut().collapsed_channels.insert(id);
                 }
             }
             Message::ToggleClient(id) => {
-                if self.connected
+                if self.server().connected
                     && !self.loopback
-                    && !self.stopping
+                    && !self.server().stopping
                     && self
+                        .server()
                         .state
                         .current_members()
                         .iter()
                         .any(|member| member.id == id)
                 {
-                    self.select_client((self.expanded_client != Some(id)).then_some(id));
+                    self.select_client((self.server().expanded_client != Some(id)).then_some(id));
                 }
             }
             Message::Close => {
-                self.streaming.sharing.stop_capture();
-                if self.session.is_none() {
+                if self.idle() {
                     return Task::Exit;
                 }
                 self.closing = true;
-                self.command(client::Command::Stop);
-                self.stopping = true;
+                let ids: Vec<_> = self.sessions.iter().map(|session| session.id).collect();
+                for id in ids {
+                    if let Some(session) = self.session(id) {
+                        session.streaming.sharing.stop_capture();
+                    }
+                    self.send_to(id, client::Command::Stop);
+                    if let Some(session) = self.session_mut(id) {
+                        session.stopping = true;
+                    }
+                }
             }
-            Message::Backend(event) => match event {
-                client::Event::Status(status) => {
-                    self.streaming.reset();
-                    self.clear_client_details();
-                    self.client_usage.clear();
-                    self.talking.clear();
-                    self.connection_history = ConnectionHistory::new();
-                    self.password_channel = None;
-                    self.channel_password.clear();
-                    self.status = status;
-                    self.connected = false;
-                    self.network_usage.stop();
-                    self.connection_usage = usage::ConnectionUsage::default();
+            Message::Backend(id, event) => return self.backend(id, event),
+            Message::Alert(source, detail) => self.alerts.raise(source, detail),
+        }
+        Task::none()
+    }
+
+    /// One server's event. Everything here belongs to that server, active or not; only the
+    /// marked places also touch what the window is showing.
+    fn backend(&mut self, id: hub::SessionId, event: client::Event) -> Task {
+        let Some(index) = self.sessions.iter().position(|session| session.id == id) else {
+            return Task::none();
+        };
+        let loopback = self.loopback;
+        let active = self.active == Some(id);
+        let session = &mut self.sessions[index];
+        match event {
+            client::Event::Status(status) => {
+                session.streaming.reset();
+                session.clear_client_details();
+                session.client_usage.clear();
+                session.talking.clear();
+                session.connection_history = ConnectionHistory::new();
+                session.password_channel = None;
+                session.channel_password.clear();
+                session.status = status;
+                session.connected = false;
+                session.network_usage.stop();
+                session.connection_usage = usage::ConnectionUsage::default();
+            }
+            client::Event::Connected(detail) => {
+                session.connected = true;
+                session.detail = detail;
+                session.status = if loopback {
+                    "Local microphone test — only you can hear this"
+                } else {
+                    "Connected — microphone starts muted"
                 }
-                client::Event::Connected(detail) => {
-                    self.connected = true;
-                    // A new session starts muted; restore the microphone as it was.
-                    if let Some(resume) = self.resume.as_mut() {
-                        let (muted, deafened) = (resume.muted, resume.deafened);
-                        (resume.muted, resume.deafened) = (true, false);
-                        if !self.loopback && !muted {
-                            self.toggle_mute();
-                        }
-                        if !self.loopback && deafened {
-                            self.toggle_deafen();
-                        }
+                .into();
+                let take_over = session.activate_on_connect;
+                // A new session starts muted; restore the microphone as it was.
+                let restored = session.resume.as_mut().map(|resume| {
+                    let state = (resume.muted, resume.deafened);
+                    (resume.muted, resume.deafened) = (true, false);
+                    state
+                });
+                self.alerts.recover_in(id.0, Source::Connection);
+                self.alerts.recover(Source::Audio);
+                if let Some((muted, deafened)) = restored
+                    && !loopback
+                {
+                    if !muted {
+                        self.set_muted(id, false);
                     }
-                    self.alerts.recover(Source::Connection);
-                    self.alerts.recover(Source::Audio);
-                    self.detail = detail;
-                    self.status = if self.loopback {
-                        "Local microphone test — only you can hear this"
-                    } else {
-                        "Connected — microphone starts muted"
+                    if deafened {
+                        self.set_deafened(id, true);
                     }
-                    .into();
                 }
-                client::Event::State(state) => {
-                    let channel_changed = self.state.current.as_ref().map(|channel| channel.id)
-                        != state.current.as_ref().map(|channel| channel.id);
-                    if channel_changed {
-                        self.client_usage.clear();
-                    } else {
-                        self.client_usage.retain(|id, _| {
-                            state
-                                .current_members()
-                                .iter()
-                                .any(|member| member.id == *id && !member.is_self)
-                        });
-                    }
-                    if self.expanded_client.is_some_and(|id| {
-                        channel_changed
-                            || !state.current_members().iter().any(|member| member.id == id)
-                    }) {
-                        self.clear_client_details();
-                    }
-                    self.collapsed_channels
-                        .retain(|id| state.channels.iter().any(|channel| channel.id == *id));
-                    let present = |id: &u16| {
+                if take_over {
+                    self.activate(Some(id));
+                }
+            }
+            client::Event::State(state) => {
+                let channel_changed = session.state.current.as_ref().map(|channel| channel.id)
+                    != state.current.as_ref().map(|channel| channel.id);
+                if channel_changed {
+                    session.client_usage.clear();
+                } else {
+                    session.client_usage.retain(|id, _| {
                         state
-                            .channels
+                            .current_members()
                             .iter()
-                            .any(|channel| channel.members.iter().any(|member| member.id == *id))
-                    };
-                    self.selected_members.retain(present);
-                    if self.poke.as_ref().is_some_and(|draft| !present(&draft.id)) {
-                        self.poke = None;
-                    }
-                    self.state = state;
-                    if self.connected
-                        && !self.state.channels.is_empty()
-                        // The channel list arrives before the server says where you are, and
-                        // asking for the channel you were put in is refused with an error.
-                        && self.state.current.is_some()
-                        && let Some(resume) = self.resume.take()
-                        && let Some(id) = resume.channel
-                        && self.state.current.as_ref().map(|channel| channel.id) != Some(id)
-                        && self.can_request_join(id)
-                    {
-                        self.alerts.begin(Source::Join);
-                        if !resume.channel_password.is_empty() {
-                            self.channel_secret = Some((id, resume.channel_password.clone()));
-                        }
-                        self.command(client::Command::Join(id, resume.channel_password));
-                    }
-                    if self
-                        .password_channel
-                        .is_some_and(|id| !self.can_request_join(id))
-                    {
-                        self.password_channel = None;
-                        self.channel_password.clear();
-                    }
+                            .any(|member| member.id == *id && !member.is_self)
+                    });
                 }
-                client::Event::Talking(talking) => self.talking = talking,
-                client::Event::Poked { from, message } => {
-                    notify::show(
-                        &format!("{from} poked you"),
-                        if message.is_empty() {
-                            "Open Flexspeak to reply."
-                        } else {
-                            &message
-                        },
-                    );
-                    if self.pokes.len() >= 10 {
-                        self.pokes.remove(0);
-                    }
-                    self.pokes.push(Poke { from, message });
+                if session.expanded_client.is_some_and(|id| {
+                    channel_changed || !state.current_members().iter().any(|member| member.id == id)
+                }) {
+                    session.clear_client_details();
                 }
-                client::Event::Done(source) => self.alerts.recover(source),
-                client::Event::Streaming(event) => {
-                    match &event {
-                        streaming::Event::State { phase, detail, .. } => match phase {
-                            streaming::Phase::Failed => {
-                                self.alerts.raise(Source::StreamWatch, detail)
-                            }
-                            streaming::Phase::Receiving => self.alerts.recover(Source::StreamWatch),
-                            _ => {}
-                        },
-                        streaming::Event::Notice(detail) if !detail.is_empty() => {
-                            self.alerts.raise(Source::StreamDiscovery, detail)
+                session
+                    .collapsed_channels
+                    .retain(|id| state.channels.iter().any(|channel| channel.id == *id));
+                let present = |id: &u16| {
+                    state
+                        .channels
+                        .iter()
+                        .any(|channel| channel.members.iter().any(|member| member.id == *id))
+                };
+                session.selected_members.retain(present);
+                if session
+                    .poke
+                    .as_ref()
+                    .is_some_and(|draft| !present(&draft.id))
+                {
+                    session.poke = None;
+                }
+                session.state = state;
+                let mut join = None;
+                if session.connected
+                    && !session.state.channels.is_empty()
+                    // The channel list arrives before the server says where you are, and
+                    // asking for the channel you were put in is refused with an error.
+                    && session.state.current.is_some()
+                    && let Some(resume) = session.resume.take()
+                    && let Some(channel) = resume.channel
+                    && session.state.current.as_ref().map(|channel| channel.id) != Some(channel)
+                    && session.can_request_join(loopback, channel)
+                {
+                    if !resume.channel_password.is_empty() {
+                        session.channel_secret = Some((channel, resume.channel_password.clone()));
+                    }
+                    join = Some((channel, resume.channel_password));
+                }
+                if session
+                    .password_channel
+                    .is_some_and(|channel| !session.can_request_join(loopback, channel))
+                {
+                    session.password_channel = None;
+                    session.channel_password.clear();
+                }
+                if let Some((channel, password)) = join {
+                    self.alerts.begin_in(id.0, Source::Join);
+                    self.send_to(id, client::Command::Join(channel, password));
+                }
+            }
+            client::Event::Talking(talking) => session.talking = talking,
+            client::Event::Poked { from, message } => {
+                notify::show(
+                    &format!("{from} poked you"),
+                    if message.is_empty() {
+                        "Open Flexspeak to reply."
+                    } else {
+                        &message
+                    },
+                );
+                if session.pokes.len() >= 10 {
+                    session.pokes.remove(0);
+                }
+                session.pokes.push(Poke { from, message });
+                if !active {
+                    session.unseen_pokes = session.unseen_pokes.saturating_add(1);
+                }
+            }
+            client::Event::Done(source) => self.alerts.recover_in(id.0, source),
+            client::Event::Streaming(event) => {
+                session.streaming.update(event.clone());
+                match &event {
+                    streaming::Event::State { phase, detail, .. } => match phase {
+                        streaming::Phase::Failed => self.raise_for(id, Source::StreamWatch, detail),
+                        streaming::Phase::Receiving => {
+                            self.alerts.recover_in(id.0, Source::StreamWatch)
                         }
                         _ => {}
+                    },
+                    streaming::Event::Notice(detail) if !detail.is_empty() => {
+                        self.raise_for(id, Source::StreamDiscovery, detail)
                     }
-                    self.streaming.update(event);
+                    _ => {}
                 }
-                client::Event::Transmitting(value) => self.transmitting = value,
-                client::Event::Meter {
-                    level,
-                    sent,
-                    received,
-                    audio_buffer_bytes,
-                } => {
+            }
+            client::Event::Transmitting(value) => {
+                if active {
+                    self.transmitting = value;
+                }
+            }
+            client::Event::Meter {
+                level,
+                sent,
+                received,
+                audio_buffer_bytes,
+            } => {
+                session.sent = sent;
+                session.received = received;
+                if active {
                     self.level = level;
-                    self.sent = sent;
-                    self.received = received;
                     self.audio_buffer_bytes = audio_buffer_bytes;
                 }
-                client::Event::Warning { source, detail } => self.alerts.raise(source, detail),
-                client::Event::Recovered(source) => self.alerts.recover(source),
-                client::Event::Controls { confirmed, pending } => {
-                    self.server_controls = confirmed;
-                    self.controls_pending = pending;
-                }
-                client::Event::ChannelPasswordRequired(id) => {
-                    if self.can_request_join(id) {
-                        self.password_channel = Some(id);
-                        self.channel_password.clear();
-                        self.password_error =
-                            Some("The channel password was missing or incorrect.".into());
+            }
+            client::Event::Warning { source, detail } => self.raise_for(id, source, detail),
+            client::Event::Recovered(source) => match source.server_scoped() {
+                true => self.alerts.recover_in(id.0, source),
+                false => self.alerts.recover(source),
+            },
+            client::Event::Controls { confirmed, pending } => {
+                session.server_controls = confirmed;
+                session.controls_pending = pending;
+            }
+            client::Event::ChannelPasswordRequired(channel) => {
+                if session.can_request_join(loopback, channel) {
+                    session.password_channel = Some(channel);
+                    session.channel_password.clear();
+                    session.password_error =
+                        Some("The channel password was missing or incorrect.".into());
+                    if active {
                         return Task::Focus(ui::Field::ChannelPassword);
                     }
                 }
-                client::Event::Usage {
-                    network,
-                    connection,
-                } => {
-                    self.network_usage = network;
-                    self.connection_usage = connection;
-                    if self.connected && !self.loopback {
-                        self.connection_history.push(Instant::now(), connection);
-                    }
+            }
+            client::Event::Usage {
+                network,
+                connection,
+            } => {
+                session.network_usage = network;
+                session.connection_usage = connection;
+                if session.connected && !loopback {
+                    session.connection_history.push(Instant::now(), connection);
                 }
-                client::Event::ClientUsage { id, result } => {
-                    if self.connected
-                        && self
-                            .state
-                            .current_members()
-                            .iter()
-                            .any(|member| member.id == id && !member.is_self)
+            }
+            client::Event::ClientUsage { id: client, result } => {
+                if session.connected
+                    && session
+                        .state
+                        .current_members()
+                        .iter()
+                        .any(|member| member.id == client && !member.is_self)
+                {
+                    if session.expanded_client == Some(client)
+                        && let Ok(sample) = result
                     {
-                        if self.expanded_client == Some(id)
-                            && let Ok(sample) = result
-                        {
-                            let now = Instant::now();
-                            self.client_history.push(now, sample.sample(now));
-                        }
-                        self.client_usage.insert(id, result);
+                        let now = Instant::now();
+                        session.client_history.push(now, sample.sample(now));
                     }
+                    session.client_usage.insert(client, result);
                 }
-                client::Event::Stopped(error) => {
+            }
+            client::Event::Stopped(error) => {
+                // Name the server before it goes, so its alert isn't taken for the active one's.
+                if let Some((source, detail)) = error {
+                    self.alerts.close_server(id.0);
+                    self.raise_for(id, source, detail);
+                } else {
+                    self.alerts.close_server(id.0);
+                }
+                if active {
+                    let next = self.next_active(id);
+                    self.activate(next);
+                }
+                self.sessions.remove(index);
+                if self.sessions.is_empty() {
                     self.ptt.store(false, Ordering::Release);
                     self.transmitting = false;
-                    self.streaming.reset();
-                    self.clear_client_details();
-                    self.client_usage.clear();
-                    self.talking.clear();
-                    self.connection_history = ConnectionHistory::new();
-                    self.password_channel = None;
-                    self.channel_password.clear();
-                    self.selected_members.clear();
-                    self.poke = None;
-                    self.session = None;
-                    self.resume = None;
-                    self.connected = false;
-                    self.stopping = false;
                     self.level = 0.0;
                     self.audio_buffer_bytes = 0;
-                    self.detail.clear();
-                    self.status = "Disconnected".into();
-                    self.network_usage.stop();
-                    self.connection_usage = usage::ConnectionUsage::default();
-                    self.server_controls = None;
-                    self.controls_pending = false;
-                    for source in [
-                        Source::Controls,
-                        Source::Subscription,
-                        Source::Flood,
-                        Source::Join,
-                    ] {
-                        self.alerts.recover(source);
-                    }
-                    if let Some((source, detail)) = error {
-                        self.alerts.raise(source, detail);
-                    }
+                    self.loopback = false;
+                    self.resume = None;
+                    self.home.status = "Disconnected".into();
                     if self.closing {
                         return Task::Exit;
                     }
                 }
-            },
+            }
         }
         Task::none()
     }
 
     // ---- view-independent helpers ----
-    fn clear_client_details(&mut self) {
-        self.expanded_client = None;
-        self.client_history = ConnectionHistory::new();
-    }
-
     fn select_client(&mut self, id: Option<u16>) {
         if id.is_some_and(|id| {
             !self
+                .server()
                 .state
                 .current_members()
                 .iter()
@@ -2328,33 +2678,37 @@ impl App {
         }) {
             return;
         }
-        self.clear_client_details();
-        self.expanded_client = id;
+        self.server_mut().clear_client_details();
+        self.server_mut().expanded_client = id;
     }
     fn footer_connection_status(&self) -> (usage::Health, &'static str, String) {
-        if self.connected && !self.loopback && !self.stopping && self.state.current.is_some() {
-            let health = self.connection_usage.health();
+        if self.live() && self.server().state.current.is_some() {
+            let health = self.server().connection_usage.health();
             let label = if health == usage::Health::Unknown {
                 "Unknown"
             } else {
                 health.label()
             };
-            (health, label, self.connection_usage.health_tooltip())
+            (
+                health,
+                label,
+                self.server().connection_usage.health_tooltip(),
+            )
         } else {
-            let label = if self.stopping {
+            let label = if self.server().stopping {
                 "Stopping"
-            } else if self.loopback && self.connected {
+            } else if self.loopback && self.server().connected {
                 "Local test"
-            } else if self.session.is_some() {
+            } else if !self.idle() {
                 "Connecting"
             } else {
                 "Offline"
             };
-            (usage::Health::Unknown, label, self.status.clone())
+            (usage::Health::Unknown, label, self.server().status.clone())
         }
     }
     fn microphone_status(&self) -> &'static str {
-        if !self.connected || self.stopping {
+        if !self.server().connected || self.server().stopping {
             "Inactive"
         } else if self.loopback {
             match (self.transmission.mode, self.transmitting) {
@@ -2362,11 +2716,11 @@ impl App {
                 (transmission::Mode::VoiceActivation, false) => "Local test: waiting for speech",
                 _ => "Local test only",
             }
-        } else if self.deafened {
+        } else if self.server().deafened {
             "Muted (deafened)"
-        } else if self.muted {
+        } else if self.server().muted {
             "Muted"
-        } else if !self.state.can_talk {
+        } else if !self.server().state.can_talk {
             "Blocked by server"
         } else {
             match (self.transmission.mode, self.transmitting) {
@@ -2379,9 +2733,12 @@ impl App {
     }
 
     fn microphone_icon(&self) -> Icon {
-        if self.connected
-            && !self.stopping
-            && (self.loopback || (!self.muted && !self.deafened && self.state.can_talk))
+        if self.server().connected
+            && !self.server().stopping
+            && (self.loopback
+                || (!self.server().muted
+                    && !self.server().deafened
+                    && self.server().state.can_talk))
         {
             Icon::Mic
         } else {
@@ -2390,7 +2747,7 @@ impl App {
     }
 
     fn playback_icon(&self) -> Icon {
-        if self.deafened {
+        if self.server().deafened {
             Icon::HeadphoneOff
         } else {
             Icon::Headphones
@@ -2406,36 +2763,27 @@ impl App {
     }
 
     fn can_request_join(&self, id: u64) -> bool {
-        self.connected
-            && !self.loopback
-            && !self.stopping
-            && self
-                .state
-                .current
-                .as_ref()
-                .is_none_or(|current| current.id != id)
-            && self
-                .state
-                .channels
-                .iter()
-                .any(|channel| channel.id == id && channel.join_access.can_request())
+        self.server().can_request_join(self.loopback, id)
     }
     fn find_member(&self, id: u16) -> Option<&client::Member> {
-        self.state
+        self.server()
+            .state
             .channels
             .iter()
             .flat_map(|channel| &channel.members)
             .find(|member| member.id == id)
     }
     fn member_channel(&self, id: u16) -> Option<u64> {
-        self.state
+        self.server()
+            .state
             .channels
             .iter()
             .find(|channel| channel.members.iter().any(|member| member.id == id))
             .map(|channel| channel.id)
     }
     fn own_id(&self) -> Option<u16> {
-        self.state
+        self.server()
+            .state
             .channels
             .iter()
             .flat_map(|channel| &channel.members)
@@ -2444,9 +2792,9 @@ impl App {
     }
     /// Whether these clients can be moved: the server hasn't denied it for any of them.
     fn can_move(&self, ids: &[u16]) -> bool {
-        self.connected
+        self.server().connected
             && !self.loopback
-            && !self.stopping
+            && !self.server().stopping
             && !ids.is_empty()
             && ids.iter().all(|id| {
                 self.find_member(*id)
@@ -2455,8 +2803,9 @@ impl App {
     }
     /// Whether the member is sharing a stream; the catalog only covers your current channel.
     fn is_streaming(&self, member: &client::Member) -> bool {
-        (member.is_self && self.streaming.sharing.status.live)
+        (member.is_self && self.server().streaming.sharing.status.live)
             || self
+                .server()
                 .streaming
                 .catalog
                 .iter()
@@ -2475,7 +2824,7 @@ impl App {
                 usage::Health::Unknown,
                 "Connection health is only sampled for your current channel.".into(),
             )
-        } else if let Some(Err(error)) = self.client_usage.get(&member.id) {
+        } else if let Some(Err(error)) = self.server().client_usage.get(&member.id) {
             (usage::Health::Unknown, (*error).into())
         } else {
             let quality = self.client_quality(member.id, Instant::now());
@@ -2483,7 +2832,8 @@ impl App {
         }
     }
     fn client_quality(&self, id: u16, now: Instant) -> usage::ConnectionUsage {
-        self.client_usage
+        self.server()
+            .client_usage
             .get(&id)
             .and_then(|result| result.as_ref().ok())
             .map_or_else(usage::ConnectionUsage::default, |sample| sample.sample(now))
@@ -2509,8 +2859,10 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        if let Some(sender) = &self.session {
-            let _ = sender.try_send(client::Command::Stop);
+        for session in &self.sessions {
+            if let Some(sender) = &session.session {
+                let _ = sender.try_send(client::Command::Stop);
+            }
         }
     }
 }
@@ -2518,6 +2870,30 @@ impl Drop for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Starts a pretend connection on `sender` and shows it, as `start` would.
+    fn live(app: &mut App, sender: mpsc::Sender<client::Command>) -> hub::SessionId {
+        let id = hub::SessionId(app.next_session);
+        app.next_session += 1;
+        let mut session = ServerSession::new(
+            id,
+            String::new(),
+            app.address.trim().to_owned(),
+            app.password.clone(),
+            app.home.streaming.surfaces.clone(),
+            app.home.streaming.visible.clone(),
+        );
+        session.session = Some(sender);
+        app.sessions.push(session);
+        app.activate(Some(id));
+        id
+    }
+
+    /// A pretend connection with its commands to read.
+    fn connection(app: &mut App) -> (hub::SessionId, mpsc::Receiver<client::Command>) {
+        let (sender, commands) = mpsc::channel(32);
+        (live(app, sender), commands)
+    }
 
     fn setup_fixture(name: &str) -> (App, PathBuf) {
         let root = std::env::temp_dir().join(format!(
@@ -2629,15 +3005,23 @@ mod tests {
     }
 
     #[test]
-    fn connect_uses_the_chosen_server_and_one_session_runs_at_a_time() {
+    fn each_server_connects_once_and_the_ones_in_use_are_locked() {
         let (mut app, root) = saved_fixture("connect");
         add_server(&mut app, "", "two.example", "two-password");
-        let (sender, _commands) = mpsc::channel(4);
-        // While a session runs, no other server connects and the one in use is locked.
-        app.session = Some(sender);
-        app.address = "two.example".into();
-        let _ = app.update(Message::Connect(0));
+        // Without a microphone the connection can't start, so the fields say what it would use.
+        app.input = None;
+        let _ = app.update(Message::Connect(1));
         assert_eq!(app.address, "two.example");
+        assert_eq!(app.password, "two-password");
+        let _ = app.update(Message::Connect(0));
+        assert_eq!(app.nickname, "Alex");
+        assert_eq!(app.address, "one.example");
+        assert!(app.password.is_empty());
+        // With a session on the second server, it can't be connected again or edited.
+        app.address = "two.example".into();
+        let (_id, mut commands) = connection(&mut app);
+        let _ = app.update(Message::Connect(1));
+        assert_eq!(app.sessions.len(), 1, "one session per server");
         assert!(app.server_in_use(1) && !app.server_in_use(0));
         let _ = app.update(Message::EditServer(1));
         let _ = app.update(Message::ServerAddress("elsewhere.example".into()));
@@ -2646,17 +3030,228 @@ mod tests {
         let _ = app.update(Message::RemoveServer);
         assert_eq!(app.servers.len(), 2);
         let _ = app.update(Message::CancelServer);
-        app.session = None;
-        // Each connection takes its own server's address and remembered password.
-        let _ = app.update(Message::Connect(1));
-        assert_eq!(app.address, "two.example");
-        assert_eq!(app.password, "two-password");
-        app.session = None;
-        let _ = app.update(Message::Connect(0));
-        assert_eq!(app.nickname, "Alex");
-        assert_eq!(app.address, "one.example");
-        assert!(app.password.is_empty());
+        assert!(commands.try_recv().is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    type Connection = (hub::SessionId, mpsc::Receiver<client::Command>);
+
+    fn two_servers() -> (App, Connection, Connection) {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let first = connection(&mut app);
+        app.server_mut().connected = true;
+        app.server_mut().name = "First".into();
+        let second = connection(&mut app);
+        app.server_mut().connected = true;
+        app.server_mut().name = "Second".into();
+        let _ = app.update(Message::SwitchServer(first.0));
+        assert_eq!(app.active, Some(first.0));
+        (app, first, second)
+    }
+
+    #[test]
+    fn mute_deafen_and_shortcuts_act_on_the_active_server_only() {
+        let (mut app, (first, mut first_commands), (second, mut second_commands)) = two_servers();
+        let _ = app.update(Message::Shortcut(shortcuts::Action::Mute));
+        assert!(matches!(
+            first_commands.try_recv(),
+            Ok(client::Command::Mute(false))
+        ));
+        assert!(second_commands.try_recv().is_err());
+        assert!(!app.session(first).unwrap().muted);
+        assert!(app.session(second).unwrap().muted);
+        let _ = app.update(Message::SwitchServer(second));
+        assert!(app.server().muted, "each server keeps its own mute");
+        let _ = app.update(Message::Deafen);
+        assert!(matches!(
+            second_commands.try_recv(),
+            Ok(client::Command::Deafen(true))
+        ));
+        assert!(!app.session(first).unwrap().deafened);
+    }
+
+    #[test]
+    fn a_background_error_names_its_server_and_leaves_the_active_view_alone() {
+        let (mut app, (first, _a), (second, _b)) = two_servers();
+        app.server_mut().talking = BTreeSet::from([2]);
+        let _ = app.update(Message::Backend(
+            second,
+            client::Event::Warning {
+                source: Source::Join,
+                detail: "No room".into(),
+            },
+        ));
+        let alert = app.alerts.current().unwrap();
+        assert_eq!(alert.server.as_deref(), Some("Second"));
+        assert_eq!(alert.source, Source::Join);
+        let _ = app.update(Message::DismissError);
+        // Its connection dropping takes it off the rail and nothing else.
+        let _ = app.update(Message::Backend(
+            second,
+            client::Event::Status("Lost".into()),
+        ));
+        let _ = app.update(Message::Backend(
+            second,
+            client::Event::Stopped(Some((Source::Connection, "Kicked".into()))),
+        ));
+        assert_eq!(app.active, Some(first));
+        assert_eq!(app.server().talking, BTreeSet::from([2]));
+        assert!(app.server().connected);
+        assert_eq!(
+            app.alerts.current().unwrap().server.as_deref(),
+            Some("Second")
+        );
+        assert!(app.session(second).is_none());
+        // An event from a server that has gone is dropped.
+        let _ = app.update(Message::Backend(
+            second,
+            client::Event::Status("Late".into()),
+        ));
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn a_poke_on_a_background_server_counts_and_clears_on_switch() {
+        let (mut app, (first, _a), (second, _b)) = two_servers();
+        for from in ["Mara", "Theo"] {
+            let _ = app.update(Message::Backend(
+                second,
+                client::Event::Poked {
+                    from: from.into(),
+                    message: String::new(),
+                },
+            ));
+        }
+        assert_eq!(app.session(second).unwrap().unseen_pokes, 2);
+        assert!(
+            app.server().pokes.is_empty(),
+            "no dialog over the active view"
+        );
+        let _ = app.update(Message::SwitchServer(second));
+        assert_eq!(app.session(second).unwrap().unseen_pokes, 0);
+        assert_eq!(app.server().pokes.len(), 2, "still there to read");
+        // On the active server it's the usual notification, with no marker.
+        let _ = app.update(Message::Backend(
+            second,
+            client::Event::Poked {
+                from: "Noor".into(),
+                message: String::new(),
+            },
+        ));
+        assert_eq!(app.session(second).unwrap().unseen_pokes, 0);
+        let _ = app.update(Message::SwitchServer(first));
+        assert_eq!(app.session(first).unwrap().unseen_pokes, 0);
+    }
+
+    #[test]
+    fn disconnecting_activates_another_server_or_returns_home() {
+        let (mut app, (first, mut first_commands), (second, _b)) = two_servers();
+        let _ = app.update(Message::Stop);
+        assert!(matches!(
+            first_commands.try_recv(),
+            Ok(client::Command::Stop)
+        ));
+        assert_eq!(
+            app.active,
+            Some(second),
+            "the other server takes over at once"
+        );
+        assert!(
+            app.rail_sessions().all(|session| session.id != first),
+            "one being disconnected leaves the rail"
+        );
+        let _ = app.update(Message::Backend(first, client::Event::Stopped(None)));
+        let _ = app.update(Message::Stop);
+        assert_eq!(
+            app.active,
+            Some(second),
+            "the last one stays on screen as it stops"
+        );
+        let _ = app.update(Message::Backend(second, client::Event::Stopped(None)));
+        assert_eq!(app.active, None);
+        assert!(app.idle());
+        assert_eq!(app.server().status, "Disconnected");
+    }
+
+    #[test]
+    fn quitting_waits_for_every_server_to_stop() {
+        let (mut app, (first, mut a), (second, mut b)) = two_servers();
+        assert!(matches!(app.update(Message::Close), Task::None));
+        assert!(matches!(a.try_recv(), Ok(client::Command::Stop)));
+        assert!(matches!(b.try_recv(), Ok(client::Command::Stop)));
+        assert!(matches!(
+            app.update(Message::Backend(first, client::Event::Stopped(None))),
+            Task::None
+        ));
+        assert!(matches!(
+            app.update(Message::Backend(second, client::Event::Stopped(None))),
+            Task::Exit
+        ));
+    }
+
+    #[test]
+    fn only_the_active_server_sets_what_the_mic_meter_shows() {
+        let (mut app, (first, _a), (second, _b)) = two_servers();
+        let meter = |level| client::Event::Meter {
+            level,
+            sent: 3,
+            received: 4,
+            audio_buffer_bytes: 9,
+        };
+        let _ = app.update(Message::Backend(second, meter(0.9)));
+        assert_eq!(app.level, 0.0);
+        assert_eq!(app.session(second).unwrap().sent, 3);
+        let _ = app.update(Message::Backend(first, meter(0.4)));
+        assert_eq!(app.level, 0.4);
+        let _ = app.update(Message::Backend(second, client::Event::Transmitting(true)));
+        assert!(!app.transmitting);
+    }
+
+    #[test]
+    fn a_microphone_test_and_server_connections_exclude_each_other() {
+        let (mut app, _root) = setup_fixture("exclusive");
+        let (sender, _commands) = mpsc::channel(4);
+        live(&mut app, sender);
+        app.loopback = true;
+        assert!(!app.idle());
+        // The running test holds the fields and blocks connecting.
+        let _ = app.update(Message::Connect(0));
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn switching_servers_reports_streaming_from_the_new_one() {
+        let (mut app, (first, _a), (second, _b)) = two_servers();
+        app.server_mut()
+            .streaming
+            .watching
+            .push(streaming::Watching {
+                stream: streaming::StreamInfo {
+                    id: "a".into(),
+                    publisher: 7,
+                    name: "Window".into(),
+                    viewers: 1,
+                    has_audio: false,
+                    server_relayed: false,
+                },
+                slot: 0,
+                generation: 1,
+                phase: streaming::Phase::Receiving,
+                detail: String::new(),
+                stats: streaming::Stats::default(),
+                frame: None,
+                ui_updates: 0,
+            });
+        app.server_mut().streaming.sharing.status.active = true;
+        app.server_mut().streaming.strip = streaming::Strip::Beside;
+        let _ = app.update(Message::SwitchServer(second));
+        assert!(app.server().streaming.watching.is_empty());
+        assert_eq!(app.server().streaming.strip, streaming::Strip::Beside);
+        assert!(app.session(first).unwrap().streaming.watching.is_empty());
+        assert!(
+            app.session(first).unwrap().streaming.sharing.status.active,
+            "a share in the background is left running"
+        );
     }
 
     #[test]
@@ -2689,11 +3284,12 @@ mod tests {
         assert_eq!(app.onboarding, Some(onboarding::Step::Devices));
         let _ = app.update(Message::Input(app.devices.inputs[1].clone()));
         let (sender, _) = mpsc::channel(4);
-        app.session = Some(sender);
+        live(&mut app, sender);
         app.loopback = true;
         let _ = app.update(Message::SetupNext);
         assert_eq!(app.onboarding, Some(onboarding::Step::Devices));
-        app.session = None;
+        app.sessions.clear();
+        app.active = None;
         app.loopback = false;
         let _ = app.update(Message::SetupNext);
         assert_eq!(app.onboarding, Some(onboarding::Step::Hotkeys));
@@ -2701,7 +3297,7 @@ mod tests {
         app.keybind_draft.toggle_mute = "F8".into();
         app.keybind_draft.toggle_deafen = "F9".into();
         let _ = app.update(Message::SetupNext);
-        assert!(app.onboarding.is_none() && app.session.is_none());
+        assert!(app.onboarding.is_none() && app.server().session.is_none());
         assert_eq!(app.password, "temporary-test-password");
         let saved = settings::load(&path).unwrap().unwrap();
         assert_eq!(saved.nickname, "Alex");
@@ -2853,21 +3449,27 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_update_install_records_the_session_then_closes() {
+    fn a_finished_update_install_records_every_server_then_closes() {
         let (mut app, root) = setup_fixture("resume-write");
         let path = root.join("settings.json");
         settings::save(&path, &settings::Settings::default()).unwrap();
         app.load_settings(path.clone());
-        let (sender, _commands) = mpsc::channel(8);
-        app.session = Some(sender);
-        app.connected = true;
-        app.muted = false;
-        app.password = "server secret".into();
-        app.state.current = Some(client::Channel {
+        let (first, _a) = connection(&mut app);
+        let session = app.session_mut(first).unwrap();
+        session.connected = true;
+        session.muted = false;
+        session.password = "server secret".into();
+        session.address = "ts.zirkumflex.io".into();
+        session.state.current = Some(client::Channel {
             id: 9,
             ..client::Channel::default()
         });
-        app.channel_secret = Some((9, "channel secret".into()));
+        session.channel_secret = Some((9, "channel secret".into()));
+        let (second, _b) = connection(&mut app);
+        let session = app.session_mut(second).unwrap();
+        session.connected = true;
+        session.deafened = true;
+        session.address = "two.example".into();
         app.tab = Tab::Statistics;
         app.updater = updater::Updater::new(
             updater::Build::parse_tag("v0.1.0-build.6"),
@@ -2876,32 +3478,43 @@ mod tests {
         );
         app.updater.phase = updater::Phase::Installing;
         let _ = app.update(Message::Updater(updater::Event::Installed(Ok(()))));
-        assert!(app.closing && app.stopping, "the session ends before exit");
+        assert!(
+            app.closing && app.sessions.iter().all(|session| session.stopping),
+            "every session ends before exit"
+        );
         let saved = resume::take(&resume::path(&path), SystemTime::now()).unwrap();
-        assert_eq!(saved.server_address.as_deref(), Some("ts.zirkumflex.io"));
-        assert_eq!(saved.server_password, "server secret");
-        assert_eq!(saved.channel, Some(9));
-        assert_eq!(saved.channel_password, "channel secret");
-        assert_eq!((saved.muted, saved.deafened), (false, false));
         assert_eq!(saved.page, resume::Page::Statistics);
+        assert_eq!(saved.active.as_deref(), Some("two.example"));
+        assert_eq!(saved.servers.len(), 2);
+        assert_eq!(saved.servers[0].address, "ts.zirkumflex.io");
+        assert_eq!(saved.servers[0].password, "server secret");
+        assert_eq!(saved.servers[0].channel, Some(9));
+        assert_eq!(saved.servers[0].channel_password, "channel secret");
+        assert_eq!(
+            (saved.servers[0].muted, saved.servers[0].deafened),
+            (false, false)
+        );
+        assert!(saved.servers[1].deafened);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn after_an_update_the_app_rejoins_its_channel_with_the_same_microphone() {
+    fn after_an_update_each_server_rejoins_its_channel_with_the_same_microphone() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         app.saved = Some(settings::Settings::default());
         app.servers = vec![settings::Server::new("ts.zirkumflex.io")];
-        app.resume = Some(resume::Resume {
-            page: resume::Page::Settings,
-            server_address: Some("ts.zirkumflex.io".into()),
-            server_password: "server secret".into(),
-            channel: Some(4),
-            channel_password: "channel secret".into(),
-            muted: false,
-            deafened: true,
-            ..resume::Resume::default()
-        });
+        app.resume = Some(resume::Resume::new(
+            resume::Page::Settings,
+            vec![resume::Server {
+                address: "ts.zirkumflex.io".into(),
+                password: "server secret".into(),
+                channel: Some(4),
+                channel_password: "channel secret".into(),
+                muted: false,
+                deafened: true,
+            }],
+            None,
+        ));
         // Without devices the reconnect can't start, so the resume ends there, on its page.
         let _ = app.update(Message::Resume);
         assert_eq!(app.settings_page, Some(SettingsPage::Updates));
@@ -2909,17 +3522,20 @@ mod tests {
         assert!(app.resume.is_none());
 
         // With a session under way: controls on connect, then one join once channels arrive.
-        app.resume = Some(resume::Resume {
+        let (id, mut commands) = connection(&mut app);
+        app.server_mut().resume = Some(resume::Server {
+            address: "ts.zirkumflex.io".into(),
             channel: Some(4),
             channel_password: "channel secret".into(),
             muted: false,
             deafened: true,
-            ..resume::Resume::default()
+            ..resume::Server::default()
         });
-        let (sender, mut commands) = mpsc::channel(8);
-        app.session = Some(sender);
-        let _ = app.update(Message::Backend(client::Event::Connected(String::new())));
-        assert!(!app.muted && app.deafened);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Connected(String::new()),
+        ));
+        assert!(!app.server().muted && app.server().deafened);
         assert!(matches!(
             commands.try_recv(),
             Ok(client::Command::Mute(false))
@@ -2939,17 +3555,23 @@ mod tests {
             join_access: client::JoinAccess::Allowed,
             ..client::Channel::default()
         };
-        let _ = app.update(Message::Backend(client::Event::State(client::Snapshot {
-            channels: vec![lobby.clone(), room],
-            current: Some(lobby),
-            ..client::Snapshot::default()
-        })));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::State(client::Snapshot {
+                channels: vec![lobby.clone(), room],
+                current: Some(lobby),
+                ..client::Snapshot::default()
+            }),
+        ));
         match commands.try_recv() {
             Ok(client::Command::Join(4, password)) => assert_eq!(password, "channel secret"),
             other => panic!("expected a join, got {other:?}"),
         }
-        assert!(app.resume.is_none(), "only once");
-        assert_eq!(app.channel_secret, Some((4, "channel secret".into())));
+        assert!(app.server().resume.is_none(), "only once");
+        assert_eq!(
+            app.server().channel_secret,
+            Some((4, "channel secret".into()))
+        );
     }
 
     #[test]
@@ -3015,30 +3637,39 @@ mod tests {
     #[test]
     fn resuming_waits_to_learn_your_channel_and_skips_the_join_if_you_are_there() {
         let mut app = App::with_devices(audio::Devices::default(), None);
-        app.resume = Some(resume::Resume {
-            channel: Some(1),
-            ..resume::Resume::default()
-        });
         let (sender, mut commands) = mpsc::channel(8);
-        app.session = Some(sender);
-        app.connected = true;
+        let id = live(&mut app, sender);
+        app.server_mut().resume = Some(resume::Server {
+            channel: Some(1),
+            ..resume::Server::default()
+        });
+        app.server_mut().connected = true;
         let lobby = client::Channel {
             id: 1,
             join_access: client::JoinAccess::Allowed,
             ..client::Channel::default()
         };
-        let _ = app.update(Message::Backend(client::Event::State(client::Snapshot {
-            channels: vec![lobby.clone()],
-            current: None,
-            ..client::Snapshot::default()
-        })));
-        assert!(app.resume.is_some(), "still waiting to learn the channel");
-        let _ = app.update(Message::Backend(client::Event::State(client::Snapshot {
-            channels: vec![lobby.clone()],
-            current: Some(lobby),
-            ..client::Snapshot::default()
-        })));
-        assert!(app.resume.is_none());
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::State(client::Snapshot {
+                channels: vec![lobby.clone()],
+                current: None,
+                ..client::Snapshot::default()
+            }),
+        ));
+        assert!(
+            app.server().resume.is_some(),
+            "still waiting to learn the channel"
+        );
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::State(client::Snapshot {
+                channels: vec![lobby.clone()],
+                current: Some(lobby),
+                ..client::Snapshot::default()
+            }),
+        ));
+        assert!(app.server().resume.is_none());
         assert!(commands.try_recv().is_err(), "already there, so no join");
     }
 
@@ -3046,8 +3677,8 @@ mod tests {
     fn session_fixture() -> (App, mpsc::Receiver<client::Command>) {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let (sender, commands) = mpsc::channel(16);
-        app.session = Some(sender);
-        app.connected = true;
+        live(&mut app, sender);
+        app.server_mut().connected = true;
         let person = |id: u16, name: &str, is_self: bool, can_move: Option<bool>| client::Member {
             id,
             name: name.into(),
@@ -3074,28 +3705,32 @@ mod tests {
             join_access: client::JoinAccess::Allowed,
             ..Default::default()
         };
-        app.state.channels = vec![lobby.clone(), games];
-        app.state.current = Some(lobby);
+        app.server_mut().state.channels = vec![lobby.clone(), games];
+        app.server_mut().state.current = Some(lobby);
         (app, commands)
     }
 
     #[test]
     fn clicks_select_one_member_and_command_clicks_add_to_the_selection() {
         let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
         let _ = app.update(Message::SelectMember(2, false));
-        assert_eq!(app.selected_members, BTreeSet::from([2]));
+        assert_eq!(app.server().selected_members, BTreeSet::from([2]));
         let _ = app.update(Message::SelectMember(3, true));
-        assert_eq!(app.selected_members, BTreeSet::from([2, 3]));
+        assert_eq!(app.server().selected_members, BTreeSet::from([2, 3]));
         let _ = app.update(Message::SelectMember(3, false));
-        assert_eq!(app.selected_members, BTreeSet::from([3]));
+        assert_eq!(app.server().selected_members, BTreeSet::from([3]));
         let _ = app.update(Message::SelectMember(3, false));
-        assert!(app.selected_members.is_empty(), "A second click unselects");
-        let _ = app.update(Message::SelectMember(2, true));
-        let mut state = app.state.clone();
-        state.channels[0].members.retain(|member| member.id != 2);
-        let _ = app.update(Message::Backend(client::Event::State(state)));
         assert!(
-            app.selected_members.is_empty(),
+            app.server().selected_members.is_empty(),
+            "A second click unselects"
+        );
+        let _ = app.update(Message::SelectMember(2, true));
+        let mut state = app.server().state.clone();
+        state.channels[0].members.retain(|member| member.id != 2);
+        let _ = app.update(Message::Backend(id, client::Event::State(state)));
+        assert!(
+            app.server().selected_members.is_empty(),
             "Leavers drop out of the selection"
         );
     }
@@ -3106,7 +3741,7 @@ mod tests {
         assert!(app.can_move(&[2]));
         assert!(!app.can_move(&[2, 3]), "The server denied moving Theo");
         assert!(app.can_move(&[1]), "You can always try to join");
-        app.selected_members = BTreeSet::from([1, 2]);
+        app.server_mut().selected_members = BTreeSet::from([1, 2]);
         let _ = app.update(Message::MoveMembers(vec![1, 2], 2));
         assert!(matches!(
             commands.try_recv(),
@@ -3116,7 +3751,7 @@ mod tests {
             commands.try_recv(),
             Ok(client::Command::Join(2, password)) if password.is_empty()
         ));
-        assert!(app.selected_members.is_empty());
+        assert!(app.server().selected_members.is_empty());
         // Nobody to move when everyone is already there.
         let _ = app.update(Message::MoveMembers(vec![2], 1));
         assert!(commands.try_recv().is_err());
@@ -3125,41 +3760,51 @@ mod tests {
     #[test]
     fn a_poke_is_written_sent_and_received_in_order() {
         let (mut app, mut commands) = session_fixture();
+        let id = app.active.unwrap();
         let _ = app.update(Message::OpenPoke(1));
-        assert!(app.poke.is_none(), "You can't poke yourself");
+        assert!(app.server().poke.is_none(), "You can't poke yourself");
         assert!(matches!(
             app.update(Message::OpenPoke(2)),
             Task::Focus(ui::Field::PokeMessage)
         ));
         let _ = app.update(Message::PokeText("x".repeat(150)));
-        assert_eq!(app.poke.as_ref().unwrap().message.len(), 100);
+        assert_eq!(app.server().poke.as_ref().unwrap().message.len(), 100);
         let _ = app.update(Message::PokeText("Raid now".into()));
         let _ = app.update(Message::SubmitPoke);
-        assert!(app.poke.is_none());
+        assert!(app.server().poke.is_none());
         assert!(matches!(
             commands.try_recv(),
             Ok(client::Command::Poke(2, message)) if message == "Raid now"
         ));
         for from in ["Mara", "Theo"] {
-            let _ = app.update(Message::Backend(client::Event::Poked {
-                from: from.into(),
-                message: String::new(),
-            }));
+            let _ = app.update(Message::Backend(
+                id,
+                client::Event::Poked {
+                    from: from.into(),
+                    message: String::new(),
+                },
+            ));
         }
-        assert_eq!(app.pokes.len(), 2);
+        assert_eq!(app.server().pokes.len(), 2);
         let _ = app.update(Message::DismissPoke);
-        assert_eq!(app.pokes[0].from, "Theo");
+        assert_eq!(app.server().pokes[0].from, "Theo");
         let _ = app.update(Message::OpenPoke(2));
-        let _ = app.update(Message::Backend(client::Event::Stopped(None)));
-        assert!(app.poke.is_none(), "Disconnecting drops an unsent poke");
+        let _ = app.update(Message::Backend(id, client::Event::Stopped(None)));
+        assert!(
+            app.server().poke.is_none(),
+            "Disconnecting drops an unsent poke"
+        );
     }
 
     #[test]
     fn several_streams_are_watched_focused_and_stopped_one_at_a_time() {
         let (mut app, mut commands) = session_fixture();
+        let id = app.active.unwrap();
+        let session = id;
         for (slot, id) in ["a", "b"].into_iter().enumerate() {
-            let _ = app.update(Message::Backend(client::Event::Streaming(
-                streaming::Event::State {
+            let _ = app.update(Message::Backend(
+                session,
+                client::Event::Streaming(streaming::Event::State {
                     generation: 900 + slot as u64,
                     slot,
                     stream: streaming::StreamInfo {
@@ -3172,25 +3817,25 @@ mod tests {
                     },
                     phase: streaming::Phase::Receiving,
                     detail: String::new(),
-                },
-            )));
+                }),
+            ));
         }
-        assert_eq!(app.streaming.watching.len(), 2);
+        assert_eq!(app.server().streaming.watching.len(), 2);
         let _ = app.update(Message::FocusStream(Some("missing".into())));
-        assert!(app.streaming.focused.is_none());
+        assert!(app.server().streaming.focused.is_none());
         let _ = app.update(Message::FocusStream(Some("b".into())));
-        assert_eq!(app.streaming.stage().unwrap().stream.id, "b");
+        assert_eq!(app.server().streaming.stage().unwrap().stream.id, "b");
         let _ = app.update(Message::StreamVolume(3, 30));
-        assert_eq!(app.streaming.volume(3), 30);
-        assert!((app.streaming.surfaces.get(1).volume() - 0.3).abs() < 1e-6);
+        assert_eq!(app.server().streaming.volume(3), 30);
+        assert!((app.server().streaming.surfaces.get(1).volume() - 0.3).abs() < 1e-6);
         let _ = app.update(Message::StopWatching(Some("b".into())));
         assert!(matches!(
             commands.try_recv(),
             Ok(client::Command::StopWatching(Some(id))) if id == "b"
         ));
-        assert_eq!(app.streaming.stage().unwrap().stream.id, "a");
+        assert_eq!(app.server().streaming.stage().unwrap().stream.id, "a");
         let _ = app.update(Message::ToggleStreamStats);
-        assert!(app.streaming.show_stats);
+        assert!(app.server().streaming.show_stats);
     }
 
     #[test]
@@ -3268,10 +3913,10 @@ mod tests {
     fn unified_home_drives_streaming_and_statistics_keep_peer_details() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let _ = app.update(Message::ShowTab(Tab::Home));
-        assert!(app.streaming.visible.load(Ordering::Relaxed));
+        assert!(app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         let _ = app.update(Message::ShowTab(Tab::Statistics));
-        assert!(!app.streaming.visible.load(Ordering::Relaxed));
+        assert!(!app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         // Settings floats over the page, so it leaves what that page shows running.
         let _ = app.update(Message::OpenSettings(SettingsPage::Audio));
@@ -3280,28 +3925,38 @@ mod tests {
         assert_eq!(app.settings_page, None);
         app.begin_setup();
         let _ = app.update(Message::ShowTab(Tab::Home));
-        assert!(!app.streaming.visible.load(Ordering::Relaxed));
+        assert!(!app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(!app.channel_health_visible.load(Ordering::Relaxed));
     }
 
     #[test]
     fn modal_dismissal_retry_and_recovery_follow_the_specific_operation() {
         let mut app = App::with_devices(audio::Devices::default(), None);
+        let (id, _commands) = connection(&mut app);
         let warning = || {
-            Message::Backend(client::Event::Warning {
-                source: Source::Flood,
-                detail: "Cooldown".into(),
-            })
+            Message::Backend(
+                id,
+                client::Event::Warning {
+                    source: Source::Flood,
+                    detail: "Cooldown".into(),
+                },
+            )
         };
         let _ = app.update(warning());
         let _ = app.update(warning());
         assert_eq!(app.alerts.current().unwrap().reports, 2);
-        let _ = app.update(Message::Backend(client::Event::Recovered(Source::Controls)));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Recovered(Source::Controls),
+        ));
         assert_eq!(app.alerts.current().unwrap().source, Source::Flood);
         let _ = app.update(Message::DismissError);
         let _ = app.update(warning());
         assert!(app.alerts.current().is_none());
-        let _ = app.update(Message::Backend(client::Event::Recovered(Source::Flood)));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Recovered(Source::Flood),
+        ));
         let _ = app.update(warning());
         assert_eq!(app.alerts.current().unwrap().reports, 1);
         let _ = app.update(Message::DismissError);
@@ -3316,8 +3971,8 @@ mod tests {
     #[test]
     fn footer_health_only_reports_live_channel_metrics_and_marks_paused_sampling() {
         let mut app = App::with_devices(audio::Devices::default(), None);
-        app.state.current = Some(client::Channel::default());
-        app.connection_usage = usage::ConnectionUsage {
+        app.server_mut().state.current = Some(client::Channel::default());
+        app.server_mut().connection_usage = usage::ConnectionUsage {
             packet_loss_in: Some(6.0),
             packet_loss_out: Some(0.0),
             ping_ms: Some(23.0),
@@ -3325,14 +3980,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(app.footer_connection_status().1, "Offline");
-        app.connected = true;
+        app.server_mut().connected = true;
         let (health, label, details) = app.footer_connection_status();
         assert_eq!(health, usage::Health::Poor);
         assert_eq!(label, "Poor");
         assert_eq!(details, "Incoming packet loss: 6.0%");
         app.loopback = true;
         assert_eq!(app.footer_connection_status().1, "Local test");
-        app.stopping = true;
+        app.server_mut().stopping = true;
         assert_eq!(app.footer_connection_status().1, "Stopping");
     }
 
@@ -3374,11 +4029,12 @@ mod tests {
     #[test]
     fn member_indicators_share_own_health_and_do_not_invent_remote_health() {
         let mut app = App::with_devices(audio::Devices::default(), None);
-        app.connected = true;
-        app.state = health_test_state();
+        app.server_mut().connected = true;
+        app.server_mut().state = health_test_state();
         let now = Instant::now();
-        let mut member = app.state.current.as_ref().unwrap().members[0].clone();
-        app.client_usage
+        let mut member = app.server().state.current.as_ref().unwrap().members[0].clone();
+        app.server_mut()
+            .client_usage
             .insert(member.id, Ok(peer_sample(0.02, now)));
         let (health, detail) = app.member_health(&member, true);
         assert_eq!(health, usage::Health::Fair);
@@ -3386,18 +4042,20 @@ mod tests {
         let (health, detail) = app.member_health(&member, false);
         assert_eq!(health, usage::Health::Unknown);
         assert!(detail.contains("current channel"));
-        app.client_usage.insert(member.id, Err("Permission denied"));
+        app.server_mut()
+            .client_usage
+            .insert(member.id, Err("Permission denied"));
         assert_eq!(
             app.member_health(&member, true),
             (usage::Health::Unknown, "Permission denied".into())
         );
-        app.client_usage.insert(
+        app.server_mut().client_usage.insert(
             member.id,
             Ok(peer_sample(0.0, now - std::time::Duration::from_secs(16))),
         );
         assert_eq!(app.member_health(&member, true).0, usage::Health::Unknown);
         member.is_self = true;
-        app.connection_usage = peer_sample(0.06, now).sample(now);
+        app.server_mut().connection_usage = peer_sample(0.06, now).sample(now);
         let (health, _, detail) = app.footer_connection_status();
         assert_eq!(app.member_health(&member, true), (health, detail));
     }
@@ -3405,8 +4063,9 @@ mod tests {
     #[test]
     fn collapsed_health_updates_without_expansion_and_expires_without_false_good() {
         let mut app = App::with_devices(audio::Devices::default(), None);
-        app.connected = true;
-        app.state = health_test_state();
+        let (id, _commands) = connection(&mut app);
+        app.server_mut().connected = true;
+        app.server_mut().state = health_test_state();
         let now = Instant::now();
         assert_eq!(app.client_quality(11, now).health(), usage::Health::Unknown);
         for (loss, health) in [
@@ -3414,27 +4073,33 @@ mod tests {
             (0.02, usage::Health::Fair),
             (0.06, usage::Health::Poor),
         ] {
-            let _ = app.update(Message::Backend(client::Event::ClientUsage {
-                id: 11,
-                result: Ok(peer_sample(loss, now)),
-            }));
-            assert_eq!(app.expanded_client, None);
+            let _ = app.update(Message::Backend(
+                id,
+                client::Event::ClientUsage {
+                    id: 11,
+                    result: Ok(peer_sample(loss, now)),
+                },
+            ));
+            assert_eq!(app.server().expanded_client, None);
             assert_eq!(app.client_quality(11, now).health(), health);
         }
         let _ = app.update(Message::ToggleClient(11));
-        assert_eq!(app.expanded_client, Some(11));
+        assert_eq!(app.server().expanded_client, Some(11));
         let _ = app.update(Message::ToggleClient(11));
-        assert_eq!(app.expanded_client, None);
+        assert_eq!(app.server().expanded_client, None);
         assert_eq!(app.client_quality(11, now).health(), usage::Health::Poor);
         assert_eq!(
             app.client_quality(11, now + std::time::Duration::from_secs(16))
                 .health(),
             usage::Health::Unknown
         );
-        let _ = app.update(Message::Backend(client::Event::ClientUsage {
-            id: 11,
-            result: Err("Denied"),
-        }));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::ClientUsage {
+                id: 11,
+                result: Err("Denied"),
+            },
+        ));
         assert_eq!(app.client_quality(11, now).health(), usage::Health::Unknown);
         let _ = app.update(Message::ShowTab(Tab::Statistics));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
@@ -3445,57 +4110,76 @@ mod tests {
     #[test]
     fn client_health_cache_is_scoped_to_current_members_and_clears_on_channel_moves() {
         let mut app = App::with_devices(audio::Devices::default(), None);
-        app.connected = true;
+        let (session, _commands) = connection(&mut app);
+        app.server_mut().connected = true;
         let mut state = health_test_state();
-        app.state = state.clone();
+        app.server_mut().state = state.clone();
         let now = Instant::now();
         for id in [12, 99] {
             let _ = app.update(Message::ToggleClient(id));
-            let _ = app.update(Message::Backend(client::Event::ClientUsage {
-                id,
-                result: Ok(peer_sample(0.0, now)),
-            }));
+            let _ = app.update(Message::Backend(
+                session,
+                client::Event::ClientUsage {
+                    id,
+                    result: Ok(peer_sample(0.0, now)),
+                },
+            ));
         }
-        assert!(app.client_usage.is_empty());
-        assert_eq!(app.expanded_client, None);
-        let _ = app.update(Message::Backend(client::Event::ClientUsage {
-            id: 11,
-            result: Ok(peer_sample(0.0, now)),
-        }));
+        assert!(app.server().client_usage.is_empty());
+        assert_eq!(app.server().expanded_client, None);
+        let _ = app.update(Message::Backend(
+            session,
+            client::Event::ClientUsage {
+                id: 11,
+                result: Ok(peer_sample(0.0, now)),
+            },
+        ));
         let _ = app.update(Message::ToggleClient(11));
         let peer = state.channels[0].members.pop().unwrap();
         state.channels[1].members.push(peer);
         state.current = Some(state.channels[0].clone());
-        let _ = app.update(Message::Backend(client::Event::State(state.clone())));
-        assert!(app.client_usage.is_empty());
-        assert_eq!(app.expanded_client, None);
+        let _ = app.update(Message::Backend(
+            session,
+            client::Event::State(state.clone()),
+        ));
+        assert!(app.server().client_usage.is_empty());
+        assert_eq!(app.server().expanded_client, None);
         state.current = Some(state.channels[1].clone());
-        let _ = app.update(Message::Backend(client::Event::State(state.clone())));
+        let _ = app.update(Message::Backend(
+            session,
+            client::Event::State(state.clone()),
+        ));
         let _ = app.update(Message::ToggleClient(12));
-        let _ = app.update(Message::Backend(client::Event::ClientUsage {
-            id: 12,
-            result: Ok(peer_sample(0.0, now)),
-        }));
-        assert_eq!(app.expanded_client, Some(12));
+        let _ = app.update(Message::Backend(
+            session,
+            client::Event::ClientUsage {
+                id: 12,
+                result: Ok(peer_sample(0.0, now)),
+            },
+        ));
+        assert_eq!(app.server().expanded_client, Some(12));
         state.current = Some(state.channels[0].clone());
-        let _ = app.update(Message::Backend(client::Event::State(state)));
-        assert!(app.client_usage.is_empty());
-        assert_eq!(app.expanded_client, None);
-        let _ = app.update(Message::Backend(client::Event::ClientUsage {
-            id: 12,
-            result: Err("Late response"),
-        }));
-        assert!(app.client_usage.is_empty());
+        let _ = app.update(Message::Backend(session, client::Event::State(state)));
+        assert!(app.server().client_usage.is_empty());
+        assert_eq!(app.server().expanded_client, None);
+        let _ = app.update(Message::Backend(
+            session,
+            client::Event::ClientUsage {
+                id: 12,
+                result: Err("Late response"),
+            },
+        ));
+        assert!(app.server().client_usage.is_empty());
     }
 
     #[test]
     fn joining_blocks_known_denials_and_lets_the_server_check_unknown_access() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let (sender, mut commands) = mpsc::channel(16);
-        app.session = Some(sender);
-        app.connected = true;
-        app.channel_password = "channel secret".into();
-        app.state.channels = [
+        live(&mut app, sender);
+        app.server_mut().connected = true;
+        app.server_mut().channel_password = "channel secret".into();
+        app.server_mut().state.channels = [
             client::JoinAccess::Allowed,
             client::JoinAccess::Denied,
             client::JoinAccess::Unknown,
@@ -3519,15 +4203,15 @@ mod tests {
                 matches!(commands.try_recv(), Ok(client::Command::Join(sent_id, password)) if sent_id == id && password.is_empty())
             );
         }
-        app.state.current = Some(app.state.channels[0].clone());
+        app.server_mut().state.current = Some(app.server().state.channels[0].clone());
         let _ = app.update(Message::Join(1));
         assert!(commands.try_recv().is_err());
-        app.state.current = None;
-        app.stopping = true;
+        app.server_mut().state.current = None;
+        app.server_mut().stopping = true;
         let _ = app.update(Message::Join(1));
         assert!(commands.try_recv().is_err());
-        app.stopping = false;
-        app.connected = false;
+        app.server_mut().stopping = false;
+        app.server_mut().connected = false;
         let _ = app.update(Message::Join(1));
         assert!(commands.try_recv().is_err());
     }
@@ -3536,29 +4220,36 @@ mod tests {
     fn channel_password_is_prompted_on_join_and_cleared_after_submit_or_cancel() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let (sender, mut commands) = mpsc::channel(16);
-        app.session = Some(sender);
-        app.connected = true;
-        app.state.channels = vec![client::Channel {
+        let id = live(&mut app, sender);
+        app.server_mut().connected = true;
+        app.server_mut().state.channels = vec![client::Channel {
             id: 2,
             has_password: true,
             join_access: client::JoinAccess::Unknown,
             ..client::Channel::default()
         }];
         let _ = app.update(Message::Join(2));
-        assert_eq!(app.password_channel, Some(2));
+        assert_eq!(app.server().password_channel, Some(2));
         assert!(commands.try_recv().is_err());
         let _ = app.update(Message::ChannelPassword("secret".into()));
         let _ = app.update(Message::SubmitChannelPassword);
         assert!(
             matches!(commands.try_recv(), Ok(client::Command::Join(2, password)) if password == "secret")
         );
-        assert!(app.password_channel.is_none() && app.channel_password.is_empty());
-        let _ = app.update(Message::Backend(client::Event::ChannelPasswordRequired(2)));
-        assert_eq!(app.password_channel, Some(2));
-        assert!(app.password_error.is_some());
+        assert!(
+            app.server().password_channel.is_none() && app.server().channel_password.is_empty()
+        );
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::ChannelPasswordRequired(2),
+        ));
+        assert_eq!(app.server().password_channel, Some(2));
+        assert!(app.server().password_error.is_some());
         let _ = app.update(Message::ChannelPassword("discard me".into()));
         let _ = app.update(Message::CancelChannelPassword);
-        assert!(app.password_channel.is_none() && app.channel_password.is_empty());
+        assert!(
+            app.server().password_channel.is_none() && app.server().channel_password.is_empty()
+        );
         assert!(commands.try_recv().is_err());
     }
 
@@ -3566,19 +4257,19 @@ mod tests {
     fn mute_and_deafen_toggles_preserve_state_and_ignore_inactive_sessions() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let (sender, mut commands) = mpsc::channel(16);
-        app.session = Some(sender);
+        live(&mut app, sender);
         let _ = app.update(Message::Shortcut(shortcuts::Action::Mute));
         assert_eq!(app.last_shortcut, Some(shortcuts::Action::Mute));
         assert!(commands.try_recv().is_err());
-        app.connected = true;
+        app.server_mut().connected = true;
         let _ = app.update(Message::Shortcut(shortcuts::Action::Deafen));
-        assert!(app.deafened && app.muted);
+        assert!(app.server().deafened && app.server().muted);
         assert!(matches!(
             commands.try_recv(),
             Ok(client::Command::Deafen(true))
         ));
         let _ = app.update(Message::Mute);
-        assert!(!app.muted && app.deafened);
+        assert!(!app.server().muted && app.server().deafened);
         assert_eq!(app.microphone_status(), "Muted (deafened)");
         assert!(matches!(
             commands.try_recv(),
@@ -3586,7 +4277,7 @@ mod tests {
         ));
         let _ = app.update(Message::Mute);
         let _ = app.update(Message::Deafen);
-        assert!(app.muted && !app.deafened);
+        assert!(app.server().muted && !app.server().deafened);
         assert!(matches!(
             commands.try_recv(),
             Ok(client::Command::Mute(true))
@@ -3595,10 +4286,10 @@ mod tests {
             commands.try_recv(),
             Ok(client::Command::Deafen(false))
         ));
-        app.stopping = true;
+        app.server_mut().stopping = true;
         let _ = app.update(Message::Mute);
         let _ = app.update(Message::Deafen);
-        assert!(app.muted && !app.deafened);
+        assert!(app.server().muted && !app.server().deafened);
         assert!(commands.try_recv().is_err());
     }
 
@@ -3607,27 +4298,27 @@ mod tests {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let (sender, _commands) = mpsc::channel(1);
         sender.try_send(client::Command::Mute(true)).unwrap();
-        app.session = Some(sender);
-        app.connected = true;
+        live(&mut app, sender);
+        app.server_mut().connected = true;
         let _ = app.update(Message::Mute);
         let _ = app.update(Message::Deafen);
-        assert!(app.muted && !app.deafened);
+        assert!(app.server().muted && !app.server().deafened);
         assert_eq!(app.alerts.current().unwrap().source, Source::Worker);
     }
 
     #[test]
     fn volume_and_portable_settings_do_not_change_microphone_state() {
         let mut app = App::with_devices(audio::Devices::default(), None);
-        app.connected = true;
-        app.muted = false;
+        app.server_mut().connected = true;
+        app.server_mut().muted = false;
         let worker_volume = app.playback_volume.clone();
         let _ = app.update(Message::PlaybackVolume(0));
         assert_eq!(worker_volume.percent(), 0);
-        assert!(!app.muted && !app.deafened);
+        assert!(!app.server().muted && !app.server().deafened);
         assert_eq!(app.edited_settings().playback_volume_percent, 0);
-        app.connected = false;
+        app.server_mut().connected = false;
         app.password = "old-server-password".into();
-        app.channel_password = "old-channel-password".into();
+        app.server_mut().channel_password = "old-channel-password".into();
         app.apply_settings(settings::Settings {
             servers: vec![settings::Server::new("voice.example:9987")],
             nickname: "Portable name".into(),
@@ -3637,7 +4328,7 @@ mod tests {
         assert_eq!(app.address, "voice.example:9987");
         assert_eq!(app.nickname, "Portable name");
         assert_eq!(worker_volume.percent(), 42);
-        assert!(app.password.is_empty() && app.channel_password.is_empty());
+        assert!(app.password.is_empty());
     }
 
     #[test]
@@ -3664,14 +4355,14 @@ mod tests {
         });
         assert_eq!(app.edited_settings().audio_processing, chosen);
         let (sender, _commands) = mpsc::channel(1);
-        app.session = Some(sender);
-        app.muted = true;
-        app.deafened = true;
+        live(&mut app, sender);
+        app.server_mut().muted = true;
+        app.server_mut().deafened = true;
         let _ = app.update(Message::AudioProcessing(
             audio_processing::Settings::default(),
         ));
         assert_eq!(app.audio_processing, chosen);
-        assert!(app.muted && app.deafened);
+        assert!(app.server().muted && app.server().deafened);
     }
 
     #[test]
@@ -3685,7 +4376,7 @@ mod tests {
         let _ = app.update(Message::Transmission(settings));
         assert_eq!(app.edited_settings().transmission, settings);
         let _ = app.start(false);
-        assert!(app.session.is_none());
+        assert!(app.server().session.is_none());
         assert_eq!(app.alerts.current().unwrap().source, Source::Shortcuts);
         app.ptt.store(false, Ordering::Release);
         let _ = app.update(Message::Shortcut(shortcuts::Action::PushToTalk(true)));
@@ -3694,16 +4385,16 @@ mod tests {
             "Delayed UI messages must not reopen a released key"
         );
         let (sender, _commands) = mpsc::channel(1);
-        app.session = Some(sender);
-        app.connected = true;
-        app.state.can_talk = true;
-        app.muted = false;
+        let id = live(&mut app, sender);
+        app.server_mut().connected = true;
+        app.server_mut().state.can_talk = true;
+        app.server_mut().muted = false;
         assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
         app.transmitting = true;
         assert_eq!(app.microphone_status(), "Transmitting");
-        let _ = app.update(Message::Backend(client::Event::Transmitting(false)));
+        let _ = app.update(Message::Backend(id, client::Event::Transmitting(false)));
         assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
-        app.muted = true;
+        app.server_mut().muted = true;
         assert_eq!(app.microphone_status(), "Muted");
         let _ = app.update(Message::Transmission(transmission::Settings::default()));
         assert_eq!(app.transmission, settings);
@@ -3712,24 +4403,25 @@ mod tests {
     #[test]
     fn microphone_status_and_meter_reflect_effective_capture_state() {
         let mut app = App::with_devices(audio::Devices::default(), None);
+        let (id, _commands) = connection(&mut app);
         app.level = 0.25; // A queued meter event must not show activity after capture stops.
         assert_eq!(app.microphone_status(), "Inactive");
         assert_eq!(app.microphone_icon(), Icon::MicOff);
         assert_eq!(app.microphone_meter_level(), 0.0);
         assert_eq!(app.playback_icon(), Icon::Headphones);
-        app.connected = true;
+        app.server_mut().connected = true;
         assert_eq!(app.microphone_status(), "Muted");
         assert_eq!(app.microphone_icon(), Icon::MicOff);
         assert_eq!(app.microphone_meter_level(), 0.0);
-        app.muted = false;
+        app.server_mut().muted = false;
         assert_eq!(app.microphone_status(), "Blocked by server");
         assert_eq!(app.microphone_icon(), Icon::MicOff);
         assert_eq!(app.microphone_meter_level(), 0.0);
-        app.state.can_talk = true;
+        app.server_mut().state.can_talk = true;
         assert_eq!(app.microphone_status(), "Unmuted");
         assert_eq!(app.microphone_icon(), Icon::Mic);
         assert_eq!(app.microphone_meter_level(), 0.5);
-        app.deafened = true;
+        app.server_mut().deafened = true;
         assert_eq!(app.microphone_status(), "Muted (deafened)");
         assert_eq!(app.microphone_icon(), Icon::MicOff);
         assert_eq!(app.microphone_meter_level(), 0.0);
@@ -3738,11 +4430,11 @@ mod tests {
         assert_eq!(app.microphone_status(), "Local test only");
         assert_eq!(app.microphone_icon(), Icon::Mic);
         assert_eq!(app.microphone_meter_level(), 0.5);
-        app.stopping = true;
+        app.server_mut().stopping = true;
         assert_eq!(app.microphone_status(), "Inactive");
         assert_eq!(app.microphone_icon(), Icon::MicOff);
         assert_eq!(app.microphone_meter_level(), 0.0);
-        let _ = app.update(Message::Backend(client::Event::Stopped(None)));
+        let _ = app.update(Message::Backend(id, client::Event::Stopped(None)));
         assert_eq!(app.microphone_status(), "Inactive");
         assert_eq!(app.microphone_meter_level(), 0.0);
     }

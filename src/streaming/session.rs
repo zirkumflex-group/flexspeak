@@ -7,6 +7,7 @@ use crate::{
     alerts::Source,
     client,
     command_flow::{Flow, Operation, Ticket},
+    hub::Foreground,
 };
 use anyhow::{Result, anyhow, ensure};
 use std::{
@@ -47,7 +48,10 @@ pub struct Session {
     pub publisher: super::publishing::Publisher,
     events: mpsc::Sender<client::Event>,
     surfaces: Arc<Surfaces>,
+    /// The server page is showing, rather than Statistics.
     visible: Arc<AtomicBool>,
+    /// Whether this is the server the window shows; only that one watches streams.
+    active: Foreground,
     supported: bool,
     channel: Option<ChannelId>,
     members: HashSet<u16>,
@@ -68,6 +72,7 @@ impl Session {
         events: mpsc::Sender<client::Event>,
         surfaces: Arc<Surfaces>,
         visible: Arc<AtomicBool>,
+        active: Foreground,
         flow: Rc<RefCell<Flow>>,
     ) -> Self {
         Self {
@@ -75,6 +80,7 @@ impl Session {
             events,
             surfaces,
             visible,
+            active,
             supported: false,
             channel: None,
             members: HashSet::new(),
@@ -88,6 +94,11 @@ impl Session {
             watches: Vec::new(),
             turn: 0,
         }
+    }
+
+    /// Whether streams from this server are on screen.
+    pub fn foreground(&self) -> bool {
+        self.visible.load(Ordering::Relaxed) && self.active.is_active()
     }
 
     fn emit(&self, event: Event) {
@@ -195,7 +206,7 @@ impl Session {
             self.publish_catalog();
         }
         self.discovery.retain(|id| members.contains(id));
-        if self.visible.load(Ordering::Relaxed) && self.supported {
+        if self.foreground() && self.supported {
             for id in members.difference(&self.members) {
                 if self.discovery.len() < 128 {
                     self.discovery.push_back(*id);
@@ -234,7 +245,7 @@ impl Session {
             "The native stream receiver is currently available on Mac and Windows"
         );
         ensure!(
-            self.supported && self.visible.load(Ordering::Relaxed),
+            self.supported && self.foreground(),
             "Open your server view on a TeamSpeak 6 server"
         );
         if self.watches.iter().any(|watch| watch.info.id == id) {
@@ -358,20 +369,22 @@ impl Session {
     }
 
     pub fn tick(&mut self, connection: &mut Connection) {
-        let visible = self.visible.load(Ordering::Relaxed);
+        let visible = self.foreground();
+        if !self.visible.load(Ordering::Relaxed) && self.publisher.active() {
+            self.publisher
+                .stop("Sharing stopped when leaving the server view");
+        }
+        // Your own share carries on in the background; only watching is tied to the screen.
         if !visible {
-            if self.publisher.active() {
-                self.publisher
-                    .stop("Sharing stopped when leaving the server view");
-            }
             self.stop(
                 connection,
                 None,
                 Phase::Stopped,
-                "Stopped when leaving the server view",
+                "Stopped when switching servers or leaving the server view",
             );
         }
         if visible && !self.was_visible {
+            self.publish_catalog();
             self.refresh(connection);
         }
         self.was_visible = visible;
@@ -798,11 +811,25 @@ mod tests {
     use super::*;
 
     fn fixture() -> (Session, Connection, mpsc::Receiver<client::Event>) {
+        let (session, connection, output, _hub) = fixture_on_hub();
+        (session, connection, output)
+    }
+
+    /// A session that is the hub's active server, with the hub to switch away from it.
+    fn fixture_on_hub() -> (
+        Session,
+        Connection,
+        mpsc::Receiver<client::Event>,
+        Arc<crate::hub::AudioHub>,
+    ) {
         let (events, output) = mpsc::channel(32);
+        let hub = Arc::new(crate::hub::AudioHub::default());
+        hub.set_active(Some(crate::hub::SessionId(1)));
         let mut session = Session::new(
             events,
             Arc::new(Surfaces::default()),
             Arc::new(AtomicBool::new(true)),
+            Foreground::new(hub.clone(), crate::hub::SessionId(1)),
             Rc::new(RefCell::new(Flow::default())),
         );
         session.channel = Some(ChannelId(1));
@@ -813,7 +840,7 @@ mod tests {
             .identity(tsclientlib::Identity::create())
             .connect()
             .unwrap();
-        (session, connection, output)
+        (session, connection, output, hub)
     }
 
     fn active(session: &mut Session) -> u64 {
@@ -835,7 +862,7 @@ mod tests {
     #[test]
     fn you_can_watch_a_stream_while_sharing_your_own() {
         let (mut session, mut connection, _output) = fixture();
-        session.publisher.pretend_sharing();
+        let _share = session.publisher.pretend_sharing();
         session.notification(
             &mut connection,
             "notifystreaminfo",
@@ -866,6 +893,32 @@ mod tests {
         let slots: HashSet<_> = session.watches.iter().map(|watch| watch.slot).collect();
         assert_eq!(slots.len(), MAX_WATCHES);
         assert!(session.watch(&mut connection, "s15").is_err());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn switching_servers_stops_watches_but_keeps_your_own_share() {
+        let (mut session, mut connection, _output, hub) = fixture_on_hub();
+        let _share = session.publisher.pretend_sharing();
+        session.notification(
+            &mut connection,
+            "notifystreaminfo",
+            "notifystreaminfo id=stream-a clid=7 name=Window",
+        );
+        session.watch(&mut connection, "stream-a").unwrap();
+        hub.set_active(Some(crate::hub::SessionId(2)));
+        session.tick(&mut connection);
+        assert!(
+            session.watches.is_empty(),
+            "watching follows the active server"
+        );
+        assert!(session.publisher.active(), "your own share keeps running");
+        assert!(session.watch(&mut connection, "stream-a").is_err());
+        // Leaving the server view altogether still ends both, as it always has.
+        hub.set_active(Some(crate::hub::SessionId(1)));
+        session.visible.store(false, Ordering::Relaxed);
+        session.tick(&mut connection);
+        assert!(!session.publisher.active());
     }
 
     #[test]

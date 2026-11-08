@@ -63,7 +63,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
     }
     // Connected, the sidebar already names the server.
     let title = match s.tab {
-        Tab::Home if s.connected && !s.loopback => None,
+        Tab::Home if s.server().connected && !s.loopback => None,
         Tab::Home => Some("Flexspeak"),
         Tab::Statistics => Some("Usage & Statistics"),
     };
@@ -119,10 +119,18 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
 }
 
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
-    if s.connected && !s.loopback {
+    if !s.loopback && s.sessions.iter().any(|session| session.connected) {
+        if !s.server().connected {
+            return row()
+                .w_full()
+                .h_full()
+                .child(server_rail(s, t, k))
+                .child(connecting_pane(s, t));
+        }
         return row()
             .w_full()
             .h_full()
+            .child(server_rail(s, t, k))
             .child(sidebar(s, t, k, layer))
             .child(el().w(1.0).h_full().fill(t.hairline))
             .child(
@@ -136,10 +144,9 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
     saved_servers(s, t, k)
 }
 
-/// The saved servers, each with its own Connect. One session runs at a time, so while one
-/// connects or is connected the others wait.
+/// The saved servers, each with its own Connect. Only a microphone test holds them back.
 fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
-    let busy = s.session.is_some();
+    let busy = s.loopback && !s.idle();
     let mut content = col().w_full().gap(14.0);
     if let Some(saved) = s.saved.as_ref().filter(|_| !s.servers.is_empty()) {
         content = content.child(
@@ -162,12 +169,11 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
                     Some(Message::AddServer),
                 )),
         );
-        let ready = !s.stopping && s.permissions.pending.is_none();
-        let current = s.session_address();
+        let ready = s.permissions.pending.is_none();
         let mut list = col().key("server-list").w_full().gap(4.0);
         for (index, server) in s.servers.iter().enumerate() {
-            let mine = current == Some(server.address.trim());
-            list = list.child(server_row(t, s, index, server, mine, busy, ready));
+            let session = s.session_at(&server.address);
+            list = list.child(server_row(t, index, server, session, busy, ready));
         }
         content = content.child(
             k.scroll_bar(
@@ -183,22 +189,22 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
             ),
         );
         let mut status = row().w_full().gap(8.0).center_y();
-        if busy && !s.stopping {
+        if !s.idle() && !s.server().stopping {
             status = status.child(pulse(if s.loopback { t.live } else { t.accent }));
         }
-        status = status.child(muted(t, s.status.clone()).grow(1.0));
+        status = status.child(muted(t, s.server().status.clone()).grow(1.0));
         if busy && s.loopback {
             status = status.child(button(
                 t,
                 "stop-test",
-                if s.stopping {
+                if s.server().stopping {
                     "Stopping…"
                 } else {
                     "Stop test"
                 },
                 Some(&icons::STOP),
                 Variant::Secondary,
-                (!s.stopping).then_some(Message::Stop),
+                (!s.server().stopping).then_some(Message::Stop),
             ));
         }
         content = content
@@ -238,13 +244,13 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
 /// One saved server: its name and address, and Connect — or Cancel while it connects.
 fn server_row(
     t: &Theme,
-    s: &App,
     index: usize,
     server: &crate::settings::Server,
-    mine: bool,
+    session: Option<&crate::ServerSession>,
     busy: bool,
     ready: bool,
 ) -> El {
+    let mine = session.is_some();
     let named = !server.name.trim().is_empty();
     let mut names = col().grow(1.0).min_w(0.0).gap(2.0).child(
         text(server.title().to_owned())
@@ -260,10 +266,14 @@ fn server_row(
                 .truncate_fade(),
         );
     }
-    let (label, action) = if mine {
+    let (label, action) = if let Some(session) = session {
         (
-            if s.stopping { "Stopping…" } else { "Cancel" },
-            (!s.stopping).then_some(Message::Stop),
+            if session.stopping {
+                "Stopping…"
+            } else {
+                "Cancel"
+            },
+            (!session.stopping).then_some(Message::StopServer(session.id)),
         )
     } else {
         (
@@ -292,7 +302,7 @@ fn server_row(
     .help(if mine {
         format!("Cancel connecting to {}", server.title())
     } else if busy {
-        "Disconnect first: one server at a time".to_owned()
+        "Stop the microphone test first".to_owned()
     } else {
         format!("Connect to {}", server.title())
     });
@@ -336,6 +346,216 @@ fn server_row(
 
 const ENTRANCE: &[rune::Beat] = &[rune::Beat::new(0.0).opacity(0.0), rune::Beat::new(0.25)];
 
+const RAIL_TILE: f32 = 44.0;
+/// The rail's width, hairline included.
+pub const RAIL: f32 = 77.0;
+
+/// Up to two letters that stand for a server: its first two words, or its first two letters.
+pub(super) fn initials(name: &str) -> String {
+    let mut words = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty());
+    let first = words.next().unwrap_or_default();
+    let letters: Vec<char> = match words.next() {
+        Some(second) => first
+            .chars()
+            .take(1)
+            .chain(second.chars().take(1))
+            .collect(),
+        None => first.chars().take(2).collect(),
+    };
+    letters
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .take(2)
+        .collect()
+}
+
+/// A colour of its own for each server, the same every time it's connected.
+pub(super) fn tile_colour(name: &str) -> rune::Color {
+    let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    rune::oklch(0.55, 0.13, (hash % 360) as f32)
+}
+
+/// A tile's marker for pokes that arrived while another server was active.
+fn poke_marker(t: &Theme, pokes: u32) -> El {
+    let mut marker = row()
+        .absolute(20.0, -6.0)
+        .h(20.0)
+        .px(5.0)
+        .gap(2.0)
+        .center()
+        .radius(radius::PILL)
+        .fill(t.fair)
+        .border(2.0, t.canvas)
+        .a11y_hidden()
+        .child(icon(&icons::HAND, 11.0).color(rune::Color::BLACK));
+    if pokes > 1 {
+        marker = marker.child(
+            text(pokes.min(99).to_string())
+                .font(ty::CAPTION)
+                .color(rune::Color::BLACK),
+        );
+    }
+    marker
+}
+
+fn rail_status_icon(
+    t: &Theme,
+    on: &'static rune::Icon,
+    off: &'static rune::Icon,
+    is_off: bool,
+) -> El {
+    icon(if is_off { off } else { on }, 13.0)
+        .color(if is_off { t.poor } else { t.muted })
+        .a11y_hidden()
+}
+
+/// One server on the rail: its tile, and the mic and sound state beneath it.
+fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
+    let name = session.title().to_owned();
+    let mut tile = el()
+        .size(RAIL_TILE, RAIL_TILE)
+        .radius(if active { 14.0 } else { RAIL_TILE / 2.0 })
+        .center()
+        .fill(tile_colour(&name))
+        .motion(motion::QUICK)
+        .child(
+            text(initials(&name))
+                .font(ty::BODY_STRONG)
+                .color(rune::Color::WHITE),
+        );
+    if !session.talking.is_empty() {
+        tile = tile.border(2.0, t.good);
+    }
+    if session.unseen_pokes > 0 {
+        tile = tile.child(poke_marker(t, session.unseen_pokes));
+    }
+    if !session.connected && !session.stopping {
+        tile = tile.child(
+            el().absolute(32.0, 32.0)
+                .size(14.0, 14.0)
+                .radius(7.0)
+                .center()
+                .fill(t.canvas)
+                .child(pulse(t.fair)),
+        );
+    }
+    let status = row()
+        .gap(5.0)
+        .center_y()
+        .child(rail_status_icon(
+            t,
+            &icons::MIC,
+            &icons::MIC_OFF,
+            session.microphone_off(),
+        ))
+        .child(rail_status_icon(
+            t,
+            &icons::HEADPHONES,
+            &icons::HEADPHONE_OFF,
+            session.deafened,
+        ));
+    let mut entry = row()
+        .key(format!("rail-{}", session.id.0))
+        .role("button")
+        .w_full()
+        .center()
+        .help(name.clone())
+        .label(name)
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .on_press_tx(send(Message::SwitchServer(session.id)))
+        .child(col().gap(5.0).center().child(tile).child(status));
+    if active {
+        entry = entry.child(
+            el().absolute(0.0, 6.0)
+                .size(4.0, 32.0)
+                .radius(2.0)
+                .fill(t.text),
+        );
+    }
+    entry
+}
+
+/// The servers you're connected to, Discord-style, down the left of the window.
+fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
+    let mut tiles = col().w_full().pt(12.0).pb(12.0).gap(14.0);
+    for session in s.rail_sessions() {
+        tiles = tiles.child(rail_entry(t, session, s.active == Some(session.id)));
+    }
+    tiles = tiles
+        .child(
+            row()
+                .w_full()
+                .center()
+                .child(el().w(32.0).h(1.0).fill(t.hairline)),
+        )
+        .child(
+            row().w_full().center().child(
+                el().key("rail-add")
+                    .role("button")
+                    .label("Connect to another server")
+                    .help("Connect to another server")
+                    .size(RAIL_TILE, RAIL_TILE)
+                    .radius(RAIL_TILE / 2.0)
+                    .center()
+                    .fill(t.raised)
+                    .focusable(true)
+                    .cursor(rune::Cursor::Pointer)
+                    .hover(t.wash(0.08))
+                    .on_press_tx(send(Message::OpenServerPicker))
+                    .child(icon(&icons::PLUS, 18.0).color(t.good).a11y_hidden()),
+            ),
+        );
+    row()
+        .key("server-rail")
+        .h_full()
+        .child(
+            col()
+                .w(RAIL - 1.0)
+                .h_full()
+                .fill(t.canvas)
+                .child(scroll_page(k, "rail-scroll", tiles)),
+        )
+        .child(el().w(1.0).h_full().fill(t.hairline))
+}
+
+/// The main pane while the server on screen is still connecting or reconnecting.
+fn connecting_pane(s: &App, t: &Theme) -> El {
+    let session = s.server();
+    col()
+        .key("server-connecting")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .padding(size::PAGE)
+        .center()
+        .gap(12.0)
+        .child(heading(t, session.title().to_owned()).truncate_fade())
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(pulse(t.accent))
+                .child(muted(t, session.status.clone())),
+        )
+        .child(button(
+            t,
+            "cancel-connecting",
+            if session.stopping {
+                "Stopping…"
+            } else {
+                "Cancel"
+            },
+            Some(&icons::DISCONNECT),
+            Variant::Secondary,
+            (!session.stopping).then_some(Message::Stop),
+        ))
+}
+
 fn sidebar(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     members::menu(s, t, k, layer);
     members::ghost(s, t, layer);
@@ -352,7 +572,7 @@ fn sidebar(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(icon(&icons::SERVER, 15.0).color(t.accent).a11y_hidden()),
         )
         .child(
-            heading(t, s.state.server.clone())
+            heading(t, s.server().state.server.clone())
                 .truncate_fade()
                 .grow(1.0)
                 .min_w(0.0),
@@ -369,6 +589,18 @@ fn sidebar(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
             if all { Variant::Active } else { Variant::Ghost },
             Some(Message::ToggleSubscribeAll),
         ));
+    let server = if s.connected_servers() < 2 {
+        server
+    } else {
+        col().w_full().gap(6.0).child(server).child(
+            row()
+                .key("shortcut-hint")
+                .gap(6.0)
+                .center_y()
+                .child(icon(&icons::KEYBOARD, 12.0).color(t.faint))
+                .child(faint(t, "Shortcuts control this server")),
+        )
+    };
     col()
         .key("sidebar")
         .w(size::SIDEBAR)
@@ -391,7 +623,7 @@ fn sidebar(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
 
 /// While several members are picked: how many, and how to drop the selection.
 fn selection_bar(s: &App, t: &Theme) -> Option<El> {
-    if s.selected_members.len() < 2 {
+    if s.server().selected_members.len() < 2 {
         return None;
     }
     Some(
@@ -410,7 +642,7 @@ fn selection_bar(s: &App, t: &Theme) -> Option<El> {
                     t,
                     format!(
                         "{} selected · drag onto a channel or right-click",
-                        s.selected_members.len()
+                        s.server().selected_members.len()
                     ),
                 )
                 .grow(1.0),
@@ -427,27 +659,31 @@ fn selection_bar(s: &App, t: &Theme) -> Option<El> {
 }
 
 fn voice_controls(s: &App, t: &Theme) -> El {
-    let enabled = s.connected && !s.loopback && !s.stopping;
+    let enabled = s.server().connected && !s.loopback && !s.server().stopping;
     let mut controls = row().w_full().gap(size::GAP);
     for (key, glyph, label, message, active, on) in [
         (
             "mute",
             s.microphone_icon().glyph(),
-            if s.muted {
+            if s.server().muted {
                 "Unmute microphone"
             } else {
                 "Mute microphone"
             },
             Message::Mute,
-            s.muted || s.deafened,
+            s.server().muted || s.server().deafened,
             enabled,
         ),
         (
             "deafen",
             s.playback_icon().glyph(),
-            if s.deafened { "Undeafen" } else { "Deafen" },
+            if s.server().deafened {
+                "Undeafen"
+            } else {
+                "Deafen"
+            },
             Message::Deafen,
-            s.deafened,
+            s.server().deafened,
             enabled,
         ),
     ] {
@@ -473,7 +709,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
             &icons::DISCONNECT,
             "Disconnect",
             Variant::Danger,
-            (!s.stopping).then_some(Message::Stop),
+            (!s.server().stopping).then_some(Message::Stop),
         ));
     let speaking = s.microphone_meter_level();
     // Lit while you are heard; it eases in and out only as that changes, not with every reading.
@@ -502,12 +738,17 @@ fn voice_controls(s: &App, t: &Theme) -> El {
             format!(
                 "Mic: {} · {}",
                 s.microphone_status(),
-                if s.deafened { "Deafened" } else { "Sound on" }
+                if s.server().deafened {
+                    "Deafened"
+                } else {
+                    "Sound on"
+                }
             ),
         ));
-    if s.controls_pending
-        || s.server_controls
-            .is_none_or(|state| state.muted != s.muted || state.deafened != s.deafened)
+    if s.server().controls_pending
+        || s.server().server_controls.is_none_or(|state| {
+            state.muted != s.server().muted || state.deafened != s.server().deafened
+        })
     {
         panel = panel.child(
             row()
@@ -518,7 +759,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
                 .child(pulse(t.fair))
                 .child(faint(
                     t,
-                    if s.controls_pending {
+                    if s.server().controls_pending {
                         "Server audio update pending"
                     } else {
                         "Server audio state unconfirmed"
@@ -531,11 +772,11 @@ fn voice_controls(s: &App, t: &Theme) -> El {
 
 /// Opens the share dialog; lit while you share.
 fn share_button(s: &App, t: &Theme) -> El {
-    let sharing = s.streaming.sharing.status.active;
-    let supported = s.connected
+    let sharing = s.server().streaming.sharing.status.active;
+    let supported = s.server().connected
         && !s.loopback
-        && !s.stopping
-        && s.state.server_version.starts_with("6.")
+        && !s.server().stopping
+        && s.server().state.server_version.starts_with("6.")
         && crate::streaming::AVAILABLE;
     let help = if sharing {
         "You are sharing · manage or stop"
@@ -563,16 +804,17 @@ fn share_button(s: &App, t: &Theme) -> El {
 fn channel_tree(s: &App, t: &Theme) -> El {
     let mut tree = col().key("channels").w_full().gap(2.0);
     let mut hidden_below = None;
-    for channel in &s.state.channels {
+    for channel in &s.server().state.channels {
         if hidden_below.is_some_and(|depth| channel.depth > depth) {
             continue;
         }
         hidden_below = None;
-        let collapsed = s.collapsed_channels.contains(&channel.id);
+        let collapsed = s.server().collapsed_channels.contains(&channel.id);
         if collapsed {
             hidden_below = Some(channel.depth);
         }
         let current = s
+            .server()
             .state
             .current
             .as_ref()
@@ -589,7 +831,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 _ => "Click to join this channel",
             }
         };
-        let joinable = (!s.stopping && current) || s.can_request_join(channel.id);
+        let joinable = (!s.server().stopping && current) || s.can_request_join(channel.id);
         let ink = if current {
             t.accent
         } else if joinable {
@@ -722,7 +964,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
 fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El {
     let mic_muted =
         member.mic_muted || (member.is_self && s.microphone_icon() == crate::Icon::MicOff);
-    let sound_muted = member.sound_muted || (member.is_self && s.deafened);
+    let sound_muted = member.sound_muted || (member.is_self && s.server().deafened);
     let (health, detail) = s.member_health(member, current);
     let label = if health == usage::Health::Unknown {
         "Unknown"
@@ -739,7 +981,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .radius(radius::ROW)
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
         .child(health_dot(t, health, format!("{label}\n{detail}")))
-        .child(speaking_dot(t, s.talking.contains(&member.id)))
+        .child(speaking_dot(t, s.server().talking.contains(&member.id)))
         .child(
             text(if member.is_self {
                 format!("{} (you)", member.name)

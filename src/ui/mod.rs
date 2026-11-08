@@ -45,7 +45,7 @@ pub enum Task {
     /// interim messages (download progress) and returns its final one.
     Stream(Box<StreamJob>),
     /// A session's backend events, forwarded until the worker closes the channel.
-    Events(mpsc::Receiver<client::Event>),
+    Events(crate::hub::SessionId, mpsc::Receiver<client::Event>),
 }
 
 impl Task {
@@ -70,10 +70,10 @@ impl Task {
             match output {
                 Ok(value) => map(value),
                 // Report through the normal alert path rather than losing the request.
-                Err(error) => Message::Backend(client::Event::Warning {
-                    source: crate::alerts::Source::Worker,
-                    detail: format!("Could not start a background task: {error}"),
-                }),
+                Err(error) => Message::Alert(
+                    crate::alerts::Source::Worker,
+                    format!("Could not start a background task: {error}"),
+                ),
             }
         }))
     }
@@ -114,6 +114,8 @@ pub struct TileDrag {
 
 /// Interface-only state: field editors and the open picker.
 pub struct UiState {
+    /// The rail's + is open, listing saved servers to connect to.
+    pub server_picker: bool,
     pub address: TextEdit,
     pub nickname: TextEdit,
     pub password: TextEdit,
@@ -141,6 +143,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            server_picker: false,
             address: TextEdit::new(""),
             nickname: TextEdit::new(""),
             password: TextEdit::new("").secure(),
@@ -175,7 +178,8 @@ impl App {
         mirror(&mut self.ui.address, &self.address);
         mirror(&mut self.ui.nickname, &self.nickname);
         mirror(&mut self.ui.password, &self.password);
-        mirror(&mut self.ui.channel_password, &self.channel_password);
+        let channel_password = self.server().channel_password.clone();
+        mirror(&mut self.ui.channel_password, &channel_password);
         mirror(&mut self.ui.key_capture, "");
         mirror(&mut self.ui.settings_search, &self.settings_query);
         let editor = self.server_editor.clone().unwrap_or_default();
@@ -183,10 +187,11 @@ impl App {
         mirror(&mut self.ui.server_address, &editor.address);
         mirror(&mut self.ui.server_password, &editor.password);
         let poke = self
+            .server()
             .poke
             .as_ref()
-            .map_or("", |draft| draft.message.as_str());
-        mirror(&mut self.ui.poke_message, poke);
+            .map_or(String::new(), |draft| draft.message.clone());
+        mirror(&mut self.ui.poke_message, &poke);
     }
 }
 
@@ -251,7 +256,7 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
                 );
             }
         }
-        Task::Events(mut events) => {
+        Task::Events(id, mut events) => {
             let Some(handle) = s.handle.clone() else {
                 return;
             };
@@ -259,7 +264,7 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
                 .name("flexspeak-events".into())
                 .spawn(move || {
                     while let Some(event) = events.blocking_recv() {
-                        handle.update(move |s, tx| dispatch(s, tx, Message::Backend(event)));
+                        handle.update(move |s, tx| dispatch(s, tx, Message::Backend(id, event)));
                     }
                 });
             if let Err(error) = spawned {
@@ -290,7 +295,7 @@ pub fn forward_shortcuts(
 }
 
 fn setup(s: &mut App, waker: Waker) {
-    s.streaming.surfaces.set_waker(waker);
+    s.server().streaming.surfaces.set_waker(waker);
 }
 
 /// Sampling timers and video frame bookkeeping. True only when something visible changed.
@@ -323,7 +328,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         None => s.next_usage_tick,
     };
     tx.wake_after(wake.saturating_duration_since(now));
-    if s.streaming.sync_frame() {
+    if s.server_mut().streaming.sync_frame() {
         changed = true;
     }
     changed
@@ -347,7 +352,7 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
     }
     // Escape drops a member selection first.
     if key.key == rune::Key::Escape
-        && !s.selected_members.is_empty()
+        && !s.server().selected_members.is_empty()
         && s.settings_page.is_none()
         && s.ui.member_menu.is_none()
     {
@@ -359,7 +364,7 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         && s.onboarding.is_none()
         && s.settings_page.is_none()
         && s.tab != Tab::Home
-        && s.password_channel.is_none()
+        && s.server().password_channel.is_none()
         && s.alerts.current().is_none()
     {
         dispatch(s, tx, Message::ShowTab(Tab::Home));

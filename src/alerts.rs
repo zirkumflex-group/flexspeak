@@ -23,6 +23,24 @@ pub enum Source {
 }
 
 impl Source {
+    /// Whether this kind of problem belongs to one server rather than to the whole app.
+    pub fn server_scoped(self) -> bool {
+        matches!(
+            self,
+            Self::Connection
+                | Self::Join
+                | Self::Controls
+                | Self::Subscription
+                | Self::Flood
+                | Self::Poke
+                | Self::Move
+                | Self::StreamDiscovery
+                | Self::StreamWatch
+                | Self::StreamFrame
+                | Self::StreamPublish
+        )
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Self::Connection => "Connection failed",
@@ -52,47 +70,81 @@ pub struct Incident {
     pub source: Source,
     pub detail: String,
     pub reports: u32,
+    /// Which server this happened on, when that needs saying.
+    pub server: Option<String>,
 }
 
-/// One incident per operation; dismissing suppresses repeats until recovery or an explicit retry.
+type Key = (Option<u64>, Source);
+
+/// One incident per operation and server; dismissing suppresses repeats until recovery or an
+/// explicit retry.
 #[derive(Default)]
 pub struct Alerts {
-    incidents: BTreeMap<Source, Incident>,
-    visible: VecDeque<Source>,
+    incidents: BTreeMap<Key, Incident>,
+    visible: VecDeque<Key>,
 }
 
 impl Alerts {
     pub fn raise(&mut self, source: Source, detail: impl AsRef<str>) {
+        self.insert((None, source), None, detail);
+    }
+    /// Raises an alert for one server, naming it when `server` is given.
+    pub fn raise_in(
+        &mut self,
+        scope: u64,
+        server: Option<String>,
+        source: Source,
+        detail: impl AsRef<str>,
+    ) {
+        self.insert((Some(scope), source), server, detail);
+    }
+    fn insert(&mut self, key: Key, server: Option<String>, detail: impl AsRef<str>) {
         let detail: String = detail.as_ref().chars().take(4096).collect();
-        if let Some(incident) = self.incidents.get_mut(&source) {
+        if let Some(incident) = self.incidents.get_mut(&key) {
             incident.detail = detail;
             incident.reports = incident.reports.saturating_add(1);
+            if server.is_some() {
+                incident.server = server;
+            }
         } else {
             self.incidents.insert(
-                source,
+                key,
                 Incident {
-                    source,
+                    source: key.1,
                     detail,
                     reports: 1,
+                    server,
                 },
             );
-            self.visible.push_back(source);
+            self.visible.push_back(key);
         }
     }
     pub fn current(&self) -> Option<&Incident> {
-        self.visible
-            .front()
-            .and_then(|source| self.incidents.get(source))
+        self.visible.front().and_then(|key| self.incidents.get(key))
     }
     pub fn dismiss(&mut self) {
         self.visible.pop_front();
     }
+    fn clear(&mut self, key: Key) {
+        self.incidents.remove(&key);
+        self.visible.retain(|visible| *visible != key);
+    }
     pub fn recover(&mut self, source: Source) {
-        self.incidents.remove(&source);
-        self.visible.retain(|key| *key != source);
+        self.clear((None, source));
+    }
+    pub fn recover_in(&mut self, scope: u64, source: Source) {
+        self.clear((Some(scope), source));
     }
     pub fn begin(&mut self, source: Source) {
         self.recover(source);
+    }
+    pub fn begin_in(&mut self, scope: u64, source: Source) {
+        self.recover_in(scope, source);
+    }
+    /// Forgets everything that happened on a server that has gone.
+    pub fn close_server(&mut self, scope: u64) {
+        self.incidents.retain(|key, _| key.0 != Some(scope));
+        self.visible.retain(|key| key.0 != Some(scope));
     }
 }
 
@@ -119,6 +171,18 @@ mod tests {
         alerts.raise(Source::Audio, "Retry failed");
         assert_eq!(alerts.current().unwrap().reports, 1);
         alerts.recover(Source::Audio);
+        assert!(alerts.current().is_none());
+    }
+
+    #[test]
+    fn one_servers_recovery_does_not_clear_another_servers_alert() {
+        let mut alerts = Alerts::default();
+        alerts.raise_in(1, Some("Work".into()), Source::Flood, "Busy");
+        alerts.raise_in(2, None, Source::Flood, "Also busy");
+        assert_eq!(alerts.current().unwrap().server.as_deref(), Some("Work"));
+        alerts.recover_in(2, Source::Flood);
+        assert_eq!(alerts.current().unwrap().detail, "Busy");
+        alerts.close_server(1);
         assert!(alerts.current().is_none());
     }
 }

@@ -14,11 +14,21 @@ The Permissions step, and the same section in Settings, shows what the operating
 
 The window has a **760 × 560 logical-pixel minimum**.
 
-The top bar contains Statistics and Settings; Voice and Streaming tabs are removed. The disconnected home screen centers a **Saved servers** card: one row per server (its name, or address, with the address beneath a name) and its own **Connect** button. The first server's Connect is the default button, so Return connects to it; **+** adds a server. Only one session runs at a time: while one server connects or is connected, its row offers **Cancel** and the others' Connect buttons wait until you disconnect.
+The top bar contains Statistics and Settings; Voice and Streaming tabs are removed. The disconnected home screen centers a **Saved servers** card: one row per server (its name, or address, with the address beneath a name) and its own **Connect** button. The first server's Connect is the default button, so Return connects to it; **+** adds a server. While a server connects, its row offers **Cancel**; the other servers stay available.
 
 Manage the list in **Settings → Server → Servers**. **Add Server** and each row's **Edit** open a dialog with **Address** (required, unique in the list), an optional **Name**, and an optional **Password**. The password is kept per server until the app quits and is never written to the file. Saving the dialog writes the list straight away, without saving other unsaved Settings edits. **Remove** is in the Edit dialog; the last server can't be removed, and the server in use can't be edited or removed until you disconnect. The row of the server in use is marked **Connecting** or **Connected**. Your **Nickname** (Settings → Server → Identity) is used on every server and is kept by **Save**.
 
 Once connected, the left sidebar contains the server/channel tree and Disconnect, Mute and Deafen. The channel tree reserves 16 logical pixels before its scrollbar. The right pane contains stream publishing and available streams. Opening Statistics stops watching/sharing, as leaving the old Streaming view did; Settings floats over the server view and leaves streams, sharing and peer polling running. Peer connection details and voice packet counts are in Statistics; sidebar health dots remain on the server view.
+
+## Several servers at once
+
+Connect to as many servers as you like. Once one is connected, a rail runs down the far left of the window with a tile for each. The tile shows the server's initials on a colour derived from its name; the active one has a rounded-square tile and a white pill on its left edge. Under every tile, a mic and a headphones icon show that server's own mute and deafen. They're red with a strike when off, and grey otherwise. A green ring means someone is talking there, and a small amber dot on the corner means it's still connecting. The **+** tile at the bottom opens your saved servers to connect another; the new one comes to the front once it has connected, unless you've picked a server in the meantime.
+
+Click a tile to make that server **active**. The sidebar, channel tree, voice panel, streams pane and footer statistics show the active server. Each server keeps its own mute and deafen. You **hear every server you haven't deafened**, and your microphone (continuous, push-to-talk or voice activation) transmits **only to the active server**. Switching mid-sentence ends the utterance on the old server and starts a new one on the new server, so nobody hears anything you didn't mean for them. The microphone, playback device, echo cancellation and audio buffers are shared: they open with the first connection and close with the last, and a device failure disconnects every server with one error. Disconnect ends the active server and brings another to the front, or returns to the saved-server home when it was the last.
+
+A poke on a server you aren't looking at shows an amber marker with a hand on its tile, with a count when there's more than one; switching to that server clears the marker, and the poke's dialog is waiting there. It still plays the normal chime and desktop notification. A poke on the active server is just the usual notification. An error from a background server names that server in its dialog instead of looking like the active one failing, and a background server dropping leaves the active view alone.
+
+Settings stay locked while any server is connected, and connecting or disconnecting one doesn't change them. The local microphone test runs only when no server is connected, and connecting is blocked during it. An update's restart reconnects every server and returns to the active one.
 
 ## Global shortcuts
 
@@ -27,7 +37,7 @@ Default global shortcuts:
 - `Ctrl+Shift+M`: toggle microphone mute.
 - `Ctrl+Shift+D`: toggle deafen. Deafening stops playback and microphone transmission; undeafening restores the existing microphone-mute choice.
 
-Both use the same control handlers as the buttons and work on every page. They act only during a connected voice session, not during connection setup, shutdown or the local microphone test. Holding a key does not repeatedly toggle it: macOS/X11 events are filtered by press/release state; Windows registration uses `MOD_NOREPEAT`.
+Both use the same control handlers as the buttons and work on every page, on the active server: with more than one connected, a hint under the server name says so. They act only during a connected voice session, not during connection setup, shutdown or the local microphone test. Holding a key does not repeatedly toggle it: macOS/X11 events are filtered by press/release state; Windows registration uses `MOD_NOREPEAT`.
 
 Lucide icons accompany the CPU, RAM, server, channel, microphone, playback and volume labels. The microphone icon reflects effective transmission state, including deafen and server restrictions; the crossed-out headphones indicate deafen.
 

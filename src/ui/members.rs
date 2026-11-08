@@ -16,12 +16,12 @@ const DRAG_START: f32 = 4.0;
 /// The member row with selection, its context menu and dragging.
 pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
     let id = member.id;
-    let selected = s.selected_members.contains(&id);
+    let selected = s.server().selected_members.contains(&id);
     let dragged =
         s.ui.drag
             .as_ref()
             .is_some_and(|drag| drag.ids.contains(&id));
-    let live = s.connected && !s.loopback && !s.stopping;
+    let live = s.server().connected && !s.loopback && !s.server().stopping;
     let mut row = row
         .role("button")
         .label(member.name.clone())
@@ -49,8 +49,8 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
             tx.live_only();
         })
         .on_secondary_press(move |s: &mut App, point: PointerPress, _tx: &mut Tx| {
-            if !s.selected_members.contains(&id) {
-                s.selected_members.clear();
+            if !s.server().selected_members.contains(&id) {
+                s.server_mut().selected_members.clear();
             }
             s.ui.member_menu = Some((id, point));
             s.ui.move_menu = false;
@@ -101,8 +101,8 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
 
 /// The selection when the pressed member is part of it, else just that member.
 fn dragged_ids(s: &App, id: u16) -> Vec<u16> {
-    if s.selected_members.contains(&id) && s.selected_members.len() > 1 {
-        s.selected_members.iter().copied().collect()
+    if s.server().selected_members.contains(&id) && s.server().selected_members.len() > 1 {
+        s.server().selected_members.iter().copied().collect()
     } else {
         vec![id]
     }
@@ -155,6 +155,7 @@ pub fn menu(s: &App, _t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         menu = menu.item(poke);
     }
     let channels: Vec<MenuEntry> = s
+        .server()
         .state
         .channels
         .iter()
@@ -224,7 +225,8 @@ pub fn ghost(s: &App, t: &Theme, layer: &mut Vec<El>) {
         many => format!("{} people", many.len()),
     };
     let target = drag.target.and_then(|id| {
-        s.state
+        s.server()
+            .state
             .channels
             .iter()
             .find(|channel| channel.id == id)

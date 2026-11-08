@@ -182,7 +182,7 @@ fn sections(
             )
             .note(group_note(
                 t,
-                "Stop the microphone test or disconnect to change processing and transmission. Save to keep them.",
+                "Stop the microphone test or disconnect from every server to change processing and transmission. Save to keep them.",
             )),
         ],
         SettingsPage::Shortcuts => vec![shortcut_section(s, t, k)],
@@ -534,13 +534,12 @@ fn window_header(s: &App, t: &Theme, page: SettingsPage, searching: bool) -> El 
 
 /// The saved servers, one row each, and Add Server. The list saves as it changes.
 fn servers_section(s: &App, t: &Theme) -> Section {
-    let current = s.session_address();
     let mut rows: Vec<Row> = s
         .servers
         .iter()
         .enumerate()
         .map(|(index, server)| {
-            let mine = current == Some(server.address.trim());
+            let session = s.session_at(&server.address);
             let mut names = col().grow(1.0).min_w(0.0).gap(2.0).child(
                 row()
                     .gap(8.0)
@@ -552,10 +551,10 @@ fn servers_section(s: &App, t: &Theme) -> Section {
                             .truncate_fade()
                             .min_w(0.0),
                     )
-                    .children(mine.then(|| {
+                    .children(session.map(|session| {
                         badge(
                             t,
-                            if s.connected {
+                            if session.connected {
                                 "Connected"
                             } else {
                                 "Connecting"
@@ -616,7 +615,7 @@ fn servers_section(s: &App, t: &Theme) -> Section {
     Section::boxed("servers", "Servers", "saved servers list bookmarks address hostname", rows)
         .note(group_note(
             t,
-            "Save as many servers as you like and connect to one at a time from the home screen. Changes here save straight away.",
+            "Save as many servers as you like and connect to several at once. Changes here save straight away.",
         ))
 }
 
@@ -632,7 +631,7 @@ fn badge(t: &Theme, label: &str) -> El {
 }
 
 fn identity_section(s: &App, t: &Theme, k: &Kit) -> Section {
-    let idle = s.session.is_none();
+    let idle = s.idle();
     Section::boxed(
         "identity",
         "Identity",
@@ -786,7 +785,7 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     .description(if editing.is_some() {
         "Changes save as soon as you choose Save."
     } else {
-        "Add it to your saved servers. You connect to one at a time."
+        "Add it to your saved servers, then connect to it from the home screen or the rail."
     })
     .open(true)
     .fit()
@@ -800,7 +799,7 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
 }
 
 fn file_section(s: &App, t: &Theme) -> Section {
-    let idle = s.session.is_none();
+    let idle = s.idle();
     let location = s
         .settings_path
         .as_ref()
@@ -852,7 +851,7 @@ fn file_section(s: &App, t: &Theme) -> Section {
 
 /// Running setup again over the saved profile; Cancel in setup keeps everything as it was.
 fn setup_section(s: &App, t: &Theme) -> Section {
-    let idle = s.session.is_none();
+    let idle = s.idle();
     Section::boxed(
         "setup",
         "Setup",
@@ -1181,12 +1180,12 @@ pub fn audio(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>)
         .child(group(t, rows(transmission_rows(s, t, k, layer))).key("transmission"))
         .child(group_note(
             t,
-            "Stop the microphone test or disconnect to change processing and transmission. Save to keep them.",
+            "Stop the microphone test or disconnect from every server to change processing and transmission. Save to keep them.",
         ))
 }
 
 fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
-    let busy = s.session.is_some();
+    let busy = !s.idle();
     let volume = s.playback_volume.percent();
     let inputs: Vec<String> = s.devices.inputs.iter().map(|d| d.name.clone()).collect();
     let outputs: Vec<String> = s.devices.outputs.iter().map(|d| d.name.clone()).collect();
@@ -1301,7 +1300,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
                     } else {
                         Variant::Secondary
                     },
-                    if s.stopping {
+                    if s.server().stopping {
                         None
                     } else if testing {
                         Some(Message::Stop)
@@ -1382,7 +1381,7 @@ fn typing_row(s: &App, t: &Theme, k: &Kit) -> Row {
                 "typing-suppression-switch",
                 "Typing suppression",
                 s.audio_processing.typing_suppression,
-                s.session.is_none(),
+                s.idle(),
                 k,
                 |s, on| processing_with(s, |o| o.typing_suppression = on),
             ),
@@ -1407,7 +1406,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
         ];
     }
     let options = s.audio_processing;
-    let editable = s.session.is_none();
+    let editable = s.idle();
     let levels: Vec<String> = audio_processing::SuppressionLevel::ALL
         .iter()
         .map(ToString::to_string)
@@ -1497,7 +1496,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
 
 fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
     let settings = s.transmission;
-    let editable = s.session.is_none();
+    let editable = s.idle();
     let modes: Vec<String> = transmission::Mode::ALL
         .iter()
         .map(ToString::to_string)
@@ -1635,7 +1634,7 @@ pub fn permissions(s: &App, t: &Theme) -> El {
 
 fn permission_section(s: &App, t: &Theme) -> Section {
     use permissions::Status;
-    let enabled = s.permissions.pending.is_none() && s.session.is_none();
+    let enabled = s.permissions.pending.is_none() && s.idle();
     let mut rows = Vec::new();
     for kind in permissions::Kind::ALL {
         let status = s.permissions.status[kind.index()];
@@ -1689,7 +1688,7 @@ fn permission_section(s: &App, t: &Theme) -> Section {
     if cfg!(target_os = "macos") {
         note.push_str(" This build appears as Flexspeak in Privacy & Security. macOS may ask you to reopen the app after allowing screen recording.");
     }
-    if s.session.is_some() {
+    if !s.idle() {
         note.push_str(" Disconnect or stop the local test before requesting access.");
     }
     Section::boxed("permissions", "Permissions", "privacy access", rows).note(group_note(t, note))

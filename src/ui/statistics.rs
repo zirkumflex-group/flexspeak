@@ -23,13 +23,17 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         .padding(size::PAGE)
         .gap(12.0)
         .child(usage_view(s, cx, t));
-    if s.connected && !s.loopback {
+    if s.server().connected && !s.loopback {
         content = content
             .child(muted(
                 t,
-                format!("Voice packets · sent {} · received {}", s.sent, s.received),
+                format!(
+                    "Voice packets · sent {} · received {}",
+                    s.server().sent,
+                    s.server().received
+                ),
             ))
-            .child(faint(t, s.detail.clone()))
+            .child(faint(t, s.server().detail.clone()))
             .child(client_connections(s, cx, t));
     }
     content = content
@@ -111,8 +115,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         s.audio_buffer_bytes,
         s.cpu_history.buffer_bytes()
             + s.ram_history.buffer_bytes()
-            + s.connection_history.buffer_bytes()
-            + s.client_history.buffer_bytes(),
+            + s.server().connection_history.buffer_bytes()
+            + s.server().client_history.buffer_bytes(),
         profiler::buffer_bytes(),
     ));
     scroll_page(k, "statistics-scroll", content)
@@ -130,8 +134,8 @@ fn metric(t: &Theme, label: &'static str, value: String) -> El {
 }
 
 fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
-    let quality = s.connection_usage;
-    let network = s.network_usage;
+    let quality = s.server().connection_usage;
+    let network = s.server().network_usage;
     let percent =
         |value: Option<f32>| value.map_or_else(|| "—".into(), |value| format!("{value:.1} %"));
     let rate = |value: f64| format!("{}/s", usage::format_bytes(value));
@@ -303,10 +307,10 @@ fn client_connections(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
         .gap(8.0)
         .child(heading(t, "Channel connections"));
     let mut count = 0;
-    if let Some(channel) = &s.state.current {
+    if let Some(channel) = &s.server().state.current {
         for member in channel.members.iter().filter(|member| !member.is_self) {
             count += 1;
-            let expanded = s.expanded_client == Some(member.id);
+            let expanded = s.server().expanded_client == Some(member.id);
             let quality = s.client_quality(member.id, std::time::Instant::now());
             let (health, detail) = s.member_health(member, true);
             let mut header = row()
@@ -341,7 +345,7 @@ fn client_connections(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                         .motion(motion::QUICK)
                         .a11y_hidden(),
                 );
-            if !s.stopping {
+            if !s.server().stopping {
                 header = header
                     .focusable(true)
                     .cursor(rune::Cursor::Pointer)
@@ -362,13 +366,13 @@ fn client_connections(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                             t,
                             "peer",
                             quality,
-                            &s.client_history,
+                            &s.server().client_history,
                             false,
                             !member.is_self,
                         ))
                         .child(faint(
                             t,
-                            match s.client_usage.get(&member.id) {
+                            match s.server().client_usage.get(&member.id) {
                                 Some(Err(error)) => *error,
                                 Some(Ok(_)) => {
                                     "Server snapshot · refreshes are staggered across your channel"

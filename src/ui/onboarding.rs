@@ -143,7 +143,7 @@ fn ts6_servers(s: &App, t: &Theme) -> Option<El> {
 /// The microphone, speakers and talk mode TeamSpeak 6 used, where this computer has them.
 fn ts6_audio(s: &App, t: &Theme) -> Option<El> {
     let imported = s.ts6.as_ref()?;
-    let free = s.session.is_none();
+    let free = s.idle();
     let mut rows = Vec::new();
     type Choose = fn(crate::audio::DeviceChoice) -> Message;
     let sides: [(&str, &str, _, _, _, Choose); 2] = [
@@ -240,7 +240,7 @@ fn stepper(t: &Theme, step: Step) -> El {
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, step: Step) -> El {
-    let busy = s.session.is_some() || s.permissions.pending.is_some();
+    let busy = !s.idle() || s.permissions.pending.is_some();
     let fields = match step {
         Step::Username => col()
             .w_full()
@@ -297,7 +297,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
             .child(muted(
                 t,
                 if s.loopback {
-                    s.status.as_str()
+                    s.server().status.as_str()
                 } else {
                     "Stop the local test before continuing. You can also test devices later in Settings."
                 },
