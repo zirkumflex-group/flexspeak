@@ -628,7 +628,8 @@ fn rail_edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         layer.push(
             col()
                 .key("rail-peek")
-                .absolute(INSET, size::HEADER + 4.0)
+                // Opens where the pointer already is, level with the handle.
+                .absolute(INSET, size::HEADER + (height - RAIL_PEEK_HEIGHT) / 2.0)
                 .w(RAIL)
                 .h(RAIL_PEEK_HEIGHT)
                 .radius(radius::PANE)
@@ -1314,9 +1315,73 @@ fn voice_controls(s: &App, t: &Theme) -> El {
         panel = panel.child(streams::sharing_status(s, t));
     }
     panel = panel
+        .children(quick_share(s, t))
         .child(controls)
         .child(meter(t, "mic-level", speaking, t.good));
     panel
+}
+
+/// One click to go live, while you aren't: your main screen, then the game you're playing.
+fn quick_share(s: &App, t: &Theme) -> Option<El> {
+    let sharing = &s.server().streaming.sharing;
+    let available = s.server().connected
+        && !s.loopback
+        && !s.server().stopping
+        && s.server().state.server_version.starts_with("6.")
+        && crate::streaming::AVAILABLE;
+    if !available || sharing.status.active || s.ui.quick_sources.is_empty() {
+        return None;
+    }
+    let mut chips = row().key("quick-share").w_full().gap(6.0);
+    for (index, source) in s.ui.quick_sources.iter().take(3).enumerate() {
+        let help = format!("Go live publicly: {}", source.name);
+        let game = matches!(
+            source.kind,
+            crate::streaming::publishing::SourceKind::Window(_)
+        );
+        chips = chips.child(
+            row()
+                .key(format!("quick-share-{index}"))
+                .role("button")
+                .label(help.clone())
+                .help(help)
+                .grow(1.0)
+                .min_w(0.0)
+                .h(26.0)
+                .px(7.0)
+                .gap(5.0)
+                .center_y()
+                .radius(radius::PILL)
+                .fill(t.live.alpha(0.12))
+                .border(1.0, t.live.alpha(0.28))
+                .hover(t.live.alpha(0.22))
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .on_press_tx(send(Message::QuickShare(source.clone())))
+                .child(
+                    icon(
+                        if game {
+                            &icons::GAMEPAD
+                        } else {
+                            &icons::MONITOR_UP
+                        },
+                        12.0,
+                    )
+                    .color(t.live)
+                    .a11y_hidden(),
+                )
+                .child(
+                    text(source.name.clone())
+                        .font(ty::CAPTION)
+                        .color(t.text)
+                        .truncate_fade()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .a11y_hidden(),
+                ),
+        );
+    }
+    Some(chips)
 }
 
 /// The voice panel's buttons share its width evenly, a little taller than the rest.
