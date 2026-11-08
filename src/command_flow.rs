@@ -17,6 +17,7 @@ pub enum Operation {
     Join,
     Statistics,
     Discovery,
+    StreamInfo,
     StreamJoin,
     StreamSignal,
     StreamLeave,
@@ -35,6 +36,7 @@ impl Operation {
             Self::Join => "channel join",
             Self::Statistics => "connection statistics",
             Self::Discovery => "stream discovery",
+            Self::StreamInfo => "stream details",
             Self::StreamJoin => "stream viewing request",
             Self::StreamSignal => "video negotiation",
             Self::StreamLeave => "stop watching",
@@ -121,8 +123,14 @@ impl Flow {
                 .last_send
                 .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1))
     }
-    pub fn optional_ready(&self, now: Instant) -> bool {
-        self.queue.is_empty()
+    pub fn optional_ready(&self, operation: Operation, now: Instant) -> bool {
+        // One queued request per optional producer lets FIFO scheduling give each a turn.
+        // Requiring an empty queue lets the first producer starve all the others.
+        operation.optional()
+            && self
+                .queue
+                .iter()
+                .all(|item| item.operation.optional() && item.operation != operation)
             && self.pending.len() < 8
             && !self.cooling_down(now)
             && self.probe.is_none()
@@ -322,8 +330,8 @@ mod tests {
         let mut flow = Flow::default();
         let info = flow.enqueue(command(), Operation::Statistics).unwrap();
         assert!(
-            !flow.optional_ready(now),
-            "Do not pile up optional producers"
+            !flow.optional_ready(Operation::Statistics, now),
+            "Do not pile up requests from the same optional producer"
         );
         assert_eq!(
             flow.next_ready(now),
@@ -435,7 +443,7 @@ mod tests {
         assert!(!flow.feedback(Ticket(3), false, true, now + Duration::from_secs(11)));
         assert!(flow.cooldown.is_some());
         flow.probe = Some(Ticket(4));
-        assert!(!flow.optional_ready(now + Duration::from_secs(12)));
+        assert!(!flow.optional_ready(Operation::Statistics, now + Duration::from_secs(12)));
         flow.feedback(Ticket(4), true, false, now + Duration::from_secs(12));
         assert!(flow.cooling_down(now + Duration::from_secs(31)));
         flow.probe = Some(Ticket(5));

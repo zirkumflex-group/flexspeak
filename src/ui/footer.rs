@@ -1,9 +1,9 @@
 //! The fixed footer: own connection health, the live connection charts and process resources.
 
-use rune::{Color, Cx, El, col, el, icon, row, text};
+use rune::{Color, El, el, icon, row, text};
 
 use super::theme::{Theme, radius, ty};
-use super::widgets::{Variant, divider, icon_button, vertical_divider};
+use super::widgets::{Variant, icon_button, vertical_divider};
 use super::{charts, icons};
 use crate::{App, Message, usage};
 
@@ -86,17 +86,14 @@ fn resources(s: &App) -> Resources {
     }
 }
 
-fn readings(s: &App, t: &Theme, stacked: bool) -> El {
+fn readings(s: &App, t: &Theme) -> El {
     let r = resources(s);
-    let items = [
-        reading(t, &icons::CPU, "CPU", r.cpu.0, r.cpu.1),
-        reading(t, &icons::MEMORY, "RAM", r.ram.0, r.ram.1),
-    ];
-    if stacked {
-        col().gap(3.0).w(160.0).children(items)
-    } else {
-        row().gap(20.0).center_y().flex_wrap().children(items)
-    }
+    row()
+        .gap(20.0)
+        .center_y()
+        .flex_wrap()
+        .child(reading(t, &icons::CPU, "CPU", r.cpu.0, r.cpu.1))
+        .child(reading(t, &icons::MEMORY, "RAM", r.ram.0, r.ram.1))
 }
 
 /// The hidden footer's resources: icons only, coloured by load, the figure in the tooltip.
@@ -144,73 +141,69 @@ fn toggle(t: &Theme, hidden: bool) -> El {
     )
 }
 
-pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
+pub fn view(s: &App, t: &Theme) -> El {
     let show_connection = s.server().connected
         && !s.loopback
         && !s.server().stopping
         && s.server().state.current.is_some();
-    let (content, py) = if s.footer_hidden {
-        (
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(status_pill(s, t))
-                .child(resource_icons(s, t))
-                .child(el().grow(1.0))
-                .child(toggle(t, true)),
-            4.0,
-        )
+    let content = if s.footer_hidden {
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(status_pill(s, t))
+            .child(resource_icons(s, t))
+            .child(el().grow(1.0))
+            .child(toggle(t, true))
     } else if show_connection {
-        (
-            row()
-                .w_full()
-                .gap(16.0)
-                .center_y()
-                .child(status_pill(s, t))
-                .child(
-                    el().key("footer-charts")
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .h(44.0)
-                        .scroll_x()
-                        .scroll_edge_fade(12.0)
-                        // The strip fills the band; below three connection charts it scrolls sideways.
-                        .child(
-                            charts::connection(
-                                cx,
-                                t,
-                                "footer",
-                                s.server().connection_usage,
-                                &s.server().connection_history,
-                                true,
-                                false,
-                            )
-                            .h(44.0)
-                            .center_y(),
-                        ),
-                )
-                .child(vertical_divider(t, 36.0))
-                .child(readings(s, t, true))
-                .child(toggle(t, false)),
-            6.0,
+        // One slim line, as a native status bar: each reading with its own sparkline, the strip
+        // scrolling sideways when the window is too narrow for all of them.
+        let mut strip = row().gap(14.0).center_y();
+        for (index, item) in charts::inline(
+            t,
+            "footer",
+            s.server().connection_usage,
+            &s.server().connection_history,
         )
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                strip = strip.child(vertical_divider(t, 14.0));
+            }
+            strip = strip.child(item);
+        }
+        row()
+            .w_full()
+            .gap(14.0)
+            .center_y()
+            .child(status_pill(s, t))
+            .child(
+                el().key("footer-charts")
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .scroll_x()
+                    .scroll_edge_fade(12.0)
+                    .child(strip),
+            )
+            .child(readings(s, t))
+            .child(toggle(t, false))
     } else {
-        (
-            row()
-                .w_full()
-                .gap(20.0)
-                .center_y()
-                .child(status_pill(s, t))
-                .child(el().grow(1.0))
-                .child(readings(s, t, false))
-                .child(toggle(t, false)),
-            8.0,
-        )
+        row()
+            .w_full()
+            .gap(20.0)
+            .center_y()
+            .child(status_pill(s, t))
+            .child(el().grow(1.0))
+            .child(readings(s, t))
+            .child(toggle(t, false))
     };
-    col()
-        .key("footer")
+    // Sits on the window background under the cards, without a rule of its own.
+    el().key("footer")
         .w_full()
-        .child(divider(t))
-        .child(el().w_full().px(12.0).py(py).fill(t.chrome).child(content))
+        .h(40.0)
+        .pl(12.0)
+        .pr(8.0)
+        .center_y()
+        .child(content)
 }

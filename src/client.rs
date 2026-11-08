@@ -1100,7 +1100,7 @@ async fn run_connection(
                             }
                         }
                         if connected && pending_info.is_none()
-                            && flow.borrow().optional_ready(now)
+                            && flow.borrow().optional_ready(Operation::Statistics, now)
                             && now.duration_since(last_info_check) >= usage::REFRESH_INTERVAL {
                             last_info_check = now;
                             let state = connection.get_state()?;

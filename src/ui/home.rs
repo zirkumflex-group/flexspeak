@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 
 use rune::{
-    Cx, El, GrowthSpec, PointerPress, ScrollSpec, Span, Transition, Tx, col, el, icon, rich, row,
-    text,
+    Cx, Drag, El, GrowthSpec, Phase, PointerPress, ScrollSpec, Span, Transition, Tx, col, el, icon,
+    rich, row, text,
 };
 use rune_kit::{Kit, MenuItem, TextInput, context_menu};
 
@@ -19,7 +19,13 @@ use crate::{App, Message, Tab, client, usage};
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     let page = match s.tab {
         Tab::Home => home(s, cx, t, k, layer),
-        Tab::Statistics => statistics::view(s, cx, t, k),
+        // On the same inset card as the connected panes, so it scrolls clear of the status bar.
+        Tab::Statistics => row().w_full().h_full().px(INSET).child(
+            pane(t)
+                .grow(1.0)
+                .min_w(0.0)
+                .child(statistics::view(s, cx, t, k)),
+        ),
     };
     let key = match s.tab {
         Tab::Home => "page-home",
@@ -42,7 +48,7 @@ pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                     .child(page),
             ),
         )
-        .child(footer::view(s, cx, t))
+        .child(footer::view(s, t))
 }
 
 fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
@@ -54,7 +60,6 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
         .pr(if cfg!(windows) { 150.0 } else { 12.0 })
         .gap(size::GAP)
         .center_y()
-        .fill(t.chrome)
         .window_drag();
     if s.tab != Tab::Home {
         bar = bar.child(icon_button(
@@ -66,21 +71,14 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
             Some(Message::ShowTab(Tab::Home)),
         ));
     }
-    // Connected, the sidebar already names the server.
-    let title = match s.tab {
-        Tab::Home if s.server().connected && !s.loopback => None,
-        Tab::Home => Some("Flexspeak"),
-        Tab::Statistics => Some("Usage & Statistics"),
+    // Connected, the sidebar names the server; the title bar just names the app, quietly,
+    // as a native window's caption does.
+    let (title, ink) = match s.tab {
+        Tab::Home if s.server().connected && !s.loopback => ("Flexspeak", t.muted),
+        Tab::Home => ("Flexspeak", t.text),
+        Tab::Statistics => ("Usage & Statistics", t.text),
     };
-    if let Some(title) = title {
-        bar = bar.child(
-            text(title)
-                .font(ty::HEADING)
-                .color(t.text)
-                .truncate()
-                .ml(4.0),
-        );
-    }
+    bar = bar.child(text(title).font(ty::HEADING).color(ink).truncate().ml(4.0));
     bar = bar.child(el().grow(1.0));
     let statistics = s.tab == Tab::Statistics;
     bar = bar.child(icon_button(
@@ -103,7 +101,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
     bar = bar.child(icon_button(
         t,
         "Settings",
-        &icons::SETTINGS,
+        &icons::SETTINGS_THIN,
         if cfg!(target_os = "macos") {
             "Settings · ⌘,"
         } else {
@@ -120,7 +118,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
             Message::OpenSettings(s.settings_recent)
         }),
     ));
-    col().w_full().child(bar).child(divider(t))
+    bar
 }
 
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -130,20 +128,22 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
             return row()
                 .w_full()
                 .h_full()
+                .pr(INSET)
                 .child(server_rail(s, t, k))
-                .child(connecting_pane(s, t));
+                .child(pane(t).grow(1.0).min_w(0.0).child(connecting_pane(s, t)));
         }
         return row()
             .w_full()
             .h_full()
+            .pr(INSET)
+            .gap(INSET)
             .child(server_rail(s, t, k))
             .child(sidebar(s, cx, t, k, layer))
-            .child(el().w(1.0).h_full().fill(t.hairline))
             .child(
-                col()
+                pane(t)
+                    .key("main-pane")
                     .grow(1.0)
                     .min_w(0.0)
-                    .h_full()
                     .child(streams::view(s, cx, t, k, layer)),
             );
     }
@@ -151,6 +151,20 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
 }
 
 /// The saved servers, each with its own Connect. Only a microphone test holds them back.
+/// The gap between the window's edge and its cards, and between the cards.
+pub const INSET: f32 = 8.0;
+
+/// A card the connected window is built from: the sidebar and the main pane sit on the window
+/// background, each with its own rounded surface and hairline edge.
+fn pane(t: &Theme) -> El {
+    col()
+        .h_full()
+        .radius(radius::CARD)
+        .fill(t.surface)
+        .border(1.0, t.hairline)
+        .clip_rounded(radius::CARD)
+}
+
 fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
     let busy = s.loopback && !s.idle();
     let mut content = col().w_full().gap(14.0);
@@ -353,8 +367,8 @@ fn server_row(
 const ENTRANCE: &[rune::Beat] = &[rune::Beat::new(0.0).opacity(0.0), rune::Beat::new(0.25)];
 
 const RAIL_TILE: f32 = 44.0;
-/// The rail's width, hairline included.
-pub const RAIL: f32 = 77.0;
+/// The rail's width.
+pub const RAIL: f32 = 68.0;
 
 /// Up to two letters that stand for a server: its first two words, or its first two letters.
 pub(super) fn initials(name: &str) -> String {
@@ -483,10 +497,10 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
         .child(col().gap(5.0).center().child(tile).child(status));
     if active {
         entry = entry.child(
-            el().absolute(0.0, 6.0)
-                .size(4.0, 32.0)
-                .radius(2.0)
-                .fill(t.text),
+            el().absolute(0.0, 10.0)
+                .size(3.0, 24.0)
+                .radius(1.5)
+                .fill(t.accent),
         );
     }
     entry
@@ -519,7 +533,7 @@ fn rail_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
 }
 
 fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
-    let mut tiles = col().w_full().pt(12.0).pb(12.0).gap(14.0);
+    let mut tiles = col().w_full().pt(4.0).pb(12.0).gap(14.0);
     for session in s.rail_sessions() {
         tiles = tiles.child(rail_entry(t, session, s.active == Some(session.id)));
     }
@@ -539,7 +553,8 @@ fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
                     .size(RAIL_TILE, RAIL_TILE)
                     .radius(RAIL_TILE / 2.0)
                     .center()
-                    .fill(t.raised)
+                    .fill(t.surface)
+                    .border(1.0, t.hairline)
                     .focusable(true)
                     .cursor(rune::Cursor::Pointer)
                     .hover(t.wash(0.08))
@@ -547,17 +562,11 @@ fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
                     .child(icon(&icons::PLUS, 18.0).color(t.good).a11y_hidden()),
             ),
         );
-    row()
+    col()
         .key("server-rail")
+        .w(RAIL)
         .h_full()
-        .child(
-            col()
-                .w(RAIL - 1.0)
-                .h_full()
-                .fill(t.canvas)
-                .child(scroll_page(k, "rail-scroll", tiles)),
-        )
-        .child(el().w(1.0).h_full().fill(t.hairline))
+        .child(scroll_page(k, "rail-scroll", tiles))
 }
 
 /// The main pane while the server on screen is still connecting or reconnecting.
@@ -597,19 +606,27 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
     members::menu(s, t, k, layer);
     members::ghost(s, t, layer);
     let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
+    let name = s.server().state.server.clone();
     let server = row()
         .w_full()
-        .gap(12.0)
+        .gap(10.0)
         .center_y()
         .child(
             el().size(28.0, 28.0)
                 .radius(radius::CONTROL)
                 .center()
-                .fill(t.raised)
-                .child(icon(&icons::SERVER, 15.0).color(t.accent).a11y_hidden()),
+                .fill(tile_colour(s.server().title()))
+                .child(
+                    text(initials(s.server().title()))
+                        .font(ty::SMALL_STRONG)
+                        .color(rune::Color::WHITE),
+                )
+                .a11y_hidden(),
         )
         .child(
-            heading(t, s.server().state.server.clone())
+            text(name)
+                .font(ty::SUBTITLE)
+                .color(t.text)
                 .truncate_fade()
                 .grow(1.0)
                 .min_w(0.0),
@@ -638,16 +655,13 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
                 .child(faint(t, "Shortcuts control this server")),
         )
     };
-    col()
+    pane(t)
         .key("sidebar")
         .w(size::SIDEBAR)
-        .h_full()
-        .fill(t.chrome)
         .padding(12.0)
-        .gap(12.0)
+        .gap(10.0)
         .child(server)
-        .child(divider(t))
-        .child(overline(t, "Channels").ml(6.0))
+        .child(overline(t, "Channels").ml(6.0).mt(4.0))
         // The channel list takes the free height, so the voice controls sit at the bottom.
         .child(scroll_page(
             k,
@@ -660,9 +674,73 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
 }
 
 const LOG_ROW: f32 = 22.0;
-const LOG_ROWS: f32 = 6.0;
+/// The log's list never gets shorter than two events while open.
+const LOG_MIN: f32 = LOG_ROW * 2.0;
+/// Dragged shorter than this, the log folds down to its heading.
+const LOG_FOLD: f32 = LOG_ROW;
+/// The share of the sidebar the log may take; the channels keep the rest.
+const LOG_MAX_SHARE: f32 = 0.6;
+/// The splitter's grab band above the log.
+const SPLITTER: f32 = 9.0;
 /// Below this the channel list needs the room more.
 const LOG_MIN_WINDOW: f32 = 680.0;
+
+/// The hairline above the log, with a taller band to grab: drag it to resize the log, past
+/// the bottom to fold it, or double-click it to fold or open it.
+fn log_splitter(s: &App, t: &Theme, max: f32) -> El {
+    let resizing = s.ui.log_resizing;
+    el().key("log-splitter")
+        .role("separator")
+        .label("Resize the server log")
+        .help("Drag to resize the server log · double-click to fold it")
+        .w_full()
+        .h(SPLITTER)
+        .radius(radius::ROW)
+        .center()
+        .cursor(rune::Cursor::ResizeRow)
+        .hover(t.wash(0.04))
+        .on_drag(
+            move |s: &mut App, d: &mut Drag, tx: &mut Tx| match d.phase {
+                Phase::Down => {
+                    s.ui.log_resizing = true;
+                    d.data = if s.log_pane.collapsed {
+                        0.0
+                    } else {
+                        f32::from(s.log_pane.height).clamp(LOG_MIN, max)
+                    };
+                    if d.clicks == 2 {
+                        dispatch(s, tx, Message::ToggleLog);
+                    }
+                }
+                Phase::Move => {
+                    tx.instant();
+                    let height = d.data - d.dy;
+                    if height < LOG_FOLD {
+                        s.log_pane.collapsed = true;
+                    } else {
+                        s.log_pane.collapsed = false;
+                        s.log_pane.height = height.clamp(LOG_MIN, max).round() as u16;
+                    }
+                }
+                Phase::Up => {
+                    s.ui.log_resizing = false;
+                    if d.cancelled() {
+                        s.log_pane.collapsed = d.data == 0.0;
+                        if d.data > 0.0 {
+                            s.log_pane.height = d.data.round() as u16;
+                        }
+                    }
+                    dispatch(s, tx, Message::SaveLogPane);
+                }
+            },
+        )
+        .child(
+            el().w_full()
+                .h(if resizing { 2.0 } else { 1.0 })
+                .fill(if resizing { t.accent } else { t.hairline })
+                .a11y_hidden(),
+        )
+}
 
 /// What has happened on this server, by hour. It follows the newest entry unless scrolled
 /// back or searching; a magnifier appears on hover to search it.
@@ -674,25 +752,35 @@ fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
     if log.is_empty() || height < LOG_MIN_WINDOW {
         return None;
     }
-    let body = if log.sections().is_empty() {
-        col()
-            .key("log-none")
-            .w_full()
-            .h(LOG_ROW * LOG_ROWS)
-            .gap(6.0)
-            .center()
-            .child(faint(t, "No events match"))
-            .child(button(
-                t,
-                "log-clear",
-                "Clear search",
-                None,
-                Variant::Ghost,
-                Some(Message::LogClear),
-            ))
+    let sidebar = cx
+        .layout_size("sidebar")
+        .map_or(height - 200.0, |size| size[1]);
+    let max = (sidebar * LOG_MAX_SHARE).max(LOG_MIN);
+    let pane = s.log_pane;
+    let rows = f32::from(pane.height).clamp(LOG_MIN, max);
+    let body = if pane.collapsed {
+        None
+    } else if log.sections().is_empty() {
+        Some(
+            col()
+                .key("log-none")
+                .w_full()
+                .h(rows)
+                .gap(6.0)
+                .center()
+                .child(faint(t, "No events match"))
+                .child(button(
+                    t,
+                    "log-clear",
+                    "Clear search",
+                    None,
+                    Variant::Ghost,
+                    Some(Message::LogClear),
+                )),
+        )
     } else {
         let theme = *t;
-        let rows = col()
+        let list = col()
             .key("log-rows")
             .w_full()
             .growth(GrowthSpec::default())
@@ -703,16 +791,18 @@ fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
                 move |s: &App, index| log_section(s, &theme, index),
             );
         let following = !log.filtering();
-        k.scroll_bar(
-            col()
-                .key(if following { "log-scroll" } else { "log-found" })
-                .w_full()
-                .h(LOG_ROW * LOG_ROWS)
-                .scroll(ScrollSpec {
-                    stick_bottom: following,
-                })
-                .scroll_edge_fade(12.0)
-                .child(rows),
+        Some(
+            k.scroll_bar(
+                col()
+                    .key(if following { "log-scroll" } else { "log-found" })
+                    .w_full()
+                    .h(rows)
+                    .scroll(ScrollSpec {
+                        stick_bottom: following,
+                    })
+                    .scroll_edge_fade(12.0)
+                    .child(list),
+            ),
         )
     };
     Some(
@@ -720,10 +810,11 @@ fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
             .key("server-log")
             .w_full()
             .gap(4.0)
+            .child(log_splitter(s, t, max).mb(2.0))
             .on_hover_change(|s: &mut App, hovering, _| s.ui.log_hover = hovering)
             .child(log_bar(s, t, k))
-            .child(body)
-            .children(s.ui.log_people.then(|| log_people(s, t, k))),
+            .children(body)
+            .children((s.ui.log_people && !pane.collapsed).then(|| log_people(s, t, k))),
     )
 }
 
@@ -731,10 +822,27 @@ fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
 fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
     let log = &s.server().log;
     let bar = row().w_full().h(size::CONTROL).gap(6.0).center_y();
-    if !log.searching {
+    let collapsed = s.log_pane.collapsed;
+    let fold = icon_button(
+        t,
+        "log-fold",
+        if collapsed {
+            &icons::CHEVRON_UP
+        } else {
+            &icons::CHEVRON_DOWN
+        },
+        if collapsed {
+            "Show the server log"
+        } else {
+            "Fold the server log"
+        },
+        Variant::Ghost,
+        Some(Message::ToggleLog),
+    );
+    if !log.searching || collapsed {
         return bar
             .child(overline(t, "Server log").ml(6.0).grow(1.0))
-            .children(s.ui.log_hover.then(|| {
+            .children((s.ui.log_hover && !collapsed).then(|| {
                 icon_button(
                     t,
                     "log-search-open",
@@ -744,7 +852,8 @@ fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
                     Some(Message::LogSearch(true)),
                 )
                 .transition(Transition::opacity())
-            }));
+            }))
+            .child(fold);
     }
     let placeholder = match log.person() {
         Some(person) => format!("Search {person}"),
@@ -844,7 +953,11 @@ fn log_people(s: &App, t: &Theme, k: &Kit) -> El {
     }
     col()
         .key("log-people-menu")
-        .absolute(size::SIDEBAR - 24.0 - WIDTH, size::CONTROL + 4.0)
+        // Under the search bar, below the splitter, its 2 pt margin and the log's 4 pt gap.
+        .absolute(
+            size::SIDEBAR - 24.0 - WIDTH,
+            SPLITTER + 2.0 + 4.0 + size::CONTROL + 4.0,
+        )
         .w(WIDTH)
         .padding(4.0)
         .radius(radius::CONTROL)
@@ -894,7 +1007,7 @@ fn log_section(s: &App, t: &Theme, index: usize) -> El {
             .pl(21.0)
             .pr(10.0)
             .center_y()
-            .fill(t.chrome)
+            .fill(t.surface)
             .sticky_top(0.0)
             .child(
                 text(section.label.clone())
@@ -1033,30 +1146,30 @@ fn voice_controls(s: &App, t: &Theme) -> El {
             enabled,
         ),
     ] {
-        controls = controls.child(icon_button(
+        controls = controls.child(dock_button(icon_button(
             t,
             key,
             glyph,
             label,
+            // Red while off, like the rail's own mic and sound icons.
             if active {
-                Variant::Active
+                Variant::Danger
             } else {
                 Variant::Secondary
             },
             on.then_some(message),
-        ));
+        )));
     }
     controls = controls
-        .child(el().grow(1.0))
-        .child(share_button(s, t))
-        .child(icon_button(
+        .child(dock_button(share_button(s, t)))
+        .child(dock_button(icon_button(
             t,
             "disconnect",
             &icons::DISCONNECT,
             "Disconnect",
-            Variant::Danger,
+            Variant::Hangup,
             (!s.server().stopping).then_some(Message::Stop),
-        ));
+        )));
     let speaking = s.microphone_meter_level();
     // Lit while you are heard; it eases in and out only as that changes, not with every reading.
     // Push-to-talk and voice activation keep it dark while their gate is closed.
@@ -1064,10 +1177,10 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     let mut panel = col()
         .key("voice")
         .w_full()
-        .gap(8.0)
+        .gap(10.0)
         .padding(10.0)
         .radius(radius::CARD)
-        .fill(t.surface)
+        .fill(t.wash(0.035))
         .border(
             1.0,
             if talking {
@@ -1118,6 +1231,11 @@ fn voice_controls(s: &App, t: &Theme) -> El {
         );
     }
     panel
+}
+
+/// The voice panel's buttons share its width evenly, a little taller than the rest.
+fn dock_button(button: El) -> El {
+    button.grow(1.0).h(34.0)
 }
 
 /// Opens the share dialog; lit while you share.

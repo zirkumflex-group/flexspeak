@@ -61,7 +61,7 @@ pub static SETTINGS: Icon = Icon {
 pub static CHART_LINE: Icon = Icon {
     name: "lucide-chart-line",
     view: 24.0,
-    body: r#"<path d="M3 3v16a2 2 0 0 0 2 2h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="m19 9-5 5-4-4-3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    body: r#"<path d="M3 3v16a2 2 0 0 0 2 2h16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="m19 9-5 5-4-4-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 pub static DISCONNECT: Icon = Icon {
     name: "lucide-disconnect",
@@ -91,7 +91,7 @@ pub static CHEVRON_DOWN: Icon = Icon {
 pub static ARROW_LEFT: Icon = Icon {
     name: "lucide-arrow-left",
     view: 24.0,
-    body: r#"<path d="m12 19-7-7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 12H5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    body: r#"<path d="m12 19-7-7 7-7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 12H5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 pub static GAUGE: Icon = Icon {
     name: "lucide-gauge",
@@ -273,6 +273,28 @@ pub static MINIMIZE: Icon = Icon {
     view: 24.0,
     body: r#"<polyline points="4 14 10 14 10 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="20 10 14 10 14 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="14" x2="21" y1="10" y2="3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="3" x2="10" y1="21" y2="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
+// Windows caption buttons, drawn like Windows 11's own: 10 pt glyphs on a 1 pt stroke, with
+// the square's softly rounded corners. Lucide's 2 pt icons read heavy beside the system's.
+pub static CAPTION_MINIMIZE: Icon = Icon {
+    name: "caption-minimize",
+    view: 10.0,
+    body: r#"<path d="M0 5.5h10" fill="none" stroke="currentColor" stroke-width="1"/>"#,
+};
+pub static CAPTION_MAXIMIZE: Icon = Icon {
+    name: "caption-maximize",
+    view: 10.0,
+    body: r#"<rect x="0.5" y="0.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1"/>"#,
+};
+pub static CAPTION_RESTORE: Icon = Icon {
+    name: "caption-restore",
+    view: 10.0,
+    body: r#"<rect x="0.5" y="2.5" width="7" height="7" rx="1.2" fill="none" stroke="currentColor" stroke-width="1"/><path d="M2.5 2.5V1.7A1.2 1.2 0 0 1 3.7 0.5H8.3A1.2 1.2 0 0 1 9.5 1.7V6.3A1.2 1.2 0 0 1 8.3 7.5H7.5" fill="none" stroke="currentColor" stroke-width="1"/>"#,
+};
+pub static CAPTION_CLOSE: Icon = Icon {
+    name: "caption-close",
+    view: 10.0,
+    body: r#"<path d="M0.5 0.5l9 9M9.5 0.5l-9 9" fill="none" stroke="currentColor" stroke-width="1"/>"#,
+};
 pub static VOLUME_2: Icon = Icon {
     name: "lucide-volume-2",
     view: 24.0,
@@ -317,4 +339,12 @@ pub static MONITOR_UP: Icon = Icon {
     name: "lucide-monitor-up",
     view: 24.0,
     body: r#"<path d="m9 10 3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 13V7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect width="20" height="14" x="2" y="3" rx="2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 17v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 21h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+// Settings in the title bar, on the lighter 1.5 pt stroke of the title bar's other icons
+// (`CHART_LINE`, `ARROW_LEFT`), beside the thin caption glyphs.
+pub static SETTINGS_THIN: Icon = Icon {
+    name: "lucide-settings-thin",
+    view: 24.0,
+    body: r#"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };

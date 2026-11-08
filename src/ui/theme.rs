@@ -149,7 +149,6 @@ pub mod size {
     pub const HEADER: f32 = 52.0;
     pub const SIDEBAR: f32 = 260.0;
     pub const CHART_MIN_WIDTH: f32 = 110.0;
-    pub const CHART_GAP: f32 = 12.0;
 }
 
 pub mod radius {
@@ -173,6 +172,8 @@ pub mod ty {
     use rune::TextStyle;
     pub const DISPLAY: TextStyle = TextStyle::new(22.0, 650.0).tracking(-0.3);
     pub const TITLE: TextStyle = TextStyle::new(17.0, 620.0).tracking(-0.2);
+    /// A card's title: the server in the sidebar.
+    pub const SUBTITLE: TextStyle = TextStyle::new(14.0, 620.0).tracking(-0.1);
     pub const HEADING: TextStyle = TextStyle::new(13.0, 600.0);
     pub const BODY: TextStyle = TextStyle::new(13.0, 400.0);
     pub const BODY_STRONG: TextStyle = TextStyle::new(13.0, 560.0);

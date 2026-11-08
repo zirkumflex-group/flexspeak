@@ -367,7 +367,6 @@ fn client_connections(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                             "peer",
                             quality,
                             &s.server().client_history,
-                            false,
                             !member.is_self,
                         ))
                         .child(faint(

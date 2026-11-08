@@ -94,18 +94,69 @@ fn readings(quality: usage::ConnectionUsage) -> [Reading; 4] {
     ]
 }
 
-/// The footer omits idle activity; remote peers retain their idle chart.
+/// Width of a status-bar sparkline.
+const SPARK_WIDTH: f32 = 56.0;
+
+fn help(reading: &Reading, status: &str) -> String {
+    format!(
+        "{} · {status}
+{}
+Last 60 s · auto-scaled · shaded band: ping variation",
+        reading.label, reading.explanation
+    )
+}
+
+/// The status bar's connection readings, one line each: label, value, then a small sparkline.
+/// Idle time stays out; it says nothing about the connection.
+pub fn inline(
+    t: &Theme,
+    scope: &str,
+    quality: usage::ConnectionUsage,
+    history: &ConnectionHistory,
+) -> Vec<El> {
+    let p = paint(t);
+    readings(quality)
+        .into_iter()
+        .filter(|reading| !matches!(reading.metric, Metric::Idle))
+        .map(|reading| {
+            let label = match reading.metric {
+                Metric::LossIn => "Loss in",
+                Metric::LossOut => "Loss out",
+                _ => reading.short,
+            };
+            row()
+                .key(format!("{scope}-{}", reading.short))
+                .gap(8.0)
+                .center_y()
+                .help(help(&reading, reading.health.label()))
+                .label(format!("{} {}", reading.label, reading.value))
+                .child(text(label).font(ty::CAPTION).color(t.muted).a11y_hidden())
+                .child(
+                    text(reading.value.clone())
+                        .font(ty::NUMERIC)
+                        .color(t.health(reading.health))
+                        .a11y_hidden(),
+                )
+                .child(
+                    canvas(history.chart(reading.metric, SPARK_WIDTH, 16.0, &p))
+                        .w(SPARK_WIDTH)
+                        .h(16.0)
+                        .a11y_hidden(),
+                )
+        })
+        .collect()
+}
+
+/// A peer's connection charts in Statistics; remote peers keep their idle chart.
 pub fn connection(
     cx: &mut Cx<App>,
     t: &Theme,
     scope: &str,
     quality: usage::ConnectionUsage,
     history: &ConnectionHistory,
-    compact: bool,
     show_idle: bool,
 ) -> El {
     let p = paint(t);
-    let mut strip = row().w_full().gap(size::CHART_GAP);
     let mut column = col().w_full().gap(8.0);
     for reading in readings(quality) {
         if !show_idle && matches!(reading.metric, Metric::Idle) {
@@ -114,61 +165,28 @@ pub fn connection(
         let status = reading.status.unwrap_or(reading.health.label());
         let color = t.health(reading.health);
         let key = format!("{scope}-{}", reading.short);
-        let height = if compact { 20.0 } else { 32.0 };
         let w = width(cx, &key);
-        let chart = canvas(history.chart(reading.metric, w, height, &p))
+        let chart = canvas(history.chart(reading.metric, w, 32.0, &p))
             .key(key)
             .w_full()
-            .h(height)
+            .h(32.0)
             .a11y_hidden();
-        let help = format!(
-            "{} · {status}\n{}\nLast 60 s · auto-scaled · shaded band: ping variation",
-            reading.label, reading.explanation
+        column = column.child(
+            well(t)
+                .padding(8.0)
+                .gap(4.0)
+                .help(help(&reading, status))
+                .child(
+                    row()
+                        .w_full()
+                        .gap(8.0)
+                        .center_y()
+                        .child(text(reading.label).font(ty::LABEL).color(t.text).grow(1.0))
+                        .child(text(status).font(ty::CAPTION).color(color))
+                        .child(text(reading.value).font(ty::NUMERIC).color(t.text)),
+                )
+                .child(chart),
         );
-        if compact {
-            strip = strip.child(
-                col()
-                    .grow(1.0)
-                    .min_w(size::CHART_MIN_WIDTH)
-                    .gap(3.0)
-                    .help(help)
-                    .label(format!("{} {}", reading.label, reading.value))
-                    .child(
-                        row()
-                            .w_full()
-                            .gap(4.0)
-                            .center_y()
-                            .child(
-                                text(reading.short)
-                                    .font(ty::CAPTION)
-                                    .color(t.faint)
-                                    .grow(1.0),
-                            )
-                            .child(text(reading.value).font(ty::NUMERIC).color(color)),
-                    )
-                    .child(chart),
-            );
-        } else {
-            column = column.child(
-                well(t)
-                    .padding(8.0)
-                    .gap(4.0)
-                    .help(help)
-                    .child(
-                        row()
-                            .w_full()
-                            .gap(8.0)
-                            .center_y()
-                            .child(text(reading.label).font(ty::LABEL).color(t.text).grow(1.0))
-                            .child(text(status).font(ty::CAPTION).color(color))
-                            .child(text(reading.value).font(ty::NUMERIC).color(t.text)),
-                    )
-                    .child(chart),
-            );
-        }
-    }
-    if compact {
-        return strip;
     }
     card(t).padding(12.0).gap(8.0).child(column).child(faint(
         t,

@@ -11,8 +11,8 @@ use rune_kit::{Checkbox, Dialog, Kit};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Range, Variant, button, card, faint, group, group_note, group_title, icon_button, lit_dot,
-    meter, muted, picker, pulse, scroll_page, slider,
+    Range, Variant, button, faint, group_title, icon_button, lit_dot, meter, muted, picker, pulse,
+    scroll_page, slider,
 };
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
@@ -50,9 +50,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                     .key("streams-header")
                     .w_full()
                     .px(size::PAGE)
-                    .pt(10.0)
-                    .pb(8.0)
-                    .child(el().grow(1.0))
+                    .pt(18.0)
+                    .pb(14.0)
+                    .gap(12.0)
+                    .child(channel_title(s, t))
                     .child(tools(s, t, supported, watching)),
             )
             .child(scroll_page(k, "streams-scroll", no_streams(t, supported)));
@@ -156,6 +157,35 @@ fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
     ))
 }
 
+/// The channel you are in, and how many are in it with you.
+fn channel_title(s: &App, t: &Theme) -> El {
+    let state = &s.server().state;
+    let Some(channel) = state.current.as_ref() else {
+        return el().grow(1.0);
+    };
+    let count = state.current_members().len();
+    col()
+        .key("channel-title")
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(2.0)
+        .child(
+            text(channel.name.clone())
+                .font(ty::TITLE)
+                .color(t.text)
+                .truncate_fade(),
+        )
+        .child(
+            text(if count == 1 {
+                "1 member".to_owned()
+            } else {
+                format!("{count} members")
+            })
+            .font(ty::SMALL)
+            .color(t.muted),
+        )
+}
+
 /// Streams in the channel that you aren't watching yet.
 fn unwatched(s: &App) -> Vec<&streaming::StreamInfo> {
     s.server()
@@ -197,38 +227,57 @@ fn no_streams(t: &Theme, supported: bool) -> El {
         .pb(size::PAGE)
         .gap(10.0);
     if !supported {
-        content = content.child(card(t).child(muted(
+        content = content.child(notice(t).child(muted(
             t,
             "This server does not advertise TeamSpeak 6. Server-channel streaming is unavailable.",
         )));
     } else if !streaming::AVAILABLE {
-        content = content.child(card(t).child(muted(
+        content = content.child(notice(t).child(muted(
             t,
             "Native screen sharing is available on Mac and Windows.",
         )));
     }
     content
-        .child(group_title(t, "In this channel"))
-        .child(group(
-            t,
-            vec![
-                col()
-                    .w_full()
-                    .padding(28.0)
-                    .gap(8.0)
-                    .center()
-                    .child(icon(&icons::SCREEN_SHARE, 22.0).color(t.faint))
-                    .child(muted(t, "No one in this channel is sharing."))
-                    .child(faint(
-                        t,
-                        "Share your own screen with the button beside Disconnect.",
-                    )),
-            ],
-        ))
-        .child(group_note(
-            t,
-            "Watch up to five streams at once. Leaving this view or switching channels stops watching and sharing; switching servers stops watching only.",
-        ))
+        .child(group_title(t, "In this channel").pt(0.0))
+        .child(
+            col()
+                .key("no-streams")
+                .w_full()
+                .pt(36.0)
+                .pb(12.0)
+                .gap(6.0)
+                .center()
+                .child(
+                    el().size(44.0, 44.0)
+                        .radius(radius::CARD)
+                        .center()
+                        .fill(t.wash(0.04))
+                        .child(icon(&icons::SCREEN_SHARE, 22.0).color(t.muted))
+                        .mb(6.0)
+                        .a11y_hidden(),
+                )
+                .child(
+                    text("No one in this channel is sharing.")
+                        .font(ty::BODY_STRONG)
+                        .color(t.text),
+                )
+                .child(muted(
+                    t,
+                    "Share your screen with the button beside Disconnect.",
+                ))
+                .child(faint(
+                    t,
+                    "Watch up to five streams at once. Leaving this view or switching channels stops watching and sharing; switching servers stops watching only.",
+                )
+                .max_w(420.0)
+                .align(rune::Align::Center)
+                .mt(4.0)),
+        )
+}
+
+/// A note on the main pane, recessed into it.
+fn notice(t: &Theme) -> El {
+    super::widgets::well(t).padding(size::CARD_PAD)
 }
 
 /// Your own share while it runs, for the voice panel: viewers, requests to watch, and the way to
