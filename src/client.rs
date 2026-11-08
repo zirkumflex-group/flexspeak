@@ -672,7 +672,6 @@ async fn run_connection(
                             } else if !connection.get_state()?.server.version.starts_with("6.") {
                                 Err(anyhow::anyhow!("Sharing requires a TeamSpeak 6 server"))
                             } else {
-                                streams.stop(&mut connection, None, streaming::Phase::Stopped, "Stopped watching to share");
                                 streams.publisher.start(options)
                             };
                             if let Err(error) = result { let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() }); }

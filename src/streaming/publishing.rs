@@ -558,6 +558,10 @@ impl Publisher {
     pub fn active(&self) -> bool {
         self.worker.is_some()
     }
+    #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+    pub fn pretend_sharing(&mut self) {
+        self.worker = Some(publish_media::test_worker().0);
+    }
     fn emit(&mut self) {
         self.status.stop = self.worker.as_ref().map(|worker| worker.stop.clone());
         self.status.active = self.active();

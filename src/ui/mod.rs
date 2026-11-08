@@ -102,6 +102,16 @@ pub struct MemberDrag {
     pub target: Option<u64>,
 }
 
+/// A watched stream being dragged onto another to trade places.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileDrag {
+    pub id: String,
+    /// The pointer, in window points.
+    pub at: (f32, f32),
+    /// The watched stream under the pointer, which a drop would trade places with.
+    pub target: Option<String>,
+}
+
 /// Interface-only state: field editors and the open picker.
 pub struct UiState {
     pub address: TextEdit,
@@ -123,7 +133,10 @@ pub struct UiState {
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
     pub drag: Option<MemberDrag>,
-    /// The window position of the member row last under the pointer, to place drags.
+    pub tile_drag: Option<TileDrag>,
+    /// Where the pressed stream is in the window, for the length of a press.
+    pub tile_origin: (f32, f32),
+    /// The window position of the member row or stream last under the pointer, to place drags.
     pub row_origin: (f32, f32),
 }
 
@@ -146,6 +159,8 @@ impl Default for UiState {
             member_menu: None,
             move_menu: false,
             drag: None,
+            tile_drag: None,
+            tile_origin: (0.0, 0.0),
             row_origin: (0.0, 0.0),
         }
     }

@@ -87,7 +87,15 @@ pub enum Event {
 }
 
 /// The most streams watched at once; each has its own picture and audio.
-pub const MAX_WATCHES: usize = 4;
+pub const MAX_WATCHES: usize = 5;
+
+/// Where the other streams go while one is on the stage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Strip {
+    #[default]
+    Below,
+    Beside,
+}
 
 /// One stream being watched, as the view knows it.
 #[derive(Debug, Clone)]
@@ -105,10 +113,11 @@ pub struct Watching {
 pub struct View {
     pub sharing: publishing::Ui,
     pub catalog: Vec<StreamInfo>,
-    /// Watched streams, oldest first.
+    /// Watched streams in the order they are shown: oldest first until you drag them around.
     pub watching: Vec<Watching>,
-    /// The stream filling the stage, by ID; the others shrink to a strip beside it.
+    /// The stream filling the stage, by ID; the others shrink to a strip.
     pub focused: Option<String>,
+    pub strip: Strip,
     /// Codec, resolution and transport details over each picture.
     pub show_stats: bool,
     /// The share dialog is open.
@@ -129,6 +138,7 @@ impl Default for View {
             catalog: Vec::new(),
             watching: Vec::new(),
             focused: None,
+            strip: Strip::default(),
             show_stats: false,
             share_open: false,
             volumes: std::collections::HashMap::new(),
@@ -154,6 +164,20 @@ impl View {
             None if self.watching.len() == 1 => self.watching.first(),
             None => None,
         }
+    }
+    /// Trades two watched streams' places. If one was on the stage, the other takes it.
+    pub fn swap(&mut self, from: &str, to: &str) {
+        let place = |id: &str| self.watching.iter().position(|w| w.stream.id == id);
+        let (Some(a), Some(b)) = (place(from), place(to)) else {
+            return;
+        };
+        self.watching.swap(a, b);
+        let replacement = match self.focused.as_deref() {
+            Some(id) if id == from => to,
+            Some(id) if id == to => from,
+            _ => return,
+        };
+        self.focused = Some(replacement.to_owned());
     }
     /// A watched stream's volume in percent; streams start at full volume.
     pub fn volume(&self, publisher: u16) -> u8 {
@@ -424,7 +448,6 @@ impl Surface {
             self.release_pixels();
         }
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn publish(&self, generation: u64, image: Image, rotation: f32) {
         let mut state = self.state.lock().unwrap();
         if !state.active || state.generation != generation {

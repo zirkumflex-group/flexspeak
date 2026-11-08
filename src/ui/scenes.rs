@@ -53,6 +53,13 @@ pub const SCENES: &[Scene] = &[
     ("share", share),
     ("sharing", sharing),
     ("watching", watching),
+    ("streams-live", streams_live),
+    ("sharing-watching", sharing_watching),
+    ("watching-five", watching_five),
+    ("watching-five-below", watching_five_below),
+    ("watching-five-beside", watching_five_beside),
+    ("watching-five-drag", watching_five_drag),
+    ("watching-five-beside-drag", watching_five_beside_drag),
     ("watching-grid", watching_grid),
     ("watching-focus", watching_focus),
     ("watching-stats", watching_stats),
@@ -522,14 +529,97 @@ fn watch(s: &mut App, streams: &[(&str, u16, &str, crate::streaming::Phase)]) {
             has_audio: true,
             server_relayed: false,
         };
+        let surface = s.streaming.surfaces.get(slot).clone();
+        let generation = surface.begin();
         s.streaming.update(crate::streaming::Event::State {
-            generation: 100 + slot as u64,
+            generation,
             slot,
             stream: info,
             phase: *phase,
             detail: "Receiving stream · audio follows playback volume and deafen".into(),
         });
+        if *phase == crate::streaming::Phase::Receiving {
+            surface.publish(generation, demo_picture(slot), 0.0);
+        }
     }
+    s.streaming.sync_frame();
+}
+
+/// A stand-in for decoded video: each stream its own colour, and the fourth a 4:3 source.
+fn demo_picture(slot: usize) -> crate::streaming::Image {
+    const COLOURS: [[u8; 3]; 5] = [
+        [46, 96, 168],
+        [168, 72, 60],
+        [52, 130, 96],
+        [132, 92, 170],
+        [176, 132, 48],
+    ];
+    let [r, g, b] = COLOURS[slot % COLOURS.len()];
+    let (width, height) = if slot == 3 { (320, 240) } else { (480, 270) };
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let stripe = ((x + y) / 24) % 2 == 0;
+            let shade = 150 + 105 * y / height;
+            let tint = if stripe { shade } else { shade * 4 / 5 };
+            pixels.extend([r, g, b].map(|c| (u32::from(c) * tint / 255) as u8));
+            pixels.push(255);
+        }
+    }
+    crate::streaming::Image {
+        width,
+        height,
+        pixels,
+    }
+}
+
+fn watching_five(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(
+        s,
+        &[
+            ("s1", 2, "Mara’s screen", Phase::Receiving),
+            ("s2", 3, "Theo’s game", Phase::Receiving),
+            ("s3", 5, "Kai’s window", Phase::Receiving),
+            ("s4", 6, "Noor’s old capture", Phase::Receiving),
+            ("s5", 7, "Lin’s second monitor", Phase::Negotiating),
+        ],
+    );
+    let lobby = s.state.current.as_mut().expect("the demo joins the lobby");
+    lobby.members.extend([
+        member(5, "Kai", false, false),
+        member(6, "Noor", false, false),
+        member(7, "Lin", false, false),
+    ]);
+    s.state.channels[0] = lobby.clone();
+}
+
+fn watching_five_below(s: &mut App) {
+    watching_five(s);
+    s.streaming.focused = Some("s2".into());
+}
+
+fn watching_five_beside(s: &mut App) {
+    watching_five_below(s);
+    s.streaming.strip = crate::streaming::Strip::Beside;
+}
+
+fn watching_five_drag(s: &mut App) {
+    watching_five(s);
+    s.ui.tile_drag = Some(super::TileDrag {
+        id: "s1".into(),
+        at: (620.0, 330.0),
+        target: Some("s2".into()),
+    });
+}
+
+fn watching_five_beside_drag(s: &mut App) {
+    watching_five_beside(s);
+    s.ui.tile_drag = Some(super::TileDrag {
+        id: "s3".into(),
+        at: (420.0, 330.0),
+        target: Some("s2".into()),
+    });
 }
 
 fn watching(s: &mut App) {
@@ -543,6 +633,35 @@ fn watching(s: &mut App) {
         has_audio: false,
         server_relayed: false,
     });
+}
+
+/// Streams running in the channel that you haven't joined.
+fn streams_live(s: &mut App) {
+    connected(s);
+    for (id, publisher, name, viewers, has_audio) in [
+        ("s2", 4, "Ines’s game", 1, false),
+        ("s3", 3, "Theo’s window", 0, true),
+    ] {
+        s.streaming.catalog.push(crate::streaming::StreamInfo {
+            id: id.into(),
+            publisher,
+            name: name.into(),
+            viewers,
+            has_audio,
+            server_relayed: false,
+        });
+    }
+}
+
+/// Your own share running while you watch someone else's.
+fn sharing_watching(s: &mut App) {
+    watching(s);
+    share_sources(s);
+    let status = &mut s.streaming.sharing.status;
+    status.active = true;
+    status.live = true;
+    status.detail = "Sharing Built-in Retina Display · 720p · 30 fps".into();
+    status.viewers = vec![(2, "Mara".into(), true)];
 }
 
 fn watching_grid(s: &mut App) {
@@ -800,6 +919,109 @@ mod tests {
         assert_eq!(s.streaming.sharing.quality, quality);
         assert_eq!(s.streaming.sharing.access, Access::Public);
         assert_eq!(s.streaming.sharing.selected, Some(camera));
+    }
+
+    fn settle(rt: &mut Runtime<App>) {
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn click(rt: &mut Runtime<App>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key}"));
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        settle(rt);
+    }
+
+    fn drag(rt: &mut Runtime<App>, from: &str, to: &str) {
+        let (x, y) = rt.find(from).unwrap_or_else(|| panic!("no {from}"));
+        let (to_x, to_y) = rt.find(to).unwrap_or_else(|| panic!("no {to}"));
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.pointer_down(x, y);
+        rt.pointer_move((x + to_x) / 2.0, (y + to_y) / 2.0);
+        rt.frame(1.0 / 60.0);
+        rt.pointer_move(to_x, to_y);
+        rt.frame(1.0 / 60.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(
+            rt.state
+                .ui
+                .tile_drag
+                .as_ref()
+                .and_then(|d| d.target.clone()),
+            Some(to.trim_start_matches("tile-").to_owned()),
+            "dragging {from} over {to} must offer that drop"
+        );
+        rt.pointer_up(to_x, to_y);
+        settle(rt);
+        assert!(rt.state.ui.tile_drag.is_none());
+    }
+
+    fn order(rt: &Runtime<App>) -> Vec<&str> {
+        let watching = &rt.state.streaming.watching;
+        watching.iter().map(|w| w.stream.id.as_str()).collect()
+    }
+
+    #[test]
+    fn five_streams_arrange_themselves_to_the_window() {
+        let row_of = |rt: &Runtime<App>, id: &str| rt.find(&format!("tile-{id}")).unwrap().1;
+        let mut wide = runtime(watching_five, (1400.0, 900.0));
+        settle(&mut wide);
+        assert_eq!(row_of(&wide, "s1"), row_of(&wide, "s3"), "three across");
+        let mut normal = runtime(watching_five, (900.0, 790.0));
+        settle(&mut normal);
+        assert_eq!(row_of(&normal, "s1"), row_of(&normal, "s2"), "two across");
+        assert!(row_of(&normal, "s3") > row_of(&normal, "s1"));
+        assert!(normal.find("streams-scroll").is_none(), "all five fit");
+        let mut small = runtime(watching_five, crate::MIN_SIZE);
+        settle(&mut small);
+        assert!(small.find("streams-scroll").is_some(), "too small to fit");
+    }
+
+    #[test]
+    fn the_mouse_switches_layouts_focuses_and_rearranges_streams() {
+        let mut rt = runtime(watching_five, (900.0, 790.0));
+        settle(&mut rt);
+
+        drag(&mut rt, "tile-s1", "tile-s2");
+        assert_eq!(order(&rt), ["s2", "s1", "s3", "s4", "s5"]);
+
+        click(&mut rt, "tile-s3");
+        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s3"));
+        assert_eq!(rt.state.streaming.strip, crate::streaming::Strip::Below);
+
+        click(&mut rt, "layout-beside");
+        assert_eq!(rt.state.streaming.strip, crate::streaming::Strip::Beside);
+        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s3"));
+
+        // A thumbnail dropped on the stage takes it and hands over its place in the strip.
+        drag(&mut rt, "tile-s4", "tile-s3");
+        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s4"));
+        assert_eq!(order(&rt), ["s2", "s1", "s4", "s3", "s5"]);
+
+        // Double-clicking the stage returns to the grid, as the grid button does.
+        let (x, y) = rt.find("tile-s4").unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+        }
+        settle(&mut rt);
+        assert_eq!(rt.state.streaming.focused, None);
+
+        click(&mut rt, "layout-below");
+        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s2"));
+        click(&mut rt, "layout-grid");
+        assert_eq!(rt.state.streaming.focused, None);
+
+        click(&mut rt, "focus");
+        assert!(rt.state.streaming.focused.is_some(), "the maximize button");
     }
 
     #[test]
@@ -1061,7 +1283,7 @@ mod tests {
                 "statistics-scroll",
                 "record-trace",
             ),
-            ("streams", crowded_streams, "streams-scroll", "stream-s1"),
+            ("streams", crowded_streams, "streams-scroll", "tile-s1"),
             ("channels", connected, "channel-scroll", "channels"),
             ("setup", devices, "setup-scroll", "refresh-devices"),
         ];

@@ -230,10 +230,6 @@ impl Session {
     pub fn watch(&mut self, connection: &mut Connection, id: &str) -> Result<()> {
         self.sync(connection);
         ensure!(
-            !self.publisher.active(),
-            "Stop sharing before watching another stream"
-        );
-        ensure!(
             AVAILABLE,
             "The native stream receiver is currently available on Mac and Windows"
         );
@@ -833,6 +829,43 @@ mod tests {
             receiver: None,
         });
         generation
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn you_can_watch_a_stream_while_sharing_your_own() {
+        let (mut session, mut connection, _output) = fixture();
+        session.publisher.pretend_sharing();
+        session.notification(
+            &mut connection,
+            "notifystreaminfo",
+            "notifystreaminfo id=stream-a clid=7 name=Window",
+        );
+        session.watch(&mut connection, "stream-a").unwrap();
+        assert_eq!(session.watches.len(), 1);
+        assert!(session.publisher.active());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn five_streams_can_be_watched_each_in_its_own_slot_but_not_a_sixth() {
+        let (mut session, mut connection, _output) = fixture();
+        for publisher in 10..16 {
+            session.members.insert(publisher);
+            session.notification(
+                &mut connection,
+                "notifystreaminfo",
+                &format!("notifystreaminfo id=s{publisher} clid={publisher} name=Window"),
+            );
+        }
+        for publisher in 10..15 {
+            session
+                .watch(&mut connection, &format!("s{publisher}"))
+                .unwrap();
+        }
+        let slots: HashSet<_> = session.watches.iter().map(|watch| watch.slot).collect();
+        assert_eq!(slots.len(), MAX_WATCHES);
+        assert!(session.watch(&mut connection, "s15").is_err());
     }
 
     #[test]
