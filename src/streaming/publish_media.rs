@@ -89,6 +89,10 @@ pub fn sources() -> Result<Vec<ShareSource>> {
     anyhow::bail!("Screen sharing is available on Mac and Windows")
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn quick_sources() -> Result<Vec<ShareSource>> {
+    Ok(Vec::new())
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub async fn still(_: ShareSource) -> Result<Option<Still>> {
     Ok(None)
 }
@@ -104,6 +108,12 @@ pub async fn still(source: ShareSource) -> Result<Option<Still>> {
         native::camera_access().await?;
     }
     tokio::task::spawn_blocking(move || native::still(&source)).await?
+}
+
+/// What one click can share: the main screen, then the game being played.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn quick_sources() -> Result<Vec<ShareSource>> {
+    native::quick_sources()
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -166,6 +176,10 @@ mod native {
         traits::{DeviceTrait, StreamTrait},
     };
     use crossbeam_queue::ArrayQueue;
+    /// macOS's stand-in id for its main display, which it finds by itself.
+    #[cfg(target_os = "macos")]
+    const MAIN_DISPLAY: u64 = 0;
+
     use libwebrtc::{
         MediaType,
         audio_frame::AudioFrame,
@@ -195,12 +209,16 @@ mod native {
         time::{Duration, Instant},
     };
 
-    fn capturer(window: bool) -> Result<DesktopCapturer> {
+    /// With `picker`, macOS asks the user what to share; without it, the app says.
+    fn capturer(window: bool, picker: bool) -> Result<DesktopCapturer> {
         #[cfg(target_os = "macos")]
-        let source_type = {
-            let _ = window;
-            DesktopCaptureSourceType::Generic
+        let source_type = match (picker, window) {
+            (true, _) => DesktopCaptureSourceType::Generic,
+            (false, true) => DesktopCaptureSourceType::Window,
+            (false, false) => DesktopCaptureSourceType::Screen,
         };
+        #[cfg(target_os = "windows")]
+        let _ = picker;
         #[cfg(target_os = "windows")]
         let source_type = if window {
             DesktopCaptureSourceType::Window
@@ -209,10 +227,70 @@ mod native {
         };
         let mut options = DesktopCapturerOptions::new(source_type);
         options.set_include_cursor(true);
+        #[cfg(target_os = "macos")]
+        options.set_sck_system_picker(picker);
         DesktopCapturer::new(options).ok_or_else(|| {
             anyhow!("Screen capture is unavailable. Check screen-recording permission.")
         })
     }
+    /// The screen source the system calls primary. Its position among display devices is
+    /// also the capturer's id for it.
+    #[cfg(target_os = "windows")]
+    fn primary_screen() -> Option<u64> {
+        use windows_sys::Win32::Graphics::Gdi::{
+            DISPLAY_DEVICE_PRIMARY_DEVICE, DISPLAY_DEVICEW, EnumDisplayDevicesW,
+        };
+        (0..16_u32).find_map(|index| {
+            // SAFETY: zeroed is valid for this plain struct, whose size is set as the call needs.
+            unsafe {
+                let mut device: DISPLAY_DEVICEW = std::mem::zeroed();
+                device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+                (EnumDisplayDevicesW(std::ptr::null(), index, &mut device, 0) != 0
+                    && device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0)
+                    .then_some(u64::from(index))
+            }
+        })
+    }
+
+    pub fn quick_sources() -> Result<Vec<ShareSource>> {
+        #[cfg(target_os = "macos")]
+        let main = Some(MAIN_DISPLAY);
+        #[cfg(target_os = "windows")]
+        let main = {
+            let screens = capturer(false, false)?.get_source_list();
+            let primary = primary_screen();
+            screens
+                .iter()
+                .find(|screen| Some(screen.id()) == primary)
+                .or(screens.first())
+                .map(|screen| screen.id())
+        };
+        let mut quick: Vec<ShareSource> = main
+            .map(|id| ShareSource {
+                kind: SourceKind::Screen(Some(id)),
+                name: "Main screen".into(),
+            })
+            .into_iter()
+            .collect();
+        let is_game = super::super::games::detector();
+        quick.extend(
+            capturer(true, false)?
+                .get_source_list()
+                .into_iter()
+                .find(|window| is_game(window.id()))
+                .map(|window| ShareSource {
+                    kind: SourceKind::Window(window.id()),
+                    name: window
+                        .title()
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(160)
+                        .collect(),
+                }),
+        );
+        Ok(quick)
+    }
+
     pub async fn camera_access() -> Result<()> {
         camera::request_access().await
     }
@@ -225,7 +303,7 @@ mod native {
             SourceKind::Screen(Some(id)) => (false, *id),
             SourceKind::Window(id) => (true, *id),
         };
-        let mut desktop = capturer(window)?;
+        let mut desktop = capturer(window, false)?;
         let selected = desktop
             .get_source_list()
             .into_iter()
@@ -264,7 +342,7 @@ mod native {
         {
             let mut sources = Vec::new();
             for window in [false, true] {
-                for (index, source) in capturer(window)?
+                for (index, source) in capturer(window, false)?
                     .get_source_list()
                     .into_iter()
                     .take(128)
@@ -674,7 +752,10 @@ mod native {
                 SourceKind::Screen(id) => (false, id),
                 SourceKind::Camera(_) => unreachable!(),
             };
-            let mut desktop = capturer(window)?;
+            let mut desktop = capturer(window, id.is_none())?;
+            // Without its picker, macOS captures the main display when given no source.
+            #[cfg(target_os = "macos")]
+            let id = id.filter(|_| window);
             let selected = id
                 .map(|id| {
                     desktop

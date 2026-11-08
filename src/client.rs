@@ -141,6 +141,8 @@ pub struct Member {
 pub struct Group {
     pub id: u64,
     pub name: String,
+    /// Shown, but nobody can be added to or removed from it.
+    pub fixed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -175,6 +177,9 @@ impl Snapshot {
     }
 }
 
+/// A quiet gap longer than this makes the next whisper a new one.
+const WHISPER_GAP: Duration = Duration::from_secs(3);
+
 /// What the status says when the connection dropped and is being re-established.
 pub const CONNECTION_LOST: &str = "Connection lost. Reconnecting…";
 
@@ -183,10 +188,21 @@ pub enum ActivityKind {
     Connected,
     Disconnected,
     LostConnection,
+    /// Moved by someone else.
     Moved,
+    /// Changed channel themselves.
+    Switched,
     KickedFromChannel,
     KickedFromServer,
     Banned,
+    RecordingStarted,
+    RecordingStopped,
+    TalkPowerGranted,
+    TalkPowerRevoked,
+    Whispered,
+    ServerGroupAssigned,
+    ServerGroupRevoked,
+    ChannelGroupChanged,
 }
 
 /// Something a person did on the server, for the log and its sounds.
@@ -194,6 +210,7 @@ pub enum ActivityKind {
 pub struct Activity {
     pub kind: ActivityKind,
     pub name: String,
+    /// The channel it happened in, or the group for a group change.
     pub channel: String,
     pub is_self: bool,
     pub entered_yours: bool,
@@ -242,6 +259,20 @@ fn activity(state: &tsclientlib::data::Connection, change: &BookEvent) -> Option
         .clients
         .get(&state.own_client)
         .map(|client| client.channel);
+    let server_group_name = |group: &ServerGroupId| {
+        state
+            .server_groups
+            .get(group)
+            .map_or_else(String::new, |group| clean(&group.name))
+    };
+    let own_change = |kind, channel| Activity {
+        kind,
+        name: String::new(),
+        channel,
+        is_self: true,
+        entered_yours: false,
+        left_yours: false,
+    };
     match change {
         BookEvent::PropertyAdded {
             id: PropertyId::Client(id),
@@ -266,10 +297,10 @@ fn activity(state: &tsclientlib::data::Connection, change: &BookEvent) -> Option
         } => {
             let client = state.clients.get(id)?;
             Some(Activity {
-                kind: if extra.reason == Some(Reason::KickChannel) {
-                    ActivityKind::KickedFromChannel
-                } else {
-                    ActivityKind::Moved
+                kind: match extra.reason {
+                    Some(Reason::KickChannel) => ActivityKind::KickedFromChannel,
+                    Some(Reason::Moved) => ActivityKind::Moved,
+                    _ => ActivityKind::Switched,
                 },
                 name: clean(&client.name),
                 channel: channel_name(client.channel),
@@ -291,6 +322,64 @@ fn activity(state: &tsclientlib::data::Connection, change: &BookEvent) -> Option
             entered_yours: false,
             left_yours: Some(client.channel) == yours,
         }),
+        BookEvent::PropertyChanged {
+            id: PropertyId::ClientIsRecording(id),
+            old: PropertyValue::Bool(was),
+            ..
+        } if *id != state.own_client => {
+            let client = state.clients.get(id)?;
+            (Some(client.channel) == yours).then(|| Activity {
+                kind: if *was {
+                    ActivityKind::RecordingStopped
+                } else {
+                    ActivityKind::RecordingStarted
+                },
+                name: clean(&client.name),
+                channel: channel_name(client.channel),
+                is_self: false,
+                entered_yours: true,
+                left_yours: false,
+            })
+        }
+        BookEvent::PropertyChanged {
+            id: PropertyId::ClientTalkPowerGranted(id),
+            old: PropertyValue::Bool(was),
+            ..
+        } if *id == state.own_client => Some(own_change(
+            if *was {
+                ActivityKind::TalkPowerRevoked
+            } else {
+                ActivityKind::TalkPowerGranted
+            },
+            String::new(),
+        )),
+        BookEvent::PropertyAdded {
+            id: PropertyId::ClientServerGroup(id, group),
+            ..
+        } if *id == state.own_client && *group != state.server.default_server_group => Some(
+            own_change(ActivityKind::ServerGroupAssigned, server_group_name(group)),
+        ),
+        BookEvent::PropertyRemoved {
+            id: PropertyId::ClientServerGroup(id, group),
+            ..
+        } if *id == state.own_client && *group != state.server.default_server_group => Some(
+            own_change(ActivityKind::ServerGroupRevoked, server_group_name(group)),
+        ),
+        // Joining a channel also reports your group there, from the server rather than a person.
+        BookEvent::PropertyChanged {
+            id: PropertyId::ClientChannelGroup(id),
+            invoker: Some(invoker),
+            ..
+        } if *id == state.own_client && invoker.id != ClientId(0) => {
+            let group = state.clients.get(id)?.channel_group;
+            Some(own_change(
+                ActivityKind::ChannelGroupChanged,
+                state
+                    .channel_groups
+                    .get(&group)
+                    .map_or_else(String::new, |group| clean(&group.name)),
+            ))
+        }
         _ => None,
     }
 }
@@ -333,6 +422,8 @@ pub enum Event {
         pending: bool,
     },
     ChannelPasswordRequired(u64),
+    /// The server refused something for lack of permission.
+    PermissionDenied,
     /// Someone poked you.
     Poked {
         from: String,
@@ -567,35 +658,35 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
         channels,
         current,
         can_talk: connection.can_send_audio(),
-        // Everyone is in the default server group; the server refuses to change that.
-        server_groups: sorted_groups(
-            state
-                .server_groups
-                .values()
-                .filter(|group| {
-                    group.group_type == GroupType::Regular
-                        && group.id != state.server.default_server_group
-                })
-                .map(|group| (group.sort_id, group.id.0, group.name.as_str())),
-        ),
-        channel_groups: sorted_groups(
-            state
-                .channel_groups
-                .values()
-                .filter(|group| group.group_type == GroupType::Regular)
-                .map(|group| (group.sort_id, group.id.0, group.name.as_str())),
-        ),
+        server_groups: sorted_groups(state.server_groups.values().filter_map(|group| {
+            (group.group_type == GroupType::Regular).then_some((
+                group.sort_id,
+                group.id.0,
+                group.name.as_str(),
+                // Everyone without another group is in this one; the server won't change that.
+                group.id == state.server.default_server_group,
+            ))
+        })),
+        channel_groups: sorted_groups(state.channel_groups.values().filter_map(|group| {
+            (group.group_type == GroupType::Regular).then_some((
+                group.sort_id,
+                group.id.0,
+                group.name.as_str(),
+                false,
+            ))
+        })),
     })
 }
 
-fn sorted_groups<'a>(groups: impl Iterator<Item = (i32, u64, &'a str)>) -> Vec<Group> {
+fn sorted_groups<'a>(groups: impl Iterator<Item = (i32, u64, &'a str, bool)>) -> Vec<Group> {
     let mut groups: Vec<_> = groups.collect();
     groups.sort_unstable();
     groups
         .into_iter()
-        .map(|(_, id, name)| Group {
+        .map(|(_, id, name, fixed)| Group {
             id,
             name: name.to_owned(),
+            fixed,
         })
         .collect()
 }
@@ -884,6 +975,7 @@ async fn run_connection(
         let mut pending_join: Option<(Ticket, u64, Instant)> = None;
         let mut server_info_enabled = true;
         let mut last_voice = None;
+        let mut last_whisper: Option<Instant> = None;
         let mut speakers = Speakers::default();
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1076,6 +1168,18 @@ async fn run_connection(
                     },
                     StreamItem::Audio(packet) => {
                         received += 1;
+                        if let AudioData::S2CWhisper { from, data, .. } = packet.data().data()
+                            && !data.is_empty()
+                            && !controls.desired.deafened
+                        {
+                            let now = Instant::now();
+                            // One cue for a whisper, however many packets it takes.
+                            if last_whisper.is_none_or(|at| now.saturating_duration_since(at) >= WHISPER_GAP) {
+                                let name = connection.get_state()?.clients.get(&ClientId(*from)).map_or_else(String::new, |client| client.name.chars().filter(|c| !c.is_control()).take(64).collect());
+                                let _ = events.try_send(Event::Activity(vec![Activity { kind: ActivityKind::Whispered, name, channel: String::new(), is_self: false, entered_yours: true, left_yours: false }]));
+                            }
+                            last_whisper = Some(now);
+                        }
                         if let AudioData::S2C { from, data, .. } | AudioData::S2CWhisper { from, data, .. } = packet.data().data() {
                             speakers.packet(*from, data.is_empty(), Instant::now());
                         }
@@ -1141,6 +1245,7 @@ async fn run_connection(
                                     Ok(()) => { let _ = events.try_send(Event::Done(source)); },
                                     Err(error) if !reply.flooded => {
                                         let detail = if error.missing_permission.is_some() || error.error == tsclientlib::TsError::PermissionsClientInsufficient {
+                                            let _ = events.try_send(Event::PermissionDenied);
                                             format!("The server denied it: you lack the permission ({}).", error.error)
                                         } else {
                                             format!("The server rejected it: {error}")
@@ -1159,6 +1264,9 @@ async fn run_connection(
                                     } else if error.error == tsclientlib::TsError::ChannelInvalidPassword {
                                         let _ = events.try_send(Event::ChannelPasswordRequired(id));
                                     } else if !reply.flooded {
+                                        if error.missing_permission.is_some() || error.error == tsclientlib::TsError::PermissionsClientInsufficient {
+                                            let _ = events.try_send(Event::PermissionDenied);
+                                        }
                                         let _ = events.try_send(Event::Warning { source: Source::Join, detail: format!("Could not join channel: {error}") });
                                     }
                                 } else { let _ = events.try_send(Event::Recovered(Source::Join)); }

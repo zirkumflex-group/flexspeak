@@ -27,6 +27,15 @@ pub enum Sound {
     ViewerLeft,
     PersonJoinedChannel,
     PersonLeftChannel,
+    PersonConnected,
+    PersonDisconnected,
+    PersonLostConnection,
+    PersonMovedIn,
+    PersonMovedOut,
+    PersonKickedIntoChannel,
+    PersonKickedFromChannel,
+    PersonKickedFromServer,
+    PersonBanned,
     Connected,
     Disconnected,
     ConnectionLost,
@@ -34,11 +43,21 @@ pub enum Sound {
     StreamStarted,
     StreamStopped,
     Kicked,
+    KickedFromChannel,
     Banned,
+    PersonRecordingStarted,
+    PersonRecordingStopped,
+    TalkPowerGranted,
+    TalkPowerRevoked,
+    WhisperReceived,
+    InsufficientPermissions,
+    ServerGroupAssigned,
+    ServerGroupRevoked,
+    ChannelGroupChanged,
 }
 
 impl Sound {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 38] = [
         Self::MicOff,
         Self::MicOn,
         Self::Deafened,
@@ -48,6 +67,15 @@ impl Sound {
         Self::MovedChannel,
         Self::PersonJoinedChannel,
         Self::PersonLeftChannel,
+        Self::PersonConnected,
+        Self::PersonDisconnected,
+        Self::PersonLostConnection,
+        Self::PersonMovedIn,
+        Self::PersonMovedOut,
+        Self::PersonKickedIntoChannel,
+        Self::PersonKickedFromChannel,
+        Self::PersonKickedFromServer,
+        Self::PersonBanned,
         Self::ViewerJoined,
         Self::ViewerLeft,
         Self::StreamStarted,
@@ -57,8 +85,45 @@ impl Sound {
         Self::ConnectionLost,
         Self::Reconnected,
         Self::Kicked,
+        Self::KickedFromChannel,
         Self::Banned,
+        Self::PersonRecordingStarted,
+        Self::PersonRecordingStopped,
+        Self::TalkPowerGranted,
+        Self::TalkPowerRevoked,
+        Self::WhisperReceived,
+        Self::InsufficientPermissions,
+        Self::ServerGroupAssigned,
+        Self::ServerGroupRevoked,
+        Self::ChannelGroupChanged,
     ];
+
+    /// The older sound this one follows until it has its own choice, so turning a pack or a
+    /// sound off before this one existed still holds.
+    fn follows(self) -> Option<Self> {
+        match self {
+            Self::PersonRecordingStarted => Some(Self::PersonJoinedChannel),
+            Self::PersonRecordingStopped => Some(Self::PersonLeftChannel),
+            Self::TalkPowerGranted => Some(Self::MicOn),
+            Self::TalkPowerRevoked => Some(Self::MicOff),
+            Self::WhisperReceived => Some(Self::Poke),
+            Self::InsufficientPermissions => Some(Self::Poke),
+            Self::ServerGroupAssigned => Some(Self::Poke),
+            Self::ServerGroupRevoked => Some(Self::Poke),
+            Self::ChannelGroupChanged => Some(Self::Poke),
+            Self::PersonConnected | Self::PersonMovedIn | Self::PersonKickedIntoChannel => {
+                Some(Self::PersonJoinedChannel)
+            }
+            Self::PersonDisconnected
+            | Self::PersonLostConnection
+            | Self::PersonMovedOut
+            | Self::PersonKickedFromChannel
+            | Self::PersonKickedFromServer
+            | Self::PersonBanned => Some(Self::PersonLeftChannel),
+            Self::KickedFromChannel => Some(Self::Kicked),
+            _ => None,
+        }
+    }
 
     pub fn title(self) -> &'static str {
         match self {
@@ -79,8 +144,27 @@ impl Sound {
             Self::Reconnected => "Reconnected",
             Self::StreamStarted => "You started streaming",
             Self::StreamStopped => "You stopped streaming",
-            Self::Kicked => "Kicked",
+            Self::Kicked => "Kicked from the server",
+            Self::PersonConnected => "Someone connected to your channel",
+            Self::PersonDisconnected => "Someone in your channel disconnected",
+            Self::PersonLostConnection => "Someone in your channel lost connection",
+            Self::PersonMovedIn => "Someone was moved into your channel",
+            Self::PersonMovedOut => "Someone was moved out of your channel",
+            Self::PersonKickedIntoChannel => "Someone was kicked into your channel",
+            Self::PersonKickedFromChannel => "Someone was kicked from your channel",
+            Self::PersonKickedFromServer => "Someone in your channel was kicked",
+            Self::PersonBanned => "Someone in your channel was banned",
+            Self::KickedFromChannel => "Kicked from the channel",
             Self::Banned => "Banned",
+            Self::PersonRecordingStarted => "Someone in your channel started recording",
+            Self::PersonRecordingStopped => "Someone in your channel stopped recording",
+            Self::TalkPowerGranted => "You were given talk power",
+            Self::TalkPowerRevoked => "Your talk power was taken away",
+            Self::WhisperReceived => "Someone is whispering to you",
+            Self::InsufficientPermissions => "The server refused an action",
+            Self::ServerGroupAssigned => "You were added to a server group",
+            Self::ServerGroupRevoked => "You were removed from a server group",
+            Self::ChannelGroupChanged => "Your channel group changed",
         }
     }
 
@@ -104,7 +188,26 @@ impl Sound {
             Self::StreamStarted => "sound-stream-started",
             Self::StreamStopped => "sound-stream-stopped",
             Self::Kicked => "sound-kicked",
+            Self::PersonConnected => "sound-person-connected",
+            Self::PersonDisconnected => "sound-person-disconnected",
+            Self::PersonLostConnection => "sound-person-connection-lost",
+            Self::PersonMovedIn => "sound-person-moved-in",
+            Self::PersonMovedOut => "sound-person-moved-out",
+            Self::PersonKickedIntoChannel => "sound-person-kicked-in",
+            Self::PersonKickedFromChannel => "sound-person-kicked-channel",
+            Self::PersonKickedFromServer => "sound-person-kicked-server",
+            Self::PersonBanned => "sound-person-banned",
+            Self::KickedFromChannel => "sound-kicked-channel",
             Self::Banned => "sound-banned",
+            Self::PersonRecordingStarted => "sound-person-recording-started",
+            Self::PersonRecordingStopped => "sound-person-recording-stopped",
+            Self::TalkPowerGranted => "sound-talk-power-granted",
+            Self::TalkPowerRevoked => "sound-talk-power-revoked",
+            Self::WhisperReceived => "sound-whisper",
+            Self::InsufficientPermissions => "sound-denied",
+            Self::ServerGroupAssigned => "sound-server-group-assigned",
+            Self::ServerGroupRevoked => "sound-server-group-revoked",
+            Self::ChannelGroupChanged => "sound-channel-group-changed",
         }
     }
 
@@ -123,6 +226,25 @@ impl Sound {
             Self::Disconnected | Self::ConnectionLost => Cue::SoundOff,
             Self::Reconnected => Cue::SoundOn,
             Self::Kicked | Self::Banned => Cue::Moved,
+            Self::PersonRecordingStarted => Cue::Poke,
+            Self::PersonRecordingStopped => Cue::ViewerLeft,
+            Self::TalkPowerGranted => Cue::MicOn,
+            Self::TalkPowerRevoked => Cue::MicOff,
+            Self::WhisperReceived => Cue::ViewerJoined,
+            Self::InsufficientPermissions => Cue::SoundOff,
+            Self::ServerGroupAssigned => Cue::ViewerJoined,
+            Self::ServerGroupRevoked => Cue::ViewerLeft,
+            Self::ChannelGroupChanged => Cue::Moved,
+            Self::PersonConnected => Cue::ViewerJoined,
+            Self::PersonDisconnected => Cue::ViewerLeft,
+            Self::PersonLostConnection => Cue::ViewerLeft,
+            Self::PersonMovedIn => Cue::ViewerJoined,
+            Self::PersonMovedOut => Cue::ViewerLeft,
+            Self::PersonKickedIntoChannel => Cue::ViewerJoined,
+            Self::PersonKickedFromChannel => Cue::Moved,
+            Self::PersonKickedFromServer => Cue::Moved,
+            Self::PersonBanned => Cue::Moved,
+            Self::KickedFromChannel => Cue::Moved,
         }
     }
 
@@ -148,7 +270,26 @@ impl Sound {
                 Self::ConnectionLost => (Voice::Hum, &[63, 58], 220, 0.0, 0.12),
                 Self::Reconnected => (Voice::Hum, &[58, 65], 180, 0.0, 0.12),
                 Self::Kicked => (Voice::Wood, &[50, 50], 130, 0.0, 0.16),
+                Self::PersonConnected => (Voice::Drop, &[74, 79], 90, 0.0, 0.09),
+                Self::PersonDisconnected => (Voice::Drop, &[79, 74], 90, 0.0, 0.09),
+                Self::PersonLostConnection => (Voice::Hum, &[67, 62], 180, 0.0, 0.09),
+                Self::PersonMovedIn => (Voice::Felt, &[67, 72], 90, 0.0, 0.09),
+                Self::PersonMovedOut => (Voice::Felt, &[72, 67], 90, 0.0, 0.09),
+                Self::PersonKickedIntoChannel => (Voice::Wood, &[57, 62], 110, 0.0, 0.12),
+                Self::PersonKickedFromChannel => (Voice::Wood, &[57, 57], 110, 0.0, 0.12),
+                Self::PersonKickedFromServer => (Voice::Wood, &[55, 55], 130, 0.0, 0.12),
+                Self::PersonBanned => (Voice::Wood, &[55, 52, 48], 140, 0.0, 0.12),
+                Self::KickedFromChannel => (Voice::Wood, &[53, 53], 130, 0.0, 0.16),
                 Self::Banned => (Voice::Wood, &[50, 47, 43], 170, 0.0, 0.16),
+                Self::PersonRecordingStarted => (Voice::Bell, &[88, 88], 100, 0.0, 0.09),
+                Self::PersonRecordingStopped => (Voice::Bell, &[88, 81], 100, 0.0, 0.07),
+                Self::TalkPowerGranted => (Voice::Hum, &[60, 67], 130, 0.0, 0.11),
+                Self::TalkPowerRevoked => (Voice::Hum, &[67, 60], 130, 0.0, 0.11),
+                Self::WhisperReceived => (Voice::Glass, &[91], 0, -3.0, 0.07),
+                Self::InsufficientPermissions => (Voice::Wood, &[45], 0, 0.0, 0.16),
+                Self::ServerGroupAssigned => (Voice::Felt, &[72, 76, 79], 100, 0.0, 0.1),
+                Self::ServerGroupRevoked => (Voice::Felt, &[79, 76, 72], 100, 0.0, 0.1),
+                Self::ChannelGroupChanged => (Voice::Felt, &[76, 79, 76], 100, 0.0, 0.1),
             };
         SoftCue {
             voice,
@@ -179,7 +320,26 @@ impl Sound {
             Self::StreamStarted => "stream_started.wav",
             Self::StreamStopped => "stream_stopped.wav",
             Self::Kicked => "you_kicked_server.wav",
+            Self::PersonConnected => "neutral_connection_connected_currentchannel.wav",
+            Self::PersonDisconnected => "neutral_connection_disconnected_currentchannel.wav",
+            Self::PersonLostConnection => "neutral_connection_connectionlost_currentchannel.wav",
+            Self::PersonMovedIn => "neutral_moved_tocurrentchannel.wav",
+            Self::PersonMovedOut => "neutral_moved_awayfromcurrentchannel.wav",
+            Self::PersonKickedIntoChannel => "neutral_kicked_channel_tocurrentchannel.wav",
+            Self::PersonKickedFromChannel => "neutral_kicked_channel_awayfromcurrentchannel.wav",
+            Self::PersonKickedFromServer => "neutral_kicked_server_currentchannel.wav",
+            Self::PersonBanned => "neutral_banned_server_currentchannel.wav",
+            Self::KickedFromChannel => "you_kicked_channel.wav",
             Self::Banned => "you_were_banned.wav",
+            Self::PersonRecordingStarted => "neutral_recording_started_currentchannel.wav",
+            Self::PersonRecordingStopped => "neutral_recording_stopped_currentchannel.wav",
+            Self::TalkPowerGranted => "talkpower_granted.wav",
+            Self::TalkPowerRevoked => "talkpower_revoked.wav",
+            Self::WhisperReceived => "whisper_received.wav",
+            Self::InsufficientPermissions => "insufficient_permissions.wav",
+            Self::ServerGroupAssigned => "servergroup_assigned.wav",
+            Self::ServerGroupRevoked => "servergroup_revoked.wav",
+            Self::ChannelGroupChanged => "channelgroup_changed.wav",
         }
     }
 }
@@ -232,12 +392,21 @@ impl Settings {
     }
 
     pub fn source(&self, sound: Sound) -> Source {
-        self.sources.get(&sound).copied().unwrap_or_default()
+        self.sources
+            .get(&sound)
+            .copied()
+            .unwrap_or_else(|| self.followed(sound))
+    }
+
+    fn followed(&self, sound: Sound) -> Source {
+        sound
+            .follows()
+            .map_or_else(Source::default, |older| self.source(older))
     }
 
     /// Stores a choice, leaving the default unwritten.
     pub fn set_source(&mut self, sound: Sound, source: Source) {
-        if source == Source::default() {
+        if source == self.followed(sound) {
             self.sources.remove(&sound);
         } else {
             self.sources.insert(sound, source);
@@ -372,6 +541,26 @@ fn decode(bytes: &[u8]) -> Option<Vec<f32>> {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::{Settings, Sound, Source};
+
+    #[test]
+    fn a_new_sound_follows_the_older_choice_until_it_has_its_own() {
+        let mut settings = Settings::default();
+        settings.set_source(Sound::PersonLeftChannel, Source::Off);
+        assert_eq!(settings.source(Sound::PersonBanned), Source::Off);
+        assert_eq!(settings.source(Sound::PersonConnected), Source::Flexspeak);
+
+        settings.set_source(Sound::PersonBanned, Source::Flexspeak);
+        assert_eq!(settings.source(Sound::PersonBanned), Source::Flexspeak);
+        assert_eq!(settings.source(Sound::PersonDisconnected), Source::Off);
+
+        settings.set_source(Sound::PersonBanned, Source::Off);
+        assert_eq!(settings.sources.len(), 1, "matching it needs no entry");
+    }
 }
 
 #[cfg(test)]

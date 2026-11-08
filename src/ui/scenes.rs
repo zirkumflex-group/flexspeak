@@ -80,6 +80,7 @@ pub const SCENES: &[Scene] = &[
     ("member-groups", member_groups),
     ("member-groups-selection", member_groups_selection),
     ("member-channel-group", member_channel_group),
+    ("member-groups-guest", member_groups_guest),
     ("member-kick", member_kick),
     ("member-ban", member_ban),
     ("servers-menu", servers_menu),
@@ -90,6 +91,8 @@ pub const SCENES: &[Scene] = &[
     ("poke", poke),
     ("poked", poked),
     ("share", share),
+    ("share-quick", share_quick),
+    ("share-quick-no-game", share_quick_no_game),
     ("sharing", sharing),
     ("watching", watching),
     ("watching-toolbar", watching_toolbar),
@@ -359,7 +362,11 @@ fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member
         can_kick_channel: (!is_self).then_some(id != 3),
         can_kick_server: (!is_self).then_some(id != 3),
         can_ban: (!is_self).then_some(id != 3),
-        server_groups: if id == 4 { vec![8, 9] } else { vec![8] },
+        server_groups: match id {
+            3 => vec![12],
+            4 => vec![8, 9],
+            _ => vec![8],
+        },
         channel_group: if id == 4 { 5 } else { 7 },
     }
 }
@@ -596,7 +603,7 @@ fn server_log(s: &mut App) {
         (Tone::Arrived, "connected"),
         (Tone::Moved, "→ Raid night"),
         (Tone::Stream, "started streaming"),
-        (Tone::Moved, "→ Lobby"),
+        (Tone::Moved, "moved to Lobby"),
         (Tone::Stream, "stopped streaming"),
         (Tone::Left, "lost connection"),
         (Tone::Arrived, "connected"),
@@ -838,8 +845,10 @@ fn with_groups(s: &mut App) {
     let group = |id: u64, name: &str| client::Group {
         id,
         name: name.into(),
+        fixed: id == 12,
     };
     s.server_mut().state.server_groups = vec![
+        group(12, "Guest"),
         group(6, "Server Admin"),
         group(7, "Moderator"),
         group(8, "Member"),
@@ -862,6 +871,18 @@ fn member_groups(s: &mut App) {
         channel_group: Some(6),
     });
     s.ui.member_menu = Some((2, rune::PointerPress { x: 150.0, y: 200.0 }));
+    s.ui.groups_menu = Some(super::GroupsMenu::Server);
+}
+
+/// Someone with only the server's default group, which can't be changed.
+fn member_groups_guest(s: &mut App) {
+    connected(s);
+    with_groups(s);
+    s.server_mut().group_edit = Some(crate::GroupEditDraft {
+        ids: vec![3],
+        ..Default::default()
+    });
+    s.ui.member_menu = Some((3, rune::PointerPress { x: 150.0, y: 220.0 }));
     s.ui.groups_menu = Some(super::GroupsMenu::Server);
 }
 
@@ -1009,6 +1030,24 @@ fn share_sources(s: &mut App) {
             rgba,
         }),
     );
+}
+
+fn share_quick_no_game(s: &mut App) {
+    use crate::streaming::publishing::{ShareSource, SourceKind};
+    connected_quiet(s);
+    s.ui.quick_sources = vec![ShareSource {
+        kind: SourceKind::Screen(Some(0)),
+        name: "Main screen".into(),
+    }];
+}
+
+fn share_quick(s: &mut App) {
+    use crate::streaming::publishing::{ShareSource, SourceKind};
+    share_quick_no_game(s);
+    s.ui.quick_sources.push(ShareSource {
+        kind: SourceKind::Window(2),
+        name: "Counter-Strike 2".into(),
+    });
 }
 
 fn share(s: &mut App) {
@@ -1446,6 +1485,20 @@ mod tests {
         peek.open(base + Duration::from_millis(ms))
     }
 
+    // Sharing, and so its chips, only exists on Mac and Windows.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn the_quick_share_chips_hide_once_you_are_live() {
+        let mut rt = runtime(share_quick, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("quick-share-0").is_some(), "the main screen");
+        assert!(rt.find("quick-share-1").is_some(), "the game");
+
+        let mut rt = runtime(sharing, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("quick-share").is_none());
+    }
+
     #[test]
     fn the_hidden_rail_opens_after_a_pause_and_forgives_a_slip() {
         let base = Instant::now();
@@ -1665,9 +1718,9 @@ mod tests {
             .wanted
             .clear();
         let row = "member-menu-item6-sub-item";
-        click(&mut rt, &format!("{row}0"));
+        click(&mut rt, &format!("{row}1"));
         settle(&mut rt);
-        click(&mut rt, &format!("{row}3"));
+        click(&mut rt, &format!("{row}4"));
         settle(&mut rt);
         assert!(
             rt.state.ui.member_menu.is_some(),

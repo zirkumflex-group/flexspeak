@@ -35,6 +35,9 @@ pub use theme::Theme;
 pub type StreamJob = dyn FnOnce(&dyn Fn(Message)) -> Message + Send;
 
 /// What an update asks the window or a worker thread to do after it returns.
+/// How often the one-click share suggestions look for a game again.
+const QUICK_SOURCE_REFRESH: Duration = Duration::from_secs(15);
+
 /// The server rail while it hides behind the left edge: with one server it only needs to show
 /// when asked. Derived from when the pointer last came or went, so views stay pure.
 #[derive(Debug, Clone, Copy, Default)]
@@ -222,6 +225,10 @@ pub struct UiState {
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
     pub rail_peek: RailPeek,
+    /// What one click can share, refreshed while you could go live.
+    pub quick_sources: Vec<crate::streaming::publishing::ShareSource>,
+    pub quick_checking: bool,
+    pub next_quick_check: Instant,
     /// Which group submenu of the member menu is open.
     pub groups_menu: Option<GroupsMenu>,
     pub drag: Option<MemberDrag>,
@@ -269,6 +276,9 @@ impl Default for UiState {
             rail_menu: None,
             move_menu: false,
             rail_peek: RailPeek::default(),
+            quick_sources: Vec::new(),
+            quick_checking: false,
+            next_quick_check: Instant::now(),
             groups_menu: None,
             drag: None,
             tile_drag: None,
@@ -519,6 +529,10 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     if s.updater.next_check.is_some_and(|at| now >= at) {
         dispatch(s, tx, Message::Updater(crate::updater::Event::Check));
         changed = true;
+    }
+    if now >= s.ui.next_quick_check && s.live() {
+        s.ui.next_quick_check = now + QUICK_SOURCE_REFRESH;
+        dispatch(s, tx, Message::RefreshQuickSources);
     }
     let wake = match s.updater.next_check {
         Some(check) => s.next_usage_tick.min(check),

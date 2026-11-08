@@ -515,30 +515,66 @@ fn channel_sound(session: &mut ServerSession, next: &client::Snapshot) -> Option
 
 /// The sound for what someone did. Your own moves already have their channel sounds.
 fn activity_sound(activity: &client::Activity) -> Option<sounds::Sound> {
-    use client::ActivityKind::{Banned, KickedFromChannel, KickedFromServer};
-    match (activity.kind, activity.is_self) {
-        (KickedFromChannel | KickedFromServer, true) => Some(sounds::Sound::Kicked),
-        (Banned, true) => Some(sounds::Sound::Banned),
-        (_, true) => None,
-        _ if activity.entered_yours => Some(sounds::Sound::PersonJoinedChannel),
-        _ if activity.left_yours => Some(sounds::Sound::PersonLeftChannel),
-        _ => None,
+    use client::ActivityKind::{
+        Banned, ChannelGroupChanged, Connected, Disconnected, KickedFromChannel, KickedFromServer,
+        LostConnection, Moved, RecordingStarted, RecordingStopped, ServerGroupAssigned,
+        ServerGroupRevoked, TalkPowerGranted, TalkPowerRevoked, Whispered,
+    };
+    use sounds::Sound;
+    if activity.is_self {
+        return match activity.kind {
+            KickedFromChannel => Some(Sound::KickedFromChannel),
+            KickedFromServer => Some(Sound::Kicked),
+            Banned => Some(Sound::Banned),
+            TalkPowerGranted => Some(Sound::TalkPowerGranted),
+            TalkPowerRevoked => Some(Sound::TalkPowerRevoked),
+            ServerGroupAssigned => Some(Sound::ServerGroupAssigned),
+            ServerGroupRevoked => Some(Sound::ServerGroupRevoked),
+            ChannelGroupChanged => Some(Sound::ChannelGroupChanged),
+            _ => None,
+        };
     }
+    if activity.entered_yours {
+        return Some(match activity.kind {
+            Connected => Sound::PersonConnected,
+            Moved => Sound::PersonMovedIn,
+            KickedFromChannel => Sound::PersonKickedIntoChannel,
+            RecordingStarted => Sound::PersonRecordingStarted,
+            RecordingStopped => Sound::PersonRecordingStopped,
+            Whispered => Sound::WhisperReceived,
+            _ => Sound::PersonJoinedChannel,
+        });
+    }
+    activity.left_yours.then_some(match activity.kind {
+        Disconnected => Sound::PersonDisconnected,
+        LostConnection => Sound::PersonLostConnection,
+        Moved => Sound::PersonMovedOut,
+        KickedFromChannel => Sound::PersonKickedFromChannel,
+        KickedFromServer => Sound::PersonKickedFromServer,
+        Banned => Sound::PersonBanned,
+        _ => Sound::PersonLeftChannel,
+    })
 }
 
 fn log_activity(log: &mut server_log::Log, activity: &client::Activity) {
     use client::ActivityKind::{
-        Banned, Connected, Disconnected, KickedFromChannel, KickedFromServer, LostConnection, Moved,
+        Banned, ChannelGroupChanged, Connected, Disconnected, KickedFromChannel, KickedFromServer,
+        LostConnection, Moved, RecordingStarted, RecordingStopped, ServerGroupAssigned,
+        ServerGroupRevoked, Switched, TalkPowerGranted, TalkPowerRevoked, Whispered,
     };
     use server_log::Tone;
     let tone = match activity.kind {
         Connected => Tone::Arrived,
-        Moved => Tone::Moved,
+        Moved | Switched | RecordingStarted | RecordingStopped | TalkPowerGranted
+        | TalkPowerRevoked | Whispered | ServerGroupAssigned | ServerGroupRevoked
+        | ChannelGroupChanged => Tone::Moved,
         _ => Tone::Left,
     };
     let action = match (activity.kind, activity.is_self) {
-        (Moved, true) => format!("joined {}", activity.channel),
-        (Moved, false) => format!("→ {}", activity.channel),
+        (Switched, true) => format!("joined {}", activity.channel),
+        (Switched, false) => format!("→ {}", activity.channel),
+        (Moved, true) => format!("were moved to {}", activity.channel),
+        (Moved, false) => format!("moved to {}", activity.channel),
         (Connected, _) => "connected".to_owned(),
         (Disconnected, _) => "disconnected".to_owned(),
         (LostConnection, _) => "lost connection".to_owned(),
@@ -548,6 +584,14 @@ fn log_activity(log: &mut server_log::Log, activity: &client::Activity) {
         (KickedFromServer, false) => "kicked".to_owned(),
         (Banned, true) => "were banned".to_owned(),
         (Banned, false) => "banned".to_owned(),
+        (RecordingStarted, _) => "started recording".to_owned(),
+        (RecordingStopped, _) => "stopped recording".to_owned(),
+        (TalkPowerGranted, _) => "got talk power".to_owned(),
+        (TalkPowerRevoked, _) => "lost talk power".to_owned(),
+        (Whispered, _) => "whispered to you".to_owned(),
+        (ServerGroupAssigned, _) => format!("were added to {}", activity.channel),
+        (ServerGroupRevoked, _) => format!("were removed from {}", activity.channel),
+        (ChannelGroupChanged, _) => format!("are now in {}", activity.channel),
     };
     let name = if activity.is_self {
         "You"
@@ -749,6 +793,10 @@ enum Message {
     ShareAudio(bool),
     ShareAudioOutput(audio::DeviceChoice),
     StartSharing,
+    /// Goes live with this source straight away, publicly.
+    QuickShare(streaming::publishing::ShareSource),
+    RefreshQuickSources,
+    QuickSources(Result<Vec<streaming::publishing::ShareSource>, String>),
     StopSharing,
     DecideViewer(u16, bool),
     RecordTrace,
@@ -1187,6 +1235,59 @@ impl App {
     }
 
     /// Keeps what this share used for the next one, on every server.
+    fn start_share(
+        &mut self,
+        source: streaming::publishing::ShareSource,
+        access: streaming::publishing::Access,
+        remember: bool,
+    ) -> Task {
+        let sharing = &self.server().streaming.sharing;
+        if !self.server().connected
+            || sharing.status.active
+            || sharing.loading
+            || self.loopback
+            || self.server().stopping
+            || self.tab != Tab::Home
+        {
+            return Task::none();
+        }
+        self.begin_alert(Source::StreamPublish);
+        let sharing = &self.server().streaming.sharing;
+        let audio = if sharing.audio {
+            let Some(device) = sharing
+                .audio_device
+                .clone()
+                .or_else(|| self.devices.output.clone())
+            else {
+                self.raise_active(
+                    Source::StreamPublish,
+                    "Choose an output device for system audio",
+                );
+                return Task::none();
+            };
+            Some(device)
+        } else {
+            None
+        };
+        let quality = sharing.quality;
+        if self.command(client::Command::StartSharing(
+            streaming::publishing::Options {
+                source,
+                audio,
+                quality,
+                access,
+            },
+        )) {
+            self.server_mut().streaming.share_open = false;
+            self.server_mut().streaming.sharing.previews.clear();
+            if remember {
+                self.remember_share();
+            }
+            self.ui.open = None;
+        }
+        Task::none()
+    }
+
     fn remember_share(&mut self) {
         let sharing = &self.server().streaming.sharing;
         let camera = sharing
@@ -2398,48 +2499,44 @@ impl App {
                 }
             }
             Message::StartSharing => {
-                if self.server().connected
-                    && !self.server().streaming.sharing.status.active
-                    && !self.server().streaming.sharing.loading
-                    && !self.loopback
-                    && !self.server().stopping
-                    && self.tab == Tab::Home
-                    && let Some(source) = self.server().streaming.sharing.selected.clone()
-                {
-                    self.begin_alert(Source::StreamPublish);
-                    let audio = if self.server().streaming.sharing.audio {
-                        let Some(device) = self
-                            .server()
-                            .streaming
-                            .sharing
-                            .audio_device
-                            .clone()
-                            .or_else(|| self.devices.output.clone())
-                        else {
-                            self.raise_active(
-                                Source::StreamPublish,
-                                "Choose an output device for system audio",
-                            );
-                            return Task::none();
-                        };
-                        Some(device)
-                    } else {
-                        None
-                    };
-                    if self.command(client::Command::StartSharing(
-                        streaming::publishing::Options {
-                            source,
-                            audio,
-                            quality: self.server().streaming.sharing.quality,
-                            access: self.server().streaming.sharing.access,
-                        },
-                    )) {
-                        self.server_mut().streaming.share_open = false;
-                        self.server_mut().streaming.sharing.previews.clear();
-                        self.remember_share();
-                        self.ui.open = None;
-                    }
+                if let Some(source) = self.server().streaming.sharing.selected.clone() {
+                    let access = self.server().streaming.sharing.access;
+                    return self.start_share(source, access, true);
                 }
+            }
+            // Always public, and it leaves the dialog's choices as they were.
+            Message::QuickShare(source) => {
+                return self.start_share(source, streaming::publishing::Access::Public, false);
+            }
+            Message::RefreshQuickSources => {
+                let session = self.server();
+                let allowed = matches!(
+                    permissions::status(permissions::Kind::Screen),
+                    permissions::Status::Granted | permissions::Status::NotRequired
+                );
+                if self.live()
+                    && self.tab == Tab::Home
+                    && streaming::AVAILABLE
+                    && session.state.server_version.starts_with("6.")
+                    && !session.streaming.sharing.status.active
+                    && !self.ui.quick_checking
+                    && allowed
+                {
+                    self.ui.quick_checking = true;
+                    return Task::perform(
+                        async {
+                            tokio::task::spawn_blocking(streaming::quick_share_sources)
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .map_err(|error| error.to_string())
+                        },
+                        Message::QuickSources,
+                    );
+                }
+            }
+            Message::QuickSources(result) => {
+                self.ui.quick_checking = false;
+                self.ui.quick_sources = result.unwrap_or_default();
             }
             Message::StopSharing => {
                 self.server().streaming.sharing.stop_capture();
@@ -3238,6 +3335,9 @@ impl App {
                 }
             }
             client::Event::Talking(talking) => session.talking = talking,
+            client::Event::PermissionDenied => {
+                sounds_due.push(sounds::Sound::InsufficientPermissions);
+            }
             client::Event::Poked { from, message } => {
                 sounds_due.push(sounds::Sound::Poke);
                 notify::show(
@@ -4598,14 +4698,14 @@ mod tests {
         assert_eq!(
             app.played_sounds,
             [
-                sounds::Sound::PersonJoinedChannel,
-                sounds::Sound::PersonLeftChannel
+                sounds::Sound::PersonMovedIn,
+                sounds::Sound::PersonDisconnected
             ],
             "nothing for someone elsewhere on the server"
         );
         let log = &app.server().log;
         assert_eq!(log.len(), 3);
-        assert_eq!(log.get(0).unwrap().action, "→ Lobby");
+        assert_eq!(log.get(0).unwrap().action, "moved to Lobby");
         assert_eq!(log.get(1).unwrap().tone, server_log::Tone::Left);
         assert_eq!(log.get(2).unwrap().action, "connected");
     }
@@ -4764,6 +4864,95 @@ mod tests {
         let _ = app.update(Message::Backend(id, client::Event::State(state)));
         assert!(app.server().moderation.is_none());
         assert!(app.server().group_edit.is_none());
+    }
+
+    #[test]
+    fn one_click_goes_live_publicly_and_leaves_the_dialogs_choices() {
+        use streaming::publishing::{Access, ShareSource, SourceKind};
+        let (mut app, mut commands) = moderation_app();
+        app.server_mut().streaming.sharing.audio = false;
+        app.server_mut().streaming.sharing.access = Access::Private;
+        let defaults = app.share_defaults;
+        let source = ShareSource {
+            kind: SourceKind::Screen(Some(0)),
+            name: "Main screen".into(),
+        };
+        let _ = app.update(Message::QuickShare(source.clone()));
+        match commands.try_recv().unwrap() {
+            client::Command::StartSharing(options) => {
+                assert_eq!(options.source, source);
+                assert_eq!(options.access, Access::Public);
+            }
+            other => panic!("Unexpected command: {other:?}"),
+        }
+        assert_eq!(app.server().streaming.sharing.access, Access::Private);
+        assert!(app.server().streaming.sharing.selected.is_none());
+        assert_eq!(app.share_defaults, defaults);
+    }
+
+    #[test]
+    fn each_thing_that_happens_in_your_channel_has_its_own_sound() {
+        use client::ActivityKind::*;
+        use sounds::Sound;
+        let heard = |kind, is_self, entered_yours, left_yours| {
+            activity_sound(&client::Activity {
+                kind,
+                name: "Mara".into(),
+                channel: "Lobby".into(),
+                is_self,
+                entered_yours,
+                left_yours,
+            })
+        };
+        for (kind, sound) in [
+            (Connected, Sound::PersonConnected),
+            (Moved, Sound::PersonMovedIn),
+            (Switched, Sound::PersonJoinedChannel),
+            (KickedFromChannel, Sound::PersonKickedIntoChannel),
+        ] {
+            assert_eq!(heard(kind, false, true, false), Some(sound));
+        }
+        for (kind, sound) in [
+            (Disconnected, Sound::PersonDisconnected),
+            (LostConnection, Sound::PersonLostConnection),
+            (Moved, Sound::PersonMovedOut),
+            (Switched, Sound::PersonLeftChannel),
+            (KickedFromChannel, Sound::PersonKickedFromChannel),
+            (KickedFromServer, Sound::PersonKickedFromServer),
+            (Banned, Sound::PersonBanned),
+        ] {
+            assert_eq!(heard(kind, false, false, true), Some(sound));
+        }
+        for (kind, sound) in [
+            (RecordingStarted, Sound::PersonRecordingStarted),
+            (RecordingStopped, Sound::PersonRecordingStopped),
+            (Whispered, Sound::WhisperReceived),
+        ] {
+            assert_eq!(heard(kind, false, true, false), Some(sound));
+        }
+        for (kind, sound) in [
+            (TalkPowerGranted, Sound::TalkPowerGranted),
+            (TalkPowerRevoked, Sound::TalkPowerRevoked),
+            (ServerGroupAssigned, Sound::ServerGroupAssigned),
+            (ServerGroupRevoked, Sound::ServerGroupRevoked),
+            (ChannelGroupChanged, Sound::ChannelGroupChanged),
+        ] {
+            assert_eq!(heard(kind, true, false, false), Some(sound));
+        }
+        assert_eq!(heard(Banned, false, false, false), None, "somewhere else");
+        assert_eq!(
+            heard(KickedFromChannel, true, false, true),
+            Some(Sound::KickedFromChannel)
+        );
+        assert_eq!(
+            heard(KickedFromServer, true, false, true),
+            Some(Sound::Kicked)
+        );
+        assert_eq!(
+            heard(Moved, true, true, false),
+            None,
+            "has its channel sound"
+        );
     }
 
     #[test]

@@ -145,6 +145,7 @@ fn server_group_rows(s: &App, ids: &[u16]) -> Vec<MenuEntry> {
             let mark = GroupMark::of(wanted, s.server_group_mark(ids, id));
             let mut item = MenuItem::new(group.name.clone())
                 .checked(mark == GroupMark::On)
+                .disabled(group.fixed)
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     dispatch(s, tx, Message::ToggleServerGroup(id));
                 });
