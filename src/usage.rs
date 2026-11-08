@@ -171,6 +171,7 @@ pub struct Percentiles {
 }
 
 pub struct MetricHistory {
+    pub revision: u64,
     samples: VecDeque<(Instant, f64)>,
     now: Instant,
     pub percentiles: Option<Percentiles>,
@@ -182,12 +183,14 @@ impl MetricHistory {
         Self {
             samples: VecDeque::new(),
             now,
+            revision: crate::connection_charts::next_revision(),
             percentiles: None,
             upper_bound: 1.0,
         }
     }
 
     pub fn push(&mut self, now: Instant, value: Option<f64>) {
+        self.revision = crate::connection_charts::next_revision();
         self.now = now;
         if let Some(value) = value.filter(|v| v.is_finite() && *v >= 0.0) {
             self.samples.push_back((now, value));

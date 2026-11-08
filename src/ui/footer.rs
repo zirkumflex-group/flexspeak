@@ -66,14 +66,15 @@ fn reading(
         )
 }
 
-struct Resources {
+#[derive(PartialEq)]
+pub(super) struct Resources {
     cpu: (String, usage::Health),
     /// The CPU figure is a share of one core; the tooltip adds the whole machine's share.
     cpu_help: String,
     ram: (String, usage::Health),
 }
 
-fn resources(s: &App) -> Resources {
+pub(super) fn resources(s: &App) -> Resources {
     let usage = &s.process_usage;
     Resources {
         cpu: (

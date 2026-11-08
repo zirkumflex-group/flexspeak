@@ -239,9 +239,33 @@ impl App {
 
 /// Runs one message on the UI thread and carries out what it returns.
 pub fn dispatch(s: &mut App, tx: &mut Tx, message: Message) {
+    // Exact equality preserves the meter's accessibility value as well as its pixels.
+    // Statistics consumes counters and buffer sizes even when the meter is unchanged.
+    let invisible = match &message {
+        Message::Backend(
+            id,
+            crate::client::Event::Meter {
+                level,
+                sent,
+                received,
+                audio_buffer_bytes,
+            },
+        ) => s.session(*id).is_none_or(|session| {
+            let active = s.active == Some(*id);
+            (!active || s.level == *level)
+                && (s.tab != Tab::Statistics
+                    || (session.sent == *sent
+                        && session.received == *received
+                        && (!active || s.audio_buffer_bytes == *audio_buffer_bytes)))
+        }),
+        _ => false,
+    };
     let task = s.update(message);
     execute(s, tx, task);
     s.sync_fields();
+    if invisible {
+        tx.live_only();
+    }
 }
 
 /// A press handler that sends `message`.
@@ -368,6 +392,15 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     let now = Instant::now();
     if now >= s.next_usage_tick {
+        let resources = footer::resources(s);
+        let connection = s.footer_connection_status();
+        let old_style = style(s);
+        // Histories and time-dependent member health remain visible on these pages.
+        let ticking_view = s.tab == Tab::Statistics
+            || (s.server().connected && (!s.footer_hidden || s.tab == Tab::Home))
+            || s.onboarding.is_some()
+            || s.settings_page.is_some()
+            || s.recording.is_some();
         dispatch(s, tx, Message::UsageTick);
         // Following the system's appearance costs one cheap query per tick.
         if s.appearance.scheme == crate::settings::ColorScheme::System
@@ -382,7 +415,10 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
             s.omarchy = Some(current);
         }
         s.next_usage_tick = now + usage::REFRESH_INTERVAL;
-        changed = true;
+        changed |= ticking_view
+            || connection != s.footer_connection_status()
+            || resources != footer::resources(s)
+            || !std::rc::Rc::ptr_eq(&old_style, &style(s));
     }
     if s.resume.is_some() && !s.resume_started {
         s.resume_started = true;
@@ -465,18 +501,59 @@ pub fn theme(s: &App) -> Theme {
         )
 }
 
+type CachedStyle = (
+    crate::settings::Appearance,
+    bool,
+    Option<crate::themes::Colors>,
+    std::rc::Rc<(Theme, rune_kit::Kit)>,
+);
+
+fn style(s: &App) -> std::rc::Rc<(Theme, rune_kit::Kit)> {
+    thread_local! {
+        static STYLE: std::cell::RefCell<Option<CachedStyle>> = const { std::cell::RefCell::new(None) };
+    }
+    let dark = s.appearance.is_dark(s.system_dark);
+    let (dark, colors) = if !s.appearance.ignore_omarchy
+        && let Some(current) = &s.omarchy
+    {
+        (current.dark, Some(current.colors))
+    } else {
+        (
+            dark,
+            s.appearance
+                .extra_theme(dark)
+                .and_then(|id| s.theme_library.find(id)?.colors(dark))
+                .copied(),
+        )
+    };
+    STYLE.with_borrow_mut(|cache| {
+        if let Some((appearance, cached_dark, cached_colors, value)) = cache
+            && appearance == &s.appearance
+            && *cached_dark == dark
+            && *cached_colors == colors
+        {
+            return value.clone();
+        }
+        let t = theme(s);
+        let value = std::rc::Rc::new((t, t.kit()));
+        *cache = Some((s.appearance.clone(), dark, colors, value.clone()));
+        value
+    })
+}
+
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let _trace = crate::profiler::scope(crate::profiler::Category::Ui, "ui.view");
     // Left off, the system's own Reduce Motion setting still applies.
     let reduced = s.appearance.disable_animations || cx.system_reduced_motion();
     cx.reduced_motion(reduced);
-    let t = theme(s);
-    let k = t.kit();
+    let style = style(s);
+    let t = style.0;
+    let k = &style.1;
     let mut layer = Vec::new();
     let content = if let Some(step) = s.onboarding {
-        onboarding::view(s, cx, &t, &k, &mut layer, step)
+        onboarding::view(s, cx, &t, k, &mut layer, step)
     } else {
-        home::normal(s, cx, &t, &k, &mut layer)
+        home::normal(s, cx, &t, k, &mut layer)
     };
     #[cfg(windows)]
     let content = if s.onboarding.is_some() {
@@ -490,8 +567,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     // Under any dialog, whose scrim then covers it too.
     layer.extend(updates::notice(s, &t));
-    settings::window(s, cx, &t, &k, &mut layer);
-    modals::build(s, &t, &k, &mut layer);
+    settings::window(s, cx, &t, k, &mut layer);
+    modals::build(s, &t, k, &mut layer);
     let base = el()
         .key("window")
         .w_full()

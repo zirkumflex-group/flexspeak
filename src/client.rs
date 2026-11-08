@@ -78,7 +78,7 @@ pub enum Command {
     Move(Vec<u16>, u64),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum JoinAccess {
     Allowed,
     Denied,
@@ -93,7 +93,7 @@ impl JoinAccess {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Member {
     pub id: u16,
     /// Their identity as text; empty until the server has sent it.
@@ -107,7 +107,7 @@ pub struct Member {
     pub can_move: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Channel {
     pub id: u64,
     pub name: String,

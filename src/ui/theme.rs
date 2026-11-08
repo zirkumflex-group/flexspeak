@@ -24,7 +24,7 @@ pub fn rgb(hex: u32) -> Color {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash)]
 pub struct Theme {
     /// Whether this is a dark palette; overlays and wells darken or lighten accordingly.
     pub dark: bool,
