@@ -1,11 +1,12 @@
 //! The connected right pane: streams in your channel, watched on a stage that fills the pane.
 //!
 //! One watched stream fills the stage. With several, they share it in a grid until you focus
-//! one; the focused stream takes the stage and the others line up beneath it, as in Discord.
-//! Each stream has its own volume. Codec and transport details hide behind the info button.
+//! one; the focused stream takes the stage and the others line up below or beside it. Dragging
+//! one stream onto another trades their places. Each stream has its own volume. Codec and
+//! transport details hide behind the info button.
 //! Sharing your own screen starts from the button beside Disconnect, in [`share_dialog`].
 
-use rune::{Color, Cx, El, SurfaceFit, Transition, col, el, icon, row, text};
+use rune::{Color, Cx, Drag, El, Phase, SurfaceFit, Transition, Tx, col, el, icon, row, text};
 use rune_kit::{Checkbox, Dialog, Kit};
 
 use super::theme::{Theme, motion, radius, size, ty};
@@ -13,9 +14,9 @@ use super::widgets::{
     Range, Variant, button, card, faint, group, group_note, group_title, icon_button, lit_dot,
     meter, muted, picker, pulse, scroll_page, slider, title,
 };
-use super::{dispatch, icons, send};
+use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
-    self, Watching,
+    self, Strip, Watching,
     publishing::{Access, Preset, Resolution},
 };
 use crate::{App, Message, usage};
@@ -24,6 +25,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
     let connected = s.connected && !s.loopback && !s.stopping;
     let supported = connected && s.state.server_version.starts_with("6.");
     share_dialog(s, cx, t, k, layer);
+    drag_ghost(s, t, layer);
     let watching = s.streaming.active();
     let mut pane = col()
         .key("streams")
@@ -33,10 +35,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
     if s.streaming.sharing.status.active {
         pane = pane.child(sharing_banner(s, t));
     }
-    if watching {
-        pane = pane.child(stage(s, t, k, supported));
+    if watching || !unwatched(s).is_empty() {
+        let room = pane_size(s, cx);
+        pane = pane.child(stage(s, t, k, supported, room));
     } else {
-        pane = pane.child(scroll_page(k, "streams-scroll", catalog(s, t, supported)));
+        pane = pane.child(scroll_page(k, "streams-scroll", no_streams(t, supported)));
     }
     pane
 }
@@ -83,6 +86,40 @@ fn header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
             Some(Message::ToggleStreamStats),
         ));
         if s.streaming.watching.len() > 1 {
+            let current = s.streaming.stage().is_some().then_some(s.streaming.strip);
+            for (key, glyph, help, layout) in [
+                (
+                    "layout-grid",
+                    &icons::LAYOUT_GRID,
+                    "Show every stream in a grid",
+                    None,
+                ),
+                (
+                    "layout-below",
+                    &icons::PANEL_BOTTOM,
+                    "One stream large, the others below it",
+                    Some(Strip::Below),
+                ),
+                (
+                    "layout-beside",
+                    &icons::PANEL_RIGHT,
+                    "One stream large, the others beside it",
+                    Some(Strip::Beside),
+                ),
+            ] {
+                bar = bar.child(icon_button(
+                    t,
+                    key,
+                    glyph,
+                    help,
+                    if current == layout {
+                        Variant::Active
+                    } else {
+                        Variant::Ghost
+                    },
+                    Some(Message::StreamLayout(layout)),
+                ));
+            }
             bar = bar.child(button(
                 t,
                 "stop-all",
@@ -126,8 +163,6 @@ fn watch_blocked(s: &App, supported: bool, stream: &streaming::StreamInfo) -> Op
         Some("Unavailable here")
     } else if stream.server_relayed {
         Some("Server relay unavailable")
-    } else if s.streaming.sharing.status.active {
-        Some("Stop sharing to watch")
     } else if s.streaming.watching.len() >= streaming::MAX_WATCHES {
         Some("Watching the most at once")
     } else {
@@ -135,8 +170,8 @@ fn watch_blocked(s: &App, supported: bool, stream: &streaming::StreamInfo) -> Op
     }
 }
 
-/// The list shown while nothing is watched.
-fn catalog(s: &App, t: &Theme, supported: bool) -> El {
+/// What the pane shows while no stream is running in the channel.
+fn no_streams(t: &Theme, supported: bool) -> El {
     let mut content = col()
         .w_full()
         .max_w(860.0)
@@ -154,78 +189,28 @@ fn catalog(s: &App, t: &Theme, supported: bool) -> El {
             "Native screen sharing is available on Mac and Windows.",
         )));
     }
-    content = content.child(group_title(t, "In this channel"));
-    let mut rows = Vec::new();
-    let available = unwatched(s);
-    if available.is_empty() {
-        rows.push(
-            col()
-                .w_full()
-                .padding(28.0)
-                .gap(8.0)
-                .center()
-                .child(icon(&icons::SCREEN_SHARE, 22.0).color(t.faint))
-                .child(muted(t, "No one in this channel is sharing."))
-                .child(faint(
-                    t,
-                    "Share your own screen with the button beside Disconnect.",
-                )),
-        );
-    }
-    for stream in available {
-        let blocked = watch_blocked(s, supported, stream);
-        rows.push(
-            row()
-                .key(format!("stream-{}", stream.id))
-                .w_full()
-                .px(size::CARD_PAD)
-                .py(10.0)
-                .gap(12.0)
-                .center_y()
-                .transition(Transition::opacity())
-                .child(lit_dot(t.live))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .gap(2.0)
-                        .child(
-                            text(stream.name.clone())
-                                .font(ty::BODY_STRONG)
-                                .color(t.text)
-                                .truncate_fade(),
-                        )
-                        .child(faint(
-                            t,
-                            format!(
-                                "{} · {} viewers{}",
-                                publisher_name(s, stream.publisher),
-                                stream.viewers,
-                                if stream.has_audio {
-                                    " · includes audio"
-                                } else {
-                                    ""
-                                }
-                            ),
-                        )),
-                )
-                .child(button(
-                    t,
-                    "watch",
-                    blocked.unwrap_or("Watch"),
-                    blocked.is_none().then_some(&icons::MONITOR_PLAY),
-                    Variant::Secondary,
-                    blocked
-                        .is_none()
-                        .then(|| Message::WatchStream(stream.id.clone())),
-                )),
-        );
-    }
-    content = content.child(group(t, rows)).child(group_note(
-        t,
-        "Watch up to four streams at once. Leaving this view or switching channels stops watching and sharing.",
-    ));
     content
+        .child(group_title(t, "In this channel"))
+        .child(group(
+            t,
+            vec![
+                col()
+                    .w_full()
+                    .padding(28.0)
+                    .gap(8.0)
+                    .center()
+                    .child(icon(&icons::SCREEN_SHARE, 22.0).color(t.faint))
+                    .child(muted(t, "No one in this channel is sharing."))
+                    .child(faint(
+                        t,
+                        "Share your own screen with the button beside Disconnect.",
+                    )),
+            ],
+        ))
+        .child(group_note(
+            t,
+            "Watch up to five streams at once. Leaving this view or switching channels stops watching and sharing.",
+        ))
 }
 
 /// Your own share while it runs: viewers, requests to watch, and the way to stop.
@@ -333,9 +318,10 @@ fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name:
         ))
 }
 
-/// The watched streams: one on the stage with the rest beneath it, or a grid of equals.
-fn stage(s: &App, t: &Theme, k: &Kit, supported: bool) -> El {
+/// Streams watched and not yet joined: one on the stage with the rest beneath it, or a grid.
+fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El {
     let watching = &s.streaming.watching;
+    let available = unwatched(s);
     let mut area = col()
         .key("stage")
         .grow(1.0)
@@ -344,41 +330,79 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool) -> El {
         .px(size::PAGE)
         .pb(size::PAGE)
         .gap(10.0);
-    if let Some(main) = s.streaming.stage() {
-        area = area.child(tile(s, t, main, Mode::Stage));
-        let others: Vec<&Watching> = watching
+    let Some(main) = s.streaming.stage() else {
+        let columns = grid_columns(watching.len() + available.len(), space);
+        let volume_slider = cell_width(space, columns.unwrap_or(2)) >= MIN_CELL_WITH_SLIDER;
+        let cells = watching
             .iter()
-            .filter(|watch| watch.generation != main.generation)
-            .collect();
-        if !others.is_empty() {
-            let mut strip = row().key("strip").w_full().h(132.0).gap(10.0);
-            for watch in others {
-                strip = strip.child(tile(s, t, watch, Mode::Thumbnail));
-            }
-            area = area.child(strip);
-        }
-    } else {
-        // Two columns: two streams side by side, three or four in two rows.
-        let mut grid = col().key("grid").grow(1.0).min_h(0.0).w_full().gap(10.0);
-        for (index, pair) in watching.chunks(2).enumerate() {
-            let mut line = row()
-                .key(format!("grid-row-{index}"))
+            .map(|watch| tile(s, t, watch, Mode::Grid, volume_slider))
+            .chain(
+                available
+                    .iter()
+                    .map(|stream| preview(s, t, stream, supported, Mode::Grid)),
+            )
+            .collect::<Vec<_>>();
+        return area.child(grid(k, cells, columns));
+    };
+    let others: Vec<&Watching> = watching
+        .iter()
+        .filter(|watch| watch.generation != main.generation)
+        .collect();
+    let room = MAX_STRIP.saturating_sub(others.len()).min(available.len());
+    let (previews, overflow) = available.split_at(room);
+    let thumbnails: Vec<El> = others
+        .into_iter()
+        .map(|watch| tile(s, t, watch, Mode::Thumbnail, false))
+        .chain(
+            previews
+                .iter()
+                .map(|stream| preview(s, t, stream, supported, Mode::Thumbnail)),
+        )
+        .collect();
+    let strip_width = (space.0 * 0.22).clamp(140.0, 280.0);
+    let stage_width = match s.streaming.strip {
+        Strip::Beside if !thumbnails.is_empty() => space.0 - strip_width - GRID_GAP,
+        _ => space.0,
+    };
+    let main = tile(
+        s,
+        t,
+        main,
+        Mode::Stage,
+        stage_width >= MIN_STAGE_WITH_SLIDER,
+    );
+    area = match s.streaming.strip {
+        Strip::Below if thumbnails.is_empty() => area.child(main),
+        Strip::Below => area.child(main).child(
+            row()
+                .key("strip")
+                .w_full()
+                .h(STRIP_HEIGHT)
+                .gap(10.0)
+                .children(thumbnails),
+        ),
+        Strip::Beside => {
+            let mut stage = row()
+                .key("stage-row")
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .gap(10.0);
-            for watch in pair {
-                line = line.child(tile(s, t, watch, Mode::Grid));
+                .gap(10.0)
+                .child(main);
+            if !thumbnails.is_empty() {
+                stage = stage.child(
+                    col()
+                        .key("strip")
+                        .w(strip_width)
+                        .h_full()
+                        .gap(10.0)
+                        .children(thumbnails),
+                );
             }
-            if pair.len() == 1 && watching.len() > 2 {
-                line = line.child(el().grow(1.0).min_w(0.0));
-            }
-            grid = grid.child(line);
+            area.child(stage)
         }
-        area = area.child(grid);
-    }
-    let available = unwatched(s);
-    if !available.is_empty() {
+    };
+    if !overflow.is_empty() {
         let mut chips = row()
             .key("also-live")
             .w_full()
@@ -386,7 +410,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool) -> El {
             .center_y()
             .flex_wrap()
             .child(faint(t, "Also live:"));
-        for stream in available {
+        for stream in overflow {
             let blocked = watch_blocked(s, supported, stream);
             chips = chips.child(
                 button(
@@ -404,8 +428,211 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool) -> El {
         }
         area = area.child(chips);
     }
-    let _ = k;
     area
+}
+
+/// Tiles that fit beneath the stage; further unjoined streams become "Also live" chips.
+const MAX_STRIP: usize = 4;
+const STRIP_HEIGHT: f32 = 132.0;
+const SCROLLED_ROW_HEIGHT: f32 = 240.0;
+const GRID_GAP: f32 = 10.0;
+/// The name and controls under a picture.
+const TILE_BAR: f32 = 46.0;
+/// Below this picture width the grid stops squeezing streams in and scrolls instead.
+const MIN_PICTURE_WIDTH: f32 = 200.0;
+/// Everything around the stage in the window: header, pane title, footer and margins.
+const CHROME_HEIGHT: f32 = 200.0;
+const MIN_CELL_WITH_SLIDER: f32 = 260.0;
+/// The stage's slider is wider, and it has a button more.
+const MIN_STAGE_WITH_SLIDER: f32 = 360.0;
+
+/// The room inside the stage. Reading its layout re-runs the view when the window resizes or
+/// the sharing banner comes and goes; until it has been laid out, estimate from the window.
+fn pane_size(s: &App, cx: &mut Cx<App>) -> (f32, f32) {
+    cx.layout_size("stage").map_or_else(
+        || {
+            let (width, height) = s.window_size;
+            (
+                width - size::SIDEBAR - 2.0 * size::PAGE,
+                height - CHROME_HEIGHT,
+            )
+        },
+        |[width, height]| (width - 2.0 * size::PAGE, height - size::PAGE),
+    )
+}
+
+fn cell_width(room: (f32, f32), columns: usize) -> f32 {
+    let columns = columns as f32;
+    (room.0 - GRID_GAP * (columns - 1.0)) / columns
+}
+
+/// How wide a 16:9 picture gets with this many columns.
+fn picture_width(count: usize, columns: usize, (width, height): (f32, f32)) -> f32 {
+    let rows = count.div_ceil(columns) as f32;
+    let cell_height = (height - GRID_GAP * (rows - 1.0)) / rows - TILE_BAR;
+    cell_width((width, height), columns).min(cell_height * 16.0 / 9.0)
+}
+
+/// The column count that makes the pictures largest, or `None` when even that is too small
+/// to share the pane and the grid should scroll.
+fn grid_columns(count: usize, pane: (f32, f32)) -> Option<usize> {
+    let best = (1..=count.clamp(1, 3))
+        .max_by(|a, b| picture_width(count, *a, pane).total_cmp(&picture_width(count, *b, pane)))?;
+    (picture_width(count, best, pane) >= MIN_PICTURE_WIDTH).then_some(best)
+}
+
+/// Rows of equal boxes; a short last row is centred. `None` columns means a scrolling list.
+fn grid(k: &Kit, cells: Vec<El>, columns: Option<usize>) -> El {
+    let fitted = columns.is_some();
+    let columns = columns.unwrap_or(2);
+    let mut grid = col().key("grid").w_full().gap(GRID_GAP);
+    if fitted {
+        grid = grid.grow(1.0).min_h(0.0);
+    }
+    let mut cells = cells.into_iter().peekable();
+    let mut index = 0;
+    while cells.peek().is_some() {
+        let boxes: Vec<El> = cells.by_ref().take(columns).collect();
+        let margin = (columns - boxes.len()) as f32 / 2.0;
+        let mut line = row()
+            .key(format!("grid-row-{index}"))
+            .w_full()
+            .gap(GRID_GAP);
+        line = if fitted {
+            line.grow(1.0).min_h(0.0)
+        } else {
+            line.h(SCROLLED_ROW_HEIGHT)
+        };
+        if margin > 0.0 {
+            line = line.child(el().grow(margin).min_w(0.0));
+        }
+        line = line.children(boxes);
+        if margin > 0.0 {
+            line = line.child(el().grow(margin).min_w(0.0));
+        }
+        grid = grid.child(line);
+        index += 1;
+    }
+    if fitted {
+        grid
+    } else {
+        scroll_page(k, "streams-scroll", grid)
+    }
+}
+
+/// How far the pointer travels before a press on a stream becomes a drag.
+const DRAG_START: f32 = 4.0;
+
+/// The watched stream whose tile holds an element, from its key path. The longest match wins,
+/// so one stream's ID being the start of another's can't pick the wrong one.
+fn watched_in_path(s: &App, path: &str) -> Option<String> {
+    s.streaming
+        .watching
+        .iter()
+        .map(|watch| &watch.stream.id)
+        .filter(|id| path.contains(&format!("tile-{id}")))
+        .max_by_key(|id| id.len())
+        .cloned()
+}
+
+/// A click puts the stream on the stage, a double-click on the stage goes back to the grid, and
+/// a drag onto another stream trades their places.
+fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
+    let id = stream.id.clone();
+    let on_stage = mode == Mode::Stage;
+    video
+        .role("button")
+        .label(format!("Move or focus {}", stream.name))
+        .help(if on_stage {
+            "Drag onto another stream to swap · double-click to show every stream"
+        } else {
+            "Click to make this the large stream · drag onto another stream to swap"
+        })
+        .cursor(rune::Cursor::Pointer)
+        .on_pointer_move_local(|s: &mut App, p, tx: &mut Tx| {
+            s.ui.row_origin = (p.window_x - p.x, p.window_y - p.y);
+            tx.live_only();
+        })
+        .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
+            // `d.x` is relative to the pressed stream, and moves over others change `row_origin`.
+            if d.phase == Phase::Down {
+                s.ui.tile_origin = s.ui.row_origin;
+            }
+            let at = (s.ui.tile_origin.0 + d.x, s.ui.tile_origin.1 + d.y);
+            match d.phase {
+                Phase::Down => s.ui.tile_drag = None,
+                Phase::Move => {
+                    if s.ui.tile_drag.is_none() && d.dx.hypot(d.dy) >= DRAG_START {
+                        s.ui.tile_drag = Some(TileDrag {
+                            id: id.clone(),
+                            at,
+                            target: None,
+                        });
+                    }
+                    if let Some(drag) = &mut s.ui.tile_drag {
+                        drag.at = at;
+                        tx.element_at(at.0, at.1, |s: &mut App, picked, _tx: &mut Tx| {
+                            let under = picked.and_then(|p| watched_in_path(s, p.path()));
+                            if let Some(drag) = &mut s.ui.tile_drag {
+                                drag.target = under.filter(|under| *under != drag.id);
+                            }
+                        });
+                    }
+                }
+                Phase::Up => {
+                    let drag = s.ui.tile_drag.take();
+                    if d.cancelled() {
+                        return;
+                    }
+                    match drag {
+                        Some(TileDrag {
+                            id: from,
+                            target: Some(to),
+                            ..
+                        }) => dispatch(s, tx, Message::SwapStreams(from, to)),
+                        Some(_) => {}
+                        None if !on_stage => {
+                            dispatch(s, tx, Message::FocusStream(Some(id.clone())))
+                        }
+                        None if d.clicks >= 2 => dispatch(s, tx, Message::FocusStream(None)),
+                        None => {}
+                    }
+                }
+            }
+        })
+}
+
+/// The label that follows the pointer while a stream is dragged.
+fn drag_ghost(s: &App, t: &Theme, layer: &mut Vec<El>) {
+    let Some(drag) = &s.ui.tile_drag else {
+        return;
+    };
+    let name = |id: &str| {
+        s.streaming
+            .watching(id)
+            .map_or_else(|| "Stream".to_owned(), |watch| watch.stream.name.clone())
+    };
+    let label = match &drag.target {
+        Some(target) => format!("{} ⇄ {}", name(&drag.id), name(target)),
+        None => name(&drag.id),
+    };
+    // Offset from the pointer, so picking the stream underneath never finds the label.
+    layer.push(
+        row()
+            .key("stream-drag")
+            .absolute(drag.at.0 + 14.0, drag.at.1 + 12.0)
+            .gap(6.0)
+            .px(10.0)
+            .py(5.0)
+            .center_y()
+            .radius(radius::PILL)
+            .fill(t.raised)
+            .border(1.0, t.accent.alpha(0.5))
+            .box_shadow(theme::shadow(0.0, 4.0, 12.0, Color::BLACK.alpha(0.3)))
+            .a11y_hidden()
+            .child(icon(&icons::MOVE, 13.0).color(t.accent))
+            .child(text(label).font(ty::SMALL).color(t.text)),
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -418,7 +645,7 @@ enum Mode {
     Thumbnail,
 }
 
-fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode) -> El {
+fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -> El {
     let id = watch.stream.id.clone();
     let several = s.streaming.watching.len() > 1;
     let receiving = watch.phase == streaming::Phase::Receiving;
@@ -447,70 +674,182 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode) -> El {
             ),
         ),
     };
-    if mode != Mode::Stage && several {
-        video = video
-            .role("button")
-            .label(format!("Focus {}", watch.stream.name))
-            .help("Click to put this stream on the stage")
-            .cursor(rune::Cursor::Pointer)
-            .on_press_tx(send(Message::FocusStream(Some(id.clone()))));
-    } else if mode == Mode::Stage && several {
-        video = video
-            .help("Double-click to show every stream")
-            .on_double_press_tx(send(Message::FocusStream(None)));
+    if several {
+        video = movable(video, &watch.stream, mode);
     }
     if s.streaming.show_stats && mode != Mode::Thumbnail {
         video = video.child(stats(s, watch).absolute(10.0, 10.0));
     }
-    let mut frame = col()
+    if mode == Mode::Grid {
+        video = video.child(
+            row()
+                .key("maximize")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .padding(6.0)
+                .child(el().grow(1.0))
+                .child(icon_button(
+                    t,
+                    "focus",
+                    &icons::MAXIMIZE,
+                    "Make this the large stream",
+                    Variant::Secondary,
+                    Some(Message::FocusStream(Some(id.clone()))),
+                )),
+        );
+    }
+    let drag = s.ui.tile_drag.as_ref();
+    if drag.is_some_and(|drag| drag.target.as_deref() == Some(id.as_str())) {
+        // Over the picture, because the picture covers the box's own border.
+        video = video.child(
+            el().key("drop")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .fill(t.accent.alpha(0.28))
+                .border(2.0, t.accent)
+                .center()
+                .a11y_hidden()
+                .child(text("Swap").font(ty::BODY_STRONG).color(Color::WHITE)),
+        );
+    }
+    let edge = if receiving {
+        t.hairline
+    } else {
+        t.fair.alpha(0.4)
+    };
+    let mut frame = tile_frame(t, &id, edge, video);
+    if drag.is_some_and(|drag| drag.id == id) {
+        frame = frame.opacity(0.45);
+    }
+    if mode == Mode::Thumbnail {
+        let dot = if receiving {
+            lit_dot(t.live)
+        } else {
+            pulse(t.fair)
+        };
+        frame.child(thumbnail_label(s, t, watch.stream.publisher, dot))
+    } else {
+        frame.child(controls(s, t, watch, mode, volume_slider))
+    }
+}
+
+/// The box around a stream's picture. A preview and its watched tile share the key, so pressing
+/// Watch keeps the box and swaps what is in it.
+fn tile_frame(t: &Theme, id: &str, edge: Color, video: El) -> El {
+    col()
         .key(format!("tile-{id}"))
         .grow(1.0)
         .min_w(0.0)
         .min_h(0.0)
         .radius(radius::CARD)
         .fill(t.surface)
-        .border(
-            1.0,
-            if receiving {
-                t.hairline
-            } else {
-                t.fair.alpha(0.4)
-            },
-        )
+        .border(1.0, edge)
         .clip_rounded(radius::CARD)
         .transition(Transition::opacity().combined(Transition::scale(0.98)))
         .motion(motion::SETTLE)
-        .child(video);
-    if mode == Mode::Thumbnail {
-        frame = frame.child(
-            row()
-                .w_full()
-                .px(8.0)
-                .py(5.0)
-                .gap(6.0)
-                .center_y()
-                .child(if receiving {
-                    lit_dot(t.live)
+        .child(video)
+}
+
+fn thumbnail_label(s: &App, t: &Theme, publisher: u16, dot: El) -> El {
+    row()
+        .w_full()
+        .px(8.0)
+        .py(5.0)
+        .gap(6.0)
+        .center_y()
+        .child(dot)
+        .child(
+            text(publisher_name(s, publisher))
+                .font(ty::SMALL)
+                .color(t.text)
+                .truncate_fade()
+                .grow(1.0)
+                .min_w(0.0),
+        )
+}
+
+/// A running stream you haven't joined: the box it will play in, with Watch in the centre.
+fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, mode: Mode) -> El {
+    let blocked = watch_blocked(s, supported, stream);
+    let thumbnail = mode == Mode::Thumbnail;
+    let video = el()
+        .key("video")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .fill(Color::BLACK)
+        .center()
+        .child(
+            button(
+                t,
+                &format!("watch-{}", stream.id),
+                // A thumbnail is too narrow for the reason, which stays in the tooltip.
+                if thumbnail {
+                    "Watch"
                 } else {
-                    pulse(t.fair)
-                })
-                .child(
-                    text(publisher_name(s, watch.stream.publisher))
-                        .font(ty::SMALL)
-                        .color(t.text)
-                        .truncate_fade()
-                        .grow(1.0)
-                        .min_w(0.0),
-                ),
+                    blocked.unwrap_or("Watch")
+                },
+                blocked.is_none().then_some(&icons::MONITOR_PLAY),
+                if blocked.is_none() {
+                    Variant::Primary
+                } else {
+                    Variant::Secondary
+                },
+                blocked
+                    .is_none()
+                    .then(|| Message::WatchStream(stream.id.clone())),
+            )
+            .help(blocked.unwrap_or("Join this stream")),
         );
-    } else {
-        frame = frame.child(controls(s, t, watch, mode));
+    let frame = tile_frame(t, &stream.id, t.hairline, video);
+    if thumbnail {
+        return frame.child(thumbnail_label(s, t, stream.publisher, lit_dot(t.live)));
     }
-    frame
+    let viewers = match stream.viewers {
+        1 => "1 viewer".to_owned(),
+        count => format!("{count} viewers"),
+    };
+    let audio = if stream.has_audio {
+        "Includes audio"
+    } else {
+        "No audio"
+    };
+    frame.child(
+        row()
+            .key("controls")
+            .w_full()
+            .px(10.0)
+            .py(8.0)
+            .gap(8.0)
+            .center_y()
+            .child(lit_dot(t.live))
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(1.0)
+                    .child(
+                        text(stream.name.clone())
+                            .font(ty::BODY_STRONG)
+                            .color(t.text)
+                            .truncate_fade(),
+                    )
+                    .child(
+                        text(format!(
+                            "{} · {viewers} · {audio}",
+                            publisher_name(s, stream.publisher)
+                        ))
+                        .font(ty::CAPTION)
+                        .color(t.faint)
+                        .truncate_fade(),
+                    ),
+            ),
+    )
 }
 
 /// Under a stream: who and what, its volume, focus and stop.
-fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode) -> El {
+fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -> El {
     let id = watch.stream.id.clone();
     let publisher = watch.stream.publisher;
     let volume = s.streaming.volume(publisher);
@@ -550,28 +889,29 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode) -> El {
                 ),
         );
     if watch.stream.has_audio {
-        bar = bar
-            .child(icon_button(
-                t,
-                "stream-mute",
-                if volume == 0 {
-                    &icons::VOLUME_OFF
-                } else {
-                    &icons::VOLUME_2
-                },
-                if volume == 0 {
-                    "Unmute stream"
-                } else {
-                    "Mute stream"
-                },
-                Variant::Ghost,
-                Some(Message::StreamVolume(
-                    publisher,
-                    if volume == 0 { 100 } else { 0 },
-                )),
-            ))
-            .child(
-                el().w(if mode == Mode::Stage { 120.0 } else { 80.0 })
+        bar = bar.child(icon_button(
+            t,
+            "stream-mute",
+            if volume == 0 {
+                &icons::VOLUME_OFF
+            } else {
+                &icons::VOLUME_2
+            },
+            if volume == 0 {
+                "Unmute stream"
+            } else {
+                "Mute stream"
+            },
+            Variant::Ghost,
+            Some(Message::StreamVolume(
+                publisher,
+                if volume == 0 { 100 } else { 0 },
+            )),
+        ));
+        // In a narrow box the name matters more; maximizing brings the slider back.
+        if volume_slider {
+            bar = bar.child(
+                el().w(if mode == Mode::Stage { 120.0 } else { 64.0 })
                     .child(slider(
                         t,
                         "stream-volume",
@@ -583,27 +923,17 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode) -> El {
                         move |value| Message::StreamVolume(publisher, value.clamp(0, 100) as u8),
                     )),
             );
+        }
     }
-    if s.streaming.watching.len() > 1 {
-        bar = bar.child(if mode == Mode::Stage {
-            icon_button(
-                t,
-                "unfocus",
-                &icons::MINIMIZE,
-                "Show every stream side by side",
-                Variant::Ghost,
-                Some(Message::FocusStream(None)),
-            )
-        } else {
-            icon_button(
-                t,
-                "focus",
-                &icons::MAXIMIZE,
-                "Put this stream on the stage",
-                Variant::Ghost,
-                Some(Message::FocusStream(Some(id.clone()))),
-            )
-        });
+    if mode == Mode::Stage && s.streaming.watching.len() > 1 {
+        bar = bar.child(icon_button(
+            t,
+            "unfocus",
+            &icons::MINIMIZE,
+            "Show every stream side by side",
+            Variant::Ghost,
+            Some(Message::FocusStream(None)),
+        ));
     }
     bar.child(icon_button(
         t,

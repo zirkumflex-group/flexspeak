@@ -2,7 +2,7 @@
 
 ## Current scope — development update, 2026-10-28
 
-The native media backend is now enabled on **macOS and Windows** for watching and publishing peer-to-peer streams through the existing TS6 server connection. The earlier Windows build disabled Watch because the backend was compiled only on macOS. Watch still requires a TS6 server, a current-channel stream and no other active watch/share.
+The native media backend is now enabled on **macOS and Windows** for watching and publishing peer-to-peer streams through the existing TS6 server connection. The earlier Windows build disabled Watch because the backend was compiled only on macOS. Watch still requires a TS6 server and a current-channel stream. You can watch while you share.
 
 Incoming stream audio is decoded to stereo 48 kHz PCM and mixed into the existing CPAL playback path. App volume and deafen apply to both voice and stream audio. Deafen, stopping and receiver-generation changes clear buffered stream sound. WebRTC never opens a microphone or a playback device; TeamSpeak voice continues to use CPAL/Opus.
 
@@ -10,7 +10,11 @@ Publishing captures a selected screen, window or camera and optionally the sound
 
 ## Watching several streams — 2026-11-07
 
-Up to four streams can be watched at once, each with its own receiver, picture and audio. One watched stream fills the right pane. With several, they share it as a grid; **Maximize** (or clicking a tile) puts one on the stage and lines the others up beneath it, and **Minimize** or double-clicking the stage returns to the grid. Every stream has its own volume slider and mute button on top of the app volume; the setting is kept per publisher for the session. Codec, resolution, frame rate, decoder and transport details are hidden behind the **info** button in the pane header. Watching still stops while you share.
+Up to five streams can be watched at once, each with its own receiver, picture and audio. One watched stream fills the right pane. With several, they share it as a grid that picks the column count giving the largest pictures for the window, centres a short last row, and scrolls when even the best fit would be too small. **Maximize** (or clicking a tile) puts one on the stage, and the three layout buttons in the pane header switch between the grid, the others below the stage, and the others beside it; **Minimize** or double-clicking the stage returns to the grid. Dragging a stream onto another trades their places, and dropping one on the stage puts it there. In a narrow box the volume slider gives way to the name, leaving the mute button. Every stream has its own volume slider and mute button on top of the app volume; the setting is kept per publisher for the session. Codec, resolution, frame rate, decoder and transport details are hidden behind the **info** button in the pane header.
+
+Streams running in the channel that you haven't joined appear as the same boxes, with **Watch** in the centre and the name, publisher, viewer count and audio below. With nothing watched they fill the pane as the same grid. Beside watched streams they share the grid, or line up under the focused stream, up to four tiles; any further ones become **Also live** buttons.
+
+Watching and sharing are independent. If you share system audio while watching a stream, the sound of that stream is on the output being captured, so your viewers hear it too; a publisher watching you back hears themselves.
 
 ## Start sharing
 
@@ -40,13 +44,13 @@ Both optimized builds and Mac/Windows cross-target Clippy passed. Native Mac UI 
 4. A transport connection alone does not count as successful video. Look for decoded frames, UI updates and a visibly changing picture.
 5. **Stop watching** (the × on a stream, or **Stop All**), changing channels, opening Statistics or disconnecting stops viewing. An interrupted video connection requires clicking Watch again.
 
-The player and its Stop button appear only while requesting or watching a stream. The watched stream is omitted from the available-stream list, so it appears once. After stopping, the player disappears and the single catalog entry offers **Watch** again. Failed requests leave an explanation above the list.
+The player and its Stop button appear only while requesting or watching a stream. After stopping, the box goes back to offering **Watch**.
 
 The receiving UI reports the server version, negotiated video codec/parameters, decoder name, ICE candidate types (without IP addresses), video RTP packet/byte counts, decoded frames/FPS, UI updates and the publisher's version when the server reports it. CPU and memory stay in the footer. Existing Statistics network counters describe the TeamSpeak transport; WebRTC media bytes are reported separately in Streaming.
 
 ## Resource and lifecycle bounds
 
-- Only one receiver is active. Watching and publishing are mutually exclusive. Native decoding runs on a separate worker so peer setup does not block the voice loop.
+- Up to five receivers run at once, alongside your own share. Native decoding runs on a separate worker so peer setup does not block the voice loop.
 - The native frame callback queue and application display slot each keep the latest frame. Superseded frames are dropped, not queued for later display.
 - Decoded frames replace one `rune::Pixels` image from the decoder thread. Rune uploads only the newest image on the next drawn frame (same-size frames reuse their atlas slot), so the UI thread never copies pixels and the old picture stays until the new one is on the GPU. The view is woken only when the picture first appears or changes size or rotation. Ending a session releases the image; an old generation cannot publish into a new one.
 - Display conversion is capped at 1280×720 and approximately 30 FPS. The incoming stream may be decoded at a larger resolution/rate; the diagnostics report its actual decoded size/FPS.

@@ -349,6 +349,10 @@ enum Message {
     StopWatching(Option<String>),
     /// Puts one stream on the stage, or shows every watched stream side by side.
     FocusStream(Option<String>),
+    /// The grid for `None`, or a stream on the stage with the others in this strip.
+    StreamLayout(Option<streaming::Strip>),
+    /// Trades two watched streams' places.
+    SwapStreams(String, String),
     /// A publisher's stream volume, in percent.
     StreamVolume(u16, u8),
     ToggleStreamStats,
@@ -1375,6 +1379,18 @@ impl App {
             Message::FocusStream(id) => {
                 self.streaming.focused = id.filter(|id| self.streaming.watching(id).is_some());
             }
+            Message::StreamLayout(None) => self.streaming.focused = None,
+            Message::StreamLayout(Some(strip)) => {
+                self.streaming.strip = strip;
+                if self.streaming.stage().is_none() {
+                    self.streaming.focused = self
+                        .streaming
+                        .watching
+                        .first()
+                        .map(|watch| watch.stream.id.clone());
+                }
+            }
+            Message::SwapStreams(from, to) => self.streaming.swap(&from, &to),
             Message::StreamVolume(publisher, percent) => {
                 self.streaming.set_volume(publisher, percent)
             }
