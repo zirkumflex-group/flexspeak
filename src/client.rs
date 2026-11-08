@@ -24,12 +24,13 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tsclientlib::{
-    ChannelId, ChannelPermissionHint, ClientId, ClientPermissionHint, Codec, Connection,
-    DisconnectOptions, Identity, StreamItem,
+    ChannelGroupId, ChannelId, ChannelPermissionHint, ClientDbId, ClientId, ClientPermissionHint,
+    Codec, Connection, DisconnectOptions, GroupType, Identity, ServerGroupId, StreamItem,
     events::{Event as BookEvent, PropertyId, PropertyValue},
+    messages::c2s,
     prelude::*,
 };
-use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio};
+use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio, OutCommand};
 
 /// How loud to play each person, by identity. Anyone absent plays at full volume.
 pub type UserGains = Arc<Mutex<HashMap<String, f32>>>;
@@ -76,6 +77,28 @@ pub enum Command {
     Poke(u16, String),
     /// Moves these clients into a channel.
     Move(Vec<u16>, u64),
+    /// Kicks or bans these clients, with an optional reason.
+    Moderate(Vec<u16>, Moderation, String),
+    /// Applies one set of group changes to each of these clients.
+    SetGroups(Vec<u16>, GroupEdit),
+    /// Asks for the group lists, for servers that haven't sent them.
+    RequestGroups,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moderation {
+    KickChannel,
+    KickServer,
+    /// For this many seconds, or forever.
+    Ban(Option<u64>),
+}
+
+/// Server groups to add and remove, and the channel group to set in each client's channel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupEdit {
+    pub add: Vec<u64>,
+    pub remove: Vec<u64>,
+    pub channel_group: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -93,7 +116,7 @@ impl JoinAccess {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Member {
     pub id: u16,
     /// Their identity as text; empty until the server has sent it.
@@ -105,6 +128,19 @@ pub struct Member {
     /// Whether the server says you may poke and move this client; `None` when it hasn't said.
     pub can_poke: Option<bool>,
     pub can_move: Option<bool>,
+    pub can_kick_channel: Option<bool>,
+    pub can_kick_server: Option<bool>,
+    pub can_ban: Option<bool>,
+    /// Sorted server group ids.
+    pub server_groups: Vec<u64>,
+    pub channel_group: u64,
+}
+
+/// A server or channel group someone can be put in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    pub id: u64,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -127,6 +163,8 @@ pub struct Snapshot {
     pub channels: Vec<Channel>,
     pub current: Option<Channel>,
     pub can_talk: bool,
+    pub server_groups: Vec<Group>,
+    pub channel_groups: Vec<Group>,
 }
 
 impl Snapshot {
@@ -465,6 +503,9 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
         .map(|client| client.channel);
     let mut members: BTreeMap<u64, Vec<Member>> = BTreeMap::new();
     for client in state.clients.values() {
+        let hint = |flag| client.permission_hints.map(|hints| hints.contains(flag));
+        let mut server_groups: Vec<u64> = client.server_groups.iter().map(|id| id.0).collect();
+        server_groups.sort_unstable();
         members.entry(client.channel.0).or_default().push(Member {
             id: client.id.0,
             uid: client
@@ -477,12 +518,13 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
             sound_muted: client.output_muted
                 || client.output_only_muted
                 || !client.output_hardware_enabled,
-            can_poke: client
-                .permission_hints
-                .map(|hints| hints.contains(ClientPermissionHint::POKE)),
-            can_move: client
-                .permission_hints
-                .map(|hints| hints.contains(ClientPermissionHint::MOVE_CLIENT)),
+            can_poke: hint(ClientPermissionHint::POKE),
+            can_move: hint(ClientPermissionHint::MOVE_CLIENT),
+            can_kick_channel: hint(ClientPermissionHint::KICK_CHANNEL),
+            can_kick_server: hint(ClientPermissionHint::KICK_SERVER),
+            can_ban: hint(ClientPermissionHint::BAN),
+            server_groups,
+            channel_group: client.channel_group.0,
         });
     }
     for clients in members.values_mut() {
@@ -516,7 +558,94 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
         channels,
         current,
         can_talk: connection.can_send_audio(),
+        // Everyone is in the default server group; the server refuses to change that.
+        server_groups: sorted_groups(
+            state
+                .server_groups
+                .values()
+                .filter(|group| {
+                    group.group_type == GroupType::Regular
+                        && group.id != state.server.default_server_group
+                })
+                .map(|group| (group.sort_id, group.id.0, group.name.as_str())),
+        ),
+        channel_groups: sorted_groups(
+            state
+                .channel_groups
+                .values()
+                .filter(|group| group.group_type == GroupType::Regular)
+                .map(|group| (group.sort_id, group.id.0, group.name.as_str())),
+        ),
     })
+}
+
+fn sorted_groups<'a>(groups: impl Iterator<Item = (i32, u64, &'a str)>) -> Vec<Group> {
+    let mut groups: Vec<_> = groups.collect();
+    groups.sort_unstable();
+    groups
+        .into_iter()
+        .map(|(_, id, name)| Group {
+            id,
+            name: name.to_owned(),
+        })
+        .collect()
+}
+
+fn moderation_packet(id: ClientId, action: Moderation, reason: &str) -> OutCommand {
+    let message = (!reason.is_empty()).then(|| reason.into());
+    let kick = |reason| {
+        c2s::OutClientKickMessage::new(&mut std::iter::once(c2s::OutClientKickPart {
+            client_id: id,
+            reason,
+            reason_message: message.clone(),
+        }))
+    };
+    match action {
+        Moderation::KickChannel => kick(Reason::KickChannel),
+        Moderation::KickServer => kick(Reason::KickServer),
+        Moderation::Ban(seconds) => {
+            c2s::OutBanClientMessage::new(&mut std::iter::once(c2s::OutBanClientPart {
+                client_id: id,
+                time: seconds.map(|seconds| time::Duration::seconds(seconds as i64)),
+                ban_reason: message.clone(),
+            }))
+        }
+    }
+}
+
+/// What it takes to bring this client in line with the edit; already-applied changes are skipped.
+fn group_packets(client: &tsclientlib::data::Client, edit: &GroupEdit) -> Vec<OutCommand> {
+    let db = ClientDbId(client.database_id.0);
+    let held = |id: &u64| client.server_groups.contains(&ServerGroupId(*id));
+    let added = edit.add.iter().filter(|id| !held(id)).map(|id| {
+        c2s::OutServerGroupAddClientMessage::new(&mut std::iter::once(
+            c2s::OutServerGroupAddClientPart {
+                server_group_id: ServerGroupId(*id),
+                client_db_id: db,
+            },
+        ))
+    });
+    let removed = edit.remove.iter().filter(|id| held(id)).map(|id| {
+        c2s::OutServerGroupDelClientMessage::new(&mut std::iter::once(
+            c2s::OutServerGroupDelClientPart {
+                server_group_id: ServerGroupId(*id),
+                client_db_id: db,
+            },
+        ))
+    });
+    let channel = edit
+        .channel_group
+        .filter(|id| *id != client.channel_group.0)
+        .map(|id| {
+            c2s::OutSetClientChannelGroupMessage::new(&mut std::iter::once(
+                c2s::OutSetClientChannelGroupPart {
+                    channel_group: ChannelGroupId(id),
+                    channel_id: client.channel,
+                    client_db_id: db,
+                },
+            ))
+        });
+    added.chain(removed).chain(channel).collect()
 }
 
 fn channel_join_access(channel: &tsclientlib::data::Channel) -> JoinAccess {
@@ -840,6 +969,32 @@ async fn run_connection(
                                 match flow.borrow_mut().enqueue(client.client_move(ChannelId(channel)).to_packet(), Operation::Move) {
                                     Ok(ticket) => { requests.insert(ticket, Source::Move); },
                                     Err(error) => { let _ = events.try_send(Event::Warning { source: Source::Move, detail: error.to_string() }); },
+                                }
+                            }
+                        },
+                        Command::Moderate(ids, action, reason) => {
+                            let reason: String = reason.chars().filter(|c| !c.is_control()).take(80).collect();
+                            for id in ids.into_iter().map(ClientId).filter(|id| *id != state.own_client && state.clients.contains_key(id)) {
+                                match flow.borrow_mut().enqueue(moderation_packet(id, action, &reason), Operation::Moderate) {
+                                    Ok(ticket) => { requests.insert(ticket, Source::Moderate); },
+                                    Err(error) => { let _ = events.try_send(Event::Warning { source: Source::Moderate, detail: error.to_string() }); },
+                                }
+                            }
+                        },
+                        Command::SetGroups(ids, edit) => {
+                            for client in ids.into_iter().filter_map(|id| state.clients.get(&ClientId(id))) {
+                                for packet in group_packets(client, &edit) {
+                                    match flow.borrow_mut().enqueue(packet, Operation::Groups) {
+                                        Ok(ticket) => { requests.insert(ticket, Source::Groups); },
+                                        Err(error) => { let _ = events.try_send(Event::Warning { source: Source::Groups, detail: error.to_string() }); },
+                                    }
+                                }
+                            }
+                        },
+                        Command::RequestGroups => {
+                            for packet in [c2s::OutServerGroupListRequestMessage::new(), c2s::OutChannelGroupListRequestMessage::new()] {
+                                if let Err(error) = flow.borrow_mut().enqueue(packet, Operation::Groups) {
+                                    let _ = events.try_send(Event::Warning { source: Source::Groups, detail: error.to_string() });
                                 }
                             }
                         },

@@ -27,6 +27,8 @@ pub enum Operation {
     PublisherInfo,
     Poke,
     Move,
+    Moderate,
+    Groups,
 }
 impl Operation {
     pub fn label(self) -> &'static str {
@@ -46,6 +48,8 @@ impl Operation {
             Self::PublisherInfo => "publisher information",
             Self::Poke => "poke",
             Self::Move => "client move",
+            Self::Moderate => "kick or ban",
+            Self::Groups => "group change",
         }
     }
     pub fn optional(self) -> bool {

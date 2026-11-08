@@ -19,6 +19,8 @@ pub enum Source {
     StreamPublish,
     Poke,
     Move,
+    Moderate,
+    Groups,
     Install,
 }
 
@@ -34,6 +36,8 @@ impl Source {
                 | Self::Flood
                 | Self::Poke
                 | Self::Move
+                | Self::Moderate
+                | Self::Groups
                 | Self::StreamDiscovery
                 | Self::StreamWatch
                 | Self::StreamFrame
@@ -60,6 +64,8 @@ impl Source {
             Self::StreamPublish => "Screen sharing unavailable",
             Self::Poke => "Could not poke",
             Self::Move => "Could not move clients",
+            Self::Moderate => "Could not kick or ban",
+            Self::Groups => "Could not change groups",
             Self::Install => "Could not install Flexspeak",
         }
     }

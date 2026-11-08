@@ -1,14 +1,14 @@
 //! What you can do with the people in the channel tree: pick them (⌘/Ctrl-click adds to the
-//! selection), open their context menu to poke or move them, and drag them onto a channel.
-//! Moving others needs the server's move permission; the menu greys out what the server's
-//! permission hints rule out, and the server has the last word.
+//! selection), open their context menu to poke, move, kick, ban or regroup them, and drag them
+//! onto a channel. The menu greys out poking and moving, and leaves out kicking and banning,
+//! when the server's permission hints rule them out; the server has the last word.
 
 use rune::{Drag, El, Phase, PointerPress, Tx, el, icon, row, text};
 use rune_kit::{Kit, MenuEntry, MenuItem, context_menu};
 
 use super::theme::{Theme, radius, ty};
-use super::{MemberDrag, dispatch, icons};
-use crate::{App, Message, client};
+use super::{GroupsMenu, MemberDrag, dispatch, icons};
+use crate::{App, GroupMark, Message, client};
 
 /// How far the pointer travels before a press on a member becomes a drag.
 const DRAG_START: f32 = 4.0;
@@ -29,7 +29,7 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
         .help(if member.is_self {
             "Right-click for options · drag onto a channel to join it"
         } else {
-            "Click to select · ⌘/Ctrl-click to add · right-click to poke or move"
+            "Click to select · ⌘/Ctrl-click to add · right-click for options"
         });
     row = if selected {
         row.fill(t.accent.alpha(0.16))
@@ -54,6 +54,8 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
             }
             s.ui.member_menu = Some((id, point));
             s.ui.move_menu = false;
+            s.ui.groups_menu = None;
+            s.server_mut().group_edit = None;
         })
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
             let at = super::drag_point(s, d);
@@ -118,9 +120,68 @@ pub fn channel_in_path(path: &str) -> Option<u64> {
 fn close(s: &mut App) {
     s.ui.member_menu = None;
     s.ui.move_menu = false;
+    s.ui.groups_menu = None;
+    s.server_mut().group_edit = None;
 }
 
-/// The member context menu: poke one person, or move everyone picked to a channel.
+/// A group submenu's rows; ticking one applies it straight away and leaves the menu open.
+fn group_entries(rows: Vec<MenuEntry>) -> Vec<MenuEntry> {
+    if rows.is_empty() {
+        return vec![MenuEntry::Label("Waiting for the server…".into())];
+    }
+    rows
+}
+
+/// Tickable rows: any number of server groups for everyone picked.
+fn server_group_rows(s: &App, ids: &[u16]) -> Vec<MenuEntry> {
+    let draft = s.server().group_edit.as_ref();
+    s.server()
+        .state
+        .server_groups
+        .iter()
+        .map(|group| {
+            let id = group.id;
+            let wanted = draft.and_then(|draft| draft.wanted.get(&id).copied());
+            let mark = GroupMark::of(wanted, s.server_group_mark(ids, id));
+            let mut item = MenuItem::new(group.name.clone())
+                .checked(mark == GroupMark::On)
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    dispatch(s, tx, Message::ToggleServerGroup(id));
+                });
+            if mark == GroupMark::Mixed {
+                item = item.badge("Some");
+            }
+            MenuEntry::item(item)
+        })
+        .collect()
+}
+
+/// Rows with one choice: someone has one channel group per channel.
+fn channel_group_rows(s: &App, ids: &[u16]) -> Vec<MenuEntry> {
+    let picked = s
+        .server()
+        .group_edit
+        .as_ref()
+        .and_then(|draft| draft.channel_group)
+        .or_else(|| s.shared_channel_group(ids));
+    s.server()
+        .state
+        .channel_groups
+        .iter()
+        .map(|group| {
+            let id = group.id;
+            MenuEntry::item(
+                MenuItem::new(group.name.clone())
+                    .checked(picked == Some(id))
+                    .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                        dispatch(s, tx, Message::PickChannelGroup(id));
+                    }),
+            )
+        })
+        .collect()
+}
+
+/// The member context menu: poke one person, or move, regroup, kick or ban everyone picked.
 pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     let Some((id, point)) = s.ui.member_menu else {
         return;
@@ -221,13 +282,80 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     })
     .lead(tinted(&icons::MOVE, t.cpu, movable))
     .disabled(!movable)
-    .on_select(|s: &mut App| s.ui.move_menu = !s.ui.move_menu);
+    .on_select(|s: &mut App| {
+        s.ui.move_menu = !s.ui.move_menu;
+        s.ui.groups_menu = None;
+    });
     if movable {
         move_to = move_to.submenu(channels, s.ui.move_menu);
     } else if !s.can_move(&ids) {
         move_to = move_to.description("The server doesn't let you move them");
     }
     menu = menu.item(move_to);
+    menu = menu.separator();
+    for (label, which, rows) in [
+        (
+            "Server groups",
+            GroupsMenu::Server,
+            server_group_rows(s, &ids),
+        ),
+        (
+            "Channel group",
+            GroupsMenu::Channel,
+            channel_group_rows(s, &ids),
+        ),
+    ] {
+        let group_ids = ids.clone();
+        menu = menu.item(
+            MenuItem::new(label)
+                .lead(tinted(&icons::SHIELD, t.accent, true))
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    s.ui.move_menu = false;
+                    s.ui.groups_menu = (s.ui.groups_menu != Some(which)).then_some(which);
+                    dispatch(s, tx, Message::OpenGroups(group_ids.clone()));
+                })
+                .submenu(group_entries(rows), s.ui.groups_menu == Some(which)),
+        );
+    }
+    // Permission hints are per target, so everyone picked has to allow it.
+    let allowed = |hint: fn(&client::Member) -> Option<bool>| {
+        ids.iter().all(|id| {
+            s.find_member(*id)
+                .is_some_and(|member| !member.is_self && hint(member) != Some(false))
+        })
+    };
+    let actions: [(&str, &'static rune::Icon, client::Moderation, bool); 3] = [
+        (
+            "Kick from channel…",
+            &icons::USER_X,
+            client::Moderation::KickChannel,
+            allowed(|member| member.can_kick_channel),
+        ),
+        (
+            "Kick from server…",
+            &icons::DISCONNECT,
+            client::Moderation::KickServer,
+            allowed(|member| member.can_kick_server),
+        ),
+        (
+            "Ban…",
+            &icons::BAN,
+            client::Moderation::Ban(Some(super::modals::DEFAULT_BAN_SECONDS)),
+            allowed(|member| member.can_ban),
+        ),
+    ];
+    for (label, glyph, action, _) in actions.into_iter().filter(|action| action.3) {
+        let ids = ids.clone();
+        menu = menu.item(
+            MenuItem::new(label)
+                .lead(tinted(glyph, t.poor, true))
+                .danger(true)
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    close(s);
+                    dispatch(s, tx, Message::OpenModeration(ids.clone(), action));
+                }),
+        );
+    }
     if ids.len() > 1 {
         menu = menu
             .separator()

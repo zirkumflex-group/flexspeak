@@ -2,13 +2,14 @@
 //! them is inert, Tab stays inside, Escape closes them and Return presses the default button.
 
 use rune::{El, col, el, row, text};
-use rune_kit::{Dialog, Kit};
+use rune_kit::{Dialog, Kit, SegmentedControl};
 
 use super::UserVolumeTarget;
 use super::icons;
 use super::theme::{Theme, size, ty};
 use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider};
-use crate::{App, Message, Poke};
+use crate::client::Moderation;
+use crate::{App, Message, ModerationDraft, Poke};
 
 /// Offers to copy a release that runs from Downloads or a disk image to where apps live.
 fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::install::Offer) {
@@ -316,6 +317,96 @@ fn poke(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, name: &str) {
         .build(k, layer);
 }
 
+/// How long a ban lasts unless you pick something else.
+pub const DEFAULT_BAN_SECONDS: u64 = 86_400;
+
+const BAN_LENGTHS: [(&str, Option<u64>); 5] = [
+    ("1 Hour", Some(3_600)),
+    ("1 Day", Some(DEFAULT_BAN_SECONDS)),
+    ("1 Week", Some(604_800)),
+    ("30 Days", Some(2_592_000)),
+    ("Forever", None),
+];
+
+/// Confirms a kick or ban and takes its reason. Return never sends it: this needs a real click.
+fn moderation(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, draft: &ModerationDraft) {
+    let who = s.people(&draft.ids);
+    let (title, description, confirm) = match draft.action {
+        Moderation::KickChannel => (
+            format!("Kick {who} from the channel"),
+            "They go to the server's default channel.",
+            "Kick",
+        ),
+        Moderation::KickServer => (
+            format!("Kick {who} from the server"),
+            "They're disconnected, and can reconnect right away.",
+            "Kick",
+        ),
+        Moderation::Ban(_) => (
+            format!("Ban {who}"),
+            "They're disconnected, and can't return until the ban ends.",
+            "Ban",
+        ),
+    };
+    let mut body = col().w_full().px(16.0).pb(16.0).gap(12.0).child(field(
+        k,
+        &s.ui.moderation_reason,
+        |s| &mut s.ui.moderation_reason,
+        "Reason (optional)",
+        Some(Message::ModerationReason),
+        None,
+    ));
+    if let Moderation::Ban(seconds) = draft.action {
+        let labels = BAN_LENGTHS.map(|(label, _)| label);
+        let selected = BAN_LENGTHS
+            .iter()
+            .position(|(_, length)| *length == seconds);
+        body = body.child(
+            SegmentedControl::new(&labels, selected)
+                .label("Ban length")
+                .fit()
+                .on_pick(|s: &mut App, index, tx| {
+                    super::dispatch(s, tx, Message::ModerationBan(BAN_LENGTHS[index].1));
+                })
+                .build(k),
+        );
+    }
+    body = body.child(
+        row()
+            .w_full()
+            .gap(size::GAP)
+            .center_y()
+            .child(faint(t, format!("{} / 80", draft.reason.chars().count())).grow(1.0))
+            .child(button(
+                t,
+                "cancel-moderation",
+                "Cancel",
+                None,
+                Variant::Secondary,
+                Some(Message::CancelModeration),
+            ))
+            .child(button(
+                t,
+                "confirm-moderation",
+                confirm,
+                None,
+                Variant::Danger,
+                Some(Message::SubmitModeration),
+            )),
+    );
+    Dialog::new("moderation", title)
+        .description(description)
+        .open(true)
+        .fit()
+        .width(420.0)
+        .on_close(|s: &mut App| {
+            let _ = s.update(Message::CancelModeration);
+            s.sync_fields();
+        })
+        .child(body)
+        .build(k, layer);
+}
+
 /// A poke someone sent you, until you close it; later ones queue behind it.
 fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
     let mut body = col().w_full().px(16.0).pb(16.0).gap(12.0);
@@ -397,6 +488,8 @@ pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         install(s, t, k, layer, offer);
     } else if s.ui.server_picker && s.alerts.current().is_none() {
         server_picker(s, t, k, layer);
+    } else if let Some(draft) = &s.server().moderation {
+        moderation(s, t, k, layer, draft);
     } else if let Some(draft) = &s.server().poke {
         poke(s, t, k, layer, &draft.name);
     } else if let Some(poke) = s.server().pokes.first() {

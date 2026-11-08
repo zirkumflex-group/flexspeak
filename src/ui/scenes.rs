@@ -69,6 +69,12 @@ pub const SCENES: &[Scene] = &[
     ("push-to-talk", push_to_talk_page),
     ("push-to-talk-connected", push_to_talk_connected),
     ("member-menu", member_menu),
+    ("member-menu-restricted", member_menu_restricted),
+    ("member-groups", member_groups),
+    ("member-groups-selection", member_groups_selection),
+    ("member-channel-group", member_channel_group),
+    ("member-kick", member_kick),
+    ("member-ban", member_ban),
     ("servers-menu", servers_menu),
     ("member-volume", member_volume),
     ("member-muted", member_muted),
@@ -319,6 +325,11 @@ fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member
         sound_muted: false,
         can_poke: None,
         can_move: (!is_self).then_some(id != 3),
+        can_kick_channel: (!is_self).then_some(id != 3),
+        can_kick_server: (!is_self).then_some(id != 3),
+        can_ban: (!is_self).then_some(id != 3),
+        server_groups: if id == 4 { vec![8, 9] } else { vec![8] },
+        channel_group: if id == 4 { 5 } else { 7 },
     }
 }
 
@@ -739,6 +750,77 @@ fn push_to_talk_connected(s: &mut App) {
 fn member_menu(s: &mut App) {
     connected(s);
     s.ui.member_menu = Some((2, rune::PointerPress { x: 150.0, y: 200.0 }));
+}
+
+fn member_menu_restricted(s: &mut App) {
+    connected(s);
+    s.ui.member_menu = Some((3, rune::PointerPress { x: 150.0, y: 220.0 }));
+}
+
+fn with_groups(s: &mut App) {
+    let group = |id: u64, name: &str| client::Group {
+        id,
+        name: name.into(),
+    };
+    s.server_mut().state.server_groups = vec![
+        group(6, "Server Admin"),
+        group(7, "Moderator"),
+        group(8, "Member"),
+        group(9, "Streamer"),
+        group(10, "Trusted"),
+    ];
+    s.server_mut().state.channel_groups = vec![
+        group(5, "Channel Admin"),
+        group(6, "Operator"),
+        group(7, "Guest"),
+    ];
+}
+
+fn member_groups(s: &mut App) {
+    connected(s);
+    with_groups(s);
+    s.server_mut().group_edit = Some(crate::GroupEditDraft {
+        ids: vec![2],
+        wanted: [(7, true), (10, true)].into(),
+        channel_group: Some(6),
+    });
+    s.ui.member_menu = Some((2, rune::PointerPress { x: 150.0, y: 200.0 }));
+    s.ui.groups_menu = Some(super::GroupsMenu::Server);
+}
+
+fn member_channel_group(s: &mut App) {
+    member_groups(s);
+    s.ui.groups_menu = Some(super::GroupsMenu::Channel);
+}
+
+fn member_groups_selection(s: &mut App) {
+    connected(s);
+    with_groups(s);
+    s.server_mut().selected_members = [2, 4].into();
+    s.server_mut().group_edit = Some(crate::GroupEditDraft {
+        ids: vec![2, 4],
+        ..Default::default()
+    });
+    s.ui.member_menu = Some((4, rune::PointerPress { x: 150.0, y: 240.0 }));
+    s.ui.groups_menu = Some(super::GroupsMenu::Server);
+}
+
+fn moderation_draft(s: &mut App, action: client::Moderation, reason: &str) {
+    connected(s);
+    s.server_mut().moderation = Some(crate::ModerationDraft {
+        ids: vec![2],
+        action,
+        reason: reason.into(),
+    });
+    s.sync_fields();
+}
+
+fn member_kick(s: &mut App) {
+    moderation_draft(s, client::Moderation::KickServer, "Please read the rules");
+}
+
+fn member_ban(s: &mut App) {
+    moderation_draft(s, client::Moderation::Ban(Some(604_800)), "Repeated spam");
 }
 
 fn member_selection(s: &mut App) {
@@ -1378,6 +1460,33 @@ mod tests {
         click(&mut rt, "rail-menu-item1");
         assert!(rt.state.ui.rail_menu.is_none());
         assert!(rt.state.session(id).is_none_or(|session| session.stopping));
+    }
+
+    /// Ticking groups keeps the menu open, so several can be picked in a row.
+    #[test]
+    fn group_ticks_leave_the_menu_open() {
+        let mut rt = runtime(member_groups, (900.0, 790.0));
+        settle(&mut rt);
+        rt.state
+            .server_mut()
+            .group_edit
+            .as_mut()
+            .unwrap()
+            .wanted
+            .clear();
+        let row = "member-menu-item6-sub-item";
+        click(&mut rt, &format!("{row}0"));
+        settle(&mut rt);
+        click(&mut rt, &format!("{row}3"));
+        settle(&mut rt);
+        assert!(
+            rt.state.ui.member_menu.is_some(),
+            "still open after ticking"
+        );
+        assert_eq!(
+            rt.state.server().group_edit.as_ref().unwrap().wanted,
+            [(6, true), (9, true)].into()
+        );
     }
 
     /// Crossing other rows on the way must not throw off where the drop lands.
