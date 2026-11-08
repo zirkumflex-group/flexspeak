@@ -795,7 +795,10 @@ async fn run_connection(
                             } else if pending_join.is_some_and(|(pending, _, _)| pending == ticket) {
                                 let (_, id, _) = pending_join.take().unwrap();
                                 if let Err(error) = reply.result {
-                                    if error.error == tsclientlib::TsError::ChannelInvalidPassword {
+                                    if error.error == tsclientlib::TsError::ChannelAlreadyIn {
+                                        // Being there is what the join was for.
+                                        let _ = events.try_send(Event::Recovered(Source::Join));
+                                    } else if error.error == tsclientlib::TsError::ChannelInvalidPassword {
                                         let _ = events.try_send(Event::ChannelPasswordRequired(id));
                                     } else if !reply.flooded {
                                         let _ = events.try_send(Event::Warning { source: Source::Join, detail: format!("Could not join channel: {error}") });

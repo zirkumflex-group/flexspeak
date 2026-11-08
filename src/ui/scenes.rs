@@ -17,6 +17,9 @@ type Scene = (&'static str, fn(&mut App));
 pub const SCENES: &[Scene] = &[
     ("setup", setup),
     ("devices", devices),
+    ("setup-ts6-offer", setup_ts6_offer),
+    ("setup-ts6-server", setup_ts6_server),
+    ("setup-ts6-devices", setup_ts6_devices),
     ("permissions-not-asked", permissions_not_asked),
     ("permissions-allowed", permissions_allowed),
     ("permissions-denied", permissions_denied),
@@ -34,6 +37,7 @@ pub const SCENES: &[Scene] = &[
     ("server-edit", server_edit),
     ("home-connecting", home_connecting),
     ("settings-shortcuts", settings_shortcuts),
+    ("settings-shortcuts-recording", settings_shortcuts_recording),
     ("settings-permissions", settings_permissions),
     ("settings-file", settings_file),
     ("settings-search", settings_search),
@@ -119,6 +123,37 @@ fn setup(s: &mut App) {
     s.address = "ts.zirkumflex.io".into();
     s.alerts = Default::default();
     s.sync_fields();
+}
+
+fn setup_ts6_offer(s: &mut App) {
+    setup(s);
+    s.onboarding = Some(onboarding::Step::Username);
+    s.ts6_path = Some("settings.db".into());
+    s.ts6 = None;
+}
+
+fn setup_ts6_server(s: &mut App) {
+    setup_ts6_offer(s);
+    let input = s.devices.inputs.first().map(|device| device.name.clone());
+    let output = s.devices.outputs.first().map(|device| device.name.clone());
+    s.ts6 = Some(crate::ts6_import::Imported {
+        nickname: Some("Jan".into()),
+        servers: vec![
+            "ts.zirkumflex.io".into(),
+            "games.example.org:1234".into(),
+            "friends.example.net".into(),
+        ],
+        input,
+        output,
+        push_to_talk: true,
+        ptt_release_ms: 200,
+    });
+    s.onboarding = Some(onboarding::Step::Server);
+}
+
+fn setup_ts6_devices(s: &mut App) {
+    setup_ts6_server(s);
+    s.onboarding = Some(onboarding::Step::Devices);
 }
 
 fn devices(s: &mut App) {
@@ -340,6 +375,14 @@ fn home_connecting(s: &mut App) {
 fn settings_picker(s: &mut App) {
     settings_audio(s);
     s.ui.open = Some("input-device");
+}
+
+fn settings_shortcuts_recording(s: &mut App) {
+    settings_shortcuts(s);
+    let _ = s.update(crate::Message::RecordShortcut(
+        crate::shortcuts::Binding::Deafen,
+    ));
+    s.sync_fields();
 }
 
 fn settings_shortcuts(s: &mut App) {
@@ -919,6 +962,89 @@ mod tests {
         assert_eq!(s.streaming.sharing.quality, quality);
         assert_eq!(s.streaming.sharing.access, Access::Public);
         assert_eq!(s.streaming.sharing.selected, Some(camera));
+    }
+
+    #[test]
+    fn pressing_change_records_the_next_key_combination() {
+        use crate::shortcuts::Binding;
+        let ctrl_shift = rune::Mods {
+            ctrl: true,
+            shift: true,
+            ..rune::Mods::default()
+        };
+        let mut rt = runtime(settings_shortcuts, (900.0, 790.0));
+        settle(&mut rt);
+        let root = std::env::temp_dir().join(format!("flexspeak-record-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        rt.state.settings_path = Some(path.clone());
+        let before = rt.state.keybind_draft.clone();
+
+        click(&mut rt, "change-Mute");
+        assert!(
+            rt.state.ui.key_capture.focused,
+            "the recorder takes the keys"
+        );
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Text("k".into()),
+            mods: rune::Mods::default(),
+        });
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.keybind_draft, before,
+            "a bare letter would block typing"
+        );
+        assert!(rt.state.key_capture.as_ref().unwrap().error.is_some());
+        assert!(
+            rt.state.ui.key_capture.text.is_empty(),
+            "keys aren't typed in"
+        );
+
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Text("k".into()),
+            mods: ctrl_shift,
+        });
+        settle(&mut rt);
+        assert_eq!(rt.state.keybind_draft.toggle_mute, "Ctrl+Shift+K");
+        assert!(rt.state.key_capture.is_none());
+        let saved = crate::settings::load(&path).unwrap().unwrap();
+        assert_eq!(
+            saved.keybinds.toggle_mute, "Ctrl+Shift+K",
+            "saved right away"
+        );
+
+        // A combination already in use is refused and the recorder keeps listening.
+        click(&mut rt, "change-Deafen");
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Text("k".into()),
+            mods: ctrl_shift,
+        });
+        settle(&mut rt);
+        assert_eq!(rt.state.keybind_draft.toggle_deafen, before.toggle_deafen);
+        assert!(rt.state.key_capture.as_ref().unwrap().error.is_some());
+
+        // Escape stops listening and leaves the shortcut alone, without closing Settings.
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Escape,
+            mods: rune::Mods::default(),
+        });
+        settle(&mut rt);
+        assert!(rt.state.key_capture.is_none());
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Shortcuts));
+        assert_eq!(
+            rt.state.keybind_draft.get(Binding::Deafen),
+            before.toggle_deafen
+        );
+
+        // Only push-to-talk may be emptied.
+        click(&mut rt, "change-PushToTalk");
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Backspace,
+            mods: rune::Mods::default(),
+        });
+        settle(&mut rt);
+        assert!(rt.state.keybind_draft.push_to_talk.is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn settle(rt: &mut Runtime<App>) {
