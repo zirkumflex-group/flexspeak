@@ -56,7 +56,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
         .key("header")
         .h(size::HEADER)
         .w_full()
-        .pl(16.0 + cx.titlebar_inset())
+        .pl(INSET + cx.titlebar_inset())
         .pr(if cfg!(windows) { 150.0 } else { 12.0 })
         .gap(size::GAP)
         .center_y()
@@ -78,7 +78,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
         Tab::Home => ("Flexspeak", t.text),
         Tab::Statistics => ("Usage & Statistics", t.text),
     };
-    bar = bar.child(text(title).font(ty::HEADING).color(ink).truncate().ml(4.0));
+    bar = bar.child(text(title).font(ty::HEADING).color(ink).truncate());
     bar = bar.child(el().grow(1.0));
     let statistics = s.tab == Tab::Statistics;
     bar = bar.child(icon_button(
@@ -367,8 +367,8 @@ fn server_row(
 const ENTRANCE: &[rune::Beat] = &[rune::Beat::new(0.0).opacity(0.0), rune::Beat::new(0.25)];
 
 const RAIL_TILE: f32 = 44.0;
-/// The rail's width.
-pub const RAIL: f32 = 68.0;
+/// The rail's width: the tile with `INSET` either side, as wide as the gap between the cards.
+pub const RAIL: f32 = RAIL_TILE + 2.0 * INSET;
 
 /// Up to two letters that stand for a server: its first two words, or its first two letters.
 pub(super) fn initials(name: &str) -> String {
@@ -464,7 +464,7 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
         );
     }
     let status = row()
-        .gap(5.0)
+        .gap(4.0)
         .center_y()
         .child(rail_status_icon(
             t,
@@ -494,7 +494,7 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
                 s.ui.rail_menu = Some((id, point));
             }
         })
-        .child(col().gap(5.0).center().child(tile).child(status));
+        .child(col().gap(4.0).center().child(tile).child(status));
     if active {
         entry = entry.child(
             el().absolute(0.0, 10.0)
@@ -533,7 +533,7 @@ fn rail_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
 }
 
 fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
-    let mut tiles = col().w_full().pt(4.0).pb(12.0).gap(14.0);
+    let mut tiles = col().w_full().pt(4.0).pb(12.0).gap(12.0);
     for session in s.rail_sessions() {
         tiles = tiles.child(rail_entry(t, session, s.active == Some(session.id)));
     }
@@ -609,7 +609,7 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
     let name = s.server().state.server.clone();
     let server = row()
         .w_full()
-        .gap(10.0)
+        .gap(8.0)
         .center_y()
         .child(
             el().size(28.0, 28.0)
@@ -659,21 +659,22 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
         .key("sidebar")
         .w(size::SIDEBAR)
         .padding(12.0)
-        .gap(10.0)
+        .gap(8.0)
         .child(server)
-        .child(overline(t, "Channels").ml(6.0).mt(4.0))
+        // Closer to its channels (8) than to the server above it (16).
+        .child(overline(t, "Channels").ml(6.0).mt(8.0))
         // The channel list takes the free height, so the voice controls sit at the bottom.
         .child(scroll_page(
             k,
             "channel-scroll",
-            channel_tree(s, t).pr(10.0).pb(8.0),
+            channel_tree(s, t).pr(8.0).pb(8.0),
         ))
         .children(selection_bar(s, t))
         .children(server_log(s, cx, t, k))
         .child(voice_controls(s, t))
 }
 
-const LOG_ROW: f32 = 22.0;
+const LOG_ROW: f32 = 24.0;
 /// The log's list never gets shorter than two events while open.
 const LOG_MIN: f32 = LOG_ROW * 2.0;
 /// Dragged shorter than this, the log folds down to its heading.
@@ -810,7 +811,7 @@ fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
             .key("server-log")
             .w_full()
             .gap(4.0)
-            .child(log_splitter(s, t, max).mb(2.0))
+            .child(log_splitter(s, t, max))
             .on_hover_change(|s: &mut App, hovering, _| s.ui.log_hover = hovering)
             .child(log_bar(s, t, k))
             .children(body)
@@ -953,10 +954,10 @@ fn log_people(s: &App, t: &Theme, k: &Kit) -> El {
     }
     col()
         .key("log-people-menu")
-        // Under the search bar, below the splitter, its 2 pt margin and the log's 4 pt gap.
+        // Under the search bar, below the splitter and the log's 4 pt gap.
         .absolute(
             size::SIDEBAR - 24.0 - WIDTH,
-            SPLITTER + 2.0 + 4.0 + size::CONTROL + 4.0,
+            SPLITTER + 4.0 + size::CONTROL + 4.0,
         )
         .w(WIDTH)
         .padding(4.0)
@@ -1005,7 +1006,7 @@ fn log_section(s: &App, t: &Theme, index: usize) -> El {
             .w_full()
             .h(20.0)
             .pl(21.0)
-            .pr(10.0)
+            .pr(8.0)
             .center_y()
             .fill(t.surface)
             .sticky_top(0.0)
@@ -1067,7 +1068,7 @@ fn log_row(s: &App, t: &Theme, index: usize) -> El {
         .gap(8.0)
         .center_y()
         .pl(6.0)
-        .pr(10.0)
+        .pr(8.0)
         .child(marker)
         .child(
             rich(words, spans)
@@ -1177,8 +1178,8 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     let mut panel = col()
         .key("voice")
         .w_full()
-        .gap(10.0)
-        .padding(10.0)
+        .gap(8.0)
+        .padding(12.0)
         .radius(radius::CARD)
         .fill(t.wash(0.035))
         .border(
@@ -1235,7 +1236,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
 
 /// The voice panel's buttons share its width evenly, a little taller than the rest.
 fn dock_button(button: El) -> El {
-    button.grow(1.0).h(34.0)
+    button.grow(1.0).h(32.0)
 }
 
 /// Opens the share dialog; lit while you share.
@@ -1411,7 +1412,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             let mut members = col()
                 .key("members")
                 .w_full()
-                .gap(1.0)
+                .gap(2.0)
                 .pl(20.0)
                 .transition(Transition::opacity());
             for member in &channel.members {

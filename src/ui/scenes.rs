@@ -116,6 +116,8 @@ fn dark(s: &mut App) {
 fn saved(s: &mut App) {
     dark(s);
     s.onboarding = None;
+    // Previews start from the default log, whatever this machine last left it at.
+    s.log_pane = Default::default();
     let servers = vec![
         settings::Server {
             name: "Zirkumflex".into(),

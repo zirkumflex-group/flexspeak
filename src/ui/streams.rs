@@ -50,8 +50,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                     .key("streams-header")
                     .w_full()
                     .px(size::PAGE)
-                    .pt(18.0)
-                    .pb(14.0)
+                    .pt(20.0)
+                    .pb(16.0)
                     .gap(12.0)
                     .child(channel_title(s, t))
                     .child(tools(s, t, supported, watching)),
@@ -238,14 +238,14 @@ fn no_streams(t: &Theme, supported: bool) -> El {
         )));
     }
     content
-        .child(group_title(t, "In this channel").pt(0.0))
+        .child(group_title(t, "In this channel").pt(0.0).px(0.0))
         .child(
             col()
                 .key("no-streams")
                 .w_full()
-                .pt(36.0)
+                .pt(40.0)
                 .pb(12.0)
-                .gap(6.0)
+                .gap(8.0)
                 .center()
                 .child(
                     el().size(44.0, 44.0)
@@ -253,7 +253,7 @@ fn no_streams(t: &Theme, supported: bool) -> El {
                         .center()
                         .fill(t.wash(0.04))
                         .child(icon(&icons::SCREEN_SHARE, 22.0).color(t.muted))
-                        .mb(6.0)
+                        .mb(4.0)
                         .a11y_hidden(),
                 )
                 .child(

@@ -13,7 +13,7 @@ fn status_pill(s: &App, t: &Theme) -> El {
     let lit = health != usage::Health::Unknown;
     row()
         .key("health-pill")
-        .h(22.0)
+        .h(24.0)
         .px(8.0)
         .gap(6.0)
         .center_y()
@@ -42,7 +42,7 @@ fn reading(
     // each tick into half a second of full-window frames.
     let warning = load_color(t, health);
     row()
-        .gap(6.0)
+        .gap(8.0)
         .center_y()
         .label(format!("{label} {value}"))
         .child(
@@ -53,7 +53,7 @@ fn reading(
         .child(
             text(label.to_owned())
                 .font(ty::CAPTION)
-                .color(t.faint)
+                .color(t.muted)
                 .a11y_hidden(),
         )
         .child(
@@ -89,7 +89,7 @@ fn resources(s: &App) -> Resources {
 fn readings(s: &App, t: &Theme) -> El {
     let r = resources(s);
     row()
-        .gap(20.0)
+        .gap(16.0)
         .center_y()
         .flex_wrap()
         .child(reading(t, &icons::CPU, "CPU", r.cpu.0, r.cpu.1))
@@ -158,7 +158,7 @@ pub fn view(s: &App, t: &Theme) -> El {
     } else if show_connection {
         // One slim line, as a native status bar: each reading with its own sparkline, the strip
         // scrolling sideways when the window is too narrow for all of them.
-        let mut strip = row().gap(14.0).center_y();
+        let mut strip = row().gap(16.0).center_y();
         for (index, item) in charts::inline(
             t,
             "footer",
@@ -175,7 +175,7 @@ pub fn view(s: &App, t: &Theme) -> El {
         }
         row()
             .w_full()
-            .gap(14.0)
+            .gap(16.0)
             .center_y()
             .child(status_pill(s, t))
             .child(
@@ -191,7 +191,7 @@ pub fn view(s: &App, t: &Theme) -> El {
     } else {
         row()
             .w_full()
-            .gap(20.0)
+            .gap(16.0)
             .center_y()
             .child(status_pill(s, t))
             .child(el().grow(1.0))
@@ -202,8 +202,7 @@ pub fn view(s: &App, t: &Theme) -> El {
     el().key("footer")
         .w_full()
         .h(40.0)
-        .pl(12.0)
-        .pr(8.0)
+        .px(8.0)
         .center_y()
         .child(content)
 }

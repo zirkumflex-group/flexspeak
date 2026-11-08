@@ -73,7 +73,7 @@ pub struct LogPane {
 impl Default for LogPane {
     fn default() -> Self {
         Self {
-            height: 132,
+            height: 144,
             collapsed: false,
         }
     }
