@@ -273,6 +273,12 @@ struct ServerSession {
     /// Clients heard right now, including yourself while you transmit.
     talking: BTreeSet<u16>,
     client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
+    /// Each sampled peer's health as their globe shows it.
+    client_health: BTreeMap<u16, usage::SteadyHealth>,
+    /// Your own health as the footer shows it.
+    connection_health: usage::SteadyHealth,
+    /// The server is refusing commands as flooding; Flexspeak resends what it must later.
+    limited: bool,
     connection_history: ConnectionHistory,
     client_history: ConnectionHistory,
     network_usage: usage::NetworkUsage,
@@ -330,6 +336,9 @@ impl ServerSession {
             expanded_client: None,
             talking: BTreeSet::new(),
             client_usage: BTreeMap::new(),
+            client_health: BTreeMap::new(),
+            connection_health: usage::SteadyHealth::default(),
+            limited: false,
             connection_history: ConnectionHistory::new(),
             client_history: ConnectionHistory::new(),
             network_usage: usage::NetworkUsage::default(),
@@ -3089,6 +3098,9 @@ impl App {
                 session.streaming.reset();
                 session.clear_client_details();
                 session.client_usage.clear();
+                session.client_health.clear();
+                session.connection_health = usage::SteadyHealth::default();
+                session.limited = false;
                 session.talking.clear();
                 session.connection_history = ConnectionHistory::new();
                 session.password_channel = None;
@@ -3147,13 +3159,16 @@ impl App {
                 if channel_changed {
                     session.catalog_seen = false;
                     session.client_usage.clear();
+                    session.client_health.clear();
                 } else {
-                    session.client_usage.retain(|id, _| {
+                    let sampled = |id: &u16| {
                         state
                             .current_members()
                             .iter()
                             .any(|member| member.id == *id && !member.is_self)
-                    });
+                    };
+                    session.client_usage.retain(|id, _| sampled(id));
+                    session.client_health.retain(|id, _| sampled(id));
                 }
                 if session.expanded_client.is_some_and(|id| {
                     channel_changed || !state.current_members().iter().any(|member| member.id == id)
@@ -3299,10 +3314,16 @@ impl App {
                 }
                 self.raise_for(id, source, detail)
             }
-            client::Event::Recovered(source) => match source.server_scoped() {
-                true => self.alerts.recover_in(id.0, source),
-                false => self.alerts.recover(source),
-            },
+            client::Event::Limited => session.limited = true,
+            client::Event::Recovered(source) => {
+                if source == Source::Flood {
+                    session.limited = false;
+                }
+                match source.server_scoped() {
+                    true => self.alerts.recover_in(id.0, source),
+                    false => self.alerts.recover(source),
+                }
+            }
             client::Event::Controls { confirmed, pending } => {
                 session.server_controls = confirmed;
                 session.controls_pending = pending;
@@ -3324,6 +3345,9 @@ impl App {
             } => {
                 session.network_usage = network;
                 session.connection_usage = connection;
+                session
+                    .connection_health
+                    .update(connection.health(), Instant::now());
                 if session.connected && !loopback {
                     session.connection_history.push(Instant::now(), connection);
                 }
@@ -3341,6 +3365,19 @@ impl App {
                     {
                         let now = Instant::now();
                         session.client_history.push(now, sample.sample(now));
+                    }
+                    match &result {
+                        Ok(sample) => {
+                            let now = Instant::now();
+                            session
+                                .client_health
+                                .entry(client)
+                                .or_default()
+                                .update(sample.sample(now).health(), now);
+                        }
+                        Err(_) => {
+                            session.client_health.remove(&client);
+                        }
                     }
                     session.client_usage.insert(client, result);
                 }
@@ -3395,7 +3432,10 @@ impl App {
     }
     fn footer_connection_status(&self) -> (usage::Health, &'static str, String) {
         if self.live() && self.server().state.current.is_some() {
-            let health = self.server().connection_usage.health();
+            let health = self
+                .server()
+                .connection_health
+                .show(self.server().connection_usage.health());
             let label = if health == usage::Health::Unknown {
                 "Unknown"
             } else {
@@ -3575,7 +3615,13 @@ impl App {
             (usage::Health::Unknown, (*error).into())
         } else {
             let quality = self.client_quality(member.id, Instant::now());
-            (quality.health(), quality.health_tooltip())
+            let reading = quality.health();
+            let health = self
+                .server()
+                .client_health
+                .get(&member.id)
+                .map_or(reading, |steady| steady.show(reading));
+            (health, quality.health_tooltip())
         }
     }
     fn client_quality(&self, id: u16, now: Instant) -> usage::ConnectionUsage {
@@ -5071,6 +5117,20 @@ mod tests {
         let _ = app.update(Message::ShowTab(Tab::Home));
         assert!(!app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(!app.channel_health_visible.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn background_flooding_shows_in_the_footer_without_a_dialog() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let (id, _commands) = connection(&mut app);
+        let _ = app.update(Message::Backend(id, client::Event::Limited));
+        assert!(app.server().limited);
+        assert!(app.alerts.current().is_none());
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Recovered(Source::Flood),
+        ));
+        assert!(!app.server().limited);
     }
 
     #[test]

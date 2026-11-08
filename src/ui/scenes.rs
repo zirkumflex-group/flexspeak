@@ -37,6 +37,9 @@ pub const SCENES: &[Scene] = &[
     ("home", home),
     ("connected", connected),
     ("connected-quiet", connected_quiet),
+    ("connected-deafened", connected_deafened),
+    ("member-states", member_states),
+    ("limited", limited),
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
@@ -479,6 +482,52 @@ fn connected_quiet(s: &mut App) {
     });
     s.level = 0.0;
     s.transmitting = false;
+}
+
+/// The server is refusing requests for a while: the footer says so, with no dialog.
+fn limited(s: &mut App) {
+    connected(s);
+    s.server_mut().limited = true;
+}
+
+/// Every member row state: you quiet, Mara speaking, Theo muted on a poor connection, Ines
+/// with her sound off.
+fn member_states(s: &mut App) {
+    connected(s);
+    let now = Instant::now();
+    s.server_mut().client_usage.insert(
+        3,
+        Ok(usage::ServerUsage::preview(
+            usage::ConnectionUsage {
+                ping_ms: Some(240.0),
+                ping_deviation_ms: Some(12.0),
+                packet_loss_in: Some(6.0),
+                packet_loss_out: Some(0.0),
+                ..Default::default()
+            },
+            now,
+        )),
+    );
+    for channel in &mut s.server_mut().state.channels {
+        for member in &mut channel.members {
+            if member.id == 4 {
+                member.mic_muted = true;
+                member.sound_muted = true;
+            }
+        }
+    }
+}
+
+/// Deafened with the microphone left unmuted: the mute button shows the mic as on, since
+/// that is what undeafening brings back. The CPU reads in whole percent.
+fn connected_deafened(s: &mut App) {
+    connected_quiet(s);
+    s.server_mut().muted = false;
+    s.server_mut().server_controls = Some(crate::command_flow::AudioState {
+        muted: false,
+        deafened: true,
+    });
+    s.process_usage.cpu_percent = Some(23.415);
 }
 
 /// The hidden footer under load: CPU red, footprint amber.

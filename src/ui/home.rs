@@ -11,8 +11,8 @@ use rune_kit::{Kit, MenuItem, TextInput, context_menu};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Variant, body, button, card, divider, faint, heading, health_dot, icon_button, labelled, meter,
-    muted, overline, pulse, scroll_page, speaking_dot,
+    Variant, body, button, card, divider, faint, heading, icon_button, labelled, meter, muted,
+    overline, pulse, scroll_page,
 };
 use super::{RailPeek, dispatch, footer, icons, members, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
@@ -1230,18 +1230,27 @@ fn selection_bar(s: &App, t: &Theme) -> Option<El> {
 
 fn voice_controls(s: &App, t: &Theme) -> El {
     let enabled = s.server().connected && !s.loopback && !s.server().stopping;
+    // Deafening keeps the microphone off, but the mute button still shows and changes your own
+    // mute, which is what you get back once you undeafen.
+    let deafened_open = s.server().deafened && !s.server().muted && s.server().state.can_talk;
     let mut controls = row().w_full().gap(size::GAP);
     for (key, glyph, label, message, active, on) in [
         (
             "mute",
-            s.microphone_icon().glyph(),
+            if deafened_open {
+                crate::Icon::Mic.glyph()
+            } else {
+                s.microphone_icon().glyph()
+            },
             if s.server().muted {
                 "Unmute microphone"
+            } else if deafened_open {
+                "Mute microphone · it stays off while you're deafened"
             } else {
                 "Mute microphone"
             },
             Message::Mute,
-            s.server().muted || s.server().deafened,
+            s.server().muted,
             enabled,
         ),
         (
@@ -1306,41 +1315,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     }
     panel = panel
         .child(controls)
-        .child(meter(t, "mic-level", speaking, t.good))
-        .child(faint(
-            t,
-            format!(
-                "Mic: {} · {}",
-                s.microphone_status(),
-                if s.server().deafened {
-                    "Deafened"
-                } else {
-                    "Sound on"
-                }
-            ),
-        ));
-    if s.server().controls_pending
-        || s.server().server_controls.is_none_or(|state| {
-            state.muted != s.server().muted || state.deafened != s.server().deafened
-        })
-    {
-        panel = panel.child(
-            row()
-                .key("pending")
-                .gap(6.0)
-                .center_y()
-                .transition(Transition::opacity())
-                .child(pulse(t.fair))
-                .child(faint(
-                    t,
-                    if s.server().controls_pending {
-                        "Server audio update pending"
-                    } else {
-                        "Server audio state unconfirmed"
-                    },
-                )),
-        );
-    }
+        .child(meter(t, "mic-level", speaking, t.good));
     panel
 }
 
@@ -1383,10 +1358,16 @@ fn share_button(s: &App, t: &Theme) -> El {
 fn channel_tree(s: &App, t: &Theme) -> El {
     let mut tree = col().key("channels").w_full().gap(2.0);
     let mut hidden_below = None;
-    for channel in &s.server().state.channels {
+    let channels = &s.server().state.channels;
+    for (index, channel) in channels.iter().enumerate() {
         if hidden_below.is_some_and(|depth| channel.depth > depth) {
             continue;
         }
+        // Only a channel with people or subchannels under it has anything to fold away.
+        let foldable = !channel.members.is_empty()
+            || channels
+                .get(index + 1)
+                .is_some_and(|next| next.depth > channel.depth);
         hidden_below = None;
         let collapsed = s.server().collapsed_channels.contains(&channel.id);
         if collapsed {
@@ -1421,7 +1402,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             format!("channel-{}", channel.id),
             (
                 channel,
-                collapsed,
+                (collapsed, foldable),
                 current,
                 member_versions,
                 t,
@@ -1516,33 +1497,37 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         .press(t.wash(0.09))
                         .on_press_tx(send(Message::Join(channel.id)));
                 }
-                let disclosure = el()
-                    .key("disclosure")
-                    .role("button")
-                    .label(if collapsed {
-                        "Expand channel"
-                    } else {
-                        "Collapse channel"
-                    })
-                    .expanded(!collapsed)
-                    .size(18.0, size::ROW)
-                    .center()
-                    .radius(6.0)
-                    .focusable(true)
-                    .cursor(rune::Cursor::Pointer)
-                    .hover(t.wash(0.06))
-                    .on_press_tx(send(Message::ToggleChannel(channel.id)))
-                    .child(
-                        icon(&icons::CHEVRON_RIGHT, 12.0)
-                            .color(t.faint)
-                            .rotate(if collapsed {
-                                0.0
-                            } else {
-                                std::f32::consts::FRAC_PI_2
-                            })
-                            .motion(motion::QUICK)
-                            .a11y_hidden(),
-                    );
+                // An empty channel keeps the arrow's space, so names stay lined up.
+                let disclosure = if !foldable {
+                    el().key("disclosure").size(18.0, size::ROW).a11y_hidden()
+                } else {
+                    el().key("disclosure")
+                        .role("button")
+                        .label(if collapsed {
+                            "Expand channel"
+                        } else {
+                            "Collapse channel"
+                        })
+                        .expanded(!collapsed)
+                        .size(18.0, size::ROW)
+                        .center()
+                        .radius(6.0)
+                        .focusable(true)
+                        .cursor(rune::Cursor::Pointer)
+                        .hover(t.wash(0.06))
+                        .on_press_tx(send(Message::ToggleChannel(channel.id)))
+                        .child(
+                            icon(&icons::CHEVRON_RIGHT, 12.0)
+                                .color(t.faint)
+                                .rotate(if collapsed {
+                                    0.0
+                                } else {
+                                    std::f32::consts::FRAC_PI_2
+                                })
+                                .motion(motion::QUICK)
+                                .a11y_hidden(),
+                        )
+                };
                 let mut node = col()
                     .key(format!("channel-{}", channel.id))
                     .w_full()
@@ -1585,12 +1570,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
     let mic_muted =
         member.mic_muted || (member.is_self && s.microphone_icon() == crate::Icon::MicOff);
     let sound_muted = member.sound_muted || (member.is_self && s.server().deafened);
-    let (health, detail) = s.member_health(member, current);
-    let label = if health == usage::Health::Unknown {
-        "Unknown"
-    } else {
-        health.label()
-    };
+    let talking = s.server().talking.contains(&member.id);
     let mut entry = row()
         .key(format!("member-{}", member.id))
         .w_full()
@@ -1600,8 +1580,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .center_y()
         .radius(radius::ROW)
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
-        .child(health_dot(t, health, format!("{label}\n{detail}")))
-        .child(speaking_dot(t, s.server().talking.contains(&member.id)))
+        .child(voice_icon(t, talking, mic_muted, sound_muted))
         .child(
             text(if member.is_self {
                 format!("{} (you)", member.name)
@@ -1609,11 +1588,24 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
                 member.name.clone()
             })
             .font(ty::BODY)
-            .color(t.text)
+            .color(if talking { t.good } else { t.text })
+            .motion(motion::QUICK)
             .truncate_fade()
             .grow(1.0)
             .min_w(0.0),
         );
+    // Connection health only earns a place on the row when something is wrong; your own is
+    // also in the footer.
+    let (health, detail) = s.member_health(member, current);
+    let signal = match health {
+        usage::Health::Fair => Some((2, t.fair)),
+        usage::Health::Poor => Some((1, t.poor)),
+        _ => None,
+    };
+    if let Some((lit, colour)) = signal {
+        let help = format!("{} connection\n{detail}", health.label());
+        entry = entry.child(signal_bars(t, lit, colour).help(help.clone()).label(help));
+    }
     if s.is_streaming(member) {
         entry = entry.child(
             el().help("Sharing a stream")
@@ -1628,17 +1620,52 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
                 .child(icon(&icons::VOLUME_OFF, 13.0).color(t.poor)),
         );
     }
-    for (muted, glyph, help) in [
-        (mic_muted, &icons::MIC_OFF, "Microphone muted"),
-        (sound_muted, &icons::HEADPHONE_OFF, "Sound muted"),
-    ] {
-        if muted {
-            entry = entry.child(
-                el().help(help)
-                    .child(icon(glyph, 13.0).color(t.faint))
-                    .label(help),
-            );
-        }
-    }
     entry
+}
+
+/// Three rising bars, the first `lit` of them in `colour`: a weak signal reads as one.
+fn signal_bars(t: &Theme, lit: usize, colour: rune::Color) -> El {
+    let mut bars = row().key("signal").h(12.0).gap(2.0).items_end().px(2.0);
+    for (index, height) in [5.0, 8.5, 12.0].into_iter().enumerate() {
+        bars = bars.child(el().w(3.0).h(height).radius(1.0).fill(if index < lit {
+            colour
+        } else {
+            t.faint.alpha(0.35)
+        }));
+    }
+    bars
+}
+
+/// What you'll hear from someone, in one place: a grey mic while quiet, green and lit while
+/// they talk, red mic-off when muted, red headphones-off when their sound is off too.
+fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> El {
+    let (glyph, colour, help) = if sound_muted {
+        (&icons::HEADPHONE_OFF, t.poor, "Sound muted")
+    } else if mic_muted {
+        (&icons::MIC_OFF, t.poor, "Microphone muted")
+    } else if talking {
+        (&icons::MIC, t.good, "Speaking")
+    } else {
+        (&icons::MIC, t.faint, "Microphone on")
+    };
+    let lit = talking && !mic_muted && !sound_muted;
+    el().key("voice")
+        .size(20.0, 20.0)
+        .radius(10.0)
+        .center()
+        .fill(if lit {
+            t.good.alpha(0.16)
+        } else {
+            t.good.alpha(0.0)
+        })
+        .shadow(0.0, 8.0, t.good.alpha(if lit { 0.45 } else { 0.0 }))
+        .motion(motion::QUICK)
+        .help(help)
+        .label(help)
+        .child(
+            icon(glyph, 13.0)
+                .color(colour)
+                .motion(motion::QUICK)
+                .a11y_hidden(),
+        )
 }
