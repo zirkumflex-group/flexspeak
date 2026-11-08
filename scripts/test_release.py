@@ -8,6 +8,38 @@ from unittest.mock import patch
 import release
 
 
+class ChangelogTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "CHANGELOG.md"
+        self.path.write_text("<!-- note -->\n\n# v0.1.0-build.24 · 2026-11-08\n\n## New\n\n- Old\n")
+
+    def changelog(self, number, tags=()):
+        commits = {"HEAD": "Latest thing\n\nFixed: Head fix\n", "v0.1.0-build.25": "A subject (#30)\n"}
+
+        def git(*args):
+            if args[0] == "tag":
+                return "\n".join(tags) + "\n"
+            return "2026-11-09\n" if "--format=%cs" in args else commits[args[-1]]
+
+        with patch.object(release, "git_output", git):
+            release.changelog("0.1.0", number, self.path)
+        return self.path.read_text()
+
+    def test_this_build_and_a_missed_one_go_on_top_newest_first(self):
+        text = self.changelog(26, ["v0.1.0-build.24", "v0.1.0-build.25"])
+        self.assertLess(text.index("build.26 · 2026-11-09"), text.index("build.25 · 2026-11-09"))
+        self.assertLess(text.index("build.25 · 2026-11-09"), text.index("build.24 · 2026-11-08"))
+        self.assertIn("## Fixed\n\n- Head fix\n", text)
+        self.assertIn("## Changed\n\n- A subject\n", text)
+        self.assertTrue(text.startswith("<!-- note -->"))
+
+    def test_a_build_already_in_the_file_is_left_alone(self):
+        before = self.path.read_text()
+        self.assertEqual(self.changelog(24, ["v0.1.0-build.24"]), before)
+
+
 class HomebrewReleaseTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

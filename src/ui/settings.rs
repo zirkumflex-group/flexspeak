@@ -197,6 +197,15 @@ fn sections(
             )
             .note(updates::note(t)),
             install_section(s, t),
+            Section::boxed(
+                "changelog",
+                "What's New",
+                "changelog changes release notes history version build earlier",
+                updates::changelog(s, t)
+                    .into_iter()
+                    .map(|row| item("", row))
+                    .collect(),
+            ),
         ],
         SettingsPage::File => vec![file_section(s, t), setup_section(s, t)],
     }

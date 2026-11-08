@@ -32,10 +32,10 @@ def sha256(path):
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
-def notes(commit, output):
+def release_notes(message):
     """Release notes from a commit message: its `New:`, `Fixed:` and `Changed:` lines, or the
-    subject under Changed when it has none. The in-app update notice reads these sections."""
-    lines = commit.read_text().splitlines()
+    subject under Changed when it has none. The app reads these sections."""
+    lines = message.splitlines()
     sections = {"New": [], "Fixed": [], "Changed": []}
     for line in lines[1:]:
         match = re.fullmatch(r"\s*(?:[-*]\s*)?(New|Fixed|Changed):\s+(.+?)\s*", line, re.I)
@@ -43,7 +43,7 @@ def notes(commit, output):
             sections[match[1].capitalize()].append(match[2])
     if not any(sections.values()):
         sections["Changed"].append(re.sub(r"\s*\(#\d+\)$", "", lines[0]).strip())
-    output.write_text(
+    return (
         "\n\n".join(
             f"## {name}\n\n" + "\n".join(f"- {item}" for item in items)
             for name, items in sections.items()
@@ -51,6 +51,36 @@ def notes(commit, output):
         )
         + "\n"
     )
+
+
+def notes(commit, output):
+    output.write_text(release_notes(commit.read_text()))
+
+
+def git_output(*args):
+    return run("git", *args, capture_output=True, text=True, encoding="utf-8").stdout
+
+
+def changelog(version, number, path=None):
+    """Adds this build and any released build CHANGELOG.md doesn't have yet, newest first, so
+    the app embeds its own notes. Rewrites the checkout's copy; nothing commits it."""
+    path = path or ROOT / "CHANGELOG.md"
+    text = path.read_bytes().decode("utf-8")
+    newest = max(map(int, re.findall(r"^# v\S+-build\.(\d+) · ", text, re.M)), default=0)
+    missing = [("HEAD", f"v{version}-build.{number}", number)] if number > newest else []
+    for tag in git_output("tag", "--list", "v*-build.*").split():
+        built = int(tag.rsplit(".", 1)[1])
+        if newest < built < number:
+            missing.append((tag, tag, built))
+    if not missing:
+        return
+    entries = []
+    for ref, tag, _ in sorted(missing, key=lambda entry: entry[2], reverse=True):
+        date = git_output("log", "-1", "--format=%cs", ref).strip()
+        entries.append(f"# {tag} · {date}\n\n{release_notes(git_output('log', '-1', '--format=%B', ref))}\n")
+    match = re.search(r"^# v\S+-build\.", text, re.M)
+    at = match.start() if match else len(text)
+    path.write_bytes((text[:at] + "".join(entries) + text[at:]).encode("utf-8"))
 
 
 def download(url, destination, attempts=5):
@@ -178,6 +208,8 @@ def build():
     env = os.environ.copy()
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     number = int(env.get("GITHUB_RUN_NUMBER", "1"))
+    if "GITHUB_RUN_NUMBER" in env:
+        changelog(version, number)
     env.update(MACOSX_DEPLOYMENT_TARGET="14.2", NATIVE_VOICE_APP_VERSION=version,
                NATIVE_VOICE_BUILD_NUMBER=str(number),
                CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=+crt-static")

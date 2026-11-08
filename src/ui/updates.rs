@@ -5,9 +5,10 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use rune::{Color, El, LineCap, Shape, canvas, col, el, icon, row, text};
 use rune_kit::{Kit, Switch};
 
-use super::theme::{Theme, radius, shadow, size, ty};
+use super::theme::{Theme, motion, radius, shadow, size, ty};
 use super::widgets::{Variant, button, faint, form_row, group, icon_button, pulse};
 use super::{dispatch, icons};
+use crate::changelog::{self, Entry};
 use crate::updater::{Event, Notes, Phase, Progress, Retry};
 use crate::usage::format_bytes;
 use crate::{App, Message};
@@ -96,8 +97,8 @@ fn shorten(detail: &str) -> String {
 /// How many entries each section shows before summing up the rest.
 const NOTES_SHOWN: usize = 5;
 
-/// What the update brings, under New, Fixed and Changed.
-fn whats_new(t: &Theme, notes: &Notes) -> El {
+/// What a release brings, under New, Fixed and Changed, with at most `shown` entries in each.
+fn whats_new(t: &Theme, notes: &Notes, shown: usize) -> El {
     let sections = [
         ("New", t.accent, &notes.new),
         ("Fixed", t.good, &notes.fixed),
@@ -113,7 +114,7 @@ fn whats_new(t: &Theme, notes: &Notes) -> El {
             .w_full()
             .gap(3.0)
             .child(text(name).font(ty::SMALL).color(tint));
-        for item in items.iter().take(NOTES_SHOWN) {
+        for item in items.iter().take(shown) {
             section = section.child(
                 text(format!("• {item}"))
                     .font(ty::SMALL)
@@ -122,8 +123,8 @@ fn whats_new(t: &Theme, notes: &Notes) -> El {
                     .w_full(),
             );
         }
-        if items.len() > NOTES_SHOWN {
-            section = section.child(faint(t, format!("and {} more", items.len() - NOTES_SHOWN)));
+        if items.len() > shown {
+            section = section.child(faint(t, format!("and {} more", items.len() - shown)));
         }
         list = list.child(section);
     }
@@ -297,7 +298,9 @@ pub fn notice(s: &App, t: &Theme) -> Option<El> {
             .pin(None, Some(size::HEADER + 10.0), Some(16.0), None)
             .on_hover_change(|s: &mut App, hovering, _| s.ui.update_hover = hovering)
             .child(top)
-            .children((has_notes && s.ui.update_hover).then(|| whats_new(t, &release.notes)))
+            .children(
+                (has_notes && s.ui.update_hover).then(|| whats_new(t, &release.notes, NOTES_SHOWN)),
+            )
             .child(footer)
             .transition(rune::Transition::opacity()),
     )
@@ -406,6 +409,80 @@ pub fn settings(s: &App, t: &Theme, k: &Kit) -> El {
             .key("auto-download"),
         ],
     )
+}
+
+/// One release in the changelog: its build, its date and everything it changed.
+fn release(t: &Theme, entry: &Entry) -> El {
+    col()
+        .key(format!("build-{}", entry.build.number))
+        .w_full()
+        .padding(size::CARD_PAD)
+        .gap(10.0)
+        .child(
+            row()
+                .w_full()
+                .gap(size::GAP)
+                .center_y()
+                .child(
+                    text(entry.build.label())
+                        .font(ty::BODY_STRONG)
+                        .color(t.text)
+                        .grow(1.0),
+                )
+                .child(faint(t, entry.date)),
+        )
+        .child(whats_new(t, &entry.notes, usize::MAX))
+}
+
+/// The row that shows or hides every release before the latest.
+fn earlier_toggle(t: &Theme, count: usize, open: bool) -> El {
+    row()
+        .key("changelog-earlier")
+        .role("button")
+        .label("Earlier versions")
+        .expanded(open)
+        .w_full()
+        .h(size::CONTROL + 12.0)
+        .px(size::CARD_PAD)
+        .gap(10.0)
+        .center_y()
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .hover(t.wash(0.05))
+        .press(t.wash(0.09))
+        .focus_ring(2.0, 0.0, t.accent.alpha(0.7))
+        .motion(motion::QUICK)
+        .on_press_tx(|s: &mut App, _| s.ui.changelog_open = !s.ui.changelog_open)
+        .child(
+            text("Earlier versions")
+                .font(ty::BODY)
+                .color(t.text)
+                .grow(1.0)
+                .a11y_hidden(),
+        )
+        .child(faint(t, count.to_string()).a11y_hidden())
+        .child(
+            icon(&icons::CHEVRON_RIGHT, 14.0)
+                .color(t.faint)
+                .rotate(if open { FRAC_PI_2 } else { 0.0 })
+                .motion(motion::QUICK)
+                .a11y_hidden(),
+        )
+}
+
+/// The latest release, then a row that opens the rest back to the first build.
+pub fn changelog(s: &App, t: &Theme) -> Vec<El> {
+    let Some((latest, earlier)) = changelog::entries().split_first() else {
+        return Vec::new();
+    };
+    let mut rows = vec![release(t, latest)];
+    if !earlier.is_empty() {
+        rows.push(earlier_toggle(t, earlier.len(), s.ui.changelog_open));
+    }
+    if s.ui.changelog_open {
+        rows.extend(earlier.iter().map(|entry| release(t, entry)));
+    }
+    rows
 }
 
 /// A footnote for the group.

@@ -101,6 +101,7 @@ pub const SCENES: &[Scene] = &[
     ("update-download-failed", update_download_failed),
     ("update-install-failed", update_install_failed),
     ("update-settings", update_settings),
+    ("update-settings-changelog", update_settings_changelog),
     ("update-settings-downloading", update_settings_downloading),
     ("update-check-failed", update_check_failed),
 ];
@@ -1097,16 +1098,16 @@ const RUNNING: Build = Build {
     major: 0,
     minor: 1,
     patch: 0,
-    number: 6,
+    number: 25,
 };
 
-/// A release build that has found build 7. Nothing is fetched; the scene only sets state.
+/// A release build that has found build 26. Nothing is fetched; the scene only sets state.
 fn with_update(s: &mut App, phase: Phase) {
     let mut u = updater::Updater::new(Some(RUNNING), Ok(updater::Package::MacApp), true);
     u.release = Some(updater::Release {
         tag: "v0.1.0-build.7".into(),
         build: Build {
-            number: 7,
+            number: 26,
             ..RUNNING
         },
         asset: updater::Asset {
@@ -1196,6 +1197,12 @@ fn update_settings(s: &mut App) {
     settings_at(s, SettingsPage::Updates);
     with_update(s, Phase::Ready);
     s.updater.dismissed = true;
+}
+
+/// The same page with every earlier release listed.
+fn update_settings_changelog(s: &mut App) {
+    update_settings(s);
+    s.ui.changelog_open = true;
 }
 
 fn update_settings_downloading(s: &mut App) {
@@ -1440,6 +1447,24 @@ mod tests {
         assert!(rt.find("extra-catppuccin-mocha").is_some());
         assert!(rt.find("extra-tokyo-night-night").is_none());
         assert!(rt.find("open-settings-folder").is_some());
+    }
+
+    #[test]
+    fn the_changelog_shows_the_latest_build_and_opens_to_all_earlier_ones() {
+        let entries = crate::changelog::entries();
+        let latest = format!("build-{}", entries[0].build.number);
+        let oldest = format!("build-{}", entries[entries.len() - 1].build.number);
+        let mut rt = runtime(update_settings, (1000.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find(&latest).is_some());
+        assert!(rt.find(&oldest).is_none());
+        click(&mut rt, "changelog-earlier");
+        settle(&mut rt);
+        assert!(rt.find(&latest).is_some());
+        assert!(rt.find(&oldest).is_some());
+        click(&mut rt, "changelog-earlier");
+        settle(&mut rt);
+        assert!(rt.find(&oldest).is_none());
     }
 
     #[test]
