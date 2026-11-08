@@ -63,6 +63,8 @@ jobs:
       - name: Build and package
         env:
           FLEXSPEAK_OPUS_DIR: ${{ runner.temp }}/opus
+          # The runner's default Xcode can't compile the Liquid Glass icon.
+          FLEXSPEAK_ICON_XCODE: /Applications/Xcode_26.3.app
         run: python scripts/release.py build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
