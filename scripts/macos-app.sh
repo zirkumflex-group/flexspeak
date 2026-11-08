@@ -22,12 +22,11 @@ mv -f "$app/Contents/MacOS/flexspeak.new" "$app/Contents/MacOS/flexspeak"
 # Always ship the Finder/Dock fallback (16–1024 px, rendered from the Icon Composer icon).
 # CI's actool can exit 0 without writing anything, which shipped build 16 with no icon.
 cp assets/icon/Flexspeak.icns "$app/Contents/Resources/Flexspeak.icns"
-# Icon Composer adds Liquid Glass on macOS 26 and newer. It needs Xcode 26 or later, and CI's
-# default is older, so FLEXSPEAK_ICON_XCODE names one for this step alone. Compiling elsewhere
-# keeps actool's own Flexspeak.icns, which stops at 256 px, from replacing the fallback above.
+# Icon Composer adds Liquid Glass on macOS 26 and newer, and needs Xcode 26 on macOS 26 to build.
+# Compiling elsewhere keeps actool's own Flexspeak.icns, which stops at 256 px, from replacing
+# the fallback above.
 icon_build="$(mktemp -d)"
-if DEVELOPER_DIR="${FLEXSPEAK_ICON_XCODE:-$(xcode-select -p)}" \
-    xcrun actool assets/icon/Flexspeak.icon --compile "$icon_build" \
+if xcrun actool assets/icon/Flexspeak.icon --compile "$icon_build" \
     --output-format human-readable-text --errors --app-icon Flexspeak --include-all-app-icons \
     --output-partial-info-plist "$icon_build/info.plist" \
     --enable-on-demand-resources NO --development-region en --target-device mac \
