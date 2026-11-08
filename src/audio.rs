@@ -1109,7 +1109,7 @@ mod tests {
     #[test]
     fn playback_matches_the_original_ramp_and_channel_conversion() {
         for channels in [1, 2, 6] {
-            for (initial, target) in [(0.0, 1.0), (1.0, 0.0), (0.37, 0.37)] {
+            for (initial, target) in [(0.0_f32, 1.0_f32), (1.0, 0.0), (0.37, 0.37)] {
                 let queue = ArrayQueue::new(700);
                 let mut expected = vec![0_i16; 800 * channels];
                 let mut old_gain = initial;

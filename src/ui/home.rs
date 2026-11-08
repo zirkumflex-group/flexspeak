@@ -1335,7 +1335,8 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             })
             .collect();
         let node = rune::memo(
-            format!("channel-tree-{}", channel.id),
+            // The memo keys what it returns, so its id is the channel's own key.
+            format!("channel-{}", channel.id),
             (
                 channel,
                 collapsed,
