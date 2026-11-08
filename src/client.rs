@@ -736,7 +736,7 @@ async fn run_connection(
         let mut sent = 0;
         let mut received = 0;
         let mut last_meter = Instant::now();
-    let mut meter = MeterDelivery::default();
+        let mut meter = MeterDelivery::default();
         let mut last_usage = Instant::now();
         let mut last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
         let mut server_usage: Option<ServerUsage> = None;
