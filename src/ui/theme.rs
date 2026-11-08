@@ -152,6 +152,10 @@ pub mod size {
 }
 
 pub mod radius {
+    /// The window's own cards: the sidebar, the main pane and Statistics.
+    pub const PANE: f32 = 12.0;
+    /// A card nested in a pane, such as the voice panel: between `PANE` and the controls in it.
+    pub const NESTED: f32 = 8.0;
     pub const CARD: f32 = 10.0;
     pub const CONTROL: f32 = 6.0;
     pub const ROW: f32 = 6.0;

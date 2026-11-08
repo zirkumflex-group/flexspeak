@@ -52,7 +52,7 @@ fn reading(
         )
         .child(
             text(label.to_owned())
-                .font(ty::CAPTION)
+                .font(ty::SMALL)
                 .color(t.muted)
                 .a11y_hidden(),
         )

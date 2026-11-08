@@ -130,7 +130,7 @@ pub fn inline(
                 .center_y()
                 .help(help(&reading, reading.health.label()))
                 .label(format!("{} {}", reading.label, reading.value))
-                .child(text(label).font(ty::CAPTION).color(t.muted).a11y_hidden())
+                .child(text(label).font(ty::SMALL).color(t.muted).a11y_hidden())
                 .child(
                     text(reading.value.clone())
                         .font(ty::NUMERIC)

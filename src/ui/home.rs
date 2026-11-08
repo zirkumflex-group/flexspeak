@@ -159,10 +159,10 @@ pub const INSET: f32 = 8.0;
 fn pane(t: &Theme) -> El {
     col()
         .h_full()
-        .radius(radius::CARD)
+        .radius(radius::PANE)
         .fill(t.surface)
         .border(1.0, t.hairline)
-        .clip_rounded(radius::CARD)
+        .clip_rounded(radius::PANE)
 }
 
 fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
@@ -961,7 +961,8 @@ fn log_people(s: &App, t: &Theme, k: &Kit) -> El {
         )
         .w(WIDTH)
         .padding(4.0)
-        .radius(radius::CONTROL)
+        // Concentric with its rows: their radius plus this padding.
+        .radius(radius::ROW + 4.0)
         .fill(t.raised)
         .border(1.0, t.hairline)
         .transition(Transition::opacity())
@@ -1180,7 +1181,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .padding(12.0)
-        .radius(radius::CARD)
+        .radius(radius::NESTED)
         .fill(t.wash(0.035))
         .border(
             1.0,
