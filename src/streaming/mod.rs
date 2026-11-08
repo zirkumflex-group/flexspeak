@@ -151,6 +151,15 @@ impl Default for View {
 }
 
 impl View {
+    /// A view for one more server, on the same pictures and visibility as the others.
+    pub fn sharing(surfaces: Arc<Surfaces>, visible: Arc<AtomicBool>) -> Self {
+        Self {
+            surfaces,
+            visible,
+            ..Self::default()
+        }
+    }
+
     pub fn active(&self) -> bool {
         !self.watching.is_empty()
     }
@@ -518,8 +527,8 @@ impl Surface {
             let Some([left, right]) = state.audio.pop_front() else {
                 break;
             };
-            frame[0] = (frame[0] + left * volume).clamp(-1.0, 1.0);
-            frame[1] = (frame[1] + right * volume).clamp(-1.0, 1.0);
+            frame[0] += left * volume;
+            frame[1] += right * volume;
         }
     }
 }

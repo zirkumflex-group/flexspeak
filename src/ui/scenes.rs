@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::permissions::{Kind, Status};
 use crate::{
-    App, SettingsPage, Tab,
+    App, ServerSession, SettingsPage, Tab,
     alerts::Source,
-    audio_processing, client, onboarding, settings, transmission,
+    audio_processing, client, hub, onboarding, settings, transmission,
     updater::{self, Build, Phase, Progress, Retry},
     usage,
 };
@@ -17,6 +17,11 @@ type Scene = (&'static str, fn(&mut App));
 pub const SCENES: &[Scene] = &[
     ("setup", setup),
     ("devices", devices),
+    ("servers", servers_rail),
+    ("servers-poked", servers_poked),
+    ("servers-switched", servers_switched),
+    ("servers-connecting", servers_connecting),
+    ("servers-picker", servers_picker),
     ("setup-ts6-offer", setup_ts6_offer),
     ("setup-ts6-server", setup_ts6_server),
     ("setup-ts6-devices", setup_ts6_devices),
@@ -156,6 +161,87 @@ fn setup_ts6_devices(s: &mut App) {
     s.onboarding = Some(onboarding::Step::Devices);
 }
 
+/// One more server, connected, with nothing on screen for it yet.
+fn another_server(s: &mut App, name: &str, address: &str) -> hub::SessionId {
+    let id = add_session(s, name, address);
+    let session = s.session_mut(id).expect("just added");
+    session.connected = true;
+    session.state.server = name.into();
+    session.state.server_version = "6.0.0".into();
+    session.state.can_talk = true;
+    id
+}
+
+/// Four servers at once, showing each kind of state the rail draws.
+fn servers(s: &mut App) -> [hub::SessionId; 3] {
+    connected(s);
+    let mine = s.server_mut();
+    mine.muted = false;
+    mine.talking = [2].into();
+    let raid = another_server(s, "Raid Night", "raid.example");
+    if let Some(session) = s.session_mut(raid) {
+        session.muted = true;
+    }
+    let work = another_server(s, "Work", "work.example");
+    if let Some(session) = s.session_mut(work) {
+        session.muted = true;
+        session.deafened = true;
+    }
+    let friends = add_session(s, "Friends", "friends.example");
+    if let Some(session) = s.session_mut(friends) {
+        session.status = "Resolving server and connecting…".into();
+    }
+    [raid, work, friends]
+}
+
+fn servers_rail(s: &mut App) {
+    servers(s);
+}
+
+/// Someone poked you twice on a server you aren't looking at.
+fn servers_poked(s: &mut App) {
+    let [_, work, _] = servers(s);
+    if let Some(session) = s.session_mut(work) {
+        session.unseen_pokes = 2;
+    }
+}
+
+/// Switched to a server where the mic is off: the panel and shortcuts follow it.
+fn servers_switched(s: &mut App) {
+    let [raid, ..] = servers(s);
+    s.activate(Some(raid));
+    if let Some(session) = s.session_mut(raid) {
+        let lobby = client::Channel {
+            id: 1,
+            name: "Raid night".into(),
+            members: vec![
+                member(1, "Jan", true, true),
+                member(2, "Theo", false, false),
+            ],
+            members_visible: true,
+            join_access: client::JoinAccess::Allowed,
+            ..client::Channel::default()
+        };
+        session.state.channels = vec![lobby.clone()];
+        session.state.current = Some(lobby);
+        session.server_controls = Some(crate::command_flow::AudioState {
+            muted: true,
+            deafened: false,
+        });
+    }
+}
+
+/// A second server still connecting, chosen from the rail.
+fn servers_connecting(s: &mut App) {
+    let [.., friends] = servers(s);
+    s.activate(Some(friends));
+}
+
+fn servers_picker(s: &mut App) {
+    servers(s);
+    s.ui.server_picker = true;
+}
+
 fn devices(s: &mut App) {
     setup(s);
     s.onboarding = Some(onboarding::Step::Devices);
@@ -198,7 +284,7 @@ fn permissions_windows(s: &mut App) {
 
 fn home(s: &mut App) {
     saved(s);
-    s.status = "Ready to connect".into();
+    s.server_mut().status = "Ready to connect".into();
 }
 
 fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member {
@@ -213,15 +299,32 @@ fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member
     }
 }
 
+/// A session as `connected` needs it, without a real connection behind it.
+fn add_session(s: &mut App, name: &str, address: &str) -> hub::SessionId {
+    let id = hub::SessionId(s.next_session);
+    s.next_session += 1;
+    s.sessions.push(ServerSession::new(
+        id,
+        name.into(),
+        address.into(),
+        String::new(),
+        s.home.streaming.surfaces.clone(),
+        s.home.streaming.visible.clone(),
+    ));
+    id
+}
+
 fn connected(s: &mut App) {
     saved(s);
-    s.connected = true;
-    s.muted = false;
+    let id = add_session(s, "Zirkumflex", "ts.zirkumflex.io");
+    s.activate(Some(id));
+    s.server_mut().connected = true;
+    s.server_mut().muted = false;
     s.level = 0.3;
     s.transmitting = true;
-    s.state.can_talk = true;
-    s.state.server = "Zirkumflex".into();
-    s.state.server_version = "6.0.0".into();
+    s.server_mut().state.can_talk = true;
+    s.server_mut().state.server = "Zirkumflex".into();
+    s.server_mut().state.server_version = "6.0.0".into();
     let lobby = client::Channel {
         id: 1,
         name: "Lobby".into(),
@@ -261,18 +364,18 @@ fn connected(s: &mut App) {
             ..client::Channel::default()
         },
     ];
-    s.state.channels = channels;
-    s.state.current = Some(lobby);
-    s.talking = [2].into();
-    s.server_controls = Some(crate::command_flow::AudioState {
+    s.server_mut().state.channels = channels;
+    s.server_mut().state.current = Some(lobby);
+    s.server_mut().talking = [2].into();
+    s.server_mut().server_controls = Some(crate::command_flow::AudioState {
         muted: false,
         deafened: false,
     });
-    s.controls_pending = false;
+    s.server_mut().controls_pending = false;
     let now = Instant::now();
     for i in 0..60u64 {
         let wave = (i as f64 * 0.35).sin();
-        s.connection_history.push(
+        s.server_mut().connection_history.push(
             now - Duration::from_secs(60 - i),
             usage::ConnectionUsage {
                 packet_loss_in: Some((0.4 + 0.4 * wave).max(0.0) as f32),
@@ -284,7 +387,7 @@ fn connected(s: &mut App) {
             },
         );
     }
-    s.connection_usage = usage::ConnectionUsage {
+    s.server_mut().connection_usage = usage::ConnectionUsage {
         packet_loss_in: Some(0.3),
         packet_loss_out: Some(0.1),
         ping_ms: Some(31.0),
@@ -292,7 +395,7 @@ fn connected(s: &mut App) {
         idle_seconds: Some(3),
         ..Default::default()
     };
-    s.streaming.catalog = vec![crate::streaming::StreamInfo {
+    s.server_mut().streaming.catalog = vec![crate::streaming::StreamInfo {
         id: "s1".into(),
         publisher: 2,
         name: "Mara’s screen".into(),
@@ -366,9 +469,9 @@ fn server_edit(s: &mut App) {
 /// Connecting to the second server: the others wait for it.
 fn home_connecting(s: &mut App) {
     home(s);
-    s.address = "voice.friday.gg:9988".into();
-    s.session = Some(tokio::sync::mpsc::channel(1).0);
-    s.status = "Connecting to voice.friday.gg:9988…".into();
+    let id = add_session(s, "Friday Squad", "voice.friday.gg:9988");
+    s.activate(Some(id));
+    s.server_mut().status = "Connecting to voice.friday.gg:9988…".into();
 }
 
 /// The microphone menu open inside the window: it draws above the panel.
@@ -419,8 +522,6 @@ fn settings_empty_search(s: &mut App) {
 /// Settings over the connected server, with the server fields locked.
 fn settings_connected(s: &mut App) {
     connected(s);
-    // A session locks the server fields; the dropped receiver is never read in a preview.
-    s.session = Some(tokio::sync::mpsc::channel(1).0);
     s.settings_path = Some("/Users/jan/Library/Application Support/Flexspeak/settings.json".into());
     s.open_settings(SettingsPage::Server);
 }
@@ -481,7 +582,7 @@ fn push_to_talk_connected(s: &mut App) {
         ..transmission::Settings::default()
     };
     s.transmitting = false;
-    s.talking = [2].into();
+    s.server_mut().talking = [2].into();
 }
 
 fn member_menu(s: &mut App) {
@@ -491,14 +592,14 @@ fn member_menu(s: &mut App) {
 
 fn member_selection(s: &mut App) {
     connected(s);
-    s.selected_members = [2, 4].into();
+    s.server_mut().selected_members = [2, 4].into();
     s.ui.member_menu = Some((4, rune::PointerPress { x: 150.0, y: 240.0 }));
     s.ui.move_menu = true;
 }
 
 fn member_drag(s: &mut App) {
     connected(s);
-    s.selected_members = [2, 4].into();
+    s.server_mut().selected_members = [2, 4].into();
     s.ui.drag = Some(super::MemberDrag {
         ids: vec![2, 4],
         at: (150.0, 250.0),
@@ -508,7 +609,7 @@ fn member_drag(s: &mut App) {
 
 fn poke(s: &mut App) {
     connected(s);
-    s.poke = Some(crate::PokeDraft {
+    s.server_mut().poke = Some(crate::PokeDraft {
         id: 2,
         name: "Mara".into(),
         message: "Raid starts in 5".into(),
@@ -518,7 +619,7 @@ fn poke(s: &mut App) {
 
 fn poked(s: &mut App) {
     connected(s);
-    s.pokes.push(crate::Poke {
+    s.server_mut().pokes.push(crate::Poke {
         from: "Theo".into(),
         message: "Can you hear me?".into(),
     });
@@ -526,7 +627,7 @@ fn poked(s: &mut App) {
 
 fn share_sources(s: &mut App) {
     use crate::streaming::publishing::{ShareSource, SourceKind};
-    s.streaming.sharing.sources = vec![
+    s.server_mut().streaming.sharing.sources = vec![
         ShareSource {
             kind: SourceKind::Screen(Some(1)),
             name: "Built-in Retina Display".into(),
@@ -540,19 +641,20 @@ fn share_sources(s: &mut App) {
             name: "Camera · Built-in camera".into(),
         },
     ];
-    s.streaming.sharing.selected = s.streaming.sharing.sources.first().cloned();
+    s.server_mut().streaming.sharing.selected =
+        s.server_mut().streaming.sharing.sources.first().cloned();
 }
 
 fn share(s: &mut App) {
     connected(s);
     share_sources(s);
-    s.streaming.share_open = true;
+    s.server_mut().streaming.share_open = true;
 }
 
 fn sharing(s: &mut App) {
     connected(s);
     share_sources(s);
-    let status = &mut s.streaming.sharing.status;
+    let status = &mut s.server_mut().streaming.sharing.status;
     status.active = true;
     status.live = true;
     status.detail = "Sharing Built-in Retina Display · 720p · 30 fps".into();
@@ -572,20 +674,22 @@ fn watch(s: &mut App, streams: &[(&str, u16, &str, crate::streaming::Phase)]) {
             has_audio: true,
             server_relayed: false,
         };
-        let surface = s.streaming.surfaces.get(slot).clone();
+        let surface = s.server_mut().streaming.surfaces.get(slot).clone();
         let generation = surface.begin();
-        s.streaming.update(crate::streaming::Event::State {
-            generation,
-            slot,
-            stream: info,
-            phase: *phase,
-            detail: "Receiving stream · audio follows playback volume and deafen".into(),
-        });
+        s.server_mut()
+            .streaming
+            .update(crate::streaming::Event::State {
+                generation,
+                slot,
+                stream: info,
+                phase: *phase,
+                detail: "Receiving stream · audio follows playback volume and deafen".into(),
+            });
         if *phase == crate::streaming::Phase::Receiving {
             surface.publish(generation, demo_picture(slot), 0.0);
         }
     }
-    s.streaming.sync_frame();
+    s.server_mut().streaming.sync_frame();
 }
 
 /// A stand-in for decoded video: each stream its own colour, and the fourth a 4:3 source.
@@ -628,23 +732,28 @@ fn watching_five(s: &mut App) {
             ("s5", 7, "Lin’s second monitor", Phase::Negotiating),
         ],
     );
-    let lobby = s.state.current.as_mut().expect("the demo joins the lobby");
+    let lobby = s
+        .server_mut()
+        .state
+        .current
+        .as_mut()
+        .expect("the demo joins the lobby");
     lobby.members.extend([
         member(5, "Kai", false, false),
         member(6, "Noor", false, false),
         member(7, "Lin", false, false),
     ]);
-    s.state.channels[0] = lobby.clone();
+    s.server_mut().state.channels[0] = lobby.clone();
 }
 
 fn watching_five_below(s: &mut App) {
     watching_five(s);
-    s.streaming.focused = Some("s2".into());
+    s.server_mut().streaming.focused = Some("s2".into());
 }
 
 fn watching_five_beside(s: &mut App) {
     watching_five_below(s);
-    s.streaming.strip = crate::streaming::Strip::Beside;
+    s.server_mut().streaming.strip = crate::streaming::Strip::Beside;
 }
 
 fn watching_five_drag(s: &mut App) {
@@ -668,14 +777,17 @@ fn watching_five_beside_drag(s: &mut App) {
 fn watching(s: &mut App) {
     use crate::streaming::Phase;
     watch(s, &[("s1", 2, "Mara’s screen", Phase::Receiving)]);
-    s.streaming.catalog.push(crate::streaming::StreamInfo {
-        id: "s2".into(),
-        publisher: 4,
-        name: "Ines’s game".into(),
-        viewers: 1,
-        has_audio: false,
-        server_relayed: false,
-    });
+    s.server_mut()
+        .streaming
+        .catalog
+        .push(crate::streaming::StreamInfo {
+            id: "s2".into(),
+            publisher: 4,
+            name: "Ines’s game".into(),
+            viewers: 1,
+            has_audio: false,
+            server_relayed: false,
+        });
 }
 
 /// Streams running in the channel that you haven't joined.
@@ -685,14 +797,17 @@ fn streams_live(s: &mut App) {
         ("s2", 4, "Ines’s game", 1, false),
         ("s3", 3, "Theo’s window", 0, true),
     ] {
-        s.streaming.catalog.push(crate::streaming::StreamInfo {
-            id: id.into(),
-            publisher,
-            name: name.into(),
-            viewers,
-            has_audio,
-            server_relayed: false,
-        });
+        s.server_mut()
+            .streaming
+            .catalog
+            .push(crate::streaming::StreamInfo {
+                id: id.into(),
+                publisher,
+                name: name.into(),
+                viewers,
+                has_audio,
+                server_relayed: false,
+            });
     }
 }
 
@@ -700,7 +815,7 @@ fn streams_live(s: &mut App) {
 fn sharing_watching(s: &mut App) {
     watching(s);
     share_sources(s);
-    let status = &mut s.streaming.sharing.status;
+    let status = &mut s.server_mut().streaming.sharing.status;
     status.active = true;
     status.live = true;
     status.detail = "Sharing Built-in Retina Display · 720p · 30 fps".into();
@@ -721,14 +836,14 @@ fn watching_grid(s: &mut App) {
 
 fn watching_focus(s: &mut App) {
     watching_grid(s);
-    s.streaming.focused = Some("s2".into());
-    s.streaming.set_volume(4, 40);
+    s.server_mut().streaming.focused = Some("s2".into());
+    s.server_mut().streaming.set_volume(4, 40);
 }
 
 fn watching_stats(s: &mut App) {
     watching(s);
-    s.streaming.show_stats = true;
-    if let Some(watch) = s.streaming.watching.first_mut() {
+    s.server_mut().streaming.show_stats = true;
+    if let Some(watch) = s.server_mut().streaming.watching.first_mut() {
         watch.stats = crate::streaming::Stats {
             codec: "VP8".into(),
             width: 1280,
@@ -755,7 +870,7 @@ fn install(s: &mut App) {
 
 fn password(s: &mut App) {
     connected(s);
-    s.password_channel = Some(3);
+    s.server_mut().password_channel = Some(3);
 }
 
 fn alert(s: &mut App) {
@@ -867,6 +982,7 @@ fn update_check_failed(s: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::home::{initials, tile_colour};
     use super::*;
     use rune::{Env, Runtime};
 
@@ -893,6 +1009,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn clicking_tiles_switches_servers_and_the_plus_offers_the_rest() {
+        let mut rt = runtime(servers_rail, (900.0, 790.0));
+        settle(&mut rt);
+        let first = rt.state.active.unwrap();
+        let other = rt.state.sessions[1].id;
+        click(&mut rt, &format!("rail-{}", other.0));
+        assert_eq!(rt.state.active, Some(other));
+        assert_eq!(rt.state.active, Some(other));
+        click(&mut rt, &format!("rail-{}", first.0));
+        assert_eq!(rt.state.active, Some(first));
+        click(&mut rt, "rail-add");
+        assert!(rt.state.ui.server_picker);
+        assert!(
+            rt.find("picker-connect-1").is_some(),
+            "Friday Squad isn't connected"
+        );
+        assert!(rt.find("picker-connect-0").is_none(), "Zirkumflex is");
+    }
+
+    #[test]
+    fn the_shortcut_hint_needs_more_than_one_server() {
+        let mut rt = runtime(connected, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("shortcut-hint").is_none());
+        let mut rt = runtime(servers_rail, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("shortcut-hint").is_some());
+    }
+
+    #[test]
+    fn a_tile_shows_the_server_state_without_a_fake_list() {
+        assert_eq!(initials("Raid Night"), "RN");
+        assert_eq!(initials("Zirkumflex"), "ZI");
+        assert_eq!(initials("ts.example.org"), "TE");
+        assert_eq!(initials(""), "");
+        assert_eq!(tile_colour("Raid Night"), tile_colour("Raid Night"));
     }
 
     #[test]
@@ -940,7 +1095,7 @@ mod tests {
         let _ = s.update(Message::ShareVideoBitrate(8000));
         let _ = s.update(Message::ShareAudioBitrate(192));
         let _ = s.update(Message::ShareAccess(Access::Public));
-        let quality = s.streaming.sharing.quality;
+        let quality = s.server().streaming.sharing.quality;
         assert_eq!(
             (quality.frame_rate, quality.video_kbps, quality.audio_kbps),
             (24, 8000, 192)
@@ -948,20 +1103,22 @@ mod tests {
         assert_eq!(quality.resolution, Resolution::P1440);
         assert!(quality.preset().is_none());
         let _ = s.update(Message::ShareFrameRate(0));
-        assert_eq!(s.streaming.sharing.quality, quality);
-        let camera = s.streaming.sharing.sources.last().unwrap().clone();
+        assert_eq!(s.server().streaming.sharing.quality, quality);
+        let camera = s.server().streaming.sharing.sources.last().unwrap().clone();
         let _ = s.update(Message::ShareSource(camera.clone()));
         assert!(
-            !s.streaming.sharing.audio,
+            !s.server().streaming.sharing.audio,
             "Camera selection must not unexpectedly share system sound"
         );
-        s.streaming.sharing.status.active = true;
+        s.server_mut().streaming.sharing.status.active = true;
         let _ = s.update(Message::ShareQuality(Preset::Saver.quality()));
         let _ = s.update(Message::ShareAccess(Access::Private));
-        let _ = s.update(Message::ShareSource(s.streaming.sharing.sources[0].clone()));
-        assert_eq!(s.streaming.sharing.quality, quality);
-        assert_eq!(s.streaming.sharing.access, Access::Public);
-        assert_eq!(s.streaming.sharing.selected, Some(camera));
+        let _ = s.update(Message::ShareSource(
+            s.server().streaming.sharing.sources[0].clone(),
+        ));
+        assert_eq!(s.server().streaming.sharing.quality, quality);
+        assert_eq!(s.server().streaming.sharing.access, Access::Public);
+        assert_eq!(s.server().streaming.sharing.selected, Some(camera));
     }
 
     #[test]
@@ -1088,7 +1245,7 @@ mod tests {
     }
 
     fn order(rt: &Runtime<App>) -> Vec<&str> {
-        let watching = &rt.state.streaming.watching;
+        let watching = &rt.state.server().streaming.watching;
         watching.iter().map(|w| w.stream.id.as_str()).collect()
     }
 
@@ -1117,16 +1274,22 @@ mod tests {
         assert_eq!(order(&rt), ["s2", "s1", "s3", "s4", "s5"]);
 
         click(&mut rt, "tile-s3");
-        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s3"));
-        assert_eq!(rt.state.streaming.strip, crate::streaming::Strip::Below);
+        assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s3"));
+        assert_eq!(
+            rt.state.server().streaming.strip,
+            crate::streaming::Strip::Below
+        );
 
         click(&mut rt, "layout-beside");
-        assert_eq!(rt.state.streaming.strip, crate::streaming::Strip::Beside);
-        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s3"));
+        assert_eq!(
+            rt.state.server().streaming.strip,
+            crate::streaming::Strip::Beside
+        );
+        assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s3"));
 
         // A thumbnail dropped on the stage takes it and hands over its place in the strip.
         drag(&mut rt, "tile-s4", "tile-s3");
-        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s4"));
+        assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s4"));
         assert_eq!(order(&rt), ["s2", "s1", "s4", "s3", "s5"]);
 
         // Double-clicking the stage returns to the grid, as the grid button does.
@@ -1139,15 +1302,18 @@ mod tests {
             rt.frame(1.0 / 60.0);
         }
         settle(&mut rt);
-        assert_eq!(rt.state.streaming.focused, None);
+        assert_eq!(rt.state.server().streaming.focused, None);
 
         click(&mut rt, "layout-below");
-        assert_eq!(rt.state.streaming.focused.as_deref(), Some("s2"));
+        assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s2"));
         click(&mut rt, "layout-grid");
-        assert_eq!(rt.state.streaming.focused, None);
+        assert_eq!(rt.state.server().streaming.focused, None);
 
         click(&mut rt, "focus");
-        assert!(rt.state.streaming.focused.is_some(), "the maximize button");
+        assert!(
+            rt.state.server().streaming.focused.is_some(),
+            "the maximize button"
+        );
     }
 
     #[test]
@@ -1338,7 +1504,8 @@ mod tests {
     #[test]
     fn typing_in_a_locked_field_is_reverted_while_connected() {
         let mut rt = runtime(settings_page, (900.0, 790.0));
-        rt.state.session = Some(tokio::sync::mpsc::channel(1).0);
+        let id = add_session(&mut rt.state, "Locked", "locked.example");
+        rt.state.activate(Some(id));
         rt.state.ui.address.replace_text("changed.example");
         let message = crate::Message::Address("changed.example".into());
         let _ = rt.state.update(message);
@@ -1366,7 +1533,8 @@ mod tests {
             crate::audio_processing::AVAILABLE
         );
         let before = rt.state.audio_processing;
-        rt.state.session = Some(tokio::sync::mpsc::channel(1).0);
+        let id = add_session(&mut rt.state, "Locked", "locked.example");
+        rt.state.activate(Some(id));
         for _ in 0..10 {
             rt.frame(1.0 / 30.0);
         }
@@ -1382,13 +1550,16 @@ mod tests {
     /// platform shows the share card.
     fn crowded_streams(s: &mut App) {
         connected(s);
-        let base = s.streaming.catalog[0].clone();
+        let base = s.server().streaming.catalog[0].clone();
         for id in 0..12 {
-            s.streaming.catalog.push(crate::streaming::StreamInfo {
-                id: format!("extra-{id}"),
-                name: format!("Screen {id}"),
-                ..base.clone()
-            });
+            s.server_mut()
+                .streaming
+                .catalog
+                .push(crate::streaming::StreamInfo {
+                    id: format!("extra-{id}"),
+                    name: format!("Screen {id}"),
+                    ..base.clone()
+                });
         }
     }
 
@@ -1417,9 +1588,9 @@ mod tests {
             let mut rt = runtime(scene, (760.0, 420.0));
             if name == "channels" {
                 // Enough channels to overflow the sidebar.
-                let base = rt.state.state.channels[0].clone();
+                let base = rt.state.server_mut().state.channels[0].clone();
                 for id in 10..40 {
-                    rt.state.state.channels.push(client::Channel {
+                    rt.state.server_mut().state.channels.push(client::Channel {
                         id,
                         name: format!("Room {id}"),
                         members: Vec::new(),

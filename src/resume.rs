@@ -1,7 +1,7 @@
 //! Where the app was when Restart installed an update: the relaunched build reads it once and
-//! reconnects to the same server and channel with the same microphone state and page.
+//! reconnects to the same servers and channels with the same microphone state and page.
 //!
-//! The file sits beside `settings.json`, readable only by its owner, and holds the session's
+//! The file sits beside `settings.json`, readable only by its owner, and holds the sessions'
 //! server and channel passwords so a protected server or channel needs no re-entry. It's deleted
 //! as soon as it's read and ignored once it's [`MAX_AGE`] old, so a later ordinary launch never
 //! reconnects on its own.
@@ -25,19 +25,70 @@ pub enum Page {
     Settings,
 }
 
+/// One server to reconnect to.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Server {
+    pub address: String,
+    pub password: String,
+    pub channel: Option<u64>,
+    pub channel_password: String,
+    pub muted: bool,
+    pub deafened: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Resume {
     /// Seconds since the Unix epoch.
     pub written_at: u64,
     pub page: Page,
-    /// The saved server the session was on; `None` when there was no session.
-    pub server_address: Option<String>,
-    pub server_password: String,
-    pub channel: Option<u64>,
-    pub channel_password: String,
-    pub muted: bool,
-    pub deafened: bool,
+    /// Every server that was connected, oldest first.
+    pub servers: Vec<Server>,
+    /// The address of the one that was active.
+    pub active: Option<String>,
+    // Older builds wrote one server's fields straight on the file: still read, no longer written.
+    #[serde(skip_serializing)]
+    server_address: Option<String>,
+    #[serde(skip_serializing)]
+    server_password: String,
+    #[serde(skip_serializing)]
+    channel: Option<u64>,
+    #[serde(skip_serializing)]
+    channel_password: String,
+    #[serde(skip_serializing)]
+    muted: bool,
+    #[serde(skip_serializing)]
+    deafened: bool,
+}
+
+impl Resume {
+    pub fn new(page: Page, servers: Vec<Server>, active: Option<String>) -> Self {
+        Self {
+            page,
+            servers,
+            active,
+            ..Self::default()
+        }
+    }
+
+    /// Moves a file from an older build, with its single server, onto the list.
+    fn upgraded(mut self) -> Self {
+        if self.servers.is_empty()
+            && let Some(address) = self.server_address.take()
+        {
+            self.active = Some(address.clone());
+            self.servers.push(Server {
+                address,
+                password: std::mem::take(&mut self.server_password),
+                channel: self.channel.take(),
+                channel_password: std::mem::take(&mut self.channel_password),
+                muted: self.muted,
+                deafened: self.deafened,
+            });
+        }
+        self
+    }
 }
 
 pub fn path(settings: &Path) -> PathBuf {
@@ -74,7 +125,7 @@ pub fn take(path: &Path, now: SystemTime) -> Option<Resume> {
     let _ = fs::remove_file(path);
     let resume: Resume = serde_json::from_slice(&json).ok()?;
     let age = seconds(now).checked_sub(resume.written_at)?;
-    (age <= MAX_AGE.as_secs()).then_some(resume)
+    (age <= MAX_AGE.as_secs()).then(|| resume.upgraded())
 }
 
 #[cfg(test)]
@@ -93,11 +144,24 @@ mod tests {
         assert_eq!(path, dir.join("resume.json"));
         let resume = Resume {
             page: Page::Statistics,
-            server_address: Some("ts.example".into()),
-            server_password: "secret".into(),
-            channel: Some(4),
-            muted: false,
-            deafened: true,
+            servers: vec![
+                Server {
+                    address: "one.example".into(),
+                    password: "secret".into(),
+                    channel: Some(4),
+                    muted: false,
+                    deafened: true,
+                    ..Server::default()
+                },
+                Server {
+                    address: "two.example".into(),
+                    channel: Some(9),
+                    channel_password: "lock".into(),
+                    muted: true,
+                    ..Server::default()
+                },
+            ],
+            active: Some("two.example".into()),
             ..Resume::default()
         };
         let now = SystemTime::now();
@@ -111,11 +175,9 @@ mod tests {
             );
         }
         let read = take(&path, now + Duration::from_secs(5)).unwrap();
-        assert_eq!(
-            (read.page, read.channel, read.deafened),
-            (Page::Statistics, Some(4), true)
-        );
-        assert_eq!(read.server_password, "secret");
+        assert_eq!(read.page, Page::Statistics);
+        assert_eq!(read.servers, resume.servers);
+        assert_eq!(read.active.as_deref(), Some("two.example"));
         assert!(!path.exists(), "read once");
         assert_eq!(take(&path, now), None);
 
@@ -131,5 +193,52 @@ mod tests {
         fs::write(&path, "{ not json").unwrap();
         assert_eq!(take(&path, now), None);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_from_an_older_build_reconnects_its_one_server() {
+        let dir = std::env::temp_dir().join(format!(
+            "flexspeak-resume-old-{}-{}",
+            std::process::id(),
+            seconds(SystemTime::now())
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = path(&dir.join("settings.json"));
+        let now = SystemTime::now();
+        let old = serde_json::json!({
+            "written_at": seconds(now),
+            "page": "Home",
+            "server_address": "ts.example",
+            "server_password": "secret",
+            "channel": 4,
+            "channel_password": "lock",
+            "muted": false,
+            "deafened": true,
+        });
+        fs::write(&path, old.to_string()).unwrap();
+        let read = take(&path, now).unwrap();
+        assert_eq!(read.active.as_deref(), Some("ts.example"));
+        assert_eq!(
+            read.servers,
+            [Server {
+                address: "ts.example".into(),
+                password: "secret".into(),
+                channel: Some(4),
+                channel_password: "lock".into(),
+                muted: false,
+                deafened: true,
+            }]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_old_single_server_fields_are_not_written_any_more() {
+        let json = serde_json::to_string(&Resume {
+            server_address: Some("ts.example".into()),
+            ..Resume::default()
+        })
+        .unwrap();
+        assert!(!json.contains("server_address"), "{json}");
     }
 }

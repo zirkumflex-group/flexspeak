@@ -23,8 +23,7 @@ use crossbeam_queue::ArrayQueue;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use tsclientlib::{ClientId, audio::AudioHandler};
-use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf};
+use tsproto_packets::packets::CodecType;
 
 pub const RATE: usize = 48_000;
 pub const FRAME: usize = 960;
@@ -304,9 +303,10 @@ impl RateConverter {
     }
 }
 
+/// The audio devices and everything that works on their samples. One opens at a time: the
+/// hub's, shared by every server, or the local microphone test's.
 pub struct AudioEngine {
-    _input_stream: Stream,
-    _output_stream: Stream,
+    _streams: Option<(Stream, Stream)>,
     capture: Arc<Capture>,
     playback: Arc<ArrayQueue<[f32; 2]>>,
     errors: Arc<ArrayQueue<String>>,
@@ -326,7 +326,6 @@ pub struct AudioEngine {
     /// A notification sound still to play, mixed over voice even while deafened.
     chime: VecDeque<f32>,
     encoder: Encoder,
-    incoming: AudioHandler,
     pub codec: CodecType,
     output_target: usize,
     pub description: String,
@@ -406,8 +405,6 @@ impl AudioEngine {
             format => bail!("Unsupported playback sample format: {format}"),
         }
         .context("Cannot open playback device")?;
-        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
-        encoder.set_bitrate(Bitrate::BitsPerSecond(32_768))?;
         let input_rate = RateConverter::new(
             input_config.sample_rate(),
             RATE as u32,
@@ -424,9 +421,67 @@ impl AudioEngine {
         );
         output_stream.play()?;
         input_stream.play()?;
+        Self::assemble(
+            Some((input_stream, output_stream)),
+            capture,
+            playback,
+            errors,
+            processor,
+            voice_gate,
+            reference,
+            input_config.sample_rate(),
+            input_rate,
+            output_rate,
+            output_config.sample_rate() as usize / 50,
+            description,
+        )
+    }
+
+    /// The same engine with no devices behind it: tests feed the capture queue and read the
+    /// playback queue directly.
+    #[cfg(test)]
+    pub fn without_devices(transmission: crate::transmission::Settings) -> Result<Self> {
+        let discontinuity = Arc::new(AtomicBool::new(false));
+        Self::assemble(
+            None,
+            Arc::new(Capture {
+                samples: ArrayQueue::new(RATE / 4),
+                generation: AtomicU64::new(0),
+                level: AtomicU32::new(0.0_f32.to_bits()),
+                discontinuity,
+            }),
+            Arc::new(ArrayQueue::new(RATE / 4)),
+            Arc::new(ArrayQueue::new(4)),
+            Processor::new(audio_processing::Settings::default())?,
+            crate::transmission::VoiceGate::new(transmission)?,
+            None,
+            RATE as u32,
+            RateConverter::new(RATE as u32, RATE as u32, 1, RATE / 100)?,
+            RateConverter::new(RATE as u32, RATE as u32, 2, BLOCK)?,
+            RATE / 50,
+            String::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        streams: Option<(Stream, Stream)>,
+        capture: Arc<Capture>,
+        playback: Arc<ArrayQueue<[f32; 2]>>,
+        errors: Arc<ArrayQueue<String>>,
+        processor: Processor,
+        voice_gate: crate::transmission::VoiceGate,
+        reference: Option<Reference>,
+        input_device_rate: u32,
+        input_rate: RateConverter,
+        output_rate: RateConverter,
+        output_target: usize,
+        description: String,
+    ) -> Result<Self> {
+        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
+        encoder.set_bitrate(Bitrate::BitsPerSecond(32_768))?;
         Ok(Self {
-            _input_stream: input_stream,
-            _output_stream: output_stream,
+            _streams: streams,
             capture,
             playback,
             errors,
@@ -436,7 +491,7 @@ impl AudioEngine {
             last_frame: None,
             reference,
             input_clock: ResampleClock::default(),
-            input_device_rate: input_config.sample_rate(),
+            input_device_rate,
             input_len: 0,
             input_at: None,
             input_rate,
@@ -445,9 +500,8 @@ impl AudioEngine {
             monitor: VecDeque::new(),
             chime: VecDeque::new(),
             encoder,
-            incoming: AudioHandler::new(),
             codec: CodecType::OpusVoice,
-            output_target: output_config.sample_rate() as usize / 50,
+            output_target,
             description,
         })
     }
@@ -501,26 +555,18 @@ impl AudioEngine {
         Ok(())
     }
 
-    pub fn receive(&mut self, packet: InAudioBuf) {
-        let _trace = profiler::scope(Category::AudioProcessing, "audio.receive");
-        let id = match packet.data().data() {
-            AudioData::S2C { from, .. } | AudioData::S2CWhisper { from, .. } => ClientId(*from),
-            _ => return,
-        };
-        if let Err(error) = self.incoming.handle_packet(id, packet) {
-            tracing::debug!(%error, "Dropped incoming audio packet");
-        }
+    /// Ends any utterance in progress and clears the microphone pipeline, so nothing spoken to
+    /// one server reaches another. Returns the packets that close that utterance.
+    pub fn end_utterance(&mut self) -> Result<Vec<Vec<u8>>> {
+        self.reset_capture(false)?;
+        let mut packets = Vec::new();
+        self.packet_boundary.flush(&mut packets);
+        Ok(packets)
     }
 
     /// Plays the poke chime: two soft rising notes, about a third of a second.
     pub fn chime(&mut self) {
         self.chime = chime_samples().into();
-    }
-
-    pub fn clear_playback(&mut self) {
-        self.incoming = AudioHandler::new();
-        while self.playback.pop().is_some() {}
-        self.output_rate.reset();
     }
 
     pub fn level(&self) -> f32 {
@@ -548,12 +594,12 @@ impl AudioEngine {
             })
     }
 
-    /// Codec work and resampling happen on the worker, never in an OS audio callback.
+    /// Codec work and resampling happen on the worker, never in an OS audio callback. `mix` adds
+    /// whatever should be heard into each stereo block.
     pub fn tick(
         &mut self,
         loopback: bool,
-        deafened: bool,
-        stream_audio: Option<&crate::streaming::Surfaces>,
+        mut mix: impl FnMut(&mut [f32]),
     ) -> Result<Vec<Vec<u8>>> {
         let _trace = profiler::scope(Category::AudioProcessing, "audio.process");
         if let Some(error) = self.errors.pop() {
@@ -638,20 +684,18 @@ impl AudioEngine {
                     let sample = self.monitor.pop_front().unwrap_or_default();
                     frame.fill(sample);
                 }
-            } else if !deafened {
-                self.incoming.fill_buffer(&mut stereo);
-                if let Some(surfaces) = stream_audio {
-                    surfaces.mix_audio(&mut stereo);
-                }
-            }
-            if !loopback {
+            } else {
+                mix(&mut stereo);
                 for frame in stereo.as_chunks_mut::<2>().0 {
                     let Some(sample) = self.chime.pop_front() else {
                         break;
                     };
-                    frame[0] = (frame[0] + sample).clamp(-1.0, 1.0);
-                    frame[1] = (frame[1] + sample).clamp(-1.0, 1.0);
+                    frame[0] += sample;
+                    frame[1] += sample;
                 }
+                stereo
+                    .iter_mut()
+                    .for_each(|sample| *sample = soft_limit(*sample));
             }
             for (i, frame) in stereo.as_chunks::<2>().0.iter().enumerate() {
                 self.output_rate.input[0][i] = frame[0];
@@ -666,6 +710,31 @@ impl AudioEngine {
         }
         Ok(packets)
     }
+}
+
+#[cfg(test)]
+impl AudioEngine {
+    pub fn push_mic(&self, value: f32) {
+        let generation = self.capture.generation.load(Ordering::Acquire);
+        let sample = Timed { value, at: None };
+        let _ = self.capture.samples.push((generation, sample));
+    }
+
+    pub fn drain_playback(&self) -> Vec<[f32; 2]> {
+        std::iter::from_fn(|| self.playback.pop()).collect()
+    }
+}
+
+/// Eases peaks into the -1..1 range instead of chopping them off, so several servers talking
+/// at once stay clean. Anything below the knee is left untouched.
+fn soft_limit(sample: f32) -> f32 {
+    const KNEE: f32 = 0.8;
+    let level = sample.abs();
+    if level <= KNEE || !level.is_finite() {
+        return sample;
+    }
+    let room = 1.0 - KNEE;
+    sample.signum() * (KNEE + room * ((level - KNEE) / room).tanh())
 }
 
 /// Two sine notes a fifth apart (A5 then E6), each with a quick attack and a soft decay.
@@ -851,6 +920,22 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
 mod tests {
     use super::*;
     use audiopus::coder::Decoder;
+    use tsclientlib::{ClientId, audio::AudioHandler};
+    use tsproto_packets::packets::{AudioData, InAudioBuf};
+
+    #[test]
+    fn the_soft_limit_leaves_normal_levels_alone_and_keeps_peaks_inside_full_scale() {
+        for sample in [0.0, 0.3, -0.8, 0.8] {
+            assert_eq!(soft_limit(sample), sample);
+        }
+        let mut last = 0.8;
+        for tenths in 9..40 {
+            let limited = soft_limit(tenths as f32 / 10.0);
+            assert!(limited >= last && limited <= 1.0, "{tenths}: {limited}");
+            assert_eq!(soft_limit(-(tenths as f32) / 10.0), -limited);
+            last = limited;
+        }
+    }
 
     #[test]
     fn the_poke_chime_is_short_quiet_and_fades_out() {

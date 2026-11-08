@@ -95,9 +95,97 @@ fn path_line(t: &Theme, label: &str, path: &std::path::Path) -> El {
         )
 }
 
+/// The rail's +: every saved server you aren't already on, each with its own Connect.
+fn server_picker(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    let mut list = col().w_full().gap(4.0);
+    for (index, server) in s.servers.iter().enumerate() {
+        if s.session_at(&server.address).is_some() {
+            continue;
+        }
+        let names = col()
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(2.0)
+            .child(
+                text(server.title().to_owned())
+                    .font(ty::BODY_STRONG)
+                    .color(t.text)
+                    .truncate_fade(),
+            )
+            .children((!server.name.trim().is_empty()).then(|| {
+                text(server.address.clone())
+                    .font(ty::SMALL)
+                    .color(t.muted)
+                    .truncate_fade()
+            }));
+        list = list.child(
+            row()
+                .key(format!("picker-{index}"))
+                .w_full()
+                .gap(12.0)
+                .center_y()
+                .child(names)
+                .child(button(
+                    t,
+                    &format!("picker-connect-{index}"),
+                    "Connect",
+                    Some(&icons::CONNECT),
+                    Variant::Secondary,
+                    s.permissions
+                        .pending
+                        .is_none()
+                        .then_some(Message::Connect(index)),
+                )),
+        );
+    }
+    let empty = s
+        .servers
+        .iter()
+        .all(|server| s.session_at(&server.address).is_some());
+    let mut body = col().w_full().px(16.0).pb(16.0).gap(14.0);
+    if empty {
+        body = body.child(muted(t, "You're connected to all your saved servers."));
+    } else {
+        body = body.child(list);
+    }
+    body = body.child(
+        row()
+            .w_full()
+            .gap(size::GAP)
+            .center_y()
+            .child(button(
+                t,
+                "picker-add",
+                "Add Server",
+                Some(&icons::PLUS),
+                Variant::Ghost,
+                Some(Message::AddServer),
+            ))
+            .child(el().grow(1.0))
+            .child(button(
+                t,
+                "picker-close",
+                "Close",
+                None,
+                Variant::Secondary,
+                Some(Message::CloseServerPicker),
+            )),
+    );
+    Dialog::new("server-picker", "Connect to another server")
+        .open(true)
+        .fit()
+        .width(440.0)
+        .on_close(|s: &mut App| {
+            let _ = s.update(Message::CloseServerPicker);
+        })
+        .child(body)
+        .build(k, layer);
+}
+
 /// Writing a poke: an optional short message, sent with Return.
 fn poke(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, name: &str) {
     let length = s
+        .server()
         .poke
         .as_ref()
         .map_or(0, |draft| draft.message.chars().count());
@@ -186,10 +274,10 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
                 .selectable(true),
             ),
     );
-    if s.pokes.len() > 1 {
+    if s.server().pokes.len() > 1 {
         body = body.child(faint(
             t,
-            format!("{} more pokes waiting", s.pokes.len() - 1),
+            format!("{} more pokes waiting", s.server().pokes.len() - 1),
         ));
     }
     body = body.child(
@@ -197,7 +285,11 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
             button(
                 t,
                 "dismiss-poke",
-                if s.pokes.len() > 1 { "Next" } else { "Close" },
+                if s.server().pokes.len() > 1 {
+                    "Next"
+                } else {
+                    "Close"
+                },
                 None,
                 Variant::Primary,
                 Some(Message::DismissPoke),
@@ -222,14 +314,19 @@ pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         && s.alerts.current().is_none()
     {
         install(s, t, k, layer, offer);
-    } else if let Some(draft) = &s.poke {
+    } else if s.ui.server_picker && s.alerts.current().is_none() {
+        server_picker(s, t, k, layer);
+    } else if let Some(draft) = &s.server().poke {
         poke(s, t, k, layer, &draft.name);
-    } else if let Some(poke) = s.pokes.first() {
+    } else if let Some(poke) = s.server().pokes.first() {
         poked(s, t, k, layer, poke);
-    } else if let Some(channel) = s
-        .password_channel
-        .and_then(|id| s.state.channels.iter().find(|channel| channel.id == id))
-    {
+    } else if let Some(channel) = s.server().password_channel.and_then(|id| {
+        s.server()
+            .state
+            .channels
+            .iter()
+            .find(|channel| channel.id == id)
+    }) {
         let mut body = col().w_full().px(16.0).pb(16.0).gap(14.0).child(field(
             k,
             &s.ui.channel_password,
@@ -238,7 +335,7 @@ pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
             Some(Message::ChannelPassword),
             Some(Message::SubmitChannelPassword),
         ));
-        if let Some(error) = &s.password_error {
+        if let Some(error) = &s.server().password_error {
             body = body.child(error_text(t, error.clone()));
         }
         body = body.child(
@@ -322,7 +419,11 @@ pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                     .default_button(),
                 ),
         );
-        Dialog::new("alert", incident.source.title())
+        let title = match &incident.server {
+            Some(server) => format!("{server}: {}", incident.source.title()),
+            None => incident.source.title().to_owned(),
+        };
+        Dialog::new("alert", title)
             .open(true)
             .fit()
             .width(520.0)

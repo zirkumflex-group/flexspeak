@@ -16,6 +16,10 @@ Streams running in the channel that you haven't joined appear as the same boxes,
 
 Watching and sharing are independent. If you share system audio while watching a stream, the sound of that stream is on the output being captured, so your viewers hear it too; a publisher watching you back hears themselves.
 
+## Several servers
+
+Streams you watch run only on the active server: switching away stops them, and you press Watch again when you return. Your own share keeps running in the background when you switch; its controls and status show again when you come back. Voice from every server you haven't deafened keeps playing regardless. The streaming pane always shows the active server. Leaving the server page for Statistics ends sharing and watching on every server, as it does for one.
+
 ## Start sharing
 
 1. Connect and join the channel where you want to share. Press the **share** button beside Disconnect at the bottom of the sidebar; the dialog lists screens, windows and cameras.

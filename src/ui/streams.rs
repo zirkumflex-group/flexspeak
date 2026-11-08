@@ -22,17 +22,17 @@ use crate::streaming::{
 use crate::{App, Message, usage};
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
-    let connected = s.connected && !s.loopback && !s.stopping;
-    let supported = connected && s.state.server_version.starts_with("6.");
+    let connected = s.server().connected && !s.loopback && !s.server().stopping;
+    let supported = connected && s.server().state.server_version.starts_with("6.");
     share_dialog(s, cx, t, k, layer);
     drag_ghost(s, t, layer);
-    let watching = s.streaming.active();
+    let watching = s.server().streaming.active();
     let mut pane = col()
         .key("streams")
         .w_full()
         .h_full()
         .child(header(s, t, supported, watching));
-    if s.streaming.sharing.status.active {
+    if s.server().streaming.sharing.status.active {
         pane = pane.child(sharing_banner(s, t));
     }
     if watching || !unwatched(s).is_empty() {
@@ -63,8 +63,9 @@ fn header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
                     t,
                     format!(
                         "Server {} · {}",
-                        s.state.server_version,
-                        s.state
+                        s.server().state.server_version,
+                        s.server()
+                            .state
                             .current
                             .as_ref()
                             .map_or("No channel", |channel| channel.name.as_str())
@@ -72,7 +73,7 @@ fn header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
                 )),
         );
     if watching {
-        let on = s.streaming.show_stats;
+        let on = s.server().streaming.show_stats;
         bar = bar.child(icon_button(
             t,
             "stream-stats",
@@ -85,8 +86,13 @@ fn header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
             if on { Variant::Active } else { Variant::Ghost },
             Some(Message::ToggleStreamStats),
         ));
-        if s.streaming.watching.len() > 1 {
-            let current = s.streaming.stage().is_some().then_some(s.streaming.strip);
+        if s.server().streaming.watching.len() > 1 {
+            let current = s
+                .server()
+                .streaming
+                .stage()
+                .is_some()
+                .then_some(s.server().streaming.strip);
             for (key, glyph, help, layout) in [
                 (
                     "layout-grid",
@@ -142,15 +148,17 @@ fn header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
 
 /// Streams in the channel that you aren't watching yet.
 fn unwatched(s: &App) -> Vec<&streaming::StreamInfo> {
-    s.streaming
+    s.server()
+        .streaming
         .catalog
         .iter()
-        .filter(|stream| s.streaming.watching(&stream.id).is_none())
+        .filter(|stream| s.server().streaming.watching(&stream.id).is_none())
         .collect()
 }
 
 fn publisher_name(s: &App, id: u16) -> String {
-    s.state
+    s.server()
+        .state
         .current_members()
         .iter()
         .find(|member| member.id == id)
@@ -163,7 +171,7 @@ fn watch_blocked(s: &App, supported: bool, stream: &streaming::StreamInfo) -> Op
         Some("Unavailable here")
     } else if stream.server_relayed {
         Some("Server relay unavailable")
-    } else if s.streaming.watching.len() >= streaming::MAX_WATCHES {
+    } else if s.server().streaming.watching.len() >= streaming::MAX_WATCHES {
         Some("Watching the most at once")
     } else {
         None
@@ -209,13 +217,13 @@ fn no_streams(t: &Theme, supported: bool) -> El {
         ))
         .child(group_note(
             t,
-            "Watch up to five streams at once. Leaving this view or switching channels stops watching and sharing.",
+            "Watch up to five streams at once. Leaving this view or switching channels stops watching and sharing; switching servers stops watching only.",
         ))
 }
 
 /// Your own share while it runs: viewers, requests to watch, and the way to stop.
 fn sharing_banner(s: &App, t: &Theme) -> El {
-    let status = &s.streaming.sharing.status;
+    let status = &s.server().streaming.sharing.status;
     let mut banner = col()
         .key("sharing-banner")
         .w_full()
@@ -243,7 +251,7 @@ fn sharing_banner(s: &App, t: &Theme) -> El {
                     format!(
                         "{} · {} / {} viewers",
                         if status.detail.is_empty() {
-                            s.streaming.sharing.quality.label()
+                            s.server().streaming.sharing.quality.label()
                         } else {
                             status.detail.clone()
                         },
@@ -320,7 +328,7 @@ fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name:
 
 /// Streams watched and not yet joined: one on the stage with the rest beneath it, or a grid.
 fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El {
-    let watching = &s.streaming.watching;
+    let watching = &s.server().streaming.watching;
     let available = unwatched(s);
     let mut area = col()
         .key("stage")
@@ -330,7 +338,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         .px(size::PAGE)
         .pb(size::PAGE)
         .gap(10.0);
-    let Some(main) = s.streaming.stage() else {
+    let Some(main) = s.server().streaming.stage() else {
         let columns = grid_columns(watching.len() + available.len(), space);
         let volume_slider = cell_width(space, columns.unwrap_or(2)) >= MIN_CELL_WITH_SLIDER;
         let cells = watching
@@ -360,7 +368,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         )
         .collect();
     let strip_width = (space.0 * 0.22).clamp(140.0, 280.0);
-    let stage_width = match s.streaming.strip {
+    let stage_width = match s.server().streaming.strip {
         Strip::Beside if !thumbnails.is_empty() => space.0 - strip_width - GRID_GAP,
         _ => space.0,
     };
@@ -371,7 +379,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         Mode::Stage,
         stage_width >= MIN_STAGE_WITH_SLIDER,
     );
-    area = match s.streaming.strip {
+    area = match s.server().streaming.strip {
         Strip::Below if thumbnails.is_empty() => area.child(main),
         Strip::Below => area.child(main).child(
             row()
@@ -526,7 +534,8 @@ const DRAG_START: f32 = 4.0;
 /// The watched stream whose tile holds an element, from its key path. The longest match wins,
 /// so one stream's ID being the start of another's can't pick the wrong one.
 fn watched_in_path(s: &App, path: &str) -> Option<String> {
-    s.streaming
+    s.server()
+        .streaming
         .watching
         .iter()
         .map(|watch| &watch.stream.id)
@@ -608,7 +617,8 @@ fn drag_ghost(s: &App, t: &Theme, layer: &mut Vec<El>) {
         return;
     };
     let name = |id: &str| {
-        s.streaming
+        s.server()
+            .streaming
             .watching(id)
             .map_or_else(|| "Stream".to_owned(), |watch| watch.stream.name.clone())
     };
@@ -647,7 +657,7 @@ enum Mode {
 
 fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -> El {
     let id = watch.stream.id.clone();
-    let several = s.streaming.watching.len() > 1;
+    let several = s.server().streaming.watching.len() > 1;
     let receiving = watch.phase == streaming::Phase::Receiving;
     let mut video = el()
         .key("video")
@@ -661,7 +671,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
             el().w_full()
                 .h_full()
                 .pixels_fit(
-                    s.streaming.surfaces.get(watch.slot).pixels(),
+                    s.server().streaming.surfaces.get(watch.slot).pixels(),
                     SurfaceFit::Fit,
                 )
                 .rotate(frame.rotation),
@@ -677,7 +687,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
     if several {
         video = movable(video, &watch.stream, mode);
     }
-    if s.streaming.show_stats && mode != Mode::Thumbnail {
+    if s.server().streaming.show_stats && mode != Mode::Thumbnail {
         video = video.child(stats(s, watch).absolute(10.0, 10.0));
     }
     if mode == Mode::Grid {
@@ -852,7 +862,7 @@ fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, 
 fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -> El {
     let id = watch.stream.id.clone();
     let publisher = watch.stream.publisher;
-    let volume = s.streaming.volume(publisher);
+    let volume = s.server().streaming.volume(publisher);
     let receiving = watch.phase == streaming::Phase::Receiving;
     let mut bar = row()
         .key("controls")
@@ -919,13 +929,13 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
                         i32::from(volume),
                         format!("{volume}%"),
                         Range::PERCENT,
-                        move |s: &App| i32::from(s.streaming.volume(publisher)),
+                        move |s: &App| i32::from(s.server().streaming.volume(publisher)),
                         move |value| Message::StreamVolume(publisher, value.clamp(0, 100) as u8),
                     )),
             );
         }
     }
-    if mode == Mode::Stage && s.streaming.watching.len() > 1 {
+    if mode == Mode::Stage && s.server().streaming.watching.len() > 1 {
         bar = bar.child(icon_button(
             t,
             "unfocus",
@@ -1011,10 +1021,10 @@ fn stats(s: &App, watch: &Watching) -> El {
 
 /// Choosing what to share, its quality and audio; or, while sharing, who watches.
 pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
-    if !s.streaming.share_open {
+    if !s.server().streaming.share_open {
         return;
     }
-    let sharing = &s.streaming.sharing;
+    let sharing = &s.server().streaming.sharing;
     let quality = sharing.quality;
     let status = &sharing.status;
     let mut menus = Vec::new();
@@ -1148,7 +1158,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                         quality.frame_rate as i32,
                         format!("{} fps", quality.frame_rate),
                         Range { min: 5, max: 60, step: 1, key_step: 1 },
-                        |s: &App| s.streaming.sharing.quality.frame_rate as i32,
+                        |s: &App| s.server().streaming.sharing.quality.frame_rate as i32,
                         |value| Message::ShareFrameRate(value as u32),
                     ))),
             )
@@ -1159,7 +1169,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                 quality.video_kbps as i32,
                 format!("{} kbps", quality.video_kbps),
                 Range { min: 250, max: 20_000, step: 50, key_step: 50 },
-                |s: &App| s.streaming.sharing.quality.video_kbps as i32,
+                |s: &App| s.server().streaming.sharing.quality.video_kbps as i32,
                 |value| Message::ShareVideoBitrate(value as u32),
             ))
             .child(faint(
@@ -1183,7 +1193,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                 Checkbox::new(sharing.audio)
                     .label("Share system audio")
                     .on_toggle_tx(move |s: &mut App, tx| {
-                        let next = !s.streaming.sharing.audio;
+                        let next = !s.server().streaming.sharing.audio;
                         dispatch(s, tx, Message::ShareAudio(next));
                     })
                     .build(k),
@@ -1218,7 +1228,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                     quality.audio_kbps as i32,
                     format!("{} kbps", quality.audio_kbps),
                     Range { min: 32, max: 320, step: 16, key_step: 16 },
-                    |s: &App| s.streaming.sharing.quality.audio_kbps as i32,
+                    |s: &App| s.server().streaming.sharing.quality.audio_kbps as i32,
                     |value| Message::ShareAudioBitrate(value as u32),
                 ))
                 .child(faint(
@@ -1305,6 +1315,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
 fn preset_picker(s: &App, k: &Kit, menus: &mut Vec<El>) -> El {
     let label = |preset: Preset| format!("{} · {}", preset.label(), preset.quality().label());
     let current = s
+        .server()
         .streaming
         .sharing
         .quality
@@ -1333,7 +1344,7 @@ fn resolution_picker(s: &App, k: &Kit, menus: &mut Vec<El>) -> El {
             .iter()
             .map(|resolution| resolution.label().to_owned())
             .collect(),
-        Some(s.streaming.sharing.quality.resolution.label()),
+        Some(s.server().streaming.sharing.quality.resolution.label()),
         "Resolution",
         true,
         224.0,

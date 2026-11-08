@@ -145,7 +145,10 @@ fn toggle(t: &Theme, hidden: bool) -> El {
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
-    let show_connection = s.connected && !s.loopback && !s.stopping && s.state.current.is_some();
+    let show_connection = s.server().connected
+        && !s.loopback
+        && !s.server().stopping
+        && s.server().state.current.is_some();
     let (content, py) = if s.footer_hidden {
         (
             row()
@@ -178,8 +181,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                                 cx,
                                 t,
                                 "footer",
-                                s.connection_usage,
-                                &s.connection_history,
+                                s.server().connection_usage,
+                                &s.server().connection_history,
                                 true,
                                 false,
                             )

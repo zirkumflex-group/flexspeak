@@ -1,4 +1,5 @@
 use crate::audio::{AudioEngine, DeviceChoice, PlaybackVolume};
+use crate::hub::{self, AudioHub, Link, SessionId, Voice};
 use crate::profiler::{self, Category};
 use crate::usage::{self, ConnectionUsage, NetworkUsage, ServerUsage, TrafficMeter};
 use crate::{
@@ -31,6 +32,8 @@ use tsclientlib::{
 use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 
 pub struct Config {
+    pub id: SessionId,
+    pub hub: Arc<AudioHub>,
     pub channel_health_visible: Arc<AtomicBool>,
     /// See every channel's members (subscribe to all), or only your own channel's.
     pub subscribe_all: Arc<AtomicBool>,
@@ -221,7 +224,11 @@ pub fn identity_path() -> Result<PathBuf> {
     Ok(dirs.data_local_dir().join("identity.txt"))
 }
 
+/// One identity file: two connections starting together must not race to create it.
+static IDENTITY_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn load_identity() -> Result<Identity> {
+    let _guard = IDENTITY_FILE.lock().unwrap();
     let path = identity_path()?;
     match fs::read_to_string(&path) {
         Ok(value) => {
@@ -469,7 +476,7 @@ fn order_channels(channels: Vec<Channel>) -> Vec<Channel> {
     ordered
 }
 
-fn update_codec(connection: &Connection, audio: &mut AudioEngine) -> Result<()> {
+fn update_codec(connection: &Connection, link: &Link) -> Result<()> {
     let state = connection.get_state()?;
     if let Some(client) = state.clients.get(&state.own_client)
         && let Some(channel) = state.channels.get(&client.channel)
@@ -481,7 +488,7 @@ fn update_codec(connection: &Connection, audio: &mut AudioEngine) -> Result<()> 
                 "The current channel uses a legacy codec. This prototype requires an Opus channel."
             ),
         };
-        audio.set_codec(codec, channel.codec_quality.unwrap_or(7))?;
+        link.set_codec(codec, channel.codec_quality.unwrap_or(7));
     }
     Ok(())
 }
@@ -519,14 +526,21 @@ async fn run_connection(
     ));
     // Native permission dialogs may block device initialization. Finish them
     // before connecting so they cannot stall TeamSpeak's network event loop.
-    let mut audio = AudioEngine::open(
-        &config.input,
-        &config.output,
-        config.playback_volume.clone(),
-        config.audio_processing.for_session(false),
-        config.transmission,
-    )
-    .map_err(AudioFailure)?;
+    let mut audio = config
+        .hub
+        .attach(
+            config.id,
+            hub::Open {
+                input: config.input.clone(),
+                output: config.output.clone(),
+                volume: config.playback_volume.clone(),
+                processing: config.audio_processing.for_session(false),
+                transmission: config.transmission,
+                ptt: config.ptt.clone(),
+                surfaces: config.video_surfaces.clone(),
+            },
+        )
+        .map_err(AudioFailure)?;
     if commands.is_closed()
         || events.is_closed()
         || matches!(commands.try_recv(), Ok(Command::Stop))
@@ -541,13 +555,13 @@ async fn run_connection(
         .input_muted(true)
         .connect()?;
     let mut traffic = TrafficMeter::new(Instant::now());
-    let mut ptt_gate = crate::transmission::PttGate::default();
     let mut reported_transmission = false;
     let flow = Rc::new(RefCell::new(Flow::default()));
     let mut streams = streaming::Session::new(
         events.clone(),
         config.video_surfaces.clone(),
         config.streaming_visible.clone(),
+        hub::Foreground::new(config.hub.clone(), config.id),
         flow.clone(),
     );
     let result = async {
@@ -572,7 +586,7 @@ async fn run_connection(
         let mut speakers = Speakers::default();
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(u64, Option<streaming::MediaEvent>), Tick }
+        enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(u64, Option<streaming::MediaEvent>), Voice(Option<Voice>), Tick }
         // Pokes and moves in flight, so their replies can be reported.
         let mut requests: HashMap<Ticket, Source> = HashMap::new();
         loop {
@@ -587,6 +601,7 @@ async fn run_connection(
                     command = commands.recv() => Step::Command(command),
                     event = next_event => Step::Network(event),
                     (generation, event) = streams.next_media() => Step::Media(generation, event),
+                    voice = audio.next_voice() => Step::Voice(voice),
                     _ = tick.tick() => Step::Tick,
                 }
             };
@@ -598,15 +613,15 @@ async fn run_connection(
                     match command {
                         Command::Mute(value) => {
                             controls.desired.muted = value;
-                            if value { audio.set_capture(false).map_err(AudioFailure)?; }
+                            if value { audio.set_can_send(false); }
                             controls.changed(&mut flow.borrow_mut(), Instant::now());
                             let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: controls.pending.is_some() || controls.confirmed != Some(controls.desired) });
                         },
                         Command::Deafen(value) => {
                             controls.desired.deafened = value;
-                            config.video_surfaces.set_audio_enabled(!value);
+                            audio.set_silent(value || !connected);
                             audio.clear_playback();
-                            audio.set_capture(false).map_err(AudioFailure)?;
+                            audio.set_can_send(false);
                             controls.changed(&mut flow.borrow_mut(), Instant::now());
                             let _ = events.try_send(Event::Controls { confirmed: controls.confirmed, pending: controls.pending.is_some() || controls.confirmed != Some(controls.desired) });
                         },
@@ -667,7 +682,7 @@ async fn run_connection(
                         },
                         Command::StartSharing(options) => {
                             streams.sync(&mut connection);
-                            let result = if !connected || !config.streaming_visible.load(Ordering::Relaxed) {
+                            let result = if !connected || !streams.foreground() {
                                 Err(anyhow::anyhow!("Open your connected server view to share"))
                             } else if !connection.get_state()?.server.version.starts_with("6.") {
                                 Err(anyhow::anyhow!("Sharing requires a TeamSpeak 6 server"))
@@ -692,7 +707,7 @@ async fn run_connection(
                             last_usage = Instant::now();
                             server_info_enabled = true;
                             last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
-                            let _ = events.try_send(Event::Connected(audio.description.clone()));
+                            let _ = events.try_send(Event::Connected(audio.description().to_owned()));
                             controls.reconnect(Instant::now());
                             subscribed = None;
                             subscription = None;
@@ -722,7 +737,7 @@ async fn run_connection(
                                 }
                             }
                         }
-                        update_codec(&connection, &mut audio)?;
+                        update_codec(&connection, &audio)?;
                         streams.sync(&mut connection);
                     },
                     StreamItem::Audio(packet) => {
@@ -741,7 +756,8 @@ async fn run_connection(
                         subscribed = None;
                         connected = false;
                         deadline = Instant::now();
-                        audio.set_capture(false).map_err(AudioFailure)?;
+                        audio.set_can_send(false);
+                        audio.set_silent(true);
                         audio.clear_playback();
                         server_usage = None;
                         pending_info = None;
@@ -824,26 +840,32 @@ async fn run_connection(
                 Step::Network(Some(Err(error))) => return Err(connection_error(error)).context("TeamSpeak connection failed"),
                 Step::Network(None) => bail!("The server closed the connection."),
                 Step::Media(generation, event) => streams.media_event(&mut connection, generation, event),
+                Step::Voice(None) => {}
+                Step::Voice(Some(voice)) => {
+                    let can_send = connected && controls.capture_allowed() && connection.can_send_audio() && audio.is_active();
+                    // Empty packets end an utterance when push-to-talk or voice activation closes.
+                    if voice.data.is_empty() {
+                        if connected {
+                            connection.send_audio(OutAudio::new(&AudioData::C2S { id: 0, codec: voice.codec, data: &voice.data }))?;
+                        }
+                    } else if can_send {
+                        if audio.level().sqrt() > crate::audio::SPEAKING_METER {
+                            speakers.packet(connection.get_state()?.own_client.0, false, Instant::now());
+                        }
+                        let _trace = profiler::scope(Category::Network, "network.send_voice");
+                        connection.send_audio(OutAudio::new(&AudioData::C2S { id: 0, codec: voice.codec, data: &voice.data }))?;
+                        sent += 1;
+                        last_voice = Some(Instant::now());
+                    }
+                },
                 Step::Tick => {
                     if events.is_closed() { break; }
                     if !connected && deadline.elapsed() > Duration::from_secs(40) { bail!("Connection timed out. Check the address, UDP port, password, and server availability."); }
                     {
-                        let can_send = connected && controls.capture_allowed() && connection.can_send_audio();
-                        let capture = ptt_gate.allows(can_send, config.ptt.load(Ordering::Acquire), Instant::now(), config.transmission);
-                        audio.set_capture(capture).map_err(AudioFailure)?;
-                        config.video_surfaces.set_audio_enabled(!controls.desired.deafened && connected);
-                        let packets = audio.tick(false, controls.desired.deafened || !connected, Some(&config.video_surfaces)).map_err(AudioFailure)?;
-                        // Empty packets end an utterance when push-to-talk or voice activation closes.
-                        if can_send && packets.iter().any(|packet| !packet.is_empty()) && audio.level().sqrt() > crate::audio::SPEAKING_METER {
-                            speakers.packet(connection.get_state()?.own_client.0, false, Instant::now());
-                        }
-                        for packet in packets {
-                            if (packet.is_empty() && connected) || (!packet.is_empty() && can_send) {
-                                let _trace = profiler::scope(Category::Network, "network.send_voice");
-                                connection.send_audio(OutAudio::new(&AudioData::C2S { id: 0, codec: audio.codec, data: &packet }))?;
-                                if !packet.is_empty() { sent += 1; last_voice = Some(Instant::now()); }
-                            }
-                        }
+                        if let Some(failure) = audio.failure() { return Err(AudioFailure(anyhow::anyhow!(failure)).into()); }
+                        let can_send = connected && controls.capture_allowed() && connection.can_send_audio() && audio.is_active();
+                        audio.set_can_send(can_send);
+                        audio.set_silent(controls.desired.deafened || !connected);
                         report_transmission(events, &mut reported_transmission, can_send && audio.transmitting());
                         let now = Instant::now();
                         speakers.report(now, |talking| events.try_send(Event::Talking(talking)).is_ok());
@@ -986,7 +1008,7 @@ async fn run_loopback(
                 if events.is_closed() { break; }
                 let capture = ptt_gate.allows(true, config.ptt.load(Ordering::Acquire), Instant::now(), config.transmission);
                 audio.set_capture(capture).map_err(AudioFailure)?;
-                audio.tick(true, false, None).map_err(AudioFailure)?;
+                audio.tick(true, |_| {}).map_err(AudioFailure)?;
                 report_transmission(events, &mut reported_transmission, audio.transmitting());
                 if last_meter.elapsed() >= Duration::from_millis(100) {
                     let _ = events.try_send(Event::Meter { level: audio.level(), sent: 0, received: 0, audio_buffer_bytes: audio.buffer_bytes() });
