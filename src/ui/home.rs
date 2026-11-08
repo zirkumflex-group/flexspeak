@@ -1,14 +1,14 @@
 //! The window shell, the saved-server home, the connected sidebar and performance mode.
 
-use rune::{Cx, El, Transition, col, el, icon, row, text};
-use rune_kit::Kit;
+use rune::{Cx, El, PointerPress, Transition, Tx, col, el, icon, row, text};
+use rune_kit::{Kit, MenuItem, context_menu};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
     Variant, body, button, card, divider, faint, heading, health_dot, icon_button, labelled, meter,
     muted, overline, pulse, scroll_page, speaking_dot,
 };
-use super::{footer, icons, members, send, statistics, streams};
+use super::{dispatch, footer, icons, members, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -119,6 +119,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
 }
 
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+    rail_menu(s, k, layer);
     if !s.loopback && s.sessions.iter().any(|session| session.connected) {
         if !s.server().connected {
             return row()
@@ -468,6 +469,12 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
         .focusable(true)
         .cursor(rune::Cursor::Pointer)
         .on_press_tx(send(Message::SwitchServer(session.id)))
+        .on_secondary_press({
+            let id = session.id;
+            move |s: &mut App, point: PointerPress, _: &mut Tx| {
+                s.ui.rail_menu = Some((id, point));
+            }
+        })
         .child(col().gap(5.0).center().child(tile).child(status));
     if active {
         entry = entry.child(
@@ -481,6 +488,31 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
 }
 
 /// The servers you're connected to, Discord-style, down the left of the window.
+/// Right-clicking a server in the rail.
+fn rail_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let Some((id, point)) = s.ui.rail_menu else {
+        return;
+    };
+    let Some(session) = s.rail_sessions().find(|session| session.id == id) else {
+        return;
+    };
+    let menu = context_menu("rail-menu", el(), Some(point))
+        .min_width(180.0)
+        .on_close(|s: &mut App| s.ui.rail_menu = None)
+        .group_label(session.title().to_owned())
+        .item(
+            MenuItem::new("Disconnect")
+                .icon(&icons::DISCONNECT)
+                .danger(true)
+                .disabled(session.stopping)
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    s.ui.rail_menu = None;
+                    dispatch(s, tx, Message::StopServer(id));
+                }),
+        );
+    let _ = menu.build(k, layer);
+}
+
 fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
     let mut tiles = col().w_full().pt(12.0).pb(12.0).gap(14.0);
     for session in s.rail_sessions() {
@@ -999,6 +1031,13 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
             el().help("Sharing a stream")
                 .label("Sharing a stream")
                 .child(icon(&icons::SCREEN_SHARE, 13.0).color(t.live)),
+        );
+    }
+    if !member.is_self && s.user_audio(&member.uid).muted {
+        entry = entry.child(
+            el().help("Muted by you")
+                .label("Muted by you")
+                .child(icon(&icons::VOLUME_OFF, 13.0).color(t.poor)),
         );
     }
     for (muted, glyph, help) in [

@@ -8,7 +8,7 @@ use std::{
     collections::HashSet,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tsclientlib::{ClientId, audio::AudioHandler};
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf};
 
-use crate::audio::{AudioEngine, DeviceChoice, PlaybackVolume};
+use crate::audio::{AudioEngine, Cue, DeviceChoice, PlaybackVolume};
 use crate::profiler::{self, Category};
 use crate::streaming::Surfaces;
 
@@ -62,6 +62,23 @@ struct Line {
     voice: mpsc::Sender<Voice>,
 }
 
+impl Line {
+    fn hear(
+        &self,
+        id: ClientId,
+        packet: InAudioBuf,
+        gain: f32,
+    ) -> Result<Option<ClientId>, tsclientlib::audio::Error> {
+        let mut incoming = self.incoming.lock().unwrap();
+        let result = incoming.handle_packet(id, packet);
+        // Set on every packet, because a pause in speech drops the queue and its volume.
+        if let Some(queue) = incoming.get_mut_queues().get_mut(&id) {
+            queue.volume = gain;
+        }
+        result
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     lines: Mutex<Vec<Arc<Line>>>,
@@ -69,7 +86,8 @@ struct Shared {
     level: AtomicU32,
     transmitting: AtomicBool,
     buffer_bytes: AtomicUsize,
-    chime: AtomicBool,
+    /// The next cue to play, as one past its place in `Cue::ALL`; zero for none.
+    cue: AtomicU8,
 }
 
 struct Device {
@@ -255,13 +273,13 @@ impl Link {
         *self.line.codec.lock().unwrap() = (codec, quality);
     }
 
-    pub fn receive(&self, packet: InAudioBuf) {
+    pub fn receive(&self, packet: InAudioBuf, gain: f32) {
         let _trace = profiler::scope(Category::AudioProcessing, "audio.receive");
         let id = match packet.data().data() {
             AudioData::S2C { from, .. } | AudioData::S2CWhisper { from, .. } => ClientId(*from),
             _ => return,
         };
-        let result = self.line.incoming.lock().unwrap().handle_packet(id, packet);
+        let result = self.line.hear(id, packet, gain);
         if let Err(error) = result {
             tracing::debug!(%error, "Dropped incoming audio packet");
         }
@@ -272,9 +290,10 @@ impl Link {
         *self.line.incoming.lock().unwrap() = AudioHandler::new();
     }
 
-    /// Plays the poke chime, whichever server was poked.
-    pub fn chime(&self) {
-        self.shared.chime.store(true, Ordering::Release);
+    /// Plays a cue on the shared device, whichever server asked for it.
+    pub fn cue(&self, cue: Cue) {
+        let place = Cue::ALL.iter().position(|known| *known == cue).unwrap_or(0);
+        self.shared.cue.store(place as u8 + 1, Ordering::Release);
     }
 
     pub fn level(&self) -> f32 {
@@ -387,8 +406,11 @@ impl Core {
         self.engine.set_capture(capture)?;
         self.surfaces
             .set_audio_enabled(active.is_some_and(|line| !line.silent.load(Ordering::Acquire)));
-        if shared.chime.swap(false, Ordering::AcqRel) {
-            self.engine.chime();
+        if let Some(cue) = (shared.cue.swap(0, Ordering::AcqRel) as usize)
+            .checked_sub(1)
+            .and_then(|place| Cue::ALL.get(place))
+        {
+            self.engine.cue(*cue);
         }
         let surfaces = self.surfaces.clone();
         let packets = self.engine.tick(false, |stereo| {
@@ -652,6 +674,26 @@ mod tests {
         rig.tick();
         assert!(rig.core.owed.is_empty());
         assert_eq!(drain(&mut a), [Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn a_persons_volume_sets_how_loud_they_are_mixed() {
+        let mut rig = rig(crate::transmission::Settings::default());
+        let (a, _voice) = rig.line(1);
+        rig.hub.set_active(Some(SessionId(1)));
+        let mut heard_at = |gain: f32| {
+            for packet in talking_packets(40) {
+                a.hear(ClientId(42), packet, gain).unwrap();
+            }
+            let heard = rig.heard(30);
+            *a.incoming.lock().unwrap() = AudioHandler::new();
+            heard
+        };
+        let full = heard_at(1.0);
+        assert!(full > 0.0);
+        assert_eq!(heard_at(0.0), 0.0, "muted for you");
+        let half = heard_at(0.5);
+        assert!(half > 0.0 && half < full, "{half} against {full}");
     }
 
     #[test]

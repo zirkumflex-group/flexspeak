@@ -178,7 +178,11 @@ fn sections(
                 "transmission",
                 "Voice Transmission",
                 "audio talk send",
-                transmission_rows(s, t, k, layer),
+                {
+                    let mut rows = transmission_rows(s, t, k, layer);
+                    rows.push(sound_cues_row(s, t, k));
+                    rows
+                },
             )
             .note(group_note(
                 t,
@@ -951,7 +955,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
         .map(|name| name.title())
         .collect::<Vec<_>>()
         .join(" ");
-    vec![
+    let mut sections = vec![
         Section::open(
             "scheme",
             "Color Scheme",
@@ -995,17 +999,52 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             )],
         ),
         more_themes(s, t),
-    ]
+    ];
+    if let Some(current) = &s.omarchy {
+        sections.insert(0, omarchy_section(s, t, k, &current.name));
+    }
+    sections
+}
+
+/// Only on an Omarchy desktop, where the app follows the desktop's theme unless told not to.
+fn omarchy_section(s: &App, t: &Theme, k: &Kit, name: &str) -> Section {
+    let following = !s.appearance.ignore_omarchy;
+    let detail = if following {
+        format!("Using {name}. Turn this off to choose a theme below.")
+    } else {
+        "Using the theme chosen below.".to_owned()
+    };
+    Section::boxed(
+        "omarchy",
+        "Omarchy",
+        "omarchy desktop follow match theme",
+        vec![item(
+            "match omarchy theme",
+            form_row(
+                t,
+                "Match Omarchy theme",
+                Some(&detail),
+                switch(
+                    "follow-omarchy",
+                    "Match Omarchy theme",
+                    following,
+                    true,
+                    k,
+                    |s, on| {
+                        Message::Appearance(Appearance {
+                            ignore_omarchy: !on,
+                            ..s.appearance.clone()
+                        })
+                    },
+                ),
+            ),
+        )],
+    )
 }
 
 /// The bundled collections and the user's own themes, one group each.
 fn more_themes(s: &App, t: &Theme) -> Section {
     let groups = s.theme_library.collections();
-    let terms: String = groups
-        .iter()
-        .flat_map(|(_, themes)| themes.iter().map(|theme| theme.label.as_str()))
-        .collect::<Vec<_>>()
-        .join(" ");
     let rows = groups
         .iter()
         .map(|(name, themes)| {
@@ -1015,10 +1054,25 @@ fn more_themes(s: &App, t: &Theme) -> Section {
                 .flex_wrap()
                 .children(themes.iter().map(|theme| extra_card(s, t, theme)))
                 // Empty cells keep a short last row's cards the width of the others.
-                .child(theme_cell().key("spacer-1").py(0.0).h(0.0).a11y_hidden())
-                .child(theme_cell().key("spacer-2").py(0.0).h(0.0).a11y_hidden());
+                .child(
+                    theme_cell()
+                        .key("spacer-1")
+                        .px(10.0)
+                        .py(0.0)
+                        .h(0.0)
+                        .a11y_hidden(),
+                )
+                .child(
+                    theme_cell()
+                        .key("spacer-2")
+                        .px(10.0)
+                        .py(0.0)
+                        .h(0.0)
+                        .a11y_hidden(),
+                );
+            let labels: Vec<&str> = themes.iter().map(|theme| theme.label.as_str()).collect();
             item(
-                format!("{name} {terms}"),
+                format!("{name} {}", labels.join(" ")),
                 col()
                     .key(format!("collection-{name}"))
                     .w_full()
@@ -1028,10 +1082,27 @@ fn more_themes(s: &App, t: &Theme) -> Section {
             )
         })
         .collect();
-    let mut note = col().w_full().gap(4.0).child(group_note(
-        t,
-        "Add your own under custom_themes in the settings file, in T3 Code's theme format, then press Reload on the Settings File page.",
-    ));
+    let mut note = col().w_full().gap(4.0).child(
+        row()
+            .w_full()
+            .gap(12.0)
+            .center_y()
+            .child(
+                col().grow(1.0).min_w(0.0).px(2.0).child(
+                    super::widgets::faint(t, "Add your own under custom_themes in settings.json, in T3 Code's theme format, then press Reload on the Settings File page.").wrap().w_full(),
+                ),
+            )
+            .child(button(
+                t,
+                "open-settings-folder",
+                "Open Folder",
+                Some(&icons::FOLDER_OPEN),
+                Variant::Secondary,
+                s.settings_path
+                    .as_ref()
+                    .map(|_| Message::OpenSettingsFolder),
+            )),
+    );
     for problem in &s.theme_library.problems {
         note = note.child(super::widgets::error_text(t, format!("Skipped {problem}")));
     }
@@ -1059,12 +1130,24 @@ fn extra_card(s: &App, t: &Theme, theme: &crate::themes::Extra) -> El {
         .border(1.0, t.hairline)
         .child(
             row().w_full().gap(10.0).center_y().child(swatches).child(
-                text(theme.label.clone())
-                    .font(ty::BODY_STRONG)
-                    .color(t.text)
-                    .truncate_fade()
+                col()
                     .grow(1.0)
-                    .min_w(0.0),
+                    .min_w(0.0)
+                    .gap(1.0)
+                    .child(
+                        text(theme.label.clone())
+                            .font(ty::BODY_STRONG)
+                            .color(t.text)
+                            .truncate_fade(),
+                    )
+                    .child(super::widgets::faint(
+                        t,
+                        match (theme.light.is_some(), theme.dark.is_some()) {
+                            (true, true) => "Light and dark",
+                            (true, false) => "Light",
+                            _ => "Dark",
+                        },
+                    )),
             ),
         )
 }
@@ -1530,6 +1613,25 @@ fn processing_with(s: &App, change: impl FnOnce(&mut audio_processing::Settings)
     let mut next = s.audio_processing;
     change(&mut next);
     Message::AudioProcessing(next)
+}
+
+fn sound_cues_row(s: &App, t: &Theme, k: &Kit) -> Row {
+    item(
+        "sound cues mute deafen beep notification",
+        form_row(
+            t,
+            "Sound cues",
+            Some("Plays a short sound when you mute, unmute, deafen or undeafen."),
+            switch(
+                "sound-cues",
+                "Sound cues",
+                s.sound_cues,
+                true,
+                k,
+                |_, on| Message::SoundCues(on),
+            ),
+        ),
+    )
 }
 
 fn typing_row(s: &App, t: &Theme, k: &Kit) -> Row {

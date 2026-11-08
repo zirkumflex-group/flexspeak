@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -29,9 +29,18 @@ use tsclientlib::{
     events::{Event as BookEvent, PropertyId},
     prelude::*,
 };
-use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
+use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio};
+
+/// How loud to play each person, by identity. Anyone absent plays at full volume.
+pub type UserGains = Arc<Mutex<HashMap<String, f32>>>;
+
+/// A TeamSpeak identity as text, for settings and lookups.
+pub fn uid_key(uid: &[u8]) -> String {
+    uid.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 pub struct Config {
+    pub user_gains: UserGains,
     pub id: SessionId,
     pub hub: Arc<AudioHub>,
     pub channel_health_visible: Arc<AtomicBool>,
@@ -53,6 +62,8 @@ pub struct Config {
 #[derive(Debug)]
 pub enum Command {
     Stop,
+    /// Plays a short sound on the shared audio device.
+    Cue(crate::audio::Cue),
     Mute(bool),
     Deafen(bool),
     Join(u64, String),
@@ -87,6 +98,8 @@ impl JoinAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub id: u16,
+    /// Their identity as text; empty until the server has sent it.
+    pub uid: String,
     pub name: String,
     pub is_self: bool,
     pub mic_muted: bool,
@@ -299,6 +312,31 @@ impl Speakers {
     }
 }
 
+/// How loud the sender of this packet should play.
+fn sender_gain(connection: &Connection, gains: &UserGains, packet: &InAudioBuf) -> f32 {
+    let gains = gains.lock().unwrap();
+    if gains.is_empty() {
+        return 1.0;
+    }
+    let (AudioData::S2C { from, .. } | AudioData::S2CWhisper { from, .. }) = packet.data().data()
+    else {
+        return 1.0;
+    };
+    connection
+        .get_state()
+        .ok()
+        .and_then(|state| {
+            state
+                .clients
+                .get(&ClientId(*from))?
+                .uid
+                .as_ref()
+                .map(|uid| uid_key(&uid.0))
+        })
+        .and_then(|key| gains.get(&key).copied())
+        .unwrap_or(1.0)
+}
+
 fn snapshot(connection: &Connection) -> Result<Snapshot> {
     let state = connection.get_state()?;
     let current_id = state
@@ -309,6 +347,10 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
     for client in state.clients.values() {
         members.entry(client.channel.0).or_default().push(Member {
             id: client.id.0,
+            uid: client
+                .uid
+                .as_ref()
+                .map_or_else(String::new, |uid| uid_key(&uid.0)),
             name: client.name.clone(),
             is_self: client.id == state.own_client,
             mic_muted: client.input_muted || client.output_muted || !client.input_hardware_enabled,
@@ -611,6 +653,7 @@ async fn run_connection(
                     if !connected { continue; }
                     let state = connection.get_state()?;
                     match command {
+                        Command::Cue(cue) => audio.cue(cue),
                         Command::Mute(value) => {
                             controls.desired.muted = value;
                             if value { audio.set_can_send(false); }
@@ -723,7 +766,7 @@ async fn run_connection(
                             if let BookEvent::Message { target: tsclientlib::MessageTarget::Poke(_), invoker, message } = change {
                                 let clean = |text: &str, limit: usize| text.chars().filter(|c| !c.is_control()).take(limit).collect::<String>();
                                 let _ = events.try_send(Event::Poked { from: clean(&invoker.name, 64), message: clean(message, 200) });
-                                audio.chime();
+                                audio.cue(crate::audio::Cue::Poke);
                                 continue;
                             }
                             if let BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }
@@ -745,7 +788,10 @@ async fn run_connection(
                         if let AudioData::S2C { from, data, .. } | AudioData::S2CWhisper { from, data, .. } = packet.data().data() {
                             speakers.packet(*from, data.is_empty(), Instant::now());
                         }
-                        if !controls.desired.deafened && connection.can_receive_audio() { audio.receive(packet); }
+                        if !controls.desired.deafened && connection.can_receive_audio() {
+                            let gain = sender_gain(&connection, &config.user_gains, &packet);
+                            audio.receive(packet, gain);
+                        }
                     },
                     StreamItem::IdentityLevelIncreasing(level) => { let _ = events.try_send(Event::Status(format!("Preparing server identity (security level {level})…"))); },
                     StreamItem::DisconnectedTemporarily(_) => {

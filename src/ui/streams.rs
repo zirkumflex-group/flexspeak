@@ -563,11 +563,7 @@ fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
             tx.live_only();
         })
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
-            // `d.x` is relative to the pressed stream, and moves over others change `row_origin`.
-            if d.phase == Phase::Down {
-                s.ui.tile_origin = s.ui.row_origin;
-            }
-            let at = (s.ui.tile_origin.0 + d.x, s.ui.tile_origin.1 + d.y);
+            let at = super::drag_point(s, d);
             match d.phase {
                 Phase::Down => s.ui.tile_drag = None,
                 Phase::Move => {

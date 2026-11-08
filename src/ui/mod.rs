@@ -23,7 +23,7 @@ mod widgets;
 
 use std::time::Instant;
 
-use rune::{AppSpec, Cx, El, TextEdit, Tx, Waker, col, el};
+use rune::{AppSpec, Cx, Drag, El, Phase, TextEdit, Tx, Waker, col, el};
 use tokio::sync::mpsc;
 
 use crate::{App, Message, Tab, client, shortcuts, usage};
@@ -113,8 +113,16 @@ pub struct TileDrag {
     pub target: Option<String>,
 }
 
+/// Who the volume dialog is adjusting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserVolumeTarget {
+    pub uid: String,
+    pub name: String,
+}
+
 /// Interface-only state: field editors and the open picker.
 pub struct UiState {
+    pub user_volume: Option<UserVolumeTarget>,
     /// The rail's + is open, listing saved servers to connect to.
     pub server_picker: bool,
     pub address: TextEdit,
@@ -131,14 +139,16 @@ pub struct UiState {
     pub open: Option<&'static str>,
     /// The member a context menu is open for, and where it opened.
     pub member_menu: Option<(u16, rune::PointerPress)>,
+    /// The server in the rail a context menu is open for, and where it opened.
+    pub rail_menu: Option<(crate::hub::SessionId, rune::PointerPress)>,
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
     pub drag: Option<MemberDrag>,
     pub tile_drag: Option<TileDrag>,
     /// The pointer is over the update notice, which then lists what's new.
     pub update_hover: bool,
-    /// Where the pressed stream is in the window, for the length of a press.
-    pub tile_origin: (f32, f32),
+    /// Where the current press started, in window points.
+    pub press_point: (f32, f32),
     /// The window position of the member row or stream last under the pointer, to place drags.
     pub row_origin: (f32, f32),
 }
@@ -159,11 +169,13 @@ impl Default for UiState {
             poke_message: TextEdit::new(""),
             open: None,
             member_menu: None,
+            rail_menu: None,
             move_menu: false,
             drag: None,
             tile_drag: None,
             update_hover: false,
-            tile_origin: (0.0, 0.0),
+            user_volume: None,
+            press_point: (0.0, 0.0),
             row_origin: (0.0, 0.0),
         }
     }
@@ -281,6 +293,15 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
     }
 }
 
+/// Where the pointer is during a drag, in window points. Measured from the press, because the
+/// row under it can change or move, and moving over another row updates `row_origin`.
+pub(crate) fn drag_point(s: &mut App, d: &Drag) -> (f32, f32) {
+    if d.phase == Phase::Down {
+        s.ui.press_point = (s.ui.row_origin.0 + d.x, s.ui.row_origin.1 + d.y);
+    }
+    (s.ui.press_point.0 + d.dx, s.ui.press_point.1 + d.dy)
+}
+
 /// Delivers global shortcut presses to the UI thread.
 pub fn forward_shortcuts(
     handle: Option<rune::AppHandle<App>>,
@@ -314,6 +335,12 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
             && let Some(dark) = crate::system_appearance::is_dark()
         {
             s.system_dark = dark;
+        }
+        // Kept through the moment a theme switch has the folder swapped out.
+        if let Some(current) = crate::omarchy::poll(&s.theme_library)
+            && s.omarchy.as_ref() != Some(&current)
+        {
+            s.omarchy = Some(current);
         }
         s.next_usage_tick = now + usage::REFRESH_INTERVAL;
         changed = true;
@@ -379,6 +406,11 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
 
 /// The palette for the chosen scheme and theme.
 pub fn theme(s: &App) -> Theme {
+    if !s.appearance.ignore_omarchy
+        && let Some(current) = &s.omarchy
+    {
+        return Theme::extra(&current.colors, current.dark);
+    }
     let dark = s.appearance.is_dark(s.system_dark);
     s.appearance
         .extra_theme(dark)

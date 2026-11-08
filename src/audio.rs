@@ -564,9 +564,9 @@ impl AudioEngine {
         Ok(packets)
     }
 
-    /// Plays the poke chime: two soft rising notes, about a third of a second.
-    pub fn chime(&mut self) {
-        self.chime = chime_samples().into();
+    /// Plays a short cue over whatever is playing.
+    pub fn cue(&mut self, cue: Cue) {
+        self.chime = cue_samples(cue).into();
     }
 
     pub fn level(&self) -> f32 {
@@ -737,19 +737,52 @@ fn soft_limit(sample: f32) -> f32 {
     sample.signum() * (KNEE + room * ((level - KNEE) / room).tanh())
 }
 
-/// Two sine notes a fifth apart (A5 then E6), each with a quick attack and a soft decay.
-fn chime_samples() -> Vec<f32> {
-    let note = |frequency: f32, length: usize| {
-        (0..length).map(move |i| {
-            let t = i as f32 / RATE as f32;
-            let attack = (i as f32 / (RATE as f32 * 0.005)).min(1.0);
-            let decay = (-t * 9.0).exp();
-            (std::f32::consts::TAU * frequency * t).sin() * attack * decay * 0.28
+/// A short sound the app plays itself. Rising means on and falling means off; the microphone's
+/// notes sit higher than the headphones'.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cue {
+    Poke,
+    MicOff,
+    MicOn,
+    SoundOff,
+    SoundOn,
+}
+
+impl Cue {
+    pub const ALL: [Self; 5] = [
+        Self::Poke,
+        Self::MicOff,
+        Self::MicOn,
+        Self::SoundOff,
+        Self::SoundOn,
+    ];
+}
+
+/// Sine notes, each with a quick attack and a soft decay.
+fn tones(notes: &[(f32, usize)], gain: f32) -> Vec<f32> {
+    notes
+        .iter()
+        .flat_map(|&(frequency, length)| {
+            (0..length).map(move |i| {
+                let t = i as f32 / RATE as f32;
+                let attack = (i as f32 / (RATE as f32 * 0.005)).min(1.0);
+                let decay = (-t * 9.0).exp();
+                (std::f32::consts::TAU * frequency * t).sin() * attack * decay * gain
+            })
         })
-    };
-    note(880.0, RATE * 3 / 20)
-        .chain(note(1318.5, RATE / 5))
         .collect()
+}
+
+fn cue_samples(cue: Cue) -> Vec<f32> {
+    let step = RATE * 9 / 100;
+    match cue {
+        // A5 then E6.
+        Cue::Poke => tones(&[(880.0, RATE * 3 / 20), (1318.5, RATE / 5)], 0.28),
+        Cue::MicOff => tones(&[(659.3, step), (440.0, step)], 0.2),
+        Cue::MicOn => tones(&[(440.0, step), (659.3, step)], 0.2),
+        Cue::SoundOff => tones(&[(392.0, step), (261.6, step)], 0.2),
+        Cue::SoundOn => tones(&[(261.6, step), (392.0, step)], 0.2),
+    }
 }
 
 pub(crate) fn report_stream_error(error: cpal::Error, errors: &ArrayQueue<String>) {
@@ -938,8 +971,21 @@ mod tests {
     }
 
     #[test]
+    fn mute_and_deafen_cues_are_short_quiet_and_all_different() {
+        let cues = [Cue::MicOff, Cue::MicOn, Cue::SoundOff, Cue::SoundOn].map(cue_samples);
+        for cue in &cues {
+            assert!(cue.len() < RATE / 4, "brief enough to repeat quickly");
+            assert!(cue.iter().all(|sample| sample.abs() <= 0.2));
+            assert!(cue.iter().any(|sample| sample.abs() > 0.08));
+        }
+        for (index, cue) in cues.iter().enumerate() {
+            assert!(cues[index + 1..].iter().all(|other| other != cue));
+        }
+    }
+
+    #[test]
     fn the_poke_chime_is_short_quiet_and_fades_out() {
-        let chime = chime_samples();
+        let chime = cue_samples(Cue::Poke);
         assert_eq!(chime.len(), RATE * 7 / 20);
         assert!(chime.iter().all(|sample| sample.abs() <= 0.28));
         assert!(chime.iter().any(|sample| sample.abs() > 0.1));
