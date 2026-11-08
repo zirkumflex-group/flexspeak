@@ -37,6 +37,7 @@ fn reading(
     label: &str,
     value: String,
     health: usage::Health,
+    help: String,
 ) -> El {
     // Plain tabular figures: readings change every second, and an animated roll would turn
     // each tick into half a second of full-window frames.
@@ -44,6 +45,7 @@ fn reading(
     row()
         .gap(8.0)
         .center_y()
+        .help(help)
         .label(format!("{label} {value}"))
         .child(
             icon(glyph, 14.0)
@@ -66,6 +68,8 @@ fn reading(
 
 struct Resources {
     cpu: (String, usage::Health),
+    /// The CPU figure is a share of one core; the tooltip adds the whole machine's share.
+    cpu_help: String,
     ram: (String, usage::Health),
 }
 
@@ -79,6 +83,7 @@ fn resources(s: &App) -> Resources {
             ),
             usage::cpu_health(usage.cpu_percent),
         ),
+        cpu_help: usage::cpu_detail(usage.cpu_percent),
         ram: (
             usage::format_mib(usage.memory_bytes),
             usage::memory_health(usage.memory_bytes),
@@ -92,24 +97,37 @@ fn readings(s: &App, t: &Theme) -> El {
         .gap(16.0)
         .center_y()
         .flex_wrap()
-        .child(reading(t, &icons::CPU, "CPU", r.cpu.0, r.cpu.1))
-        .child(reading(t, &icons::MEMORY, "RAM", r.ram.0, r.ram.1))
+        .child(reading(t, &icons::CPU, "CPU", r.cpu.0, r.cpu.1, r.cpu_help))
+        .child(reading(
+            t,
+            &icons::MEMORY,
+            "RAM",
+            r.ram.0.clone(),
+            r.ram.1,
+            format!("RAM {}", r.ram.0),
+        ))
 }
 
 /// The hidden footer's resources: icons only, coloured by load, the figure in the tooltip.
 fn resource_icons(s: &App, t: &Theme) -> El {
     let r = resources(s);
     let mut icons_row = row().key("resource-icons").gap(2.0).center_y();
-    for (key, glyph, label, (value, health)) in [
-        ("cpu", &icons::CPU, "CPU", r.cpu),
-        ("ram", &icons::MEMORY, "RAM", r.ram),
+    for (key, glyph, label, (value, health), help) in [
+        ("cpu", &icons::CPU, "CPU", r.cpu, r.cpu_help),
+        (
+            "ram",
+            &icons::MEMORY,
+            "RAM",
+            r.ram.clone(),
+            format!("RAM {}", r.ram.0),
+        ),
     ] {
         icons_row = icons_row.child(
             el().key(key)
                 .size(22.0, 22.0)
                 .center()
                 .radius(6.0)
-                .help(format!("{label} {value}"))
+                .help(help)
                 .label(format!("{label} {value}"))
                 .child(
                     icon(glyph, 14.0)

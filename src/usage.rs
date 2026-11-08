@@ -62,6 +62,21 @@ pub fn format_cpu_percent(value: f64) -> String {
     format!("{}%", value.trim_end_matches('0').trim_end_matches('.'))
 }
 
+/// `percent` of one core, and the same load as a share of the whole machine, as Task Manager
+/// and Activity Monitor's CPU totals show it.
+pub fn cpu_detail(percent: Option<f32>) -> String {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let cores = *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    match percent {
+        None => "CPU · measuring".into(),
+        Some(value) => format!(
+            "{} of one core · {} of all {cores} cores",
+            format_cpu_percent(f64::from(value)),
+            format_cpu_percent(f64::from(value) / cores as f64),
+        ),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn memory_detail_bytes() -> Option<u64> {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v0>::zeroed();
