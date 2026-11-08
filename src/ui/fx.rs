@@ -108,6 +108,7 @@ fn prepared_renderer(
 
 #[derive(Default)]
 pub struct Effects {
+    videos: super::video::Videos,
     renderer: Option<(DeviceKey, FxRenderer)>,
     /// The renderer being prepared off the UI thread, once the first frame has started it.
     warming: Option<(DeviceKey, JoinHandle<FxRenderer>)>,
@@ -124,6 +125,7 @@ impl Compositor<App> for Effects {
     fn render(&mut self, f: &mut Frame<'_, App>) {
         // The first frame built the frosted backdrop's pipelines; the next can drop the speck.
         f.rt.state.ui.warm_blur = false;
+        let video_visible = self.videos.prepare(f);
         let key = f.device_key();
         if !std::mem::replace(&mut self.warming_started, true) {
             let (device, queue) = (f.device.clone(), f.queue.clone());
@@ -160,7 +162,7 @@ impl Compositor<App> for Effects {
             );
         }
         self.moving = layers.iter().any(FxLayer::is_animating);
-        if layers.is_empty() {
+        if layers.is_empty() && !video_visible {
             f.draw_ui();
             return;
         }
@@ -196,7 +198,10 @@ impl Compositor<App> for Effects {
             f.encoder,
             f.target,
             clear,
-            &mut |phase, site: &EffectSite<'_>| {
+            &mut |mut phase, site: &EffectSite<'_>| {
+                if let EffectPhase::Draw(pass) = &mut phase {
+                    self.videos.draw(device, pass, site);
+                }
                 let Some(k) = at.iter().position(|n| *n == site.index) else {
                     return;
                 };

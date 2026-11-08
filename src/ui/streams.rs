@@ -726,13 +726,9 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
         .center();
     video = match &watch.frame {
         Some(frame) => video.child(
-            el().w_full()
-                .h_full()
-                .pixels_fit(
-                    s.server().streaming.surfaces.get(watch.slot).pixels(),
-                    SurfaceFit::Fit,
-                )
-                .rotate(frame.rotation),
+            super::video::picture(watch.slot, frame.rotation)
+                .w_full()
+                .h_full(),
         ),
         None => video.child(
             col().gap(10.0).center().child(pulse(t.accent)).child(
