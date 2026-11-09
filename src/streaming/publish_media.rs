@@ -600,9 +600,11 @@ mod native {
             let _ = pc.add_ice_candidate(candidate).await;
         }
     }
-    /// Offered video codecs, most preferred first. AV1 leads only when a hardware encoder
-    /// (NVENC) offers it: the build leaves libaom's software AV1 encoder out, because it is
-    /// slower than VP8. VP8 always follows, for viewers that cannot decode AV1.
+    /// Offered video codecs, most preferred first. On Windows, AV1 leads only when a hardware
+    /// encoder (NVENC) offers it: the build leaves libaom's software AV1 encoder out, because
+    /// it is slower than VP8. macOS's VideoToolbox factory can still list a software AV1
+    /// encoder, so there AV1 is not offered at all. VP8 always follows, for viewers that
+    /// cannot decode AV1.
     fn video_codecs(factory: &PeerConnectionFactory) -> Vec<RtpCodecCapability> {
         let codecs = factory.get_rtp_sender_capabilities(MediaType::Video).codecs;
         let named = |name: &'static str| {
@@ -611,7 +613,10 @@ mod native {
                 .filter(move |c| c.mime_type.eq_ignore_ascii_case(name))
                 .cloned()
         };
-        named("video/AV1").chain(named("video/VP8")).collect()
+        named("video/AV1")
+            .filter(|_| cfg!(target_os = "windows"))
+            .chain(named("video/VP8"))
+            .collect()
     }
     #[allow(clippy::too_many_arguments)]
     async fn add_peer(
