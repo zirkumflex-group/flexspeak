@@ -806,6 +806,7 @@ enum Message {
     ShareSources(Result<Vec<streaming::publishing::ShareSource>, String>),
     ShareSource(streaming::publishing::ShareSource),
     ShareAudio(bool),
+    ShareFastCapture(bool),
     ShareAudioOutput(audio::DeviceChoice),
     StartSharing,
     /// Goes live with this source straight away, publicly.
@@ -1321,12 +1322,14 @@ impl App {
             None
         };
         let quality = sharing.quality;
+        let fast_capture = sharing.fast_capture;
         if self.command(client::Command::StartSharing(
             streaming::publishing::Options {
                 source,
                 audio,
                 quality,
                 access,
+                fast_capture,
             },
         )) {
             self.server_mut().streaming.share_open = false;
@@ -1354,6 +1357,7 @@ impl App {
             } else {
                 sharing.audio
             },
+            fast_capture: sharing.fast_capture,
         };
         if next == self.share_defaults {
             return;
@@ -2585,6 +2589,11 @@ impl App {
             Message::ShareAudio(audio) => {
                 if !self.server().streaming.sharing.status.active {
                     self.server_mut().streaming.sharing.audio = audio;
+                }
+            }
+            Message::ShareFastCapture(on) => {
+                if !self.server().streaming.sharing.status.active {
+                    self.server_mut().streaming.sharing.fast_capture = on;
                 }
             }
             Message::ShareAudioOutput(device) => {

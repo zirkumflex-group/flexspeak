@@ -1529,6 +1529,28 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                     "Shares everything on this output, including notifications. Your microphone stays separate.",
                 ));
         }
+        // Experimental and Windows-only; cameras have their own capture.
+        if cfg!(windows)
+            && !sharing
+                .selected
+                .as_ref()
+                .is_some_and(|s| s.kind.is_camera())
+        {
+            body = body
+                .child(
+                    Checkbox::new(sharing.fast_capture)
+                        .label("Fast capture (experimental)")
+                        .on_toggle_tx(move |s: &mut App, tx| {
+                            let next = !s.server().streaming.sharing.fast_capture;
+                            dispatch(s, tx, Message::ShareFastCapture(next));
+                        })
+                        .build(k),
+                )
+                .child(faint(
+                    t,
+                    "Captures and resizes on the graphics card, so a busy game no longer stalls your stream or loads the CPU. Turn it off if the picture stays black or freezes.",
+                ));
+        }
         if !status.detail.is_empty() {
             body = body.child(muted(t, status.detail.clone()));
         }

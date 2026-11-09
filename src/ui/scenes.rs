@@ -94,11 +94,13 @@ pub const SCENES: &[Scene] = &[
     ("poke", poke),
     ("poked", poked),
     ("share", share),
+    ("share-fast-capture", share_fast_capture),
     ("share-quick", share_quick),
     ("share-quick-no-game", share_quick_no_game),
     ("share-quick-streams", share_quick_streams),
     ("channel-tree", channel_tree),
     ("sharing", sharing),
+    ("sharing-fast-capture", sharing_fast_capture),
     ("sharing-alone", sharing_alone),
     ("watching", watching),
     ("watching-solo", watching_solo),
@@ -1156,6 +1158,22 @@ fn share(s: &mut App) {
     connected(s);
     share_sources(s);
     s.server_mut().streaming.share_open = true;
+}
+
+/// The experimental fast capture ticked, with its explanation (Windows only).
+fn share_fast_capture(s: &mut App) {
+    share(s);
+    s.server_mut().streaming.sharing.fast_capture = true;
+}
+
+/// The open "You are sharing" dialog says that fast capture is the one running.
+fn sharing_fast_capture(s: &mut App) {
+    sharing(s);
+    let sharing = &mut s.server_mut().streaming;
+    sharing.share_open = true;
+    sharing.sharing.fast_capture = true;
+    sharing.sharing.status.detail =
+        "Public stream · viewers in your channel join automatically. Fast capture is on.".into();
 }
 
 /// Your share is the only one in the channel: the pane says so in place of its empty state.

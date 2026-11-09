@@ -1677,6 +1677,7 @@ dependencies = [
  "webrtc-sys",
  "webrtc-sys-build",
  "wgpu",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

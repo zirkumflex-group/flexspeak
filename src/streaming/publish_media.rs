@@ -25,12 +25,19 @@ pub enum Input {
 }
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub enum Output {
-    Ready,
+    /// The first frame was sent; says whether the experimental fast capture produced it.
+    Ready {
+        fast_capture: bool,
+    },
     Offer(PeerKey, String),
     Signal(PeerKey, Value),
     Connected(PeerKey),
     Left(PeerKey),
-    Stats { video: u64, audio: u64, level: f32 },
+    Stats {
+        video: u64,
+        audio: u64,
+        level: f32,
+    },
     Failed(String),
 }
 pub struct Publisher {
@@ -754,7 +761,33 @@ mod native {
         };
         let mut capture = None;
         let mut camera_capture = None;
-        if let SourceKind::Camera(id) = &options.source.kind {
+        #[cfg(target_os = "windows")]
+        let mut fast = None;
+        #[cfg(target_os = "windows")]
+        if options.fast_capture {
+            let target = match options.source.kind {
+                SourceKind::Screen(Some(id)) => Some(crate::streaming::wgc::Target::Screen(id)),
+                SourceKind::Window(id) => Some(crate::streaming::wgc::Target::Window(id)),
+                _ => None,
+            };
+            if let Some(target) = target {
+                match crate::streaming::wgc::Capture::open(target, max_size, frame_interval) {
+                    Ok(started) => fast = Some(started),
+                    Err(error) => {
+                        tracing::warn!(
+                            "Fast capture unavailable, using standard capture: {error:#}"
+                        )
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        let fast_started = fast.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let fast_started = false;
+        if fast_started {
+            // Fast capture replaces the standard capture for this share.
+        } else if let SourceKind::Camera(id) = &options.source.kind {
             tokio::select! {
                 biased;
                 _ = cancel.changed() => return Ok(()),
@@ -867,11 +900,15 @@ mod native {
                     },
                     _ = video_tick.tick() => {
                         if let Some(capture) = &mut capture { capture.capture_frame(); }
+                        #[cfg(target_os = "windows")]
+                        if let Some(fast) = &mut fast && let Some(buffer) = fast.poll()? {
+                            *latest.lock().unwrap() = Some(buffer);
+                        }
                         if let Some(buffer) = latest.lock().unwrap().take() {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             video.capture_frame(&frame); last_video = Instant::now(); frames += 1;
-                            if frames == 1 { emit(events,Output::Ready)?; }
+                            if frames == 1 { emit(events,Output::Ready { fast_capture: fast_started })?; }
                         }
                     }
                     _ = tick.tick() => {

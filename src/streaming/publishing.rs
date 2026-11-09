@@ -83,6 +83,7 @@ mod tests {
             audio: None,
             quality: Quality::default(),
             access: Access::default(),
+            fast_capture: false,
         }
     }
     fn fixture() -> (
@@ -248,7 +249,11 @@ mod tests {
     fn stopping_cancels_capture_and_late_start_is_taken_down() {
         let (mut publisher, _commands, _output) = fixture();
         publisher.id = None;
-        publisher.media_event(publish_media::Output::Ready).unwrap();
+        publisher
+            .media_event(publish_media::Output::Ready {
+                fast_capture: false,
+            })
+            .unwrap();
         let ticket = publisher.setup.unwrap();
         publisher.stop("Stopped");
         assert!(!publisher.active());
@@ -324,6 +329,7 @@ mod tests {
             quality: Preset::Sharp.quality(),
             access: Access::Public,
             audio: false,
+            fast_capture: true,
         };
         let json = serde_json::to_string(&defaults).unwrap();
         assert!(
@@ -340,6 +346,7 @@ mod tests {
         assert_eq!(ui.quality.preset(), Some(Preset::Sharp));
         assert_eq!(ui.access, Access::Public);
         assert!(!ui.audio);
+        assert!(ui.fast_capture);
 
         ui.status.active = true;
         ui.apply(ShareDefaults::default());
@@ -364,7 +371,11 @@ mod tests {
     fn unconfirmed_start_blocks_retry_and_old_timeouts_cannot_stop_new_share() {
         let (mut publisher, _commands, _output) = fixture();
         publisher.id = None;
-        publisher.media_event(publish_media::Output::Ready).unwrap();
+        publisher
+            .media_event(publish_media::Output::Ready {
+                fast_capture: false,
+            })
+            .unwrap();
         let ticket = publisher.setup.unwrap();
         // A sent command can no longer be cancelled by removing it from the queue.
         publisher.flow.borrow_mut().cancel(ticket);
@@ -403,6 +414,9 @@ pub struct Options {
     pub audio: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
+    /// Experimental: capture screens and windows on the GPU without waiting for it
+    /// (Windows only; see `streaming/wgc.rs`). Falls back to the standard capture.
+    pub fast_capture: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,6 +569,7 @@ pub struct ShareDefaults {
     pub quality: Quality,
     pub access: Access,
     pub audio: bool,
+    pub fast_capture: bool,
 }
 impl Default for ShareDefaults {
     fn default() -> Self {
@@ -562,6 +577,7 @@ impl Default for ShareDefaults {
             quality: Quality::default(),
             access: Access::default(),
             audio: true,
+            fast_capture: false,
         }
     }
 }
@@ -645,6 +661,7 @@ pub struct Ui {
     pub audio_device: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
+    pub fast_capture: bool,
     pub status: Status,
     /// One still per source chosen since the dialog opened.
     pub previews: Vec<SourcePreview>,
@@ -659,6 +676,7 @@ impl Default for Ui {
             audio_device: None,
             quality: Quality::default(),
             access: Access::default(),
+            fast_capture: false,
             status: Status::default(),
             previews: Vec::new(),
         }
@@ -672,6 +690,7 @@ impl Ui {
         }
         self.quality = defaults.quality;
         self.access = defaults.access;
+        self.fast_capture = defaults.fast_capture;
         if !self.selected.as_ref().is_some_and(|s| s.kind.is_camera()) {
             self.audio = defaults.audio;
         }
@@ -747,6 +766,8 @@ pub struct Publisher {
     own: Option<u16>,
     started: Instant,
     status: Status,
+    /// Whether the experimental fast capture is the one running, once capture started.
+    fast_capture: bool,
 }
 
 impl Publisher {
@@ -769,10 +790,22 @@ impl Publisher {
             own: None,
             started: Instant::now(),
             status: Status::default(),
+            fast_capture: false,
         }
     }
     pub fn active(&self) -> bool {
         self.worker.is_some()
+    }
+    /// Says whether the experimental fast capture that was asked for is the one running.
+    fn capture_note(&self) -> &'static str {
+        match (
+            self.options.as_ref().is_some_and(|o| o.fast_capture),
+            self.fast_capture,
+        ) {
+            (false, _) => "",
+            (true, true) => " Fast capture is on.",
+            (true, false) => " Fast capture was unavailable, so standard capture is used.",
+        }
     }
     #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
     /// Starts a stand-in share; it runs for as long as the returned value is held.
@@ -1052,7 +1085,8 @@ impl Publisher {
             } else {
                 "Private stream · approve viewers below."
             }
-            .into();
+            .to_owned()
+                + self.capture_note();
             let _ = self
                 .events
                 .try_send(client::Event::Recovered(Source::StreamPublish));
@@ -1210,7 +1244,8 @@ impl Publisher {
     }
     fn media_event(&mut self, event: publish_media::Output) -> Result<()> {
         match event {
-            publish_media::Output::Ready => {
+            publish_media::Output::Ready { fast_capture } => {
+                self.fast_capture = fast_capture;
                 let options = self
                     .options
                     .as_ref()
