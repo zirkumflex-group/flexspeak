@@ -59,6 +59,7 @@ pub const SCENES: &[Scene] = &[
     ("settings-sounds-no-teamspeak", settings_sounds_no_teamspeak),
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
+    ("settings-streaming", settings_streaming),
     ("settings-picker", settings_picker),
     ("settings-auto-connect", settings_auto_connect),
     ("server-add", server_add),
@@ -99,6 +100,11 @@ pub const SCENES: &[Scene] = &[
     ("share-quick-streams", share_quick_streams),
     ("channel-tree", channel_tree),
     ("sharing", sharing),
+    ("sharing-stream-options", sharing_stream_options),
+    (
+        "sharing-stream-options-unavailable",
+        sharing_stream_options_unavailable,
+    ),
     ("sharing-alone", sharing_alone),
     ("watching", watching),
     ("watching-solo", watching_solo),
@@ -721,6 +727,15 @@ fn settings_audio(s: &mut App) {
     settings_at(s, SettingsPage::Audio);
 }
 
+/// Settings > Streaming with both options on.
+fn settings_streaming(s: &mut App) {
+    settings_at(s, SettingsPage::Streaming);
+    s.stream_options = crate::settings::Streaming {
+        hardware_av1: true,
+        fast_capture: true,
+    };
+}
+
 /// Adding a server, from the home card's + or Settings.
 fn settings_auto_connect(s: &mut App) {
     settings_page(s);
@@ -1156,6 +1171,23 @@ fn share(s: &mut App) {
     connected(s);
     share_sources(s);
     s.server_mut().streaming.share_open = true;
+}
+
+/// The open "You are sharing" dialog says that AV1 and fast capture are both in use.
+fn sharing_stream_options(s: &mut App) {
+    sharing(s);
+    let sharing = &mut s.server_mut().streaming;
+    sharing.share_open = true;
+    sharing.sharing.status.detail =
+        "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is on. Fast capture is on.".into();
+}
+
+/// AV1 and fast capture were asked for but are unavailable: the dialog says what runs.
+fn sharing_stream_options_unavailable(s: &mut App) {
+    sharing_stream_options(s);
+    s.server_mut().streaming.sharing.status.detail =
+        "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is unavailable on this graphics card, so VP8 is used. Fast capture was unavailable, so standard capture is used."
+            .into();
 }
 
 /// Your share is the only one in the channel: the pane says so in place of its empty state.

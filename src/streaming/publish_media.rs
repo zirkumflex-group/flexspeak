@@ -25,12 +25,21 @@ pub enum Input {
 }
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub enum Output {
-    Ready,
+    /// The first frame was sent. Says whether the experimental fast capture produced it and
+    /// whether hardware AV1 is offered to viewers.
+    Ready {
+        fast_capture: bool,
+        hardware_av1: bool,
+    },
     Offer(PeerKey, String),
     Signal(PeerKey, Value),
     Connected(PeerKey),
     Left(PeerKey),
-    Stats { video: u64, audio: u64, level: f32 },
+    Stats {
+        video: u64,
+        audio: u64,
+        level: f32,
+    },
     Failed(String),
 }
 pub struct Publisher {
@@ -195,7 +204,7 @@ mod native {
             ContinualGatheringPolicy, IceServer, PeerConnectionFactory, RtcConfiguration,
             native::PeerConnectionFactoryExt,
         },
-        rtp_parameters::DegradationPreference,
+        rtp_parameters::{DegradationPreference, RtpCodecCapability},
         rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
         session_description::{SdpType, SessionDescription},
         video_frame::{I420Buffer, VideoFrame, VideoRotation},
@@ -600,6 +609,27 @@ mod native {
             let _ = pc.add_ice_candidate(candidate).await;
         }
     }
+    /// Offered video codecs, most preferred first. With `hardware_av1` (an experimental
+    /// option) on Windows, AV1 leads when a hardware encoder (NVENC) offers it: the build
+    /// leaves libaom's software AV1 encoder out, because it is slower than VP8. macOS's
+    /// VideoToolbox factory can still list a software AV1 encoder, so there AV1 is not
+    /// offered at all. VP8 always follows, for viewers that cannot decode AV1.
+    fn video_codecs(
+        factory: &PeerConnectionFactory,
+        hardware_av1: bool,
+    ) -> Vec<RtpCodecCapability> {
+        let codecs = factory.get_rtp_sender_capabilities(MediaType::Video).codecs;
+        let named = |name: &'static str| {
+            codecs
+                .iter()
+                .filter(move |c| c.mime_type.eq_ignore_ascii_case(name))
+                .cloned()
+        };
+        named("video/AV1")
+            .filter(|_| hardware_av1 && cfg!(target_os = "windows"))
+            .chain(named("video/VP8"))
+            .collect()
+    }
     #[allow(clippy::too_many_arguments)]
     async fn add_peer(
         factory: &PeerConnectionFactory,
@@ -611,6 +641,7 @@ mod native {
         events: &mpsc::Sender<Output>,
         servers: Vec<String>,
         quality: Quality,
+        codecs: &[RtpCodecCapability],
     ) -> Result<Peer> {
         let mut config = RtcConfiguration::default();
         config.continual_gathering_policy = ContinualGatheringPolicy::GatherOnce;
@@ -648,13 +679,13 @@ mod native {
         let transceiver = peer
             .pc
             .add_transceiver(MediaStreamTrack::Video(video.clone()), init())?;
-        let codecs = factory
-            .get_rtp_sender_capabilities(MediaType::Video)
-            .codecs
-            .into_iter()
-            .filter(|c| c.mime_type.eq_ignore_ascii_case("video/VP8"))
-            .collect::<Vec<_>>();
-        ensure!(!codecs.is_empty(), "The native VP8 encoder is unavailable");
+        let codecs = codecs.to_vec();
+        ensure!(
+            codecs
+                .iter()
+                .any(|c| c.mime_type.eq_ignore_ascii_case("video/VP8")),
+            "The native VP8 encoder is unavailable"
+        );
         transceiver.set_codec_preferences(codecs)?;
         peer.pc
             .add_transceiver(MediaStreamTrack::Audio(audio.clone()), init())?;
@@ -704,6 +735,10 @@ mod native {
             !options.source.kind.is_camera(),
         );
         let video_track = factory.create_video_track("shared-video", video.clone());
+        let codecs = video_codecs(&factory, options.hardware_av1);
+        let hardware_av1 = codecs
+            .first()
+            .is_some_and(|c| c.mime_type.eq_ignore_ascii_case("video/AV1"));
         // The official TS6 client silently drops an offer without an audio section, so a share
         // without system audio still negotiates this track and simply never feeds it.
         let audio = NativeAudioSource::new(AudioSourceOptions::default(), 48000, 2, 50);
@@ -736,6 +771,35 @@ mod native {
         };
         let mut capture = None;
         let mut camera_capture = None;
+        #[cfg(target_os = "windows")]
+        let mut fast = None;
+        #[cfg(target_os = "windows")]
+        if options.fast_capture {
+            let target = match options.source.kind {
+                SourceKind::Screen(Some(id)) => Some(crate::streaming::wgc::Target::Screen(id)),
+                SourceKind::Window(id) => Some(crate::streaming::wgc::Target::Window(id)),
+                _ => None,
+            };
+            if let Some(target) = target {
+                match crate::streaming::wgc::Capture::open(target, max_size, frame_interval) {
+                    Ok(started) => fast = Some(started),
+                    Err(error) => {
+                        tracing::warn!(
+                            "Fast capture unavailable, using standard capture: {error:#}"
+                        )
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        let fast_started = fast.is_some();
+        // Fast capture's newest frame. Windows sends frames only when the picture changes,
+        // but encoders expect one every tick (a viewer who joins needs one to start from),
+        // so it is sent again until a newer one arrives, as the standard capture does.
+        #[cfg(target_os = "windows")]
+        let mut fast_frame: Option<VideoFrame<I420Buffer>> = None;
+        #[cfg(not(target_os = "windows"))]
+        let fast_started = false;
         if let SourceKind::Camera(id) = &options.source.kind {
             tokio::select! {
                 biased;
@@ -746,7 +810,7 @@ mod native {
                 return Ok(());
             }
             camera_capture = Some(camera::Capture::open(id, quality, receive)?);
-        } else {
+        } else if !fast_started {
             let (window, id) = match options.source.kind {
                 SourceKind::Window(id) => (true, Some(id)),
                 SourceKind::Screen(id) => (false, id),
@@ -815,7 +879,7 @@ mod native {
                                 Input::Add(id) if !peers.contains_key(&id) => {
                                     ensure!(peers.len() < MAX_VIEWERS,"Too many viewers");
                                     let peer = add_peer(&factory,&video_track,&audio_track,id,callbacks.clone(),overflow.clone(),events,
-                                        vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()],quality).await?;
+                                        vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()],quality,&codecs).await?;
                                     peers.insert(id,peer);
                                 },
                                 Input::Remove(id) => { peers.remove(&id); },
@@ -849,11 +913,22 @@ mod native {
                     },
                     _ = video_tick.tick() => {
                         if let Some(capture) = &mut capture { capture.capture_frame(); }
+                        #[cfg(target_os = "windows")]
+                        if let Some(fast) = &mut fast {
+                            if let Some(buffer) = fast.poll()? {
+                                fast_frame = Some(VideoFrame::new(VideoRotation::VideoRotation0,buffer));
+                            }
+                            if let Some(frame) = &mut fast_frame {
+                                frame.timestamp_us = start.elapsed().as_micros() as i64;
+                                video.capture_frame(frame); last_video = Instant::now(); frames += 1;
+                                if frames == 1 { emit(events,Output::Ready { fast_capture: true, hardware_av1 })?; }
+                            }
+                        }
                         if let Some(buffer) = latest.lock().unwrap().take() {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             video.capture_frame(&frame); last_video = Instant::now(); frames += 1;
-                            if frames == 1 { emit(events,Output::Ready)?; }
+                            if frames == 1 { emit(events,Output::Ready { fast_capture: fast_started, hardware_av1 })?; }
                         }
                     }
                     _ = tick.tick() => {
@@ -948,6 +1023,36 @@ mod native {
             assert_eq!(saver.map(|b| (b.width(), b.height())).unwrap(), (852, 480));
         }
 
+        /// The codec name of the first payload type on the SDP's video line.
+        fn first_video_codec(sdp: &str) -> Option<String> {
+            let payload = sdp
+                .lines()
+                .find(|l| l.starts_with("m=video"))?
+                .split(' ')
+                .nth(3)?;
+            let prefix = format!("a=rtpmap:{payload} ");
+            let rtpmap = sdp.lines().find_map(|l| l.strip_prefix(prefix.as_str()))?;
+            Some(rtpmap.split('/').next()?.to_owned())
+        }
+
+        #[test]
+        fn first_video_codec_reads_the_preferred_payload() {
+            let sdp = "v=0
+m=audio 9 UDP/TLS/RTP/SAVPF 111
+m=video 9 UDP/TLS/RTP/SAVPF 45 96
+a=rtpmap:96 VP8/90000
+a=rtpmap:45 AV1/90000
+";
+            assert_eq!(first_video_codec(sdp).as_deref(), Some("AV1"));
+            assert_eq!(
+                first_video_codec(
+                    "v=0
+"
+                ),
+                None
+            );
+        }
+
         #[tokio::test]
         #[ignore = "Native codec/UDP integration; generated pixels and audio only, no capture or server"]
         async fn publisher_sends_generated_video_and_stereo_audio() -> Result<()> {
@@ -980,6 +1085,7 @@ mod native {
                 &events,
                 vec![],
                 Quality::default(),
+                &video_codecs(&factory, true),
             )
             .await?;
             let Some(Output::Offer(_, sdp)) = output.recv().await else {
@@ -993,6 +1099,21 @@ mod native {
             let generation = surface.begin();
             let mut receiver =
                 rtc::start_with_servers(sdp, vec![], generation, surface.clone(), vec![])?;
+            ensure!(
+                video_codecs(&factory, false)
+                    .iter()
+                    .all(|c| c.mime_type.eq_ignore_ascii_case("video/VP8")),
+                "Without the hardware AV1 option only VP8 may be offered"
+            );
+            let expected = if video_codecs(&factory, true)[0]
+                .mime_type
+                .eq_ignore_ascii_case("video/AV1")
+            {
+                "AV1"
+            } else {
+                "VP8"
+            };
+            let mut negotiated = None;
             let mut answered = false;
             let mut pending = Vec::new();
             let mut decoded_video = 0;
@@ -1014,6 +1135,7 @@ mod native {
                             Some(rtc::Output::Signal(value)) if value["cmd"] == "answer" => {
                                 let sdp = value["args"]["answer"].as_str().context("Missing answer")?;
                                 ensure!(!sdp.contains("a=sendrecv") && !sdp.contains("a=sendonly"),"Receiver must not send media");
+                                negotiated = first_video_codec(sdp);
                                 sender.pc.set_remote_description(SessionDescription::parse(sdp,SdpType::Answer)?).await?;
                                 answered = true;
                                 for candidate in pending.drain(..) { add_candidate(&sender.pc,candidate).await; }
@@ -1052,8 +1174,12 @@ mod native {
                 !factory.adm_recording_enabled(),
                 "The publishing test must never enable microphone capture"
             );
+            ensure!(
+                negotiated.as_deref() == Some(expected),
+                "Expected {expected} video, negotiated {negotiated:?}"
+            );
             println!(
-                "Publisher proof: {decoded_video} decoded video frames, {} distinct levels, {decoded_audio} stereo audio blocks, peak {peak}; no capture devices or server",
+                "Publisher proof: {expected} video, {decoded_video} decoded video frames, {} distinct levels, {decoded_audio} stereo audio blocks, peak {peak}; no capture devices or server",
                 distinct.len()
             );
             video_track.set_enabled(false);

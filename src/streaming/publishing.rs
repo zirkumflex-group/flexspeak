@@ -83,6 +83,8 @@ mod tests {
             audio: None,
             quality: Quality::default(),
             access: Access::default(),
+            fast_capture: false,
+            hardware_av1: false,
         }
     }
     fn fixture() -> (
@@ -248,7 +250,12 @@ mod tests {
     fn stopping_cancels_capture_and_late_start_is_taken_down() {
         let (mut publisher, _commands, _output) = fixture();
         publisher.id = None;
-        publisher.media_event(publish_media::Output::Ready).unwrap();
+        publisher
+            .media_event(publish_media::Output::Ready {
+                fast_capture: false,
+                hardware_av1: false,
+            })
+            .unwrap();
         let ticket = publisher.setup.unwrap();
         publisher.stop("Stopped");
         assert!(!publisher.active());
@@ -364,7 +371,12 @@ mod tests {
     fn unconfirmed_start_blocks_retry_and_old_timeouts_cannot_stop_new_share() {
         let (mut publisher, _commands, _output) = fixture();
         publisher.id = None;
-        publisher.media_event(publish_media::Output::Ready).unwrap();
+        publisher
+            .media_event(publish_media::Output::Ready {
+                fast_capture: false,
+                hardware_av1: false,
+            })
+            .unwrap();
         let ticket = publisher.setup.unwrap();
         // A sent command can no longer be cancelled by removing it from the queue.
         publisher.flow.borrow_mut().cancel(ticket);
@@ -403,6 +415,12 @@ pub struct Options {
     pub audio: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
+    /// Settings > Streaming, experimental: capture screens and windows on the GPU without
+    /// waiting for it (Windows only; see `streaming/wgc.rs`). Falls back to the standard capture.
+    pub fast_capture: bool,
+    /// Settings > Streaming: offer AV1 from the NVIDIA hardware encoder before VP8 (Windows,
+    /// RTX 40 series and newer). Without such a GPU, VP8 is used as before.
+    pub hardware_av1: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -747,6 +765,10 @@ pub struct Publisher {
     own: Option<u16>,
     started: Instant,
     status: Status,
+    /// Whether the experimental fast capture is the one running, once capture started.
+    fast_capture: bool,
+    /// Whether hardware AV1 is offered to viewers, once capture started.
+    hardware_av1: bool,
 }
 
 impl Publisher {
@@ -769,10 +791,29 @@ impl Publisher {
             own: None,
             started: Instant::now(),
             status: Status::default(),
+            fast_capture: false,
+            hardware_av1: false,
         }
     }
     pub fn active(&self) -> bool {
         self.worker.is_some()
+    }
+    /// Says whether the experimental options that were asked for are the ones running.
+    fn experimental_note(&self) -> String {
+        let asked = |f: fn(&Options) -> bool| self.options.as_ref().is_some_and(f);
+        let av1 = match (asked(|o| o.hardware_av1), self.hardware_av1) {
+            (false, _) => "",
+            (true, true) => " Hardware AV1 encoding is on.",
+            (true, false) => {
+                " Hardware AV1 encoding is unavailable on this graphics card, so VP8 is used."
+            }
+        };
+        let capture = match (asked(|o| o.fast_capture), self.fast_capture) {
+            (false, _) => "",
+            (true, true) => " Fast capture is on.",
+            (true, false) => " Fast capture was unavailable, so standard capture is used.",
+        };
+        format!("{av1}{capture}")
     }
     #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
     /// Starts a stand-in share; it runs for as long as the returned value is held.
@@ -1052,7 +1093,8 @@ impl Publisher {
             } else {
                 "Private stream · approve viewers below."
             }
-            .into();
+            .to_owned()
+                + &self.experimental_note();
             let _ = self
                 .events
                 .try_send(client::Event::Recovered(Source::StreamPublish));
@@ -1210,7 +1252,12 @@ impl Publisher {
     }
     fn media_event(&mut self, event: publish_media::Output) -> Result<()> {
         match event {
-            publish_media::Output::Ready => {
+            publish_media::Output::Ready {
+                fast_capture,
+                hardware_av1,
+            } => {
+                self.fast_capture = fast_capture;
+                self.hardware_av1 = hardware_av1;
                 let options = self
                     .options
                     .as_ref()

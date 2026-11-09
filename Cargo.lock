@@ -1674,8 +1674,10 @@ dependencies = [
  "tray-icon",
  "tsclientlib",
  "tsproto-packets",
+ "webrtc-sys",
  "webrtc-sys-build",
  "wgpu",
+ "windows",
  "windows-sys 0.61.2",
 ]
 
@@ -6426,8 +6428,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.51"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efdd060d83386bcfee760513166d3b717a9e127c6d1d9c1b29bcad3229a76f22"
+source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=6469898101c8cfa7fdda0215246eba52bc46778a#6469898101c8cfa7fdda0215246eba52bc46778a"
 dependencies = [
  "cc",
  "cxx",
@@ -6441,8 +6442,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys-build"
 version = "0.3.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d67326bcdd69af2a902c37d2f19101eaf4298fc81b699b89a2017a9a0c46267"
+source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=6469898101c8cfa7fdda0215246eba52bc46778a#6469898101c8cfa7fdda0215246eba52bc46778a"
 dependencies = [
  "anyhow",
  "fs2",

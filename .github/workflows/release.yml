@@ -61,13 +61,16 @@ jobs:
           workspaces: ${{ env.DEV_DRIVE_WORKSPACE || '.' }}
           # A Mac cache from another image holds that image's Xcode paths and won't link.
           shared-key: release-${{ matrix.platform }}${{ runner.os == 'macOS' && '-26' || '' }}
+          # Only main's caches help later releases; a branch's would only spend the quota.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # rust-cache prunes unknown directories under target/, so Opus lives (and is cached) elsewhere.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/opus
             !${{ runner.temp }}/opus/build
-          key: opus-${{ matrix.platform }}-${{ hashFiles('scripts/release.py') }}
+          # The build's own stamp also catches changed CMake options.
+          key: opus-${{ matrix.platform }}-${{ hashFiles('scripts/opus.json') }}
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libxkbcommon-dev libwayland-dev desktop-file-utils
@@ -75,12 +78,32 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           python3 -m venv "$RUNNER_TEMP/dmg-tools"
-          "$RUNNER_TEMP/dmg-tools/bin/pip" install dmgbuild==1.6.7
+          "$RUNNER_TEMP/dmg-tools/bin/pip" install --require-hashes -r scripts/dmg-requirements.txt
           echo "FLEXSPEAK_DMGBUILD=$RUNNER_TEMP/dmg-tools/bin/dmgbuild" >> "$GITHUB_ENV"
+      # Everything Cargo needs for this platform, before the build: release.py runs
+      # `cargo metadata` and `cargo build` side by side, and a fetch in either would hold
+      # Cargo's package lock. Through the git CLI, which shows progress and gives up on a
+      # stalled transfer or a credential prompt (Cargo's built-in git hung on macOS). These
+      # variables stay on this step: rust-cache keys on Cargo's environment.
+      - name: Fetch Rust dependencies
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
+        timeout-minutes: 10
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          GIT_TERMINAL_PROMPT: '0'
+          GCM_INTERACTIVE: never
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+        run: python scripts/release.py fetch
       - name: Build and package
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         env:
           FLEXSPEAK_OPUS_DIR: ${{ runner.temp }}/opus
+          # Nothing may reach the network after the fetch (build scripts' own downloads,
+          # such as the prebuilt libwebrtc, are not Cargo's and still work).
+          CARGO_NET_OFFLINE: 'true'
+          # The runner image's Python, whatever its version, reads and writes UTF-8.
+          PYTHONUTF8: '1'
         run: python scripts/release.py build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -92,6 +115,10 @@ jobs:
 
   publish:
     needs: [checks, build]
+    # Only main publishes. The `release` environment admits main alone, and holds the tap's
+    # deploy key, so a workflow edited on a branch can neither publish nor read the key.
+    if: github.ref == 'refs/heads/main'
+    environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -129,16 +156,25 @@ jobs:
               --title "Flexspeak ${version} — build ${GITHUB_RUN_NUMBER}" \
               --notes-file "$RUNNER_TEMP/notes.md"
           fi
-          gh release edit "$tag" --draft=false --latest=false
+          # Latest as soon as every package is up, so in-app updates never wait for the
+          # Homebrew step below. A rerun of an older build never moves the mark back.
+          latest=true
+          current=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          if [[ "$current" =~ -build\.([0-9]+)$ ]] && (( BASH_REMATCH[1] > GITHUB_RUN_NUMBER )); then
+            latest=false
+          fi
+          gh release edit "$tag" --draft=false --latest="$latest"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$RUNNER_TEMP/release.json"
-      - name: Checkout private Homebrew tap
+      - name: Checkout Homebrew tap
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: zirkumflex-group/homebrew-flexspeak
           ref: main
           path: homebrew-tap
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
-      - name: Update Homebrew and latest release
+      # If this fails, the release is already out and the app already offers it; rerun the
+      # job to bring Homebrew up to date.
+      - name: Update Homebrew tap
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -157,4 +193,3 @@ jobs:
             git -C homebrew-tap commit -m "Update Flexspeak to $RELEASE_TAG"
             git -C homebrew-tap push origin main
           fi
-          gh release edit "$RELEASE_TAG" --latest

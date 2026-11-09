@@ -124,6 +124,7 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
     match page {
         SettingsPage::Server => &icons::SERVER,
         SettingsPage::Appearance => &icons::PALETTE,
+        SettingsPage::Streaming => &icons::MONITOR_UP,
         SettingsPage::Audio => &icons::AUDIO_LINES,
         SettingsPage::Shortcuts => &icons::KEYBOARD,
         SettingsPage::Permissions => &icons::SHIELD,
@@ -134,7 +135,14 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
 
 /// The sidebar's headings: which categories follow each one.
 const NAV: &[(Option<&str>, &[SettingsPage])] = &[
-    (None, &[SettingsPage::Server, SettingsPage::Appearance]),
+    (
+        None,
+        &[
+            SettingsPage::Server,
+            SettingsPage::Appearance,
+            SettingsPage::Streaming,
+        ],
+    ),
     (
         Some("Voice"),
         &[
@@ -157,6 +165,7 @@ fn sections(
     match page {
         SettingsPage::Server => vec![servers_section(s, t, k), identity_section(s, t, k)],
         SettingsPage::Appearance => appearance_sections(s, t, k),
+        SettingsPage::Streaming => vec![streaming_section(s, t, k)],
         SettingsPage::Audio => vec![
             Section::boxed(
                 "audio",
@@ -1673,6 +1682,62 @@ fn processing_with(s: &App, change: impl FnOnce(&mut audio_processing::Settings)
     let mut next = s.audio_processing;
     change(&mut next);
     Message::AudioProcessing(next)
+}
+
+/// How your screen shares are encoded and captured. Both are Windows only.
+fn streaming_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    let options = s.stream_options;
+    let available = cfg!(windows);
+    let rows = vec![
+        item(
+            "hardware av1 encoding nvidia nvenc gpu graphics card codec vp8 cpu",
+            form_row(
+                t,
+                "Hardware AV1 encoding",
+                Some(
+                    "Encodes your stream on NVIDIA RTX 40 series and newer graphics cards instead of the CPU. Other cards, and viewers who can't play AV1, get VP8.",
+                ),
+                switch(
+                    "hardware-av1",
+                    "Hardware AV1 encoding",
+                    options.hardware_av1,
+                    available,
+                    k,
+                    |_, on| Message::StreamingHardwareAv1(on),
+                ),
+            ),
+        ),
+        item(
+            "fast capture experimental gpu game stall screen window",
+            form_row(
+                t,
+                "Fast capture (experimental)",
+                Some(
+                    "Captures and resizes on the graphics card, so a busy game no longer stalls your stream or loads the CPU. Turn it off if the picture stays black or freezes.",
+                ),
+                switch(
+                    "fast-capture",
+                    "Fast capture",
+                    options.fast_capture,
+                    available,
+                    k,
+                    |_, on| Message::StreamingFastCapture(on),
+                ),
+            ),
+        ),
+    ];
+    let note = if available {
+        "Applies to your next share. The sharing window says whether each one is in use."
+    } else {
+        "Available on Windows."
+    };
+    Section::boxed(
+        "streaming",
+        "Screen Sharing",
+        "stream share screen video encode capture",
+        rows,
+    )
+    .note(group_note(t, note))
 }
 
 fn sound_cues_row(s: &App, t: &Theme, k: &Kit) -> Row {

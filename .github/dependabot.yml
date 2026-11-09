@@ -1,0 +1,10 @@
+# The workflows pin every action by commit; this keeps those pins from going stale.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

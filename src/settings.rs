@@ -49,6 +49,9 @@ pub struct Settings {
     /// The quality, access and sound screen sharing last used.
     #[serde(skip_serializing_if = "crate::streaming::publishing::ShareDefaults::is_default")]
     pub share: crate::streaming::publishing::ShareDefaults,
+    /// Settings > Streaming. Saved straight away when changed, like `footer_hidden`.
+    #[serde(skip_serializing_if = "Streaming::is_default")]
+    pub streaming: Streaming,
     /// Kept as written, so one bad entry can't stop the settings from loading.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_themes: Vec<serde_json::Value>,
@@ -58,6 +61,23 @@ pub struct Settings {
     /// The server log's height under the channel list, and whether it is folded away.
     #[serde(skip_serializing_if = "LogPane::is_default")]
     pub log_pane: LogPane,
+}
+
+/// How screen sharing encodes and captures (Settings > Streaming). Both apply to the next
+/// share, and both are Windows only.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Streaming {
+    /// Offer AV1 from the NVIDIA hardware encoder before VP8.
+    pub hardware_av1: bool,
+    /// Experimental capture that never waits for the GPU (`streaming/wgc.rs`).
+    pub fast_capture: bool,
+}
+
+impl Streaming {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// How much of the sidebar the server log takes. Saved straight away, like `footer_hidden`.
@@ -280,6 +300,7 @@ impl Default for Settings {
             sound_cues: true,
             sounds: crate::sounds::Settings::default(),
             share: Default::default(),
+            streaming: Streaming::default(),
             custom_themes: Vec::new(),
             skip_install_prompt: false,
         }
@@ -377,6 +398,23 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_options_round_trip_and_stay_out_of_the_file_when_off() {
+        let off = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!off.contains("streaming"), "{off}");
+        let settings = Settings {
+            streaming: Streaming {
+                hardware_av1: true,
+                fast_capture: true,
+            },
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"hardware_av1\":true"), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.streaming, settings.streaming);
+    }
 
     #[test]
     fn animations_default_on_and_the_option_is_only_written_when_used() {

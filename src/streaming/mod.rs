@@ -5,6 +5,8 @@ mod publish_media;
 pub mod publishing;
 mod rtc;
 mod session;
+#[cfg(target_os = "windows")]
+mod wgc;
 pub use publish_media::quick_sources as quick_share_sources;
 #[cfg(target_os = "macos")]
 pub use publish_media::request_system_audio_access;

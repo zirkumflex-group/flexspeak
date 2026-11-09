@@ -54,9 +54,15 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 libwebrtc = "=0.3.54"
+# Named only to switch off libaom's software AV1 encoder: AV1 is then offered only
+# when a hardware encoder (NVENC) provides it, and sharing otherwise stays on VP8.
+webrtc-sys = { version = "=0.3.51", features = ["no-software-av1-encoder"] }
 tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+# Experimental fast capture (src/streaming/wgc.rs): Windows Graphics Capture and the D3D11
+# video processor. The same version Rune, wgpu and cpal already build.
+windows = { version = "0.62", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
@@ -75,3 +81,9 @@ embed-resource = "3"
 # Keep this aligned with the helper used by the pinned libwebrtc dependency.
 webrtc-sys-build = "=0.3.21"
 
+# webrtc-sys with the NVENC hardware encoders built on Windows, from
+# zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc (based on webrtc-sys v0.3.51).
+# The rev is also tagged flexspeak/webrtc-sys-v0.3.51-nvenc.2 there, so it stays fetchable.
+[patch.crates-io]
+webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "6469898101c8cfa7fdda0215246eba52bc46778a" }
+webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "6469898101c8cfa7fdda0215246eba52bc46778a" }

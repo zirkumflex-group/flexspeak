@@ -1,4 +1,4 @@
-"""Build native release packages and generate the private Homebrew cask."""
+"""Build native release packages and generate the Homebrew cask."""
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -19,12 +19,33 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "dist/releases"
-OPUS_VERSION = "1.6.1"
-OPUS_SHA256 = "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"
+# In its own file so CI can key the Opus cache on it alone.
+OPUS = json.loads((ROOT / "scripts/opus.json").read_text(encoding="utf-8"))
+OPUS_VERSION = OPUS["version"]
+OPUS_SHA256 = OPUS["sha256"]
+# The Arch packaging container, by digest so a new image can't change a release silently.
+ARCH_IMAGE = "archlinux:base-devel@sha256:2de80105abb49f813a85393c6758a4334deb6bcec4a2411bd2f059c0bee6ee4c"
 
 
 def run(*args, **kwargs):
     return subprocess.run([str(arg) for arg in args], check=True, cwd=ROOT, **kwargs)
+
+
+def target():
+    """The one target this runner builds. Fetching, license notices and the build all use
+    it, so nothing needs another platform's crates."""
+    if os.name == "nt":
+        return "x86_64-pc-windows-msvc"
+    if sys.platform == "darwin":
+        return "aarch64-apple-darwin"
+    return "x86_64-unknown-linux-gnu"
+
+
+def fetch(env=None):
+    """Downloads every crate and git dependency the build needs, before anything else runs
+    Cargo. `build()` runs `cargo metadata` and `cargo build` side by side; if either had to
+    fetch, it would hold Cargo's package lock while the other waits."""
+    run("cargo", "fetch", "--locked", "--target", target(), env=env)
 
 
 def sha256(path):
@@ -54,7 +75,7 @@ def release_notes(message):
 
 
 def notes(commit, output):
-    output.write_text(release_notes(commit.read_text()))
+    output.write_text(release_notes(commit.read_text(encoding="utf-8")), encoding="utf-8")
 
 
 def git_output(*args):
@@ -124,19 +145,22 @@ def build_opus(env):
                 "-DOPUS_BUILD_TESTING=OFF", "-DOPUS_BUILD_PROGRAMS=OFF"]
     stamp = install / "flexspeak-build.json"
     settings = json.dumps({"version": OPUS_VERSION, "options": options})
-    if not stamp.is_file() or stamp.read_text() != settings:
+    if not stamp.is_file() or stamp.read_text(encoding="utf-8") != settings:
         shutil.rmtree(install, ignore_errors=True)
         run("cmake", "-S", source, "-B", work / "build", *options, env=env)
         run("cmake", "--build", work / "build", "--config", "Release", "--parallel", "3", env=env)
         run("cmake", "--install", work / "build", "--config", "Release", env=env)
-        stamp.write_text(settings)
+        stamp.write_text(settings, encoding="utf-8")
     env.update(OPUS_NO_PKG="1", OPUS_LIB_DIR=str(install))
     return source
 
 
 def write_notices(destination, opus_source):
-    metadata = json.loads(run("cargo", "metadata", "--locked", "--format-version=1",
-                              capture_output=True, text=True).stdout)
+    # Offline and for this platform only: `fetch()` has the crates, and the notices cover
+    # what this package contains. Cargo's errors go to the log instead of being swallowed.
+    metadata = json.loads(run("cargo", "metadata", "--locked", "--offline", "--format-version=1",
+                              "--filter-platform", target(),
+                              stdout=subprocess.PIPE, encoding="utf-8").stdout)
     with destination.open("w", encoding="utf-8") as output:
         output.write("Dependency license notices\n")
         for package in sorted(metadata["packages"], key=lambda item: (item["name"], item["version"])):
@@ -159,12 +183,13 @@ def write_notices(destination, opus_source):
             for path in sorted(files):
                 output.write(f"\n{path.name}\n{path.read_text(encoding='utf-8', errors='replace')}\n")
         output.write(f"\n--- Native Opus {OPUS_VERSION} ---\n")
-        output.write((opus_source / "COPYING").read_text())
+        # UTF-8 explicitly: Windows would read these as cp1252 and garble names and ©.
+        output.write((opus_source / "COPYING").read_text(encoding="utf-8"))
         output.write("\n--- Lucide status icons ---\n")
-        output.write((ROOT / "assets/lucide/LICENSE").read_text())
+        output.write((ROOT / "assets/lucide/LICENSE").read_text(encoding="utf-8"))
         output.write("\n--- Native WebRTC ---\n")
-        output.write((ROOT / "assets/webrtc/LICENSE.md").read_text())
-        output.write((ROOT / "assets/webrtc/NOTICE.txt").read_text())
+        output.write((ROOT / "assets/webrtc/LICENSE.md").read_text(encoding="utf-8"))
+        output.write((ROOT / "assets/webrtc/NOTICE.txt").read_text(encoding="utf-8"))
 
 
 def package_linux(stage, version, number):
@@ -177,13 +202,13 @@ def package_linux(stage, version, number):
         shutil.rmtree(work)
     work.mkdir(parents=True)
     shutil.copy2(archive, work)
-    recipe = (ROOT / "scripts/PKGBUILD.in").read_text()
+    recipe = (ROOT / "scripts/PKGBUILD.in").read_text(encoding="utf-8")
     (work / "PKGBUILD").write_text(recipe.replace("@VERSION@", f"{version}.r{number}")
-                                  .replace("@SHA256@", sha256(archive)))
+                                  .replace("@SHA256@", sha256(archive)), encoding="utf-8")
     # makepkg packages the already-built binary; it does not compile a second copy.
     run("docker", "run", "--rm", "--platform", "linux/amd64",
         "-e", f"PACKAGER_UID={os.getuid()}", "-v", f"{work}:/work",
-        "-w", "/work", "archlinux:base-devel", "bash", "-euc", """
+        "-w", "/work", ARCH_IMAGE, "bash", "-euc", """
 pacman -Syu --noconfirm
 useradd --uid "$PACKAGER_UID" --create-home packager
 chown -R packager:packager /work
@@ -206,7 +231,7 @@ def build():
     if sys.platform == "linux" and platform.machine() != "x86_64":
         raise ValueError("Linux releases require an x86_64 runner")
     env = os.environ.copy()
-    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     number = int(env.get("GITHUB_RUN_NUMBER", "1"))
     if "GITHUB_RUN_NUMBER" in env:
         changelog(version, number)
@@ -222,13 +247,22 @@ def build():
     stage.mkdir(parents=True)
     shutil.copy2(ROOT / "settings.example.json", stage)
     shutil.copy2(ROOT / "README.md", stage)
-    (stage / "BUILD-INFO.json").write_text(json.dumps({
-        "version": version, "build": number, "commit": env.get("GITHUB_SHA") or
-        run("git", "rev-parse", "HEAD", capture_output=True, text=True).stdout.strip(),
+    def output(*args):
+        return run(*args, capture_output=True, encoding="utf-8").stdout.strip()
+
+    info = {
+        "version": version, "build": number,
+        "commit": env.get("GITHUB_SHA") or output("git", "rev-parse", "HEAD"),
         "platform": sys.platform, "architecture": platform.machine(), "opus": OPUS_VERSION,
-    }, indent=2) + "\n")
+        "rustc": output("rustc", "--version"),
+    }
+    if sys.platform == "darwin":
+        # The runner image's default Xcode builds the app; record which one it was.
+        info["xcode"] = output("xcodebuild", "-version").replace("\n", ", ")
+    (stage / "BUILD-INFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+    fetch(env)
     # Collecting license files walks every dependency's source tree, which takes
-    # most of a minute on Windows; do it while Cargo compiles.
+    # most of a minute on Windows; do it while Cargo compiles. Both run offline now.
     with ThreadPoolExecutor(max_workers=1) as pool:
         notices = pool.submit(write_notices, stage / "THIRD-PARTY-LICENSES.txt", opus_source)
         if os.name == "nt":
@@ -261,7 +295,7 @@ def build():
         run("codesign", "--force", "--sign", "-", app)
         run("codesign", "--verify", "--strict", app)
         binary = app / "Contents/MacOS/flexspeak"
-        dependencies = run("otool", "-L", binary, capture_output=True, text=True).stdout
+        dependencies = run("otool", "-L", binary, capture_output=True, encoding="utf-8").stdout
         if any(path in dependencies for path in ("/opt/homebrew/", "/usr/local/")):
             raise ValueError("App links to a Homebrew library instead of being standalone")
         run(binary, "--help")
@@ -286,7 +320,7 @@ def cask(release, output, artifacts=OUTPUT):
     match = re.fullmatch(r"v(\d+\.\d+\.\d+)-build\.(\d+)", release["tag_name"])
     if not match:
         raise ValueError("Unexpected release tag")
-    values = {"VERSION": f"{match[1]},{match[2]}"}
+    values = {"VERSION": f"{match[1]},{match[2]}", "TAG": release["tag_name"]}
     name = "Flexspeak-macos-arm64.dmg"
     assets = [asset for asset in release["assets"] if asset["name"] == name]
     if len(assets) != 1 or type(assets[0]["id"]) is not int or assets[0]["id"] <= 0:
@@ -295,9 +329,9 @@ def cask(release, output, artifacts=OUTPUT):
     if assets[0].get("digest") != f"sha256:{digest}":
         raise ValueError(f"Uploaded asset checksum does not match: {name}")
     values.update(ARM_ID=assets[0]["id"], ARM_SHA=digest)
-    rendered = Template((ROOT / "scripts/flexspeak.rb.in").read_text()).substitute(values)
+    rendered = Template((ROOT / "scripts/flexspeak.rb.in").read_text(encoding="utf-8")).substitute(values)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(rendered)
+    output.write_text(rendered, encoding="utf-8")
 
 
 def checksums():
@@ -308,18 +342,21 @@ def checksums():
         raise ValueError("Missing release artifacts")
     (OUTPUT / "SHA256SUMS.txt").write_text("".join(
         f"{sha256(OUTPUT / name)}  {name}\n" for name in sorted(required)
-    ))
+    ), encoding="utf-8")
 
 
 if __name__ == "__main__":
     os.chdir(ROOT)
     if sys.argv[1:] == ["build"]:
         build()
+    elif sys.argv[1:] == ["fetch"]:
+        fetch()
     elif sys.argv[1:] == ["checksums"]:
         checksums()
     elif len(sys.argv) == 4 and sys.argv[1] == "notes":
         notes(Path(sys.argv[2]), Path(sys.argv[3]))
     elif len(sys.argv) == 4 and sys.argv[1] == "cask":
-        cask(json.loads(Path(sys.argv[2]).read_text()), Path(sys.argv[3]))
+        cask(json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")), Path(sys.argv[3]))
     else:
-        sys.exit("Usage: release.py build | checksums | notes COMMIT OUTPUT | cask RELEASE_JSON OUTPUT_RB")
+        sys.exit("Usage: release.py build | fetch | checksums | notes COMMIT OUTPUT"
+                 " | cask RELEASE_JSON OUTPUT_RB")

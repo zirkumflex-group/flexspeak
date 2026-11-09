@@ -1819,12 +1819,17 @@ mod tests {
         address
     }
 
+    /// A fresh directory per call. Only digits after the name: `{:?}` of an `Instant` has
+    /// `:` and spaces, which Windows refuses in a directory name.
     fn scratch(name: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "flexspeak-update-{name}-{}-{:?}",
+            "flexspeak-update-{name}-{}-{}",
             std::process::id(),
-            Instant::now()
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // A reused process id may have left one behind.
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
     }
