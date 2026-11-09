@@ -35,6 +35,11 @@ jobs:
             platform: linux-x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      # Git dependencies (the webrtc-sys fork and its submodules) go through the git CLI,
+      # which shows progress, and fail instead of waiting for credentials nobody can enter.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GIT_TERMINAL_PROMPT: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,6 +82,12 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/dmg-tools"
           "$RUNNER_TEMP/dmg-tools/bin/pip" install dmgbuild==1.6.7
           echo "FLEXSPEAK_DMGBUILD=$RUNNER_TEMP/dmg-tools/bin/dmgbuild" >> "$GITHUB_ENV"
+      # On its own first: release.py runs `cargo metadata` and `cargo build` side by side, and
+      # whichever fetches a missing git dependency holds the package lock for the other.
+      - name: Fetch Rust dependencies
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
+        timeout-minutes: 10
+        run: cargo fetch --locked
       - name: Build and package
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         env:
