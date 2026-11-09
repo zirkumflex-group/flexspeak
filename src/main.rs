@@ -28,6 +28,7 @@ mod streaming;
 mod system_appearance;
 mod themes;
 mod transmission;
+mod tray;
 mod ts6_import;
 mod ui;
 mod updater;
@@ -123,6 +124,7 @@ fn main() -> anyhow::Result<()> {
     }
     if !args.iter().any(|arg| ui::is_tool_flag(arg)) {
         session_end::install();
+        tray::allow();
     }
     ui::run();
     Ok(())
@@ -1017,6 +1019,36 @@ impl App {
                 Arc::new(AtomicBool::new(false)),
             ),
         }
+    }
+
+    /// What the notification-area icon shows, or `None` for no icon: switched off, or quitting.
+    fn tray_status(&self) -> Option<tray::Status> {
+        if self.closing || self.appearance.hide_tray_icon || !tray::SUPPORTED {
+            return None;
+        }
+        let server = self.server();
+        let connected = server.connected && !server.stopping;
+        let state = if !connected {
+            tray::State::Offline
+        } else if server.deafened {
+            tray::State::Deafened
+        } else if server.muted {
+            tray::State::Muted
+        } else if self.own_id().is_some_and(|id| server.talking.contains(&id)) {
+            tray::State::Talking
+        } else {
+            tray::State::Open
+        };
+        Some(tray::Status {
+            state,
+            server: if connected {
+                server.title().to_owned()
+            } else {
+                String::new()
+            },
+            muted: server.muted,
+            deafened: server.deafened,
+        })
     }
 
     /// The server the window is showing, or a blank one on the saved-server page and in setup.
@@ -4768,6 +4800,51 @@ mod tests {
         app.server_mut().quiet_channel_change = true;
         arrive(&mut app, Some(home));
         assert!(app.played_sounds.is_empty(), "returning after an update");
+    }
+
+    #[test]
+    fn the_tray_follows_the_server_on_screen() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        assert_eq!(
+            app.tray_status().map(|status| status.state),
+            tray::SUPPORTED.then_some(tray::State::Offline)
+        );
+        if !tray::SUPPORTED {
+            return;
+        }
+        let _connection = connection(&mut app);
+        let server = app.server_mut();
+        server.connected = true;
+        server.muted = false;
+        server.state.channels = vec![client::Channel {
+            id: 1,
+            members: vec![client::Member {
+                id: 7,
+                is_self: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        assert_eq!(app.tray_status().unwrap().state, tray::State::Open);
+        app.server_mut().talking = BTreeSet::from([7]);
+        assert_eq!(app.tray_status().unwrap().state, tray::State::Talking);
+        app.server_mut().talking = BTreeSet::from([8]);
+        assert_eq!(
+            app.tray_status().unwrap().state,
+            tray::State::Open,
+            "someone else talking"
+        );
+        app.server_mut().muted = true;
+        assert_eq!(app.tray_status().unwrap().state, tray::State::Muted);
+        app.server_mut().deafened = true;
+        let status = app.tray_status().unwrap();
+        assert_eq!(status.state, tray::State::Deafened);
+        assert!(status.muted && status.deafened);
+        app.closing = true;
+        assert!(
+            app.tray_status().is_none(),
+            "the icon goes as the window does"
+        );
     }
 
     #[test]

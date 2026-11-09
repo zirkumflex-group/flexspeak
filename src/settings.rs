@@ -188,6 +188,9 @@ pub struct Appearance {
     /// Written only when on, so settings stay readable by builds without this option.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disable_animations: bool,
+    /// The notification-area or menu-bar icon is on unless this is set; written only when set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide_tray_icon: bool,
 }
 
 impl Appearance {

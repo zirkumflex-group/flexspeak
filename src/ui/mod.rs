@@ -363,9 +363,32 @@ pub fn dispatch(s: &mut App, tx: &mut Tx, message: Message) {
     let task = s.update(message);
     execute(s, tx, task);
     s.sync_fields();
+    sync_tray(s);
     if invisible {
         tx.live_only();
     }
+}
+
+/// Keeps the notification-area icon in step with the server on screen. Cheap when nothing
+/// changed: the icon is redrawn only when its state does.
+fn sync_tray(s: &App) {
+    let handle = s.handle.clone();
+    crate::tray::sync(s.tray_status(), move || {
+        let handle = handle?;
+        Some(move |action| tray_action(&handle, action))
+    });
+}
+
+/// Runs on the tray's event handler, so everything but Show goes through the UI thread.
+fn tray_action(handle: &rune::AppHandle<App>, action: crate::tray::Action) {
+    use crate::tray::Action;
+    let message = match action {
+        Action::Show => return handle.open(),
+        Action::Mute => Message::Mute,
+        Action::Deafen => Message::Deafen,
+        Action::Quit => Message::Close,
+    };
+    handle.update(move |s, tx| dispatch(s, tx, message));
 }
 
 /// A press handler that sends `message`.
