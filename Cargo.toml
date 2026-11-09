@@ -37,6 +37,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", default-features = false }
 tsclientlib = { path = "vendor/tsclientlib", default-features = false, features = ["audio"] }
 tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5" }
+# For saved identities that tsclientlib cannot load back (see `recover_identity`).
+tsproto-types = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5" }
+base64 = "0.22"
 nnnoiseless = { version = "0.5.2", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }

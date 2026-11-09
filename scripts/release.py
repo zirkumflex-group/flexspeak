@@ -53,17 +53,24 @@ def sha256(path):
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
-def release_notes(message):
+def release_notes(message, earlier=()):
     """Release notes from a commit message: its `New:`, `Fixed:` and `Changed:` lines, or the
-    subject under Changed when it has none. The app reads these sections."""
+    subject under Changed when it has none. The app reads these sections. `earlier` holds
+    the messages of older commits the same build carries; only their lines are added."""
     lines = message.splitlines()
     sections = {"New": [], "Fixed": [], "Changed": []}
-    for line in lines[1:]:
-        match = re.fullmatch(r"\s*(?:[-*]\s*)?(New|Fixed|Changed):\s+(.+?)\s*", line, re.I)
-        if match:
-            sections[match[1].capitalize()].append(match[2])
+
+    def collect(body):
+        for line in body:
+            match = re.fullmatch(r"\s*(?:[-*]\s*)?(New|Fixed|Changed):\s+(.+?)\s*", line, re.I)
+            if match and match[2] not in sections[match[1].capitalize()]:
+                sections[match[1].capitalize()].append(match[2])
+
+    collect(lines[1:])
     if not any(sections.values()):
         sections["Changed"].append(re.sub(r"\s*\(#\d+\)$", "", lines[0]).strip())
+    for other in earlier:
+        collect(other.splitlines()[1:])
     return (
         "\n\n".join(
             f"## {name}\n\n" + "\n".join(f"- {item}" for item in items)
@@ -84,13 +91,20 @@ def git_output(*args):
 
 def changelog(version, number, path=None):
     """Adds this build and any released build CHANGELOG.md doesn't have yet, newest first, so
-    the app embeds its own notes. Rewrites the checkout's copy; nothing commits it."""
+    the app embeds its own notes. Rewrites the checkout's copy; nothing commits it.
+
+    Builds of several pushes run side by side, so the push before this one may have no
+    release yet (or never get one, if its build fails). This build carries those commits
+    all the same, so their changelog lines go into its own entry."""
     path = path or ROOT / "CHANGELOG.md"
     text = path.read_bytes().decode("utf-8")
     newest = max(map(int, re.findall(r"^# v\S+-build\.(\d+) · ", text, re.M)), default=0)
     missing = [("HEAD", f"v{version}-build.{number}", number)] if number > newest else []
+    released = {}
     for tag in git_output("tag", "--list", "v*-build.*").split():
         built = int(tag.rsplit(".", 1)[1])
+        if built < number:
+            released[built] = tag
         if newest < built < number:
             missing.append((tag, tag, built))
     if not missing:
@@ -98,7 +112,12 @@ def changelog(version, number, path=None):
     entries = []
     for ref, tag, _ in sorted(missing, key=lambda entry: entry[2], reverse=True):
         date = git_output("log", "-1", "--format=%cs", ref).strip()
-        entries.append(f"# {tag} · {date}\n\n{release_notes(git_output('log', '-1', '--format=%B', ref))}\n")
+        earlier = ()
+        if ref == "HEAD" and released:
+            last = released[max(released)]
+            unreleased = git_output("log", "--first-parent", "--skip=1", "--format=%B%x00", f"{last}..HEAD")
+            earlier = [message.strip() for message in unreleased.split("\0") if message.strip()]
+        entries.append(f"# {tag} · {date}\n\n{release_notes(git_output('log', '-1', '--format=%B', ref), earlier)}\n")
     match = re.search(r"^# v\S+-build\.", text, re.M)
     at = match.start() if match else len(text)
     path.write_bytes((text[:at] + "".join(entries) + text[at:]).encode("utf-8"))

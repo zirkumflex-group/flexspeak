@@ -1,10 +1,13 @@
-name: PR checks
+name: Checks
 
 # No paths filter: these checks are required on main, and a filtered-out PR would never
-# report them and could not merge.
+# report them and could not merge. They run again on main after every merge: that run is
+# the one that saves the build caches PRs start from, and it shows a merge that only
+# broke in combination with another. Releases do not wait for it (see release.yml).
 on:
   pull_request:
-  workflow_call:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -93,3 +96,22 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         run: cargo test --locked
+
+  # The one status check main requires: its name stays the same whichever runners the
+  # matrix above uses.
+  passed:
+    name: Checks passed
+    needs: [check]
+    if: always()
+    concurrency:
+      group: probe-${{ github.run_id }}
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every platform passed
+        env:
+          RESULT: ${{ needs.check.result }}
+        run: |
+          echo "Format, lint, test: $RESULT"
+          [ "$RESULT" = success ]

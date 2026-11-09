@@ -31,6 +31,7 @@ use tsclientlib::{
     prelude::*,
 };
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio, OutCommand};
+use tsproto_types::crypto::EccKeyPrivP256;
 
 /// How loud to play each person, by identity. Anyone absent plays at full volume.
 pub type UserGains = Arc<Mutex<HashMap<String, f32>>>;
@@ -535,15 +536,12 @@ fn load_identity() -> Result<Identity> {
     let _guard = IDENTITY_FILE.lock().unwrap();
     let path = identity_path()?;
     match fs::read_to_string(&path) {
-        Ok(value) => {
-            return Identity::new_from_ts_str(value.trim())
-                .context("Saved TeamSpeak identity is invalid; back it up before replacing it");
-        }
+        Ok(value) => return parse_identity(&value),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("Cannot read saved TeamSpeak identity"),
     }
     fs::create_dir_all(path.parent().context("Identity path has no parent")?)?;
-    let identity = Identity::create();
+    let identity = new_identity();
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -553,15 +551,111 @@ fn load_identity() -> Result<Identity> {
     }
     match options.open(&path) {
         Ok(mut file) => {
-            write!(file, "{}V{}", identity.counter(), identity.key().to_ts())?;
+            write!(file, "{}", encode_identity(&identity))?;
             file.sync_all()?;
             Ok(identity)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Identity::new_from_ts_str(fs::read_to_string(&path)?.trim()).map_err(Into::into)
+            parse_identity(&fs::read_to_string(&path)?)
         }
         Err(error) => Err(error).context("Cannot save TeamSpeak identity"),
     }
+}
+
+/// The saved form: the hash cash counter, `V`, and the key as TeamSpeak's base64 DER.
+fn encode_identity(identity: &Identity) -> String {
+    format!("{}V{}", identity.counter(), identity.key().to_ts())
+}
+
+/// A new identity whose saved form loads again. tsproto-types writes the private key as a
+/// DER integer, which drops leading zero bytes, and then refuses to read anything shorter
+/// than 32 bytes, so about one random key in 256 could never be loaded back.
+fn new_identity() -> Identity {
+    loop {
+        let identity = Identity::create();
+        if Identity::new_from_ts_str(&encode_identity(&identity)).is_ok() {
+            return identity;
+        }
+    }
+}
+
+fn parse_identity(saved: &str) -> Result<Identity> {
+    let saved = saved.trim();
+    match Identity::new_from_ts_str(saved) {
+        Ok(identity) => Ok(identity),
+        // Identities saved before `new_identity` took care: the same key, read by hand.
+        Err(error) => recover_identity(saved)
+            .ok_or(error)
+            .context("Saved TeamSpeak identity is invalid; back it up before replacing it"),
+    }
+}
+
+/// Reads a saved identity whose private key lost its leading zero bytes. The key is
+/// libtomcrypt's DER `SEQUENCE { BIT STRING flags, INTEGER 32, INTEGER x, INTEGER y,
+/// INTEGER private }`, or TS3AudioBot's `{ BIT STRING, INTEGER 32, INTEGER private }`.
+fn recover_identity(saved: &str) -> Option<Identity> {
+    use base64::prelude::*;
+    let (counter, key) = saved.split_once('V')?;
+    let counter = counter.parse().ok()?;
+    let der = BASE64_STANDARD.decode(key).ok()?;
+    let (0x30, mut body, []) = der_element(&der)? else {
+        return None;
+    };
+    let mut elements = Vec::new();
+    while !body.is_empty() {
+        let (tag, content, rest) = der_element(body)?;
+        elements.push((tag, content));
+        body = rest;
+    }
+    // A bit string starts with its count of unused bits; the first bit marks a private key.
+    let (0x03, [unused, flags, ..]) = *elements.first()? else {
+        return None;
+    };
+    if flags & 0x80 == 0 {
+        return None;
+    }
+    let (index, has_public) = match unused {
+        7 => (4, true),
+        6 => (2, false),
+        _ => return None,
+    };
+    let (0x02, scalar) = *elements.get(index)? else {
+        return None;
+    };
+    if scalar.first()? & 0x80 != 0 {
+        return None;
+    }
+    let scalar = &scalar[scalar.iter().position(|byte| *byte != 0)?..];
+    let mut short = [0; 32];
+    short
+        .get_mut(32usize.checked_sub(scalar.len())?..)?
+        .copy_from_slice(scalar);
+    let key = EccKeyPrivP256::from_short(&short).ok()?;
+    // The public key saved next to it must be this key's, so the user keeps their identity.
+    if has_public && key.to_tomcrypt() != der {
+        return None;
+    }
+    Some(Identity::new(key, counter))
+}
+
+/// Splits one DER element off the front: its tag, its content and what follows.
+fn der_element(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = data.split_first()?;
+    let (&first, mut rest) = rest.split_first()?;
+    let mut length = usize::from(first);
+    if first >= 0x80 {
+        let count = usize::from(first & 0x7f);
+        if count == 0 || count > 2 {
+            return None;
+        }
+        let bytes = rest.get(..count)?;
+        length = bytes
+            .iter()
+            .fold(0, |sum, byte| sum << 8 | usize::from(*byte));
+        rest = &rest[count..];
+    }
+    let content = rest.get(..length)?;
+    Some((tag, content, &rest[length..]))
 }
 
 /// Who is heard right now. A client talks from its first voice packet until it sends the
@@ -1863,16 +1957,87 @@ mod tests {
         Ok(())
     }
 
+    /// What a build before the fix wrote for a private key starting with a zero byte
+    /// (00 a1 a2 ... bf), and that key's public half. Made outside this code, with
+    /// plain P-256 arithmetic and DER, so it does not depend on what it tests.
+    const BROKEN_IDENTITY: &str = "41VMG4DAgeAAgEgAiBGcYBL7WNUI2ncYyoBOnJFCYa2Rd3FemxQ7gzdMiAe3gIhAJoOjdLQpGfvPBG0eJvjnMM7FTlAi1Ee8PGU29INDrGqAiAAoaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+vw==";
+    const BROKEN_IDENTITY_PUBLIC_KEY: &str = "MEwDAgcAAgEgAiBGcYBL7WNUI2ncYyoBOnJFCYa2Rd3FemxQ7gzdMiAe3gIhAJoOjdLQpGfvPBG0eJvjnMM7FTlAi1Ee8PGU29INDrGq";
+
+    fn public_key(identity: &Identity) -> String {
+        identity.key().to_pub().to_ts()
+    }
+
     #[test]
     fn identity_roundtrip_keeps_the_same_public_identity() -> Result<()> {
-        let identity = Identity::create();
-        let encoded = format!("{}V{}", identity.counter(), identity.key().to_ts());
-        let restored = Identity::new_from_ts_str(&encoded)?;
-        assert_eq!(
-            identity.key().to_pub().to_ts(),
-            restored.key().to_pub().to_ts()
-        );
+        // A plain `Identity::create()` cannot be loaded back about once in 256 times.
+        let identity = new_identity();
+        let restored = parse_identity(&encode_identity(&identity))?;
+        assert_eq!(public_key(&identity), public_key(&restored));
         assert_eq!(identity.counter(), restored.counter());
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_with_leading_zero_bytes_saves_and_loads_as_the_same_identity() -> Result<()> {
+        // One and two zero bytes, and a second byte whose high bit makes DER add a sign
+        // byte, so the saved integer is 32 bytes long and still one short once read.
+        for start in [&[0, 0x12][..], &[0, 0, 0x34], &[0, 0x80]] {
+            let mut scalar = [0x5a; 32];
+            scalar[..start.len()].copy_from_slice(start);
+            let identity = Identity::new(EccKeyPrivP256::from_short(&scalar)?, 7);
+            let encoded = encode_identity(&identity);
+            for restored in [
+                recover_identity(&encoded).context("not recovered")?,
+                parse_identity(&format!("{encoded}\n"))?,
+            ] {
+                assert_eq!(restored.key().to_short().as_slice(), scalar);
+                assert_eq!(public_key(&restored), public_key(&identity));
+                assert_eq!(restored.counter(), 7);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_identity_file_written_before_the_fix_is_recovered() -> Result<()> {
+        // If tsclientlib ever loads this itself, `recover_identity` has done its job.
+        assert!(Identity::new_from_ts_str(BROKEN_IDENTITY).is_err());
+        let restored = parse_identity(BROKEN_IDENTITY)?;
+        assert_eq!(public_key(&restored), BROKEN_IDENTITY_PUBLIC_KEY);
+        assert_eq!(restored.counter(), 41);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_reads_the_short_ts3audiobot_form() -> Result<()> {
+        use base64::prelude::*;
+        // SEQUENCE { BIT STRING (2 bits) 0b11, INTEGER 32, INTEGER 31-byte private key }
+        let mut der = vec![0x30, 40, 0x03, 2, 6, 0xc0, 0x02, 1, 32, 0x02, 31];
+        der.extend([0x5a; 31]);
+        let restored = recover_identity(&format!("3V{}", BASE64_STANDARD.encode(der)))
+            .context("not recovered")?;
+        let mut scalar = [0x5a; 32];
+        scalar[0] = 0;
+        assert_eq!(restored.key().to_short().as_slice(), scalar);
+        assert_eq!(restored.counter(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn a_damaged_identity_is_rejected_rather_than_read_as_another_key() -> Result<()> {
+        use base64::prelude::*;
+        let (counter, key) = BROKEN_IDENTITY.split_once('V').unwrap();
+        let der = BASE64_STANDARD.decode(key)?;
+        // A changed private key no longer belongs to the saved public key.
+        let mut changed = der.clone();
+        *changed.last_mut().unwrap() ^= 1;
+        for damaged in [&changed[..], &der[..der.len() - 1], &der[..2], &[]] {
+            let saved = format!("{counter}V{}", BASE64_STANDARD.encode(damaged));
+            assert!(recover_identity(&saved).is_none());
+            assert!(parse_identity(&saved).is_err());
+        }
+        assert!(parse_identity(key).is_err());
+        assert!(parse_identity("").is_err());
         Ok(())
     }
 }
