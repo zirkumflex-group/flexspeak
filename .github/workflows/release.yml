@@ -3,23 +3,63 @@ name: Release
 on:
   push:
     branches: [main]
+    # A push that only changes documentation releases nothing. Everything counts except
+    # docs/ and Markdown, and of those the files a release carries count again. A manual
+    # run always releases.
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!**.md'
+      - README.md # in every package
+      - CHANGELOG.md # compiled into the app, shown under Settings → Updates
+      - docs/releases.md # becomes the Homebrew tap's README
+      - assets/webrtc/LICENSE.md # part of THIRD-PARTY-LICENSES.txt
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Keep every push queued, and serialize release/tap updates. Manual build-only
-# runs on other branches get their own queue so they never delay a release.
-concurrency:
-  group: release-${{ github.ref == 'refs/heads/main' && 'main' || github.ref }}
-  queue: max
+# No workflow-wide concurrency: the builds of several pushes run side by side, and only
+# publishing takes turns (see the publish job).
 
 jobs:
-  checks:
+  # The three platforms are checked on every PR before it merges (ci.yml), so a release
+  # does not repeat them. This catches what a PR cannot: a direct push, or two merges
+  # that each passed alone. Linux only, on the cache the checks save, so it is done
+  # before the slowest build.
+  test:
     if: github.ref == 'refs/heads/main' && github.repository == 'zirkumflex-group/flexspeak'
-    uses: ./.github/workflows/ci.yml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # As in ci.yml: rust-cache keys on Cargo's environment, and this job reads that cache.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: linux-checks
+          # Saved by the checks on main, which also build Clippy's half of it.
+          save-if: false
+      - name: Linux native dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libopus-dev libxkbcommon-dev libwayland-dev
+      - name: Fetch Rust dependencies
+        timeout-minutes: 10
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          GIT_TERMINAL_PROMPT: '0'
+          GCM_INTERACTIVE: never
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+        run: cargo fetch --locked
+      - run: cargo test --locked
 
-  # Builds run alongside the checks; nothing publishes unless both pass.
+  # Builds run alongside the tests; nothing publishes unless both pass.
   build:
     if: github.repository == 'zirkumflex-group/flexspeak'
     strategy:
@@ -114,11 +154,17 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [checks, build]
+    needs: [test, build]
     # Only main publishes. The `release` environment admits main alone, and holds the tap's
     # deploy key, so a workflow edited on a branch can neither publish nor read the key.
     if: github.ref == 'refs/heads/main'
     environment: release
+    # One publish at a time, and every waiting one keeps its place (GitHub would otherwise
+    # cancel all but the newest waiting job). They can come in any order, since a quick
+    # build overtakes a slow one: the steps below never move "latest" or the tap back.
+    concurrency:
+      group: release-publish
+      queue: max
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
