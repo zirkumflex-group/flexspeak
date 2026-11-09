@@ -39,6 +39,7 @@ pub const SCENES: &[Scene] = &[
     ("connected-quiet", connected_quiet),
     ("connected-deafened", connected_deafened),
     ("member-states", member_states),
+    ("own-channel-only", own_channel_only),
     ("limited", limited),
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
@@ -93,8 +94,15 @@ pub const SCENES: &[Scene] = &[
     ("share", share),
     ("share-quick", share_quick),
     ("share-quick-no-game", share_quick_no_game),
+    ("share-quick-streams", share_quick_streams),
+    ("channel-tree", channel_tree),
     ("sharing", sharing),
+    ("sharing-alone", sharing_alone),
     ("watching", watching),
+    ("watching-solo", watching_solo),
+    ("watching-solo-hover", watching_solo_hover),
+    ("watching-others-hidden", watching_others_hidden),
+    ("watching-others-hidden-hover", watching_others_hidden_hover),
     ("watching-toolbar", watching_toolbar),
     ("watching-1440p", watching_1440p),
     ("streams-live", streams_live),
@@ -489,6 +497,18 @@ fn connected_quiet(s: &mut App) {
     });
     s.level = 0.0;
     s.transmitting = false;
+}
+
+/// Seeing only your own channel: the toggle beside the server's name is lit, and the other
+/// channels keep their people to themselves.
+fn own_channel_only(s: &mut App) {
+    connected(s);
+    s.subscribe_all
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    for channel in s.server_mut().state.channels.iter_mut().skip(1) {
+        channel.members.clear();
+        channel.members_visible = false;
+    }
 }
 
 /// The server is refusing requests for a while: the footer says so, with no dialog.
@@ -1050,10 +1070,80 @@ fn share_quick(s: &mut App) {
     });
 }
 
+/// Someone else is live, so the pane is theirs and going live moves above the voice buttons.
+fn share_quick_streams(s: &mut App) {
+    use crate::streaming::publishing::{ShareSource, SourceKind};
+    connected(s);
+    s.ui.quick_sources = vec![
+        ShareSource {
+            kind: SourceKind::Screen(Some(0)),
+            name: "Main screen".into(),
+        },
+        ShareSource {
+            kind: SourceKind::Window(2),
+            name: "Counter-Strike 2".into(),
+        },
+    ];
+}
+
+/// A fuller server, as an evening looks: people in some channels and none in others, most of
+/// them muted, and a subchannel. You are muted and deafened and no one is sharing.
+fn channel_tree(s: &mut App) {
+    share_quick_no_game(s);
+    let person = |id, name: &str, mic_muted, sound_muted| client::Member {
+        sound_muted,
+        ..member(id, name, false, mic_muted)
+    };
+    let room = |id, name: &str, depth, members| client::Channel {
+        id,
+        name: name.into(),
+        depth,
+        members,
+        members_visible: true,
+        join_access: client::JoinAccess::Allowed,
+        ..client::Channel::default()
+    };
+    let lobby = room(
+        1,
+        "Lobby",
+        0,
+        vec![
+            member(1, "Jan", true, true),
+            person(2, "Mara", true, true),
+            person(3, "Theo", true, false),
+        ],
+    );
+    s.server_mut().state.channels = vec![
+        lobby.clone(),
+        room(2, "War room", 0, Vec::new()),
+        room(3, "Raid night", 0, vec![person(4, "Ines", true, false)]),
+        room(4, "Scrims", 1, Vec::new()),
+        room(5, "Strategy", 0, Vec::new()),
+        room(
+            6,
+            "Late shift",
+            0,
+            vec![
+                person(5, "Noor", true, false),
+                person(6, "Kofi", false, false),
+                person(7, "Lena", true, true),
+            ],
+        ),
+    ];
+    s.server_mut().state.current = Some(lobby);
+    s.server_mut().talking.clear();
+}
+
 fn share(s: &mut App) {
     connected(s);
     share_sources(s);
     s.server_mut().streaming.share_open = true;
+}
+
+/// Your share is the only one in the channel: the pane says so in place of its empty state.
+fn sharing_alone(s: &mut App) {
+    sharing(s);
+    s.server_mut().streaming.catalog.clear();
 }
 
 fn sharing(s: &mut App) {
@@ -1182,6 +1272,28 @@ fn watching_five_beside_drag(s: &mut App) {
 /// The pointer over the streams, with their toolbar showing.
 fn watching_toolbar(s: &mut App) {
     watching_grid(s);
+    s.ui.streams_hover = true;
+}
+
+/// The only stream in the channel: edge to edge, its bar hidden until the pointer is over it.
+fn watching_solo(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(s, &[("s1", 2, "Mara’s screen", Phase::Receiving)]);
+}
+
+fn watching_solo_hover(s: &mut App) {
+    watching_solo(s);
+    s.ui.streams_hover = true;
+}
+
+/// The other stream tucked away: the watched one fills the pane, a tab brings the other back.
+fn watching_others_hidden(s: &mut App) {
+    watching(s);
+    s.server_mut().streaming.others_hidden = true;
+}
+
+fn watching_others_hidden_hover(s: &mut App) {
+    watching_others_hidden(s);
     s.ui.streams_hover = true;
 }
 
@@ -1485,18 +1597,30 @@ mod tests {
         peek.open(base + Duration::from_millis(ms))
     }
 
-    // Sharing, and so its chips, only exists on Mac and Windows.
+    // Sharing, and so going live with one click, only exists on Mac and Windows.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn the_quick_share_chips_hide_once_you_are_live() {
+    fn going_live_is_offered_in_the_empty_pane_or_above_the_voice_buttons_until_you_are_live() {
         let mut rt = runtime(share_quick, (900.0, 790.0));
         settle(&mut rt);
+        assert!(rt.find("go-live-0").is_some(), "the main screen");
+        assert!(rt.find("go-live-1").is_some(), "the game");
+        assert!(rt.find("go-live-options").is_some(), "the dialog");
+        assert!(rt.find("quick-share").is_none(), "offered once");
+
+        // Streams fill the pane, so the chips take over.
+        let mut rt = runtime(share_quick_streams, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("go-live").is_none());
         assert!(rt.find("quick-share-0").is_some(), "the main screen");
         assert!(rt.find("quick-share-1").is_some(), "the game");
 
-        let mut rt = runtime(sharing, (900.0, 790.0));
-        settle(&mut rt);
-        assert!(rt.find("quick-share").is_none());
+        for scene in [sharing as fn(&mut App), sharing_alone] {
+            let mut rt = runtime(scene, (900.0, 790.0));
+            settle(&mut rt);
+            assert!(rt.find("quick-share").is_none());
+            assert!(rt.find("go-live").is_none());
+        }
     }
 
     #[test]
@@ -2392,6 +2516,8 @@ mod tests {
                         ..base.clone()
                     });
                 }
+                // Changed outside a handler, so the next frame must be told to re-run the view.
+                rt.invalidate();
             }
             for _ in 0..10 {
                 rt.frame(1.0 / 30.0);

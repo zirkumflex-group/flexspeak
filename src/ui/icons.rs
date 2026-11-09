@@ -33,6 +33,36 @@ pub static HEADPHONE_OFF: Icon = Icon {
     view: 24.0,
     body: r#"<path d="M21 14h-1.343" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.128 3.47A9 9 0 0 1 21 12v3.343" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="m2 2 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M20.414 20.414A2 2 0 0 1 19 21h-1a2 2 0 0 1-2-2v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 2.636-6.364" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
+// The switched-off icons in two halves, so the glyph can stay neutral while only its mark is
+// red (`widgets::struck`): each `_GLYPH` is the icon above without its strike or cross.
+pub static MIC_OFF_GLYPH: Icon = Icon {
+    name: "lucide-mic-off-glyph",
+    view: 24.0,
+    body: r#"<path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 10v2a7 7 0 0 0 12 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" x2="12" y1="19" y2="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+pub static HEADPHONE_OFF_GLYPH: Icon = Icon {
+    name: "lucide-headphone-off-glyph",
+    view: 24.0,
+    body: r#"<path d="M21 14h-1.343" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.128 3.47A9 9 0 0 1 21 12v3.343" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M20.414 20.414A2 2 0 0 1 19 21h-1a2 2 0 0 1-2-2v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 2.636-6.364" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+/// The diagonal through a switched-off microphone or headphones, a little heavier than the
+/// glyph so it carries at 13 pt.
+pub static STRIKE: Icon = Icon {
+    name: "lucide-strike",
+    view: 24.0,
+    body: r#"<path d="m2 2 20 20" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+pub static VOLUME_OFF_GLYPH: Icon = Icon {
+    name: "lucide-volume-off-glyph",
+    view: 24.0,
+    body: r#"<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+/// The cross beside a switched-off speaker.
+pub static VOLUME_OFF_CROSS: Icon = Icon {
+    name: "lucide-volume-off-cross",
+    view: 24.0,
+    body: r#"<line x1="22" x2="16" y1="9" y2="15" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><line x1="16" x2="22" y1="9" y2="15" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
 pub static VOLUME: Icon = Icon {
     name: "lucide-volume",
     view: 24.0,
@@ -318,6 +348,16 @@ pub static PANEL_RIGHT: Icon = Icon {
     name: "lucide-panel-right",
     view: 24.0,
     body: r#"<rect width="18" height="18" x="3" y="3" rx="2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 3v18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+pub static PANEL_BOTTOM_CLOSE: Icon = Icon {
+    name: "lucide-panel-bottom-close",
+    view: 24.0,
+    body: r#"<rect width="18" height="18" x="3" y="3" rx="2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 15h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="m15 8-3 3-3-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+pub static PANEL_RIGHT_CLOSE: Icon = Icon {
+    name: "lucide-panel-right-close",
+    view: 24.0,
+    body: r#"<rect width="18" height="18" x="3" y="3" rx="2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 3v18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="m8 9 3 3-3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 pub static FOLDER_OPEN: Icon = Icon {
     name: "lucide-folder-open",

@@ -122,6 +122,9 @@ pub struct View {
     /// The stream filling the stage, by ID; the others shrink to a strip.
     pub focused: Option<String>,
     pub strip: Strip,
+    /// The other streams are tucked away so the one on the stage fills the pane; a tab at its
+    /// foot brings them back.
+    pub others_hidden: bool,
     /// Codec, resolution and transport details over each picture.
     pub show_stats: bool,
     /// The share dialog is open.
@@ -143,6 +146,7 @@ impl Default for View {
             watching: Vec::new(),
             focused: None,
             strip: Strip::default(),
+            others_hidden: false,
             show_stats: false,
             share_open: false,
             volumes: std::collections::HashMap::new(),

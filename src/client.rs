@@ -443,15 +443,50 @@ impl std::fmt::Display for AudioFailure {
 }
 impl std::error::Error for AudioFailure {}
 
+/// Every voice session still running, so the app can say goodbye to each server when it is
+/// about to be torn down without the usual close: a crash, or Windows signing out or shutting
+/// down. A process killed outright runs nothing; the server drops it after its own timeout.
+static SESSIONS: std::sync::Mutex<Vec<mpsc::Sender<Command>>> = std::sync::Mutex::new(Vec::new());
+static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Asks every running session to disconnect and waits until they have, or `limit` passes.
+/// Safe from any thread but a voice session's own.
+pub fn stop_all(limit: Duration) {
+    use std::sync::atomic::Ordering;
+    if let Ok(sessions) = SESSIONS.lock() {
+        for session in sessions.iter() {
+            let _ = session.try_send(Command::Stop);
+        }
+    }
+    let deadline = Instant::now() + limit;
+    while RUNNING.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub fn start(
     config: Config,
     loopback: bool,
 ) -> Result<(mpsc::Sender<Command>, mpsc::Receiver<Event>)> {
+    use std::sync::atomic::Ordering;
     let (commands, receiver) = mpsc::channel(16);
     let (events, output) = mpsc::channel(64);
+    if let Ok(mut sessions) = SESSIONS.lock() {
+        sessions.retain(|session| !session.is_closed());
+        sessions.push(commands.clone());
+    }
+    RUNNING.fetch_add(1, Ordering::AcqRel);
     std::thread::Builder::new()
         .name("voice-session".into())
         .spawn(move || {
+            /// Counts the session out however its thread ends.
+            struct Running;
+            impl Drop for Running {
+                fn drop(&mut self) {
+                    RUNNING.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            let running = Running;
             let result = (|| -> Result<()> {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -464,6 +499,8 @@ pub fn start(
                     }
                 })
             })();
+            // Disconnected by now: count it out before telling the app, which may quit on it.
+            drop(running);
             let _ = events.blocking_send(Event::Stopped(result.err().map(|error| {
                 let source = if error.downcast_ref::<AudioFailure>().is_some() {
                     Source::Audio
@@ -472,6 +509,9 @@ pub fn start(
                 };
                 (source, format!("{error:#}"))
             })));
+        })
+        .inspect_err(|_| {
+            RUNNING.fetch_sub(1, Ordering::AcqRel);
         })?;
     Ok((commands, output))
 }

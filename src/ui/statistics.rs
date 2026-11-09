@@ -5,7 +5,7 @@ use rune_kit::Kit;
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Variant, button, card, divider, faint, heading, health_dot, muted, scroll_page, title, well,
+    Variant, button, divider, faint, heading, health_dot, muted, scroll_page, title, well,
 };
 use super::{charts, icons, send};
 use crate::{
@@ -122,15 +122,33 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     scroll_page(k, "statistics-scroll", content)
 }
 
-fn metric(t: &Theme, label: &'static str, value: String) -> El {
-    card(t)
+/// Readings as a plain table under a heading: the label leads, the figure trails, and hairlines
+/// part the rows, as a desktop app's inspector does.
+fn readings(t: &Theme, key: &str, title: &'static str, rows: Vec<(&'static str, String)>) -> El {
+    let mut table = col()
+        .key(key.to_owned())
         .grow(1.0)
         .w(0.0)
-        .min_w(120.0)
-        .padding(12.0)
-        .gap(2.0)
-        .child(text(label).font(ty::CAPTION).color(t.faint))
-        .child(text(value).font(ty::VALUE).color(t.text))
+        .min_w(260.0)
+        .child(heading(t, title).mb(6.0));
+    for (label, value) in rows {
+        table = table.child(divider(t)).child(
+            row()
+                .w_full()
+                .h(30.0)
+                .gap(16.0)
+                .center_y()
+                .child(
+                    text(label)
+                        .font(ty::BODY)
+                        .color(t.muted)
+                        .grow(1.0)
+                        .min_w(0.0),
+                )
+                .child(text(value).font(ty::NUMERIC).color(t.text)),
+        );
+    }
+    table
 }
 
 fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
@@ -143,11 +161,11 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
         |value: Option<u64>| value.map_or_else(|| "—".into(), |value| rate(value as f64));
     col()
         .w_full()
-        .gap(12.0)
+        .gap(20.0)
         .child(
             row()
                 .w_full()
-                .gap(16.0)
+                .gap(40.0)
                 .flex_wrap()
                 .child(history_card(
                     cx,
@@ -179,45 +197,48 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
         .child(
             row()
                 .w_full()
-                .gap(10.0)
+                .gap(40.0)
                 .flex_wrap()
-                .child(metric(t, "Upload", rate(network.upload_per_second)))
-                .child(metric(t, "Download", rate(network.download_per_second)))
-                .child(metric(t, "Packet loss in", percent(quality.packet_loss_in)))
-                .child(metric(t, "Packet loss out", percent(quality.packet_loss_out)))
-                .child(metric(t, "Ping", quality.ping_text()))
-                .child(metric(
+                .child(readings(
                     t,
-                    "Idle time",
-                    quality
-                        .idle_seconds
-                        .map_or_else(|| "—".into(), usage::format_idle),
-                )),
-        )
-        .child(
-            row()
-                .w_full()
-                .gap(10.0)
-                .flex_wrap()
-                .child(metric(
-                    t,
-                    "File transfer (in)",
-                    file_rate(quality.file_download_per_second),
+                    "connection-readings",
+                    "Connection",
+                    vec![
+                        ("Upload", rate(network.upload_per_second)),
+                        ("Download", rate(network.download_per_second)),
+                        ("Packet loss in", percent(quality.packet_loss_in)),
+                        ("Packet loss out", percent(quality.packet_loss_out)),
+                        ("Ping", quality.ping_text()),
+                        (
+                            "Idle time",
+                            quality
+                                .idle_seconds
+                                .map_or_else(|| "—".into(), usage::format_idle),
+                        ),
+                    ],
                 ))
-                .child(metric(
+                .child(readings(
                     t,
-                    "File transfer (out)",
-                    file_rate(quality.file_upload_per_second),
-                ))
-                .child(metric(
-                    t,
-                    "Session sent",
-                    usage::format_bytes(network.uploaded as f64),
-                ))
-                .child(metric(
-                    t,
-                    "Session received",
-                    usage::format_bytes(network.downloaded as f64),
+                    "transfer-readings",
+                    "Transfers",
+                    vec![
+                        (
+                            "File transfer in",
+                            file_rate(quality.file_download_per_second),
+                        ),
+                        (
+                            "File transfer out",
+                            file_rate(quality.file_upload_per_second),
+                        ),
+                        (
+                            "Session sent",
+                            usage::format_bytes(network.uploaded as f64),
+                        ),
+                        (
+                            "Session received",
+                            usage::format_bytes(network.downloaded as f64),
+                        ),
+                    ],
                 )),
         )
         .child(faint(
@@ -274,11 +295,10 @@ fn history_card(
                 .color(t.muted),
         );
     }
-    card(t)
+    col()
         .grow(1.0)
         .min_w(320.0)
         .w(0.0)
-        .padding(16.0)
         .gap(6.0)
         .child(heading_row)
         .child(faint(t, format!("Scale 0–{}", format(history.upper_bound))))
@@ -319,13 +339,11 @@ fn client_connections(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                 .label(member.name.clone())
                 .expanded(expanded)
                 .w_full()
-                .h(34.0)
-                .px(12.0)
+                .h(30.0)
+                .px(6.0)
                 .gap(10.0)
                 .center_y()
                 .radius(radius::ROW)
-                .fill(t.surface)
-                .border(1.0, t.hairline)
                 .child(health_dot(t, health, detail))
                 .child(
                     text(member.name.clone())
@@ -426,11 +444,10 @@ fn duration_text(seconds: f64) -> String {
 }
 
 fn stat_card(t: &Theme, title: &'static str, value: String, note: String) -> El {
-    card(t)
+    col()
         .grow(1.0)
         .min_w(180.0)
         .w(0.0)
-        .padding(14.0)
         .gap(4.0)
         .child(text(title).font(ty::CAPTION).color(t.faint))
         .child(text(value).font(ty::BIG_VALUE).color(t.text))
@@ -448,8 +465,10 @@ fn bars(
         .iter()
         .map(|entry| entry.value)
         .fold(0.0_f64, f64::max);
-    let mut content = card(t)
+    let mut content = col()
+        .w_full()
         .gap(12.0)
+        .pt(8.0)
         .child(heading(t, title))
         .child(muted(t, description))
         .child(faint(t, format!("Shared scale: 0–{}", unit.format(scale))));
