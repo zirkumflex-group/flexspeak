@@ -92,6 +92,9 @@ pub struct Server {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub address: String,
+    /// Connect when Flexspeak opens.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_connect: bool,
 }
 
 impl Server {
@@ -99,6 +102,7 @@ impl Server {
         Self {
             name: String::new(),
             address: address.into(),
+            auto_connect: false,
         }
     }
 
@@ -395,6 +399,7 @@ mod tests {
                 Server {
                     name: "Friends".into(),
                     address: "voice.example".into(),
+                    ..Default::default()
                 },
             ],
             nickname: "Älex".into(),

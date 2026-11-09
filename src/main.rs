@@ -227,6 +227,7 @@ struct App {
     /// Where to return after an update's restart, until it has been reached.
     resume: Option<resume::Resume>,
     resume_started: bool,
+    auto_connect_checked: bool,
     /// Every server connected or connecting, oldest first.
     sessions: Vec<ServerSession>,
     /// The server the window shows and the microphone goes to.
@@ -722,6 +723,9 @@ enum Message {
     CloseServerPicker,
     AddServer,
     EditServer(usize),
+    ServerAutoConnect(usize, bool),
+    /// Connects to the servers set to connect at launch.
+    AutoConnect,
     ServerName(String),
     ServerAddress(String),
     ServerPassword(String),
@@ -1000,6 +1004,7 @@ impl App {
             updater: updater::Updater::new(None, Err(String::new()), true),
             resume: None,
             resume_started: false,
+            auto_connect_checked: false,
             sessions: Vec::new(),
             active: None,
             next_session: 1,
@@ -1531,6 +1536,10 @@ impl App {
         let server = settings::Server {
             name: editor.name.trim().into(),
             address: address.clone(),
+            auto_connect: editor
+                .index
+                .and_then(|index| self.servers.get(index))
+                .is_some_and(|server| server.auto_connect),
         };
         let mut servers = self.servers.clone();
         match editor.index {
@@ -1564,6 +1573,32 @@ impl App {
         self.server_passwords.remove(removed.address.trim());
         self.set_servers(servers);
         self.server_editor = None;
+    }
+
+    /// Connects to the servers set to connect at launch; the first one is shown.
+    fn auto_connect(&mut self) -> Task {
+        let mut tasks = Vec::new();
+        let mut shown = None;
+        for index in self.auto_connect_servers() {
+            let address = self.servers[index].address.trim().to_owned();
+            tasks.push(self.update(Message::Connect(index)));
+            if let Some(id) = self.session_at(&address).map(|session| session.id)
+                && let Some(session) = self.session_mut(id)
+            {
+                session.activate_on_connect = false;
+                shown.get_or_insert(id);
+            }
+        }
+        if shown.is_some() {
+            self.activate(shown);
+        }
+        Task::batch(tasks)
+    }
+
+    fn auto_connect_servers(&self) -> Vec<usize> {
+        (0..self.servers.len())
+            .filter(|index| self.servers[*index].auto_connect)
+            .collect()
     }
 
     /// Uses `servers` and saves only the list, leaving other unsaved edits alone.
@@ -2756,6 +2791,14 @@ impl App {
                     editor.password = value;
                 }
             }
+            Message::ServerAutoConnect(index, on) => {
+                let mut servers = self.servers.clone();
+                if let Some(server) = servers.get_mut(index) {
+                    server.auto_connect = on;
+                    self.set_servers(servers);
+                }
+            }
+            Message::AutoConnect => return self.auto_connect(),
             Message::SubmitServer => self.submit_server(),
             Message::CancelServer => self.server_editor = None,
             Message::RemoveServer => self.remove_server(),
@@ -3902,6 +3945,7 @@ mod tests {
                 settings::Server {
                     name: "Friends".into(),
                     address: "two.example:9988".into(),
+                    ..Default::default()
                 },
             ]
         );
@@ -3934,6 +3978,32 @@ mod tests {
         assert_eq!(app.servers.len(), 1);
         assert_eq!(settings::load(&path).unwrap().unwrap().servers.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_connect_is_set_per_server_and_survives_editing_it() {
+        let (mut app, _root) = saved_fixture("auto-connect");
+        add_server(&mut app, "", "two.example", "");
+        assert!(app.auto_connect_servers().is_empty());
+        let _ = app.update(Message::ServerAutoConnect(1, true));
+        assert_eq!(app.auto_connect_servers(), [1]);
+        let saved = settings::load(app.settings_path.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(saved.servers[1].auto_connect && !saved.servers[0].auto_connect);
+
+        let _ = app.update(Message::EditServer(1));
+        let _ = app.update(Message::ServerName("Two".into()));
+        let _ = app.update(Message::SubmitServer);
+        assert_eq!(app.auto_connect_servers(), [1], "editing keeps it");
+
+        // Without a microphone nothing starts, but the field shows which server was tried.
+        app.input = None;
+        let _ = app.update(Message::AutoConnect);
+        assert_eq!(app.address, "two.example");
+
+        let _ = app.update(Message::ServerAutoConnect(1, false));
+        assert!(app.auto_connect_servers().is_empty());
     }
 
     #[test]

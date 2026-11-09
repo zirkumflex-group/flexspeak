@@ -60,6 +60,7 @@ pub const SCENES: &[Scene] = &[
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
     ("settings-picker", settings_picker),
+    ("settings-auto-connect", settings_auto_connect),
     ("server-add", server_add),
     ("server-edit", server_edit),
     ("home-connecting", home_connecting),
@@ -148,10 +149,12 @@ fn saved(s: &mut App) {
         settings::Server {
             name: "Zirkumflex".into(),
             address: "ts.zirkumflex.io".into(),
+            ..Default::default()
         },
         settings::Server {
             name: "Friday Squad".into(),
             address: "voice.friday.gg:9988".into(),
+            ..Default::default()
         },
         settings::Server::new("ts3.example.org"),
     ];
@@ -718,6 +721,13 @@ fn settings_audio(s: &mut App) {
 }
 
 /// Adding a server, from the home card's + or Settings.
+fn settings_auto_connect(s: &mut App) {
+    settings_page(s);
+    // A capture must never really connect.
+    s.auto_connect_checked = true;
+    s.servers[0].auto_connect = true;
+}
+
 fn server_add(s: &mut App) {
     settings_page(s);
     let _ = s.update(crate::Message::AddServer);
