@@ -69,6 +69,7 @@ pub const SCENES: &[Scene] = &[
     ("settings-permissions", settings_permissions),
     ("settings-file", settings_file),
     ("settings-search", settings_search),
+    ("settings-tray", settings_tray),
     ("settings-empty-search", settings_empty_search),
     ("settings-connected", settings_connected),
     ("settings-light", settings_light),
@@ -786,6 +787,13 @@ fn settings_file(s: &mut App) {
 fn settings_search(s: &mut App) {
     settings_at(s, SettingsPage::Server);
     s.settings_query = "mic".into();
+    s.sync_fields();
+}
+
+/// Settings searched for the notification-area icon's switch (Windows and macOS only).
+fn settings_tray(s: &mut App) {
+    settings_at(s, SettingsPage::Appearance);
+    s.settings_query = "tray".into();
     s.sync_fields();
 }
 
@@ -1964,6 +1972,11 @@ mod tests {
     fn choosing_a_bundled_theme_uses_it_and_a_builtin_replaces_it() {
         let mut rt = runtime(settings_appearance, (1000.0, 1500.0));
         settle(&mut rt);
+        scroll_into_view(
+            &mut rt,
+            "settings-body-Appearance",
+            "tokyo-night-storm-dark",
+        );
         click(&mut rt, "tokyo-night-storm-dark");
         assert_eq!(
             rt.state.appearance.dark_theme_id.as_deref(),
@@ -1979,6 +1992,29 @@ mod tests {
             true,
         );
         assert_eq!(chosen.surface, expected.surface);
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "macos"))]
+    fn the_tray_icon_stays_on_until_switched_off_in_appearance() {
+        let mut rt = runtime(settings_appearance, (1000.0, 1500.0));
+        settle(&mut rt);
+        assert!(!rt.state.appearance.hide_tray_icon, "on by default");
+        assert!(rt.state.tray_status().is_some());
+        let root = std::env::temp_dir().join(format!("flexspeak-tray-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        crate::settings::save(&path, &crate::settings::Settings::default()).unwrap();
+        rt.state.settings_path = Some(path.clone());
+        scroll_into_view(&mut rt, "settings-body-Appearance", "tray-icon");
+        click(&mut rt, "tray-icon");
+        assert!(rt.state.appearance.hide_tray_icon);
+        assert!(rt.state.tray_status().is_none(), "no icon once it's off");
+        let saved = crate::settings::load(&path).unwrap().unwrap();
+        assert!(saved.appearance.hide_tray_icon, "saved right away");
+        click(&mut rt, "tray-icon");
+        assert!(!rt.state.appearance.hide_tray_icon);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2087,6 +2123,22 @@ mod tests {
         for _ in 0..30 {
             rt.frame(1.0 / 60.0);
         }
+    }
+
+    /// Scrolls `body` a notch at a time until `key` sits wholly inside it.
+    fn scroll_into_view(rt: &mut Runtime<App>, body: &str, key: &str) {
+        for _ in 0..40 {
+            let ([_, top, _, height], _) =
+                rt.presented(body).unwrap_or_else(|| panic!("no {body}"));
+            let ([_, y, _, h], _) = rt.presented(key).unwrap_or_else(|| panic!("no {key}"));
+            if y >= top && y + h <= top + height {
+                return;
+            }
+            let (x, center) = rt.find(body).unwrap();
+            rt.wheel(x, center, if y < top { 60.0 } else { -60.0 });
+            settle(rt);
+        }
+        panic!("{key} never came into view");
     }
 
     fn click(rt: &mut Runtime<App>, key: &str) {

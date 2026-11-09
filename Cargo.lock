@@ -1657,9 +1657,9 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-user-notifications 0.3.2",
  "reqwest 0.13.5",
+ "resvg",
  "rubato",
  "rune",
- "rune-fx",
  "rune-kit",
  "rusqlite",
  "rustls",
@@ -1671,6 +1671,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tray-icon",
  "tsclientlib",
  "tsproto-packets",
  "webrtc-sys-build",
@@ -2932,6 +2933,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "muda"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4340e89c178916e62879c5c36b7f699019369be413e496178a6983ce91b8bc03"
+dependencies = [
+ "crossbeam-channel",
+ "dpi",
+ "keyboard-types",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "png 0.18.1",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3191,6 +3210,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.2",
  "objc2 0.6.5",
+ "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
 ]
@@ -4612,17 +4632,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rune-fx"
-version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=2ceefd2418b63cf33adb51ef83383c68bc0ffea5#2ceefd2418b63cf33adb51ef83383c68bc0ffea5"
-dependencies = [
- "bytemuck",
- "rune-motion",
- "rune-staging",
- "wgpu",
-]
-
-[[package]]
 name = "rune-highlights"
 version = "0.0.1"
 source = "git+https://github.com/anomalyco/rune?rev=2ceefd2418b63cf33adb51ef83383c68bc0ffea5#2ceefd2418b63cf33adb51ef83383c68bc0ffea5"
@@ -5857,6 +5866,25 @@ checksum = "1ad61aed86bc3faea4300c7aee358b4c6d0c8d6ccc36524c96e4c92ccf26e77e"
 dependencies = [
  "num-integer",
  "strength_reduce",
+]
+
+[[package]]
+name = "tray-icon"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f5cc5858ecf9574ddd8f0032a2ff7ffd6f7724d2b81e48b9374984b3fd6ddc9"
+dependencies = [
+ "crossbeam-channel",
+ "muda",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "once_cell",
+ "png 0.18.1",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -326,7 +326,7 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
         })
         .child(sidebar(
             t,
-            search_field(s, t, k, cx.is_reduced_motion()),
+            search_field(s, t, k),
             page,
             searching,
             &found,
@@ -411,9 +411,8 @@ fn sidebar(
         .child(nav)
 }
 
-/// The search field, in a ring of flowing liquid metal.
-fn search_field(s: &App, t: &Theme, k: &Kit, reduced_motion: bool) -> El {
-    const RING: f32 = 3.5;
+/// The search field, styled like every other text field.
+fn search_field(s: &App, t: &Theme, k: &Kit) -> El {
     let mut input = TextInput::new(&s.ui.settings_search)
         .placeholder("Search")
         .label("Search settings")
@@ -444,22 +443,10 @@ fn search_field(s: &App, t: &Theme, k: &Kit, reduced_motion: bool) -> El {
                 .a11y_hidden(),
         );
     }
-    let corner = radius::CONTROL + RING;
-    el().key("settings-search").w_full().pb(6.0).child(
-        el().w_full()
-            .padding(RING)
-            .radius(corner)
-            .child(
-                super::fx::liquid_metal_ring(RING, reduced_motion)
-                    .key("search-metal")
-                    .absolute(0.0, 0.0)
-                    .w_full()
-                    .h_full()
-                    .radius(corner)
-                    .a11y_hidden(),
-            )
-            .child(input.build(k)),
-    )
+    el().key("settings-search")
+        .w_full()
+        .pb(6.0)
+        .child(input.build(k))
 }
 
 fn nav_item(t: &Theme, page: SettingsPage, active: bool, found: bool) -> El {
@@ -1027,10 +1014,56 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
         ),
         more_themes(s, t),
     ];
+    if crate::tray::SUPPORTED {
+        sections.insert(sections.len() - 1, tray_section(s, t, k));
+    }
     if let Some(current) = &s.omarchy {
         sections.insert(0, omarchy_section(s, t, k, &current.name));
     }
     sections
+}
+
+/// The icon beside the clock (Windows) or in the menu bar (macOS) that shows your mute state.
+fn tray_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    let (title, label, detail) = if cfg!(target_os = "macos") {
+        (
+            "Menu Bar",
+            "Show icon in the menu bar",
+            "A ring while your microphone is on that lights up while you talk, and a struck microphone or headphones while muted or deafened.",
+        )
+    } else {
+        (
+            "Notification Area",
+            "Show icon in the notification area",
+            "A ring while your microphone is on that lights up while you talk, and a struck microphone or headphones while muted or deafened. Windows may put it under ^ at first: drag it onto the taskbar to keep it in sight.",
+        )
+    };
+    Section::boxed(
+        "tray",
+        title,
+        "tray icon notification area system tray menu bar taskbar status mute talking",
+        vec![item(
+            "tray icon notification area menu bar",
+            form_row(
+                t,
+                label,
+                Some(detail),
+                switch(
+                    "tray-icon",
+                    label,
+                    !s.appearance.hide_tray_icon,
+                    true,
+                    k,
+                    |s, on| {
+                        Message::Appearance(Appearance {
+                            hide_tray_icon: !on,
+                            ..s.appearance.clone()
+                        })
+                    },
+                ),
+            ),
+        )],
+    )
 }
 
 /// Only on an Omarchy desktop, where the app follows the desktop's theme unless told not to.
