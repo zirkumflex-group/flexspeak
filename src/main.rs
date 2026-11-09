@@ -169,6 +169,8 @@ struct App {
     sound_cues: bool,
     sounds: sounds::Settings,
     share_defaults: streaming::publishing::ShareDefaults,
+    /// Settings > Streaming, applied when a share starts.
+    stream_options: settings::Streaming,
     /// TeamSpeak's sounds, from its install on this computer if there is one.
     sound_bank: sounds::Bank,
     /// The sound volume moved and hasn't been saved yet.
@@ -471,6 +473,7 @@ struct ServerEditor {
 enum SettingsPage {
     Server,
     Appearance,
+    Streaming,
     Audio,
     Shortcuts,
     Permissions,
@@ -479,9 +482,10 @@ enum SettingsPage {
 }
 
 impl SettingsPage {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Server,
         Self::Appearance,
+        Self::Streaming,
         Self::Audio,
         Self::Shortcuts,
         Self::Permissions,
@@ -493,6 +497,7 @@ impl SettingsPage {
         match self {
             Self::Server => "Server",
             Self::Appearance => "Appearance",
+            Self::Streaming => "Streaming",
             Self::Audio => "Audio",
             Self::Shortcuts => "Shortcuts",
             Self::Permissions => "Permissions",
@@ -806,8 +811,8 @@ enum Message {
     ShareSources(Result<Vec<streaming::publishing::ShareSource>, String>),
     ShareSource(streaming::publishing::ShareSource),
     ShareAudio(bool),
-    ShareFastCapture(bool),
-    ShareHardwareAv1(bool),
+    StreamingHardwareAv1(bool),
+    StreamingFastCapture(bool),
     ShareAudioOutput(audio::DeviceChoice),
     StartSharing,
     /// Goes live with this source straight away, publicly.
@@ -958,6 +963,7 @@ impl App {
             sound_cues: true,
             sounds: sounds::Settings::default(),
             share_defaults: Default::default(),
+            stream_options: settings::Streaming::default(),
             sound_bank: if cfg!(test) {
                 sounds::Bank::default()
             } else {
@@ -1323,8 +1329,10 @@ impl App {
             None
         };
         let quality = sharing.quality;
-        let fast_capture = sharing.fast_capture;
-        let hardware_av1 = sharing.hardware_av1;
+        let settings::Streaming {
+            fast_capture,
+            hardware_av1,
+        } = self.stream_options;
         if self.command(client::Command::StartSharing(
             streaming::publishing::Options {
                 source,
@@ -1360,8 +1368,6 @@ impl App {
             } else {
                 sharing.audio
             },
-            fast_capture: sharing.fast_capture,
-            hardware_av1: sharing.hardware_av1,
         };
         if next == self.share_defaults {
             return;
@@ -1727,6 +1733,7 @@ impl App {
         self.sync_user_gains();
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
+        self.stream_options = saved.streaming;
         self.share_defaults = if saved.share.quality.validate().is_ok() {
             saved.share
         } else {
@@ -1764,6 +1771,7 @@ impl App {
             sound_cues: self.sound_cues,
             sounds: self.sounds.clone(),
             share: self.share_defaults,
+            streaming: self.stream_options,
             skip_install_prompt: self
                 .saved
                 .as_ref()
@@ -2595,15 +2603,19 @@ impl App {
                     self.server_mut().streaming.sharing.audio = audio;
                 }
             }
-            Message::ShareFastCapture(on) => {
-                if !self.server().streaming.sharing.status.active {
-                    self.server_mut().streaming.sharing.fast_capture = on;
-                }
+            Message::StreamingHardwareAv1(on) => {
+                self.stream_options.hardware_av1 = on;
+                self.save_preference(
+                    |saved| saved.streaming.hardware_av1 = on,
+                    "The AV1 choice applies for now but was not saved",
+                );
             }
-            Message::ShareHardwareAv1(on) => {
-                if !self.server().streaming.sharing.status.active {
-                    self.server_mut().streaming.sharing.hardware_av1 = on;
-                }
+            Message::StreamingFastCapture(on) => {
+                self.stream_options.fast_capture = on;
+                self.save_preference(
+                    |saved| saved.streaming.fast_capture = on,
+                    "The fast capture choice applies for now but was not saved",
+                );
             }
             Message::ShareAudioOutput(device) => {
                 if !self.server().streaming.sharing.status.active {

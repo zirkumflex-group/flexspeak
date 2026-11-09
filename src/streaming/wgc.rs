@@ -248,7 +248,7 @@ impl Capture {
         }
         self.step().map_err(|error| {
             anyhow!(
-                "Fast capture stopped working ({error:#}). Turn off Fast capture in the share dialog and share again."
+                "Fast capture stopped working ({error:#}). Turn off Fast capture in Settings > Streaming and share again."
             )
         })
     }

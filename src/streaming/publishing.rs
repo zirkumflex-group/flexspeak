@@ -326,21 +326,11 @@ mod tests {
     }
 
     #[test]
-    fn share_defaults_saved_before_fast_capture_still_load() {
-        let json = r#"{"quality":{"resolution":"p1080","frame_rate":30,"video_kbps":4500,"audio_kbps":128},"access":"public","audio":false}"#;
-        let defaults: ShareDefaults = serde_json::from_str(json).unwrap();
-        assert!(!defaults.fast_capture && !defaults.hardware_av1);
-        assert_eq!(defaults.access, Access::Public);
-    }
-
-    #[test]
     fn share_defaults_round_trip_and_only_apply_while_idle() {
         let defaults = ShareDefaults {
             quality: Preset::Sharp.quality(),
             access: Access::Public,
             audio: false,
-            fast_capture: true,
-            hardware_av1: true,
         };
         let json = serde_json::to_string(&defaults).unwrap();
         assert!(
@@ -357,7 +347,6 @@ mod tests {
         assert_eq!(ui.quality.preset(), Some(Preset::Sharp));
         assert_eq!(ui.access, Access::Public);
         assert!(!ui.audio);
-        assert!(ui.fast_capture && ui.hardware_av1);
 
         ui.status.active = true;
         ui.apply(ShareDefaults::default());
@@ -426,11 +415,11 @@ pub struct Options {
     pub audio: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
-    /// Experimental: capture screens and windows on the GPU without waiting for it
-    /// (Windows only; see `streaming/wgc.rs`). Falls back to the standard capture.
+    /// Settings > Streaming, experimental: capture screens and windows on the GPU without
+    /// waiting for it (Windows only; see `streaming/wgc.rs`). Falls back to the standard capture.
     pub fast_capture: bool,
-    /// Experimental: offer AV1 from the NVIDIA hardware encoder before VP8 (Windows, RTX 40
-    /// series and newer). Without such a GPU, VP8 is used as before.
+    /// Settings > Streaming: offer AV1 from the NVIDIA hardware encoder before VP8 (Windows,
+    /// RTX 40 series and newer). Without such a GPU, VP8 is used as before.
     pub hardware_av1: bool,
 }
 
@@ -584,8 +573,6 @@ pub struct ShareDefaults {
     pub quality: Quality,
     pub access: Access,
     pub audio: bool,
-    pub fast_capture: bool,
-    pub hardware_av1: bool,
 }
 impl Default for ShareDefaults {
     fn default() -> Self {
@@ -593,8 +580,6 @@ impl Default for ShareDefaults {
             quality: Quality::default(),
             access: Access::default(),
             audio: true,
-            fast_capture: false,
-            hardware_av1: false,
         }
     }
 }
@@ -678,8 +663,6 @@ pub struct Ui {
     pub audio_device: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
-    pub fast_capture: bool,
-    pub hardware_av1: bool,
     pub status: Status,
     /// One still per source chosen since the dialog opened.
     pub previews: Vec<SourcePreview>,
@@ -694,8 +677,6 @@ impl Default for Ui {
             audio_device: None,
             quality: Quality::default(),
             access: Access::default(),
-            fast_capture: false,
-            hardware_av1: false,
             status: Status::default(),
             previews: Vec::new(),
         }
@@ -709,8 +690,6 @@ impl Ui {
         }
         self.quality = defaults.quality;
         self.access = defaults.access;
-        self.fast_capture = defaults.fast_capture;
-        self.hardware_av1 = defaults.hardware_av1;
         if !self.selected.as_ref().is_some_and(|s| s.kind.is_camera()) {
             self.audio = defaults.audio;
         }

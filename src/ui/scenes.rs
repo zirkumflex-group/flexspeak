@@ -59,6 +59,7 @@ pub const SCENES: &[Scene] = &[
     ("settings-sounds-no-teamspeak", settings_sounds_no_teamspeak),
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
+    ("settings-streaming", settings_streaming),
     ("settings-picker", settings_picker),
     ("settings-auto-connect", settings_auto_connect),
     ("server-add", server_add),
@@ -94,16 +95,15 @@ pub const SCENES: &[Scene] = &[
     ("poke", poke),
     ("poked", poked),
     ("share", share),
-    ("share-experimental", share_experimental),
     ("share-quick", share_quick),
     ("share-quick-no-game", share_quick_no_game),
     ("share-quick-streams", share_quick_streams),
     ("channel-tree", channel_tree),
     ("sharing", sharing),
-    ("sharing-experimental", sharing_experimental),
+    ("sharing-stream-options", sharing_stream_options),
     (
-        "sharing-experimental-fallback",
-        sharing_experimental_fallback,
+        "sharing-stream-options-unavailable",
+        sharing_stream_options_unavailable,
     ),
     ("sharing-alone", sharing_alone),
     ("watching", watching),
@@ -727,6 +727,15 @@ fn settings_audio(s: &mut App) {
     settings_at(s, SettingsPage::Audio);
 }
 
+/// Settings > Streaming with both options on.
+fn settings_streaming(s: &mut App) {
+    settings_at(s, SettingsPage::Streaming);
+    s.stream_options = crate::settings::Streaming {
+        hardware_av1: true,
+        fast_capture: true,
+    };
+}
+
 /// Adding a server, from the home card's + or Settings.
 fn settings_auto_connect(s: &mut App) {
     settings_page(s);
@@ -1164,28 +1173,18 @@ fn share(s: &mut App) {
     s.server_mut().streaming.share_open = true;
 }
 
-/// Both experimental options ticked, with their explanations (Windows only).
-fn share_experimental(s: &mut App) {
-    share(s);
-    let sharing = &mut s.server_mut().streaming.sharing;
-    sharing.fast_capture = true;
-    sharing.hardware_av1 = true;
-}
-
-/// The open "You are sharing" dialog says that both experimental options are running.
-fn sharing_experimental(s: &mut App) {
+/// The open "You are sharing" dialog says that AV1 and fast capture are both in use.
+fn sharing_stream_options(s: &mut App) {
     sharing(s);
     let sharing = &mut s.server_mut().streaming;
     sharing.share_open = true;
-    sharing.sharing.fast_capture = true;
-    sharing.sharing.hardware_av1 = true;
     sharing.sharing.status.detail =
         "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is on. Fast capture is on.".into();
 }
 
-/// Both experimental options were asked for but are unavailable: the dialog says what runs.
-fn sharing_experimental_fallback(s: &mut App) {
-    sharing_experimental(s);
+/// AV1 and fast capture were asked for but are unavailable: the dialog says what runs.
+fn sharing_stream_options_unavailable(s: &mut App) {
+    sharing_stream_options(s);
     s.server_mut().streaming.sharing.status.detail =
         "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is unavailable on this graphics card, so VP8 is used. Fast capture was unavailable, so standard capture is used."
             .into();
