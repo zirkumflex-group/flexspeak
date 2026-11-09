@@ -155,7 +155,7 @@ fn sections(
     page: SettingsPage,
 ) -> Vec<Section> {
     match page {
-        SettingsPage::Server => vec![servers_section(s, t), identity_section(s, t, k)],
+        SettingsPage::Server => vec![servers_section(s, t, k), identity_section(s, t, k)],
         SettingsPage::Appearance => appearance_sections(s, t, k),
         SettingsPage::Audio => vec![
             Section::boxed(
@@ -543,7 +543,7 @@ fn window_header(s: &App, t: &Theme, page: SettingsPage, searching: bool) -> El 
 }
 
 /// The saved servers, one row each, and Add Server. The list saves as it changes.
-fn servers_section(s: &App, t: &Theme) -> Section {
+fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
     let mut rows: Vec<Row> = s
         .servers
         .iter()
@@ -597,6 +597,27 @@ fn servers_section(s: &App, t: &Theme) -> Section {
                         .a11y_hidden(),
                 )
                 .child(names)
+                .child(
+                    row()
+                        .gap(8.0)
+                        .center_y()
+                        .help(
+                            "Connect when Flexspeak opens. Passwords aren't saved, so a server \
+                             that needs one can't connect this way.",
+                        )
+                        .child(text("Auto connect").font(ty::SMALL).color(t.muted))
+                        .child({
+                            let on = server.auto_connect;
+                            Switch::new(on)
+                                .label(format!("Auto connect to {}", server.title()))
+                                .hide_label()
+                                .on_toggle_tx(move |s: &mut App, tx| {
+                                    super::dispatch(s, tx, Message::ServerAutoConnect(index, !on));
+                                })
+                                .build(k)
+                                .key(format!("auto-connect-{index}"))
+                        }),
+                )
                 .child(
                     button(
                         t,

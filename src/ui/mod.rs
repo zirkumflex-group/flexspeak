@@ -526,6 +526,14 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         dispatch(s, tx, Message::Resume);
         changed = true;
     }
+    // Once, at launch. A restart for an update already returns to where you were.
+    if !std::mem::replace(&mut s.auto_connect_checked, true)
+        && !s.resume_started
+        && s.onboarding.is_none()
+    {
+        dispatch(s, tx, Message::AutoConnect);
+        changed = true;
+    }
     if s.updater.next_check.is_some_and(|at| now >= at) {
         dispatch(s, tx, Message::Updater(crate::updater::Event::Check));
         changed = true;
