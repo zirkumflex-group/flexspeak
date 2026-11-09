@@ -30,7 +30,10 @@ fn rgb_at(pixel:vec2<i32>)->vec3<f32> {
 @fragment fn fs(in:Vertex)->@location(0) vec4<f32> {
     let c=cos(u.image.z); let s=sin(u.image.z);
     // The old Pixels path fits first, then rotates the fitted picture about its centre.
-    let fit=min(u.rect.z/u.image.x,u.rect.w/u.image.y);
+    // Fit inside the box, or fill it when that crops no more than `opacity.y` of the picture.
+    let contain=min(u.rect.z/u.image.x,u.rect.w/u.image.y);
+    let cover=max(u.rect.z/u.image.x,u.rect.w/u.image.y);
+    let fit=select(contain,cover,cover<=contain*(1.0+u.opacity.y));
     let q=in.p-u.rect.xy-u.rect.zw*0.5;
     let uv=vec2<f32>(c*q.x+s*q.y,-s*q.x+c*q.y)/fit+u.image.xy*0.5;
     if any(uv<vec2<f32>(0.0)) || any(uv>=u.image.xy) { discard; }

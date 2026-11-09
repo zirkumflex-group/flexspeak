@@ -4,7 +4,8 @@
 //! one; the focused stream takes the stage and the others line up below or beside it. Dragging
 //! one stream onto another trades their places. Each stream has its own volume. Codec and
 //! transport details hide behind the info button.
-//! Sharing your own screen starts from the button beside Disconnect, in [`share_dialog`].
+//! Sharing your own screen starts from the empty pane's own buttons or the one beside
+//! Disconnect, in [`share_dialog`].
 
 use rune::{Color, Cx, Drag, El, Phase, SurfaceFit, Transition, Tx, col, el, icon, row, text};
 use rune_kit::{Checkbox, Dialog, Kit};
@@ -17,7 +18,7 @@ use super::widgets::{
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
     self, Strip, Watching,
-    publishing::{Access, Preset, PreviewState, Resolution, SourceKind},
+    publishing::{Access, Preset, PreviewState, Resolution, ShareSource, SourceKind},
 };
 use crate::{App, Message, usage};
 
@@ -28,7 +29,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
     drag_ghost(s, t, layer);
     let watching = s.server().streaming.active();
     let mut pane = col().key("streams").w_full().h_full();
-    if watching || !unwatched(s).is_empty() {
+    if on_stage(s) {
         let room = pane_size(s, cx);
         pane = pane.child(
             col()
@@ -56,9 +57,41 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                     .child(channel_title(s, t))
                     .child(tools(s, t, supported, watching)),
             )
-            .child(no_streams(t, supported));
+            .child(no_streams(s, t, supported));
     }
     pane
+}
+
+/// Whether streams fill the pane: one you watch, or one in the channel you could.
+pub fn on_stage(s: &App) -> bool {
+    s.server().streaming.active() || !unwatched(s).is_empty()
+}
+
+/// What can go live with one click right now: your main screen, then the game you're playing.
+/// Nothing while you share, or where sharing isn't on offer.
+pub fn quick_sources(s: &App) -> &[ShareSource] {
+    let session = s.server();
+    let available = session.connected
+        && !s.loopback
+        && !session.stopping
+        && session.state.server_version.starts_with("6.")
+        && streaming::AVAILABLE
+        && !session.streaming.sharing.status.active;
+    let sources = if available {
+        s.ui.quick_sources.as_slice()
+    } else {
+        &[]
+    };
+    &sources[..sources.len().min(3)]
+}
+
+/// A quick source's icon: a game is a window, the main screen a screen.
+pub fn quick_icon(source: &ShareSource) -> &'static rune::Icon {
+    if matches!(source.kind, SourceKind::Window(_)) {
+        &icons::GAMEPAD
+    } else {
+        &icons::MONITOR_UP
+    }
 }
 
 /// The toolbar floating over the streams, at the top right; each stream's own button is at its
@@ -66,9 +99,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
 fn stage_tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
     row()
         .key("stage-tools")
-        .absolute(0.0, size::PAGE + 8.0)
+        .absolute(0.0, STAGE_PAD + 8.0)
         .w_full()
-        .px(size::PAGE + 8.0)
+        .px(STAGE_PAD + 8.0)
         .child(el().grow(1.0))
         .child(
             tools(s, t, supported, watching)
@@ -218,9 +251,102 @@ fn watch_blocked(s: &App, supported: bool, stream: &streaming::StreamInfo) -> Op
     }
 }
 
-/// What the pane shows while no stream is running in the channel: centred in the space left
-/// below the header, however wide the window is.
-fn no_streams(t: &Theme, supported: bool) -> El {
+/// A source's name, cut short so its button stays a button.
+fn short(name: &str) -> String {
+    const MAX: usize = 28;
+    if name.chars().count() <= MAX {
+        return name.to_owned();
+    }
+    let cut: String = name.chars().take(MAX - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// The ways to start sharing, in the empty pane: each quick source goes live with one click,
+/// always public, and the last button opens the dialog for everything else.
+fn go_live(s: &App, t: &Theme) -> El {
+    let quick = quick_sources(s);
+    let mut actions = row()
+        .key("go-live")
+        .gap(size::GAP)
+        .mt(4.0)
+        .center()
+        .flex_wrap();
+    for (index, source) in quick.iter().enumerate() {
+        actions = actions.child(
+            button(
+                t,
+                &format!("go-live-{index}"),
+                short(&source.name),
+                Some(quick_icon(source)),
+                if index == 0 {
+                    Variant::Primary
+                } else {
+                    Variant::Secondary
+                },
+                Some(Message::QuickShare(source.clone())),
+            )
+            .help(format!("Go live publicly: {}", source.name)),
+        );
+    }
+    let only = quick.is_empty();
+    actions.child(
+        button(
+            t,
+            "go-live-options",
+            if only {
+                "Share Screen…"
+            } else {
+                "More Options…"
+            },
+            only.then_some(&icons::MONITOR_UP),
+            if only {
+                Variant::Primary
+            } else {
+                Variant::Ghost
+            },
+            Some(Message::OpenShare),
+        )
+        .help("Choose a screen, window or camera, its quality and who may watch"),
+    )
+}
+
+/// What the pane shows while no stream is running in the channel, centred in the space left
+/// below the header however wide the window is: the ways to start one, or your own share
+/// while it is the only one.
+fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
+    let sharing = s.server().streaming.sharing.status.active;
+    let mut state = col()
+        .key("no-streams")
+        .grow(1.0)
+        .w_full()
+        // A little above the middle reads as centred; the header already sits on top.
+        .pb(56.0)
+        .gap(10.0)
+        .center()
+        // One line and the ways to go live; the rules live in the tooltip.
+        .child(
+            text(if sharing {
+                "Only you are sharing in this channel."
+            } else {
+                "No one in this channel is sharing."
+            })
+            .font(ty::BODY)
+            .color(t.muted)
+            .help(
+                "Watch up to five streams at once. Switching channels stops watching and \
+                 sharing; switching servers stops watching only.",
+            ),
+        );
+    if sharing {
+        state = state.child(
+            text(share_summary(s))
+                .font(ty::SMALL)
+                .color(t.faint)
+                .align(rune::Align::Center),
+        );
+    } else if supported && streaming::AVAILABLE {
+        state = state.child(go_live(s, t));
+    }
     let mut content = col()
         .key("no-streams-area")
         .grow(1.0)
@@ -240,41 +366,23 @@ fn no_streams(t: &Theme, supported: bool) -> El {
             "Native screen sharing is available on Mac and Windows.",
         )));
     }
-    content.child(
-        col()
-            .key("no-streams")
-            .grow(1.0)
-            .w_full()
-            // A little above the middle reads as centred; the header already sits on top.
-            .pb(56.0)
-            .gap(8.0)
-            .center()
-                .child(
-                    el().size(44.0, 44.0)
-                        .radius(radius::CARD)
-                        .center()
-                        .fill(t.wash(0.04))
-                        .child(icon(&icons::SCREEN_SHARE, 22.0).color(t.muted))
-                        .mb(4.0)
-                        .a11y_hidden(),
-                )
-                .child(
-                    text("No one in this channel is sharing.")
-                        .font(ty::BODY_STRONG)
-                        .color(t.text),
-                )
-                .child(muted(
-                    t,
-                    "Share your screen with the button beside Disconnect.",
-                ))
-                .child(faint(
-                    t,
-                    "Watch up to five streams at once. Leaving this view or switching channels stops watching and sharing; switching servers stops watching only.",
-                )
-                .max_w(420.0)
-                .align(rune::Align::Center)
-                .mt(4.0)),
-        )
+    content.child(state)
+}
+
+/// Your own share in a line: how many watch it, and what it shows.
+fn share_summary(s: &App) -> String {
+    let sharing = &s.server().streaming.sharing;
+    let source = if sharing.status.detail.is_empty() {
+        sharing.quality.label()
+    } else {
+        let detail = sharing.status.detail.strip_prefix("Sharing ");
+        detail.unwrap_or(&sharing.status.detail).to_owned()
+    };
+    format!(
+        "{} / {} viewers · {source}",
+        sharing.status.viewers.len(),
+        streaming::publishing::MAX_VIEWERS
+    )
 }
 
 /// A note on the main pane, recessed into it.
@@ -286,12 +394,6 @@ fn notice(t: &Theme) -> El {
 /// stop. The source comes last so a narrow sidebar only loses the end of it.
 pub fn sharing_status(s: &App, t: &Theme) -> El {
     let status = &s.server().streaming.sharing.status;
-    let source = if status.detail.is_empty() {
-        s.server().streaming.sharing.quality.label()
-    } else {
-        let detail = status.detail.strip_prefix("Sharing ");
-        detail.unwrap_or(&status.detail).to_owned()
-    };
     let mut tile = col()
         .key("sharing-status")
         .w_full()
@@ -332,17 +434,7 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
                     Some(Message::StopSharing),
                 )),
         )
-        .child(
-            faint(
-                t,
-                format!(
-                    "{} / {} viewers · {source}",
-                    status.viewers.len(),
-                    streaming::publishing::MAX_VIEWERS
-                ),
-            )
-            .truncate_fade(),
-        );
+        .child(faint(t, share_summary(s)).truncate_fade());
     if status.audio_frames > 0 {
         tile = tile.child(meter(t, "share-audio", status.audio_level.min(1.0), t.live));
     }
@@ -398,10 +490,17 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .px(size::PAGE)
-        .pt(size::PAGE)
-        .pb(size::PAGE)
+        .padding(STAGE_PAD)
         .gap(10.0);
+    if solo(s) {
+        // One stream and nothing else to show: it fills the pane edge to edge, as a player does.
+        let main = s
+            .server()
+            .streaming
+            .stage()
+            .expect("a lone watched stream is on the stage");
+        return area.padding(0.0).child(tile(s, t, main, Mode::Solo, true));
+    }
     let Some(main) = s.server().streaming.stage() else {
         let columns = grid_columns(watching.len() + available.len(), space);
         let volume_slider = cell_width(space, columns.unwrap_or(2)) >= MIN_CELL_WITH_SLIDER;
@@ -503,6 +602,44 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
     area
 }
 
+/// The margin around several streams on the stage.
+const STAGE_PAD: f32 = 12.0;
+
+/// How much of a lone stream may be cropped to fill the pane: 2%, a few pixels at each edge.
+const SOLO_CROP: f32 = 0.02;
+
+/// Whether the stream on the stage is all the pane shows: it is the only one, or the others
+/// are tucked away.
+fn solo(s: &App) -> bool {
+    s.server().streaming.stage().is_some() && (others(s) == 0 || s.server().streaming.others_hidden)
+}
+
+/// The streams around the one on the stage: the others you watch and those you could.
+fn others(s: &App) -> usize {
+    let streaming = &s.server().streaming;
+    if streaming.stage().is_none() {
+        return 0;
+    }
+    streaming.watching.len() - 1 + unwatched(s).len()
+}
+
+/// The tab at the foot of a stream on its own that brings the tucked-away streams back.
+fn show_others(t: &Theme, count: usize) -> El {
+    button(
+        t,
+        "show-others",
+        if count == 1 {
+            "1 more stream".to_owned()
+        } else {
+            format!("{count} more streams")
+        },
+        Some(&icons::CHEVRON_UP),
+        Variant::Secondary,
+        Some(Message::HideOtherStreams(false)),
+    )
+    .help("Show the other streams again")
+}
+
 /// Tiles that fit beneath the stage; further unjoined streams become "Also live" chips.
 const MAX_STRIP: usize = 4;
 const STRIP_HEIGHT: f32 = 132.0;
@@ -525,11 +662,11 @@ fn pane_size(s: &App, cx: &mut Cx<App>) -> (f32, f32) {
         || {
             let (width, height) = s.window_size;
             (
-                width - size::SIDEBAR - 2.0 * size::PAGE,
+                width - size::SIDEBAR - 2.0 * STAGE_PAD,
                 height - CHROME_HEIGHT,
             )
         },
-        |[width, height]| (width - 2.0 * size::PAGE, height - 2.0 * size::PAGE),
+        |[width, height]| (width - 2.0 * STAGE_PAD, height - 2.0 * STAGE_PAD),
     )
 }
 
@@ -612,7 +749,7 @@ fn watched_in_path(s: &App, path: &str) -> Option<String> {
 /// a drag onto another stream trades their places.
 fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
     let id = stream.id.clone();
-    let on_stage = mode == Mode::Stage;
+    let on_stage = matches!(mode, Mode::Stage | Mode::Solo);
     video
         .role("button")
         .label(format!("Move or focus {}", stream.name))
@@ -707,7 +844,9 @@ fn drag_ghost(s: &App, t: &Theme, layer: &mut Vec<El>) {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// The focused or only stream, filling the stage.
+    /// The only thing in the pane: the picture edge to edge, its bar over it on hover.
+    Solo,
+    /// The focused stream, filling the stage above or beside the others.
     Stage,
     /// One of several equals.
     Grid,
@@ -728,9 +867,15 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
         .center();
     video = match &watch.frame {
         Some(frame) => video.child(
-            super::video::picture(watch.slot, frame.rotation)
-                .w_full()
-                .h_full(),
+            // A lone stream fills the pane, cropping a sliver rather than leaving hairline bars
+            // when the pane is a hair off the stream's shape.
+            super::video::filling(
+                watch.slot,
+                frame.rotation,
+                if mode == Mode::Solo { SOLO_CROP } else { 0.0 },
+            )
+            .w_full()
+            .h_full(),
         ),
         None => video.child(
             col().gap(10.0).center().child(pulse(t.accent)).child(
@@ -778,6 +923,44 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
                 .a11y_hidden()
                 .child(text("Swap").font(ty::BODY_STRONG).color(Color::WHITE)),
         );
+    }
+    if mode == Mode::Solo {
+        // No box: the picture is the pane. Its bar floats over the bottom while the pointer is
+        // over the stream, and stays while it connects so Stop is always at hand.
+        // Tucked-away streams leave a small tab above the bar, shown with it while the pointer is
+        // over the stream, so nothing covers the picture otherwise.
+        let hidden = others(s);
+        let bar = s.ui.streams_hover || !receiving;
+        let overlay = bar.then(|| {
+            col()
+                .key("solo-overlay")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .justify_end()
+                .gap(8.0)
+                .padding(STAGE_PAD)
+                .children((hidden > 0).then(|| show_others(t, hidden).self_center()))
+                .child(
+                    controls(s, t, watch, mode, volume_slider)
+                        .key("solo-bar")
+                        .radius(radius::CARD)
+                        .fill(t.surface.alpha(0.86))
+                        .border(1.0, t.hairline)
+                        .backdrop_blur(12.0),
+                )
+                .transition(Transition::opacity())
+        });
+        return col()
+            .key(format!("tile-{id}"))
+            .grow(1.0)
+            .min_w(0.0)
+            .min_h(0.0)
+            .fill(Color::BLACK)
+            .transition(Transition::opacity())
+            .motion(motion::SETTLE)
+            .child(video)
+            .children(overlay);
     }
     let edge = if receiving {
         t.hairline
@@ -977,19 +1160,38 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
         // In a narrow box the name matters more; maximizing brings the slider back.
         if volume_slider {
             bar = bar.child(
-                el().w(if mode == Mode::Stage { 120.0 } else { 64.0 })
-                    .child(slider(
-                        t,
-                        "stream-volume",
-                        "Stream volume",
-                        i32::from(volume),
-                        format!("{volume}%"),
-                        Range::PERCENT,
-                        move |s: &App| i32::from(s.server().streaming.volume(publisher)),
-                        move |value| Message::StreamVolume(publisher, value.clamp(0, 100) as u8),
-                    )),
+                el().w(if matches!(mode, Mode::Stage | Mode::Solo) {
+                    120.0
+                } else {
+                    64.0
+                })
+                .child(slider(
+                    t,
+                    "stream-volume",
+                    "Stream volume",
+                    i32::from(volume),
+                    format!("{volume}%"),
+                    Range::PERCENT,
+                    move |s: &App| i32::from(s.server().streaming.volume(publisher)),
+                    move |value| Message::StreamVolume(publisher, value.clamp(0, 100) as u8),
+                )),
             );
         }
+    }
+    if mode == Mode::Stage && others(s) > 0 {
+        let beside = s.server().streaming.strip == Strip::Beside;
+        bar = bar.child(icon_button(
+            t,
+            "hide-others",
+            if beside {
+                &icons::PANEL_RIGHT_CLOSE
+            } else {
+                &icons::PANEL_BOTTOM_CLOSE
+            },
+            "Hide the other streams so this one fills the pane",
+            Variant::Ghost,
+            Some(Message::HideOtherStreams(true)),
+        ));
     }
     if mode == Mode::Stage && s.server().streaming.watching.len() > 1 {
         bar = bar.child(icon_button(

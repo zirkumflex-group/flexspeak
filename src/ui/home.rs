@@ -12,7 +12,7 @@ use rune_kit::{Kit, MenuItem, TextInput, context_menu};
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
     Variant, body, button, card, divider, faint, heading, icon_button, labelled, meter, muted,
-    overline, pulse, scroll_page,
+    overline, pulse, scroll_page, struck,
 };
 use super::{RailPeek, dispatch, footer, icons, members, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
@@ -20,8 +20,8 @@ use crate::{App, Message, Tab, client, usage};
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     let page = match s.tab {
         Tab::Home => home(s, cx, t, k, layer),
-        // On the same inset card as the connected panes, so it scrolls clear of the status bar.
-        Tab::Statistics => row().w_full().h_full().px(INSET).child(
+        // On the same panel as the connected window, so it scrolls clear of the status bar.
+        Tab::Statistics => row().w_full().h_full().child(
             pane(t)
                 .grow(1.0)
                 .min_w(0.0)
@@ -131,7 +131,6 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
             return row()
                 .w_full()
                 .h_full()
-                .pr(INSET)
                 .child(server_rail(s, t, k))
                 .child(pane(t).grow(1.0).min_w(0.0).child(connecting_pane(s, t)));
         }
@@ -143,13 +142,12 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
         return row()
             .w_full()
             .h_full()
-            .pl(if hidden { INSET } else { 0.0 })
-            .pr(INSET)
-            .gap(INSET)
             .children((!hidden).then(|| server_rail(s, t, k)))
             .child(sidebar(s, cx, t, k, layer))
+            .child(vertical_rule(t))
             .child(
                 pane(t)
+                    .fill(t.stage)
                     .key("main-pane")
                     .grow(1.0)
                     .min_w(0.0)
@@ -163,15 +161,15 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
 /// The gap between the window's edge and its cards, and between the cards.
 pub const INSET: f32 = 8.0;
 
-/// A card the connected window is built from: the sidebar and the main pane sit on the window
-/// background, each with its own rounded surface and hairline edge.
+/// A panel the connected window is built from. Panels run edge to edge between the title bar and
+/// the status bar, as a desktop app's do, with one hairline where two meet.
 fn pane(t: &Theme) -> El {
-    col()
-        .h_full()
-        .radius(radius::PANE)
-        .fill(t.surface)
-        .border(1.0, t.hairline)
-        .clip_rounded(radius::PANE)
+    col().h_full().fill(t.surface)
+}
+
+/// The hairline between two panels, full height.
+fn vertical_rule(t: &Theme) -> El {
+    el().w(1.0).h_full().fill(t.hairline).a11y_hidden()
 }
 
 fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
@@ -199,9 +197,12 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
                 )),
         );
         let ready = s.permissions.pending.is_none();
-        let mut list = col().key("server-list").w_full().gap(4.0);
+        let mut list = col().key("server-list").w_full().gap(2.0);
         for (index, server) in s.servers.iter().enumerate() {
             let session = s.session_at(&server.address);
+            if index > 0 {
+                list = list.child(divider(t).mx(8.0));
+            }
             list = list.child(server_row(t, index, server, session, busy, ready));
         }
         content = content.child(
@@ -236,9 +237,12 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
                 (!s.server().stopping).then_some(Message::Stop),
             ));
         }
-        content = content
-            .child(divider(t))
-            .child(status.key("status").transition(Transition::opacity()));
+        content = content.child(
+            status
+                .key("status")
+                .pt(4.0)
+                .transition(Transition::opacity()),
+        );
     } else {
         content = content
             .child(overline(t, "Saved servers"))
@@ -338,11 +342,13 @@ fn server_row(
     if default {
         connect = connect.default_button();
     }
+    // A plain list row, led by the same coloured tile the server has on the rail and in the
+    // sidebar; only the server being connected is tinted.
     row()
         .key(format!("server-{index}"))
         .w_full()
         .min_h(52.0)
-        .px(10.0)
+        .px(8.0)
         .py(8.0)
         .gap(12.0)
         .center_y()
@@ -350,23 +356,19 @@ fn server_row(
         .fill(if mine {
             t.accent.alpha(0.10)
         } else {
-            t.wash(0.03)
+            t.accent.alpha(0.0)
         })
-        .border(
-            1.0,
-            if mine {
-                t.accent.alpha(0.35)
-            } else {
-                t.hairline
-            },
-        )
         .motion(motion::QUICK)
         .child(
             el().size(32.0, 32.0)
                 .radius(radius::CONTROL)
                 .center()
-                .fill(t.raised)
-                .child(icon(&icons::SERVER, 16.0).color(t.accent).a11y_hidden())
+                .fill(tile_colour(server.title()))
+                .child(
+                    text(initials(server.title()))
+                        .font(ty::SMALL_STRONG)
+                        .color(rune::Color::WHITE),
+                )
                 .a11y_hidden(),
         )
         .child(names)
@@ -431,15 +433,19 @@ fn poke_marker(t: &Theme, pokes: u32) -> El {
     marker
 }
 
+/// Your microphone or sound on one server: plain while on, struck through in red while off,
+/// as the tree draws everyone's.
 fn rail_status_icon(
     t: &Theme,
     on: &'static rune::Icon,
     off: &'static rune::Icon,
     is_off: bool,
 ) -> El {
-    icon(if is_off { off } else { on }, 13.0)
-        .color(if is_off { t.poor } else { t.muted })
-        .a11y_hidden()
+    if is_off {
+        struck(t, off, &icons::STRIKE, 13.0)
+    } else {
+        icon(on, 13.0).color(t.muted).a11y_hidden()
+    }
 }
 
 /// One server on the rail: its tile, and the mic and sound state beneath it.
@@ -478,13 +484,13 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
         .child(rail_status_icon(
             t,
             &icons::MIC,
-            &icons::MIC_OFF,
+            &icons::MIC_OFF_GLYPH,
             session.microphone_off(),
         ))
         .child(rail_status_icon(
             t,
             &icons::HEADPHONES,
-            &icons::HEADPHONE_OFF,
+            &icons::HEADPHONE_OFF_GLYPH,
             session.deafened,
         ));
     let mut entry = row()
@@ -590,13 +596,8 @@ fn rail_edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     let near = peek.inside();
     let height = (s.window_size.1 - size::HEADER - 40.0).max(80.0);
     let (width, length) = if near { (5.0, 60.0) } else { (3.0, 44.0) };
-    let ink = if !s.server().talking.is_empty() {
-        t.good
-    } else if near {
-        t.muted
-    } else {
-        t.faint
-    };
+    // A handle, not a status light: it stays quiet while people talk.
+    let ink = if near { t.muted } else { t.faint };
     let mut strip = el()
         .key("rail-edge")
         .role("button")
@@ -725,7 +726,8 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
             } else {
                 "Seeing only your channel · show every channel"
             },
-            if all { Variant::Active } else { Variant::Ghost },
+            // Lit only while it narrows the tree: seeing every channel is the usual state.
+            if all { Variant::Ghost } else { Variant::Active },
             Some(Message::ToggleSubscribeAll),
         ));
     let server = if s.connected_servers() < 2 {
@@ -746,9 +748,8 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
         .padding(12.0)
         .gap(8.0)
         .child(server)
-        // Closer to its channels (8) than to the server above it (16).
-        .child(overline(t, "Channels").ml(6.0).mt(8.0))
-        // The channel list takes the free height, so the voice controls sit at the bottom.
+        // The channel list takes the free height, so the voice controls sit at the bottom. The
+        // tree needs no heading: the server above it says whose channels they are.
         .child(scroll_page(
             k,
             "channel-scroll",
@@ -1272,7 +1273,7 @@ fn voice_controls(s: &App, t: &Theme) -> El {
             key,
             glyph,
             label,
-            // Red while off, like the rail's own mic and sound icons.
+            // Red while off, the colour of the strike on the tree's and the rail's own icons.
             if active {
                 Variant::Danger
             } else {
@@ -1292,53 +1293,29 @@ fn voice_controls(s: &App, t: &Theme) -> El {
             (!s.server().stopping).then_some(Message::Stop),
         )));
     let speaking = s.microphone_meter_level();
-    // Lit while you are heard; it eases in and out only as that changes, not with every reading.
-    // Push-to-talk and voice activation keep it dark while their gate is closed.
-    let talking = speaking > crate::audio::SPEAKING_METER && s.transmitting;
-    let mut panel = col()
-        .key("voice")
-        .w_full()
-        .gap(8.0)
-        .padding(12.0)
-        .radius(radius::NESTED)
-        .fill(t.wash(0.035))
-        .border(
-            1.0,
-            if talking {
-                t.good.alpha(0.5)
-            } else {
-                t.hairline
-            },
-        )
-        .motion(motion::SETTLE);
+    // The bar sits at the foot of the sidebar with no frame or rule of its own; the meter under the
+    // buttons shows when you are heard.
+    let mut panel = col().key("voice").w_full().gap(8.0).pt(4.0);
     if s.server().streaming.sharing.status.active {
         panel = panel.child(streams::sharing_status(s, t));
     }
-    panel = panel
+    panel
         .children(quick_share(s, t))
         .child(controls)
-        .child(meter(t, "mic-level", speaking, t.good));
-    panel
+        .child(meter(t, "mic-level", speaking, t.good))
 }
 
-/// One click to go live, while you aren't: your main screen, then the game you're playing.
+/// One click to go live while other streams fill the pane, which offers the same itself when
+/// it is empty: your main screen, then the game you're playing. Plain until you are live;
+/// the live colour belongs to streams that are running.
 fn quick_share(s: &App, t: &Theme) -> Option<El> {
-    let sharing = &s.server().streaming.sharing;
-    let available = s.server().connected
-        && !s.loopback
-        && !s.server().stopping
-        && s.server().state.server_version.starts_with("6.")
-        && crate::streaming::AVAILABLE;
-    if !available || sharing.status.active || s.ui.quick_sources.is_empty() {
+    let sources = streams::quick_sources(s);
+    if sources.is_empty() || !streams::on_stage(s) {
         return None;
     }
-    let mut chips = row().key("quick-share").w_full().gap(6.0);
-    for (index, source) in s.ui.quick_sources.iter().take(3).enumerate() {
+    let mut chips = row().w_full().gap(6.0);
+    for (index, source) in sources.iter().enumerate() {
         let help = format!("Go live publicly: {}", source.name);
-        let game = matches!(
-            source.kind,
-            crate::streaming::publishing::SourceKind::Window(_)
-        );
         chips = chips.child(
             row()
                 .key(format!("quick-share-{index}"))
@@ -1352,23 +1329,17 @@ fn quick_share(s: &App, t: &Theme) -> Option<El> {
                 .gap(5.0)
                 .center_y()
                 .radius(radius::PILL)
-                .fill(t.live.alpha(0.12))
-                .border(1.0, t.live.alpha(0.28))
-                .hover(t.live.alpha(0.22))
+                .fill(t.wash(0.05))
+                .border(1.0, t.hairline)
+                .hover(t.wash(0.10))
+                .press(t.wash(0.14))
                 .focusable(true)
                 .cursor(rune::Cursor::Pointer)
                 .on_press_tx(send(Message::QuickShare(source.clone())))
                 .child(
-                    icon(
-                        if game {
-                            &icons::GAMEPAD
-                        } else {
-                            &icons::MONITOR_UP
-                        },
-                        12.0,
-                    )
-                    .color(t.live)
-                    .a11y_hidden(),
+                    icon(streams::quick_icon(source), 12.0)
+                        .color(t.muted)
+                        .a11y_hidden(),
                 )
                 .child(
                     text(source.name.clone())
@@ -1381,7 +1352,14 @@ fn quick_share(s: &App, t: &Theme) -> Option<El> {
                 ),
         );
     }
-    Some(chips)
+    Some(
+        col()
+            .key("quick-share")
+            .w_full()
+            .gap(6.0)
+            .child(overline(t, "Go live").ml(2.0))
+            .child(chips),
+    )
 }
 
 /// The voice panel's buttons share its width evenly, a little taller than the rest.
@@ -1419,6 +1397,12 @@ fn share_button(s: &App, t: &Theme) -> El {
         (supported || sharing).then_some(Message::OpenShare),
     )
 }
+
+/// How far a channel's subchannels step in.
+const CHANNEL_INDENT: f32 = 14.0;
+/// How far its members do: their icons and names line up with its subchannels', one level
+/// below the channel's own.
+const MEMBER_INDENT: f32 = 32.0;
 
 fn channel_tree(s: &App, t: &Theme) -> El {
     let mut tree = col().key("channels").w_full().gap(2.0);
@@ -1495,12 +1479,16 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     }
                 };
                 let joinable = (!s.server().stopping && current) || s.can_request_join(channel.id);
+                // Where people are reads first: an empty channel steps back, one you can't
+                // join further still.
                 let ink = if current {
                     t.accent
-                } else if joinable {
-                    t.text
-                } else {
+                } else if !joinable {
                     t.faint
+                } else if channel.members.is_empty() {
+                    t.muted
+                } else {
+                    t.text
                 };
                 let mut name = row()
                     .key("name")
@@ -1597,7 +1585,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     .key(format!("channel-{}", channel.id))
                     .w_full()
                     .gap(2.0)
-                    .pl(channel.depth.min(8) as f32 * 14.0)
+                    .pl(channel.depth.min(8) as f32 * CHANNEL_INDENT)
                     .child(
                         row()
                             .w_full()
@@ -1611,7 +1599,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         .key("members")
                         .w_full()
                         .gap(2.0)
-                        .pl(20.0)
+                        .pl(MEMBER_INDENT)
                         .transition(Transition::opacity());
                     for member in &channel.members {
                         members = members.child(members::interactive(
@@ -1681,7 +1669,12 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         entry = entry.child(
             el().help("Muted by you")
                 .label("Muted by you")
-                .child(icon(&icons::VOLUME_OFF, 13.0).color(t.poor)),
+                .child(struck(
+                    t,
+                    &icons::VOLUME_OFF_GLYPH,
+                    &icons::VOLUME_OFF_CROSS,
+                    13.0,
+                )),
         );
     }
     entry
@@ -1700,14 +1693,15 @@ fn signal_bars(t: &Theme, lit: usize, colour: rune::Color) -> El {
     bars
 }
 
-/// What you'll hear from someone, in one place: red headphones-off when their sound is off,
-/// red mic-off when muted, otherwise a ring that fills and glows green while they talk.
+/// What you'll hear from someone, in one place: headphones struck through in red when their
+/// sound is off, a microphone struck through when muted, otherwise a ring that fills and glows
+/// green while they talk.
 fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> El {
     let slot = el().key("voice").size(20.0, 20.0).center();
     let muted = if sound_muted {
-        Some((&icons::HEADPHONE_OFF, "Sound muted"))
+        Some((&icons::HEADPHONE_OFF_GLYPH, "Sound muted"))
     } else if mic_muted {
-        Some((&icons::MIC_OFF, "Microphone muted"))
+        Some((&icons::MIC_OFF_GLYPH, "Microphone muted"))
     } else {
         None
     };
@@ -1715,7 +1709,7 @@ fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> E
         return slot
             .help(help)
             .label(help)
-            .child(icon(glyph, 13.0).key("muted").color(t.poor).a11y_hidden());
+            .child(struck(t, glyph, &icons::STRIKE, 13.0).key("muted"));
     }
     let (ring, fill, glow) = if talking {
         (t.good, t.good, t.good.alpha(0.55))

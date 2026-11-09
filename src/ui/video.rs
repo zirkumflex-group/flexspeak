@@ -5,8 +5,10 @@ use rune::render::EffectSite;
 use wgpu::util::DeviceExt;
 
 pub const VIDEO: u32 = 2;
-pub fn picture(slot: usize, rotation: f32) -> rune::El {
-    rune::effect(VIDEO).effect_data([slot as f32, rotation, 0.0, 0.0])
+/// A stream's picture, fitted inside its box; or filling it instead when that crops no more
+/// than `crop` of it (0.02 is 2%), so a box a hair off the stream's shape shows no bars.
+pub fn filling(slot: usize, rotation: f32, crop: f32) -> rune::El {
+    rune::effect(VIDEO).effect_data([slot as f32, rotation, crop, 0.0])
 }
 struct Picture {
     size: (u32, u32),
@@ -212,7 +214,7 @@ impl Videos {
             site.data[1],
             f32::from(site.srgb_blend),
             site.instance.fill[3],
-            0.0,
+            site.data[2],
             0.0,
             0.0,
         ] {

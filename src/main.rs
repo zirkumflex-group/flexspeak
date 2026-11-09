@@ -20,6 +20,7 @@ mod permissions;
 mod profiler;
 mod resume;
 mod server_log;
+mod session_end;
 mod settings;
 mod shortcuts;
 mod sounds;
@@ -52,6 +53,9 @@ use icons::Icon;
 use ui::Task;
 
 const MIN_SIZE: (f32, f32) = (760.0, 560.0);
+/// How long a closed window's servers get to acknowledge the goodbye before the app quits
+/// regardless: each session waits up to 2 s for its server, after stopping its streams.
+const QUIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -116,6 +120,9 @@ fn main() -> anyhow::Result<()> {
         Some(other) if ui::is_tool_flag(other) => {}
         Some(other) => anyhow::bail!("Unknown argument '{other}'. Use --help."),
         None => {}
+    }
+    if !args.iter().any(|arg| ui::is_tool_flag(arg)) {
+        session_end::install();
     }
     ui::run();
     Ok(())
@@ -774,6 +781,8 @@ enum Message {
     FocusStream(Option<String>),
     /// The grid for `None`, or a stream on the stage with the others in this strip.
     StreamLayout(Option<streaming::Strip>),
+    /// Tuck the streams around the stage away, or bring them back.
+    HideOtherStreams(bool),
     /// Trades two watched streams' places.
     SwapStreams(String, String),
     /// A publisher's stream volume, in percent.
@@ -1060,12 +1069,16 @@ impl App {
         if self.active == id {
             return;
         }
-        let (strip, show_stats) = {
+        let (strip, others_hidden, show_stats) = {
             let old = self.server_mut();
             // The session stops these streams itself; this clears them from the screen now.
             old.streaming.clear_picture();
             old.streaming.share_open = false;
-            (old.streaming.strip, old.streaming.show_stats)
+            (
+                old.streaming.strip,
+                old.streaming.others_hidden,
+                old.streaming.show_stats,
+            )
         };
         self.active = id;
         self.hub.set_active(id);
@@ -1080,6 +1093,7 @@ impl App {
         self.ui.server_picker = false;
         let new = self.server_mut();
         new.streaming.strip = strip;
+        new.streaming.others_hidden = others_hidden;
         new.streaming.show_stats = show_stats;
         new.unseen_pokes = 0;
         new.activate_on_connect = false;
@@ -2358,11 +2372,24 @@ impl App {
                 }
             }
             Message::FocusStream(id) => {
-                self.server_mut().streaming.focused =
-                    id.filter(|id| self.server().streaming.watching(id).is_some());
+                let focused = id.filter(|id| self.server().streaming.watching(id).is_some());
+                let streaming = &mut self.server_mut().streaming;
+                // Back to the grid shows every stream, so nothing stays tucked away.
+                streaming.others_hidden &= focused.is_some();
+                streaming.focused = focused;
             }
-            Message::StreamLayout(None) => self.server_mut().streaming.focused = None,
+            Message::HideOtherStreams(hidden) => {
+                self.server_mut().streaming.others_hidden = hidden;
+            }
+            Message::StreamLayout(None) => {
+                // The grid shows every stream, so nothing stays tucked away.
+                let streaming = &mut self.server_mut().streaming;
+                streaming.focused = None;
+                streaming.others_hidden = false;
+            }
             Message::StreamLayout(Some(strip)) => {
+                // Choosing where the others go means showing them.
+                self.server_mut().streaming.others_hidden = false;
                 self.server_mut().streaming.strip = strip;
                 if self.server().streaming.stage().is_none() {
                     self.server_mut().streaming.focused = self
@@ -3149,6 +3176,18 @@ impl App {
                     return Task::Exit;
                 }
                 self.closing = true;
+                if let Some(handle) = &self.handle {
+                    // The window goes at once, so closing feels instant; each server is told
+                    // goodbye behind it. Should one not answer, the app quits anyway.
+                    handle.hide();
+                    let handle = handle.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("quit-deadline".into())
+                        .spawn(move || {
+                            std::thread::sleep(QUIT_DEADLINE);
+                            handle.quit();
+                        });
+                }
                 let ids: Vec<_> = self.sessions.iter().map(|session| session.id).collect();
                 for id in ids {
                     if let Some(session) = self.session(id) {
@@ -4110,6 +4149,27 @@ mod tests {
         // The running test holds the fields and blocks connecting.
         let _ = app.update(Message::Connect(0));
         assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn tucked_away_streams_come_back_with_the_grid_or_a_layout_choice() {
+        let (mut app, _first, _second) = two_servers();
+        let _ = app.update(Message::HideOtherStreams(true));
+        assert!(app.server().streaming.others_hidden);
+        let _ = app.update(Message::StreamLayout(None));
+        assert!(
+            !app.server().streaming.others_hidden,
+            "the grid shows every stream"
+        );
+        let _ = app.update(Message::HideOtherStreams(true));
+        let _ = app.update(Message::StreamLayout(Some(streaming::Strip::Beside)));
+        assert!(
+            !app.server().streaming.others_hidden,
+            "choosing where the others go shows them"
+        );
+        let _ = app.update(Message::HideOtherStreams(true));
+        let _ = app.update(Message::FocusStream(None));
+        assert!(!app.server().streaming.others_hidden);
     }
 
     #[test]

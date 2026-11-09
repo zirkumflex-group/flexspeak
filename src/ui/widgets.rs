@@ -279,6 +279,21 @@ pub fn labelled(glyph: &'static Icon, label: impl Into<String>, color: Color) ->
         .child(text(label.into()).font(ty::LABEL).color(color))
 }
 
+/// Something switched off, drawn as TeamSpeak does: the glyph stays neutral and only its mark
+/// is red, so a tree full of muted people doesn't turn red. `glyph` and `mark` are the two
+/// halves of one icon, such as `icons::MIC_OFF_GLYPH` and `icons::STRIKE`.
+pub fn struck(t: &Theme, glyph: &'static Icon, mark: &'static Icon, size: f32) -> El {
+    el().size(size, size)
+        .a11y_hidden()
+        .child(icon(glyph, size).color(t.muted).a11y_hidden())
+        .child(
+            icon(mark, size)
+                .absolute(0.0, 0.0)
+                .color(t.poor)
+                .a11y_hidden(),
+        )
+}
+
 pub fn divider(t: &Theme) -> El {
     el().h(1.0).w_full().fill(t.hairline).a11y_hidden()
 }

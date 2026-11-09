@@ -32,8 +32,10 @@ pub struct Theme {
     pub canvas: Color,
     /// Header, sidebar and footer chrome.
     pub chrome: Color,
-    /// Cards.
+    /// Cards, and the connected window's sidebar.
     pub surface: Color,
+    /// The stream pane: a step darker than the window, as a video player's backdrop.
+    pub stage: Color,
     /// Rows and controls on a card, menus and selected navigation.
     pub raised: Color,
     pub hairline: Color,
@@ -72,6 +74,17 @@ struct Palette {
     faint: u32,
     accent: u32,
     on_accent: u32,
+}
+
+/// The stream pane's backdrop, from a palette's own neutrals so every theme follows: a step below
+/// the window on dark palettes, and the chrome's light grey on light ones, where the white
+/// sidebar stays the brightest panel.
+fn stage(canvas: Color, chrome: Color, dark: bool) -> Color {
+    if dark {
+        canvas.mix(Color::BLACK, 0.42)
+    } else {
+        chrome
+    }
 }
 
 const fn palette(name: ThemeName, dark: bool) -> Palette {
@@ -152,10 +165,8 @@ pub mod size {
 }
 
 pub mod radius {
-    /// The window's own cards: the sidebar, the main pane and Statistics.
+    /// The hidden rail's peek, floating over the window's edge.
     pub const PANE: f32 = 12.0;
-    /// A card nested in a pane, such as the voice panel: between `PANE` and the controls in it.
-    pub const NESTED: f32 = 8.0;
     pub const CARD: f32 = 10.0;
     pub const CONTROL: f32 = 6.0;
     pub const ROW: f32 = 6.0;
@@ -186,7 +197,6 @@ pub mod ty {
     pub const SMALL_STRONG: TextStyle = TextStyle::new(11.5, 600.0);
     pub const CAPTION: TextStyle = TextStyle::new(11.0, 400.0);
     pub const OVERLINE: TextStyle = TextStyle::new(11.0, 600.0);
-    pub const VALUE: TextStyle = TextStyle::new(15.0, 560.0).features("'tnum' 1");
     pub const BIG_VALUE: TextStyle = TextStyle::new(20.0, 600.0).features("'tnum' 1");
     pub const NUMERIC: TextStyle = TextStyle::new(11.5, 500.0).features("'tnum' 1");
 }
@@ -201,6 +211,7 @@ impl Theme {
             canvas: rgb(p.canvas),
             chrome: rgb(p.chrome),
             surface: rgb(p.surface),
+            stage: stage(rgb(p.canvas), rgb(p.chrome), dark),
             raised: rgb(p.raised),
             text: rgb(p.text),
             muted: rgb(p.muted),
@@ -238,6 +249,7 @@ impl Theme {
             canvas: colors.canvas,
             chrome: colors.chrome,
             surface: colors.surface,
+            stage: stage(colors.canvas, colors.chrome, dark),
             raised: colors.raised,
             text: colors.text,
             muted: colors.muted,
@@ -259,6 +271,7 @@ impl Theme {
             canvas: rgb(0x1c1d20),
             chrome: rgb(0x232427),
             surface: rgb(0x26272b),
+            stage: stage(rgb(0x1c1d20), rgb(0x232427), true),
             raised: rgb(0x34353a),
             hairline: Color::WHITE.alpha(0.08),
             bevel_top: Color::WHITE.alpha(0.10),

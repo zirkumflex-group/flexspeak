@@ -2,7 +2,7 @@
 
 use rune::{Color, El, el, icon, row, text};
 
-use super::theme::{Theme, radius, ty};
+use super::theme::{Theme, ty};
 use super::widgets::{Variant, icon_button, vertical_divider};
 use super::{charts, icons};
 use crate::{App, Message, usage};
@@ -17,15 +17,12 @@ fn status_pill(s: &App, t: &Theme) -> El {
         detail = "The server is limiting how often Flexspeak can send it requests. Your mute and deafen work here right away; others see them once it eases off, usually within a minute. Connection details pause until then.".into();
     }
     let color = t.health(health);
-    let lit = health != usage::Health::Unknown;
+    // A dot and a word, like the readings beside it, rather than a badge.
     row()
         .key("health-pill")
         .h(24.0)
-        .px(8.0)
         .gap(6.0)
         .center_y()
-        .radius(radius::PILL)
-        .fill(color.alpha(if lit { 0.12 } else { 0.06 }))
         .help(detail)
         .label(format!("Connection {label}"))
         .motion(super::theme::motion::READING)
