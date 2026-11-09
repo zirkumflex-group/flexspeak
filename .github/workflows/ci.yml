@@ -103,9 +103,6 @@ jobs:
     name: Checks passed
     needs: [check]
     if: always()
-    concurrency:
-      group: probe-${{ github.run_id }}
-      queue: max
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
