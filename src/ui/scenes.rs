@@ -101,6 +101,10 @@ pub const SCENES: &[Scene] = &[
     ("channel-tree", channel_tree),
     ("sharing", sharing),
     ("sharing-fast-capture", sharing_fast_capture),
+    (
+        "sharing-fast-capture-fallback",
+        sharing_fast_capture_fallback,
+    ),
     ("sharing-alone", sharing_alone),
     ("watching", watching),
     ("watching-solo", watching_solo),
@@ -1174,6 +1178,14 @@ fn sharing_fast_capture(s: &mut App) {
     sharing.sharing.fast_capture = true;
     sharing.sharing.status.detail =
         "Public stream · viewers in your channel join automatically. Fast capture is on.".into();
+}
+
+/// Fast capture was asked for but could not start: the dialog says standard capture runs.
+fn sharing_fast_capture_fallback(s: &mut App) {
+    sharing_fast_capture(s);
+    s.server_mut().streaming.sharing.status.detail =
+        "Public stream · viewers in your channel join automatically. Fast capture was unavailable, so standard capture is used."
+            .into();
 }
 
 /// Your share is the only one in the channel: the pane says so in place of its empty state.

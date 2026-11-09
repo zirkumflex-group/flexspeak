@@ -783,11 +783,14 @@ mod native {
         }
         #[cfg(target_os = "windows")]
         let fast_started = fast.is_some();
+        // Fast capture's newest frame. Windows sends frames only when the picture changes,
+        // but encoders expect one every tick (a viewer who joins needs one to start from),
+        // so it is sent again until a newer one arrives, as the standard capture does.
+        #[cfg(target_os = "windows")]
+        let mut fast_frame: Option<VideoFrame<I420Buffer>> = None;
         #[cfg(not(target_os = "windows"))]
         let fast_started = false;
-        if fast_started {
-            // Fast capture replaces the standard capture for this share.
-        } else if let SourceKind::Camera(id) = &options.source.kind {
+        if let SourceKind::Camera(id) = &options.source.kind {
             tokio::select! {
                 biased;
                 _ = cancel.changed() => return Ok(()),
@@ -797,7 +800,7 @@ mod native {
                 return Ok(());
             }
             camera_capture = Some(camera::Capture::open(id, quality, receive)?);
-        } else {
+        } else if !fast_started {
             let (window, id) = match options.source.kind {
                 SourceKind::Window(id) => (true, Some(id)),
                 SourceKind::Screen(id) => (false, id),
@@ -901,8 +904,15 @@ mod native {
                     _ = video_tick.tick() => {
                         if let Some(capture) = &mut capture { capture.capture_frame(); }
                         #[cfg(target_os = "windows")]
-                        if let Some(fast) = &mut fast && let Some(buffer) = fast.poll()? {
-                            *latest.lock().unwrap() = Some(buffer);
+                        if let Some(fast) = &mut fast {
+                            if let Some(buffer) = fast.poll()? {
+                                fast_frame = Some(VideoFrame::new(VideoRotation::VideoRotation0,buffer));
+                            }
+                            if let Some(frame) = &mut fast_frame {
+                                frame.timestamp_us = start.elapsed().as_micros() as i64;
+                                video.capture_frame(frame); last_video = Instant::now(); frames += 1;
+                                if frames == 1 { emit(events,Output::Ready { fast_capture: true })?; }
+                            }
                         }
                         if let Some(buffer) = latest.lock().unwrap().take() {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);

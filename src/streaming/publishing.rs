@@ -324,6 +324,14 @@ mod tests {
     }
 
     #[test]
+    fn share_defaults_saved_before_fast_capture_still_load() {
+        let json = r#"{"quality":{"resolution":"p1080","frame_rate":30,"video_kbps":4500,"audio_kbps":128},"access":"public","audio":false}"#;
+        let defaults: ShareDefaults = serde_json::from_str(json).unwrap();
+        assert!(!defaults.fast_capture);
+        assert_eq!(defaults.access, Access::Public);
+    }
+
+    #[test]
     fn share_defaults_round_trip_and_only_apply_while_idle() {
         let defaults = ShareDefaults {
             quality: Preset::Sharp.quality(),
