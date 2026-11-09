@@ -195,7 +195,7 @@ mod native {
             ContinualGatheringPolicy, IceServer, PeerConnectionFactory, RtcConfiguration,
             native::PeerConnectionFactoryExt,
         },
-        rtp_parameters::DegradationPreference,
+        rtp_parameters::{DegradationPreference, RtpCodecCapability},
         rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
         session_description::{SdpType, SessionDescription},
         video_frame::{I420Buffer, VideoFrame, VideoRotation},
@@ -600,6 +600,19 @@ mod native {
             let _ = pc.add_ice_candidate(candidate).await;
         }
     }
+    /// Offered video codecs, most preferred first. AV1 leads only when a hardware encoder
+    /// (NVENC) offers it: the build leaves libaom's software AV1 encoder out, because it is
+    /// slower than VP8. VP8 always follows, for viewers that cannot decode AV1.
+    fn video_codecs(factory: &PeerConnectionFactory) -> Vec<RtpCodecCapability> {
+        let codecs = factory.get_rtp_sender_capabilities(MediaType::Video).codecs;
+        let named = |name: &'static str| {
+            codecs
+                .iter()
+                .filter(move |c| c.mime_type.eq_ignore_ascii_case(name))
+                .cloned()
+        };
+        named("video/AV1").chain(named("video/VP8")).collect()
+    }
     #[allow(clippy::too_many_arguments)]
     async fn add_peer(
         factory: &PeerConnectionFactory,
@@ -648,13 +661,13 @@ mod native {
         let transceiver = peer
             .pc
             .add_transceiver(MediaStreamTrack::Video(video.clone()), init())?;
-        let codecs = factory
-            .get_rtp_sender_capabilities(MediaType::Video)
-            .codecs
-            .into_iter()
-            .filter(|c| c.mime_type.eq_ignore_ascii_case("video/VP8"))
-            .collect::<Vec<_>>();
-        ensure!(!codecs.is_empty(), "The native VP8 encoder is unavailable");
+        let codecs = video_codecs(factory);
+        ensure!(
+            codecs
+                .iter()
+                .any(|c| c.mime_type.eq_ignore_ascii_case("video/VP8")),
+            "The native VP8 encoder is unavailable"
+        );
         transceiver.set_codec_preferences(codecs)?;
         peer.pc
             .add_transceiver(MediaStreamTrack::Audio(audio.clone()), init())?;
@@ -948,6 +961,36 @@ mod native {
             assert_eq!(saver.map(|b| (b.width(), b.height())).unwrap(), (852, 480));
         }
 
+        /// The codec name of the first payload type on the SDP's video line.
+        fn first_video_codec(sdp: &str) -> Option<String> {
+            let payload = sdp
+                .lines()
+                .find(|l| l.starts_with("m=video"))?
+                .split(' ')
+                .nth(3)?;
+            let prefix = format!("a=rtpmap:{payload} ");
+            let rtpmap = sdp.lines().find_map(|l| l.strip_prefix(prefix.as_str()))?;
+            Some(rtpmap.split('/').next()?.to_owned())
+        }
+
+        #[test]
+        fn first_video_codec_reads_the_preferred_payload() {
+            let sdp = "v=0
+m=audio 9 UDP/TLS/RTP/SAVPF 111
+m=video 9 UDP/TLS/RTP/SAVPF 45 96
+a=rtpmap:96 VP8/90000
+a=rtpmap:45 AV1/90000
+";
+            assert_eq!(first_video_codec(sdp).as_deref(), Some("AV1"));
+            assert_eq!(
+                first_video_codec(
+                    "v=0
+"
+                ),
+                None
+            );
+        }
+
         #[tokio::test]
         #[ignore = "Native codec/UDP integration; generated pixels and audio only, no capture or server"]
         async fn publisher_sends_generated_video_and_stereo_audio() -> Result<()> {
@@ -993,6 +1036,15 @@ mod native {
             let generation = surface.begin();
             let mut receiver =
                 rtc::start_with_servers(sdp, vec![], generation, surface.clone(), vec![])?;
+            let expected = if video_codecs(&factory)[0]
+                .mime_type
+                .eq_ignore_ascii_case("video/AV1")
+            {
+                "AV1"
+            } else {
+                "VP8"
+            };
+            let mut negotiated = None;
             let mut answered = false;
             let mut pending = Vec::new();
             let mut decoded_video = 0;
@@ -1014,6 +1066,7 @@ mod native {
                             Some(rtc::Output::Signal(value)) if value["cmd"] == "answer" => {
                                 let sdp = value["args"]["answer"].as_str().context("Missing answer")?;
                                 ensure!(!sdp.contains("a=sendrecv") && !sdp.contains("a=sendonly"),"Receiver must not send media");
+                                negotiated = first_video_codec(sdp);
                                 sender.pc.set_remote_description(SessionDescription::parse(sdp,SdpType::Answer)?).await?;
                                 answered = true;
                                 for candidate in pending.drain(..) { add_candidate(&sender.pc,candidate).await; }
@@ -1052,8 +1105,12 @@ mod native {
                 !factory.adm_recording_enabled(),
                 "The publishing test must never enable microphone capture"
             );
+            ensure!(
+                negotiated.as_deref() == Some(expected),
+                "Expected {expected} video, negotiated {negotiated:?}"
+            );
             println!(
-                "Publisher proof: {decoded_video} decoded video frames, {} distinct levels, {decoded_audio} stereo audio blocks, peak {peak}; no capture devices or server",
+                "Publisher proof: {expected} video, {decoded_video} decoded video frames, {} distinct levels, {decoded_audio} stereo audio blocks, peak {peak}; no capture devices or server",
                 distinct.len()
             );
             video_track.set_enabled(false);
