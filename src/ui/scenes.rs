@@ -1597,18 +1597,28 @@ mod tests {
 
     #[test]
     fn every_scene_builds_at_the_minimum_and_a_large_size() {
-        for (name, scene) in SCENES {
-            for size in [crate::MIN_SIZE, (1400.0, 900.0)] {
-                let mut rt = runtime(*scene, size);
-                for _ in 0..30 {
-                    rt.frame(1.0 / 30.0);
-                }
-                assert!(
-                    rt.find("content").is_some(),
-                    "{name} at {size:?} has no content"
-                );
+        // Hundreds of scene runs take most of the suite's time, so spread them over every core.
+        let cases: Vec<_> = SCENES
+            .iter()
+            .flat_map(|scene| [(scene, crate::MIN_SIZE), (scene, (1400.0, 900.0))])
+            .collect();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        std::thread::scope(|scope| {
+            for chunk in cases.chunks(cases.len().div_ceil(threads)) {
+                scope.spawn(move || {
+                    for &((name, scene), size) in chunk {
+                        let mut rt = runtime(*scene, size);
+                        for _ in 0..30 {
+                            rt.frame(1.0 / 30.0);
+                        }
+                        assert!(
+                            rt.find("content").is_some(),
+                            "{name} at {size:?} has no content"
+                        );
+                    }
+                });
             }
-        }
+        });
     }
 
     fn peek_at(peek: &super::super::RailPeek, base: Instant, ms: u64) -> bool {

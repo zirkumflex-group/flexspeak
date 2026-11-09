@@ -39,11 +39,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The changelog is built from the release tags' commits (scripts/release.py).
+          # The changelog is built from the release tags' commit messages (scripts/release.py),
+          # so it needs the history but not old file contents.
           fetch-depth: 0
+          filter: blob:none
+      # Windows is slow with the thousands of small files a Rust build unpacks and writes, so
+      # the toolchain, Cargo's home and a copy of the checkout live on a ReFS Dev Drive. The
+      # drive is not marked trusted, so Defender still scans it.
+      - name: Windows Dev Drive
+        if: runner.os == 'Windows'
+        uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          drive-size: 20GB
+          workspace-copy: true
+          env-mapping: |
+            CARGO_HOME,{{ DEV_DRIVE }}/.cargo
+            RUSTUP_HOME,{{ DEV_DRIVE }}/.rustup
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE || '.' }}
           # A Mac cache from another image holds that image's Xcode paths and won't link.
           shared-key: release-${{ matrix.platform }}${{ runner.os == 'macOS' && '-26' || '' }}
       # rust-cache prunes unknown directories under target/, so Opus lives (and is cached) elsewhere.
@@ -63,13 +78,14 @@ jobs:
           "$RUNNER_TEMP/dmg-tools/bin/pip" install dmgbuild==1.6.7
           echo "FLEXSPEAK_DMGBUILD=$RUNNER_TEMP/dmg-tools/bin/dmgbuild" >> "$GITHUB_ENV"
       - name: Build and package
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         env:
           FLEXSPEAK_OPUS_DIR: ${{ runner.temp }}/opus
         run: python scripts/release.py build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.platform }}
-          path: dist/releases/*
+          path: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}/dist/releases/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
