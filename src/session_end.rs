@@ -13,6 +13,7 @@ use crate::client;
 /// How long a crash waits for the servers to let go before the process goes.
 const CRASH_LIMIT: Duration = Duration::from_millis(1500);
 /// Windows allows a few seconds after sign-out before it calls an app hung.
+#[cfg(windows)]
 const SESSION_END_LIMIT: Duration = Duration::from_secs(2);
 
 pub fn install() {
