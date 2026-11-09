@@ -1,26 +1,9 @@
-require "download_strategy"
-
-# Resolve credentials only during download, never when Homebrew serializes the cask.
-class FlexspeakPrivateDownloadStrategy < CurlDownloadStrategy
-  def resolve_url_basename_time_file_size(url, timeout: nil)
-    [url, "flexspeak.dmg", nil, nil, "application/octet-stream", false]
-  end
-
-  def _fetch(url:, resolved_url:, timeout:)
-    token = ENV.fetch("HOMEBREW_GITHUB_API_TOKEN") do
-      raise CurlDownloadStrategyError.new(url, "Set HOMEBREW_GITHUB_API_TOKEN to a token with read access to zirkumflex-group/flexspeak")
-    end
-    curl_download url, to: temporary_path, timeout: timeout,
-                  header: ["Accept: application/octet-stream", "Authorization: Bearer #{token}"]
-  end
-end
-
 cask "flexspeak" do
   version "${VERSION}"
   sha256 "${ARM_SHA}"
 
-  url "https://api.github.com/repos/zirkumflex-group/flexspeak/releases/assets/${ARM_ID}",
-      using: FlexspeakPrivateDownloadStrategy
+  # The repository and its releases are public: no token is needed to download.
+  url "https://github.com/zirkumflex-group/flexspeak/releases/download/${TAG}/Flexspeak-macos-arm64.dmg"
   name "Flexspeak"
   desc "Native TeamSpeak-compatible voice client"
   homepage "https://github.com/zirkumflex-group/flexspeak"
@@ -31,5 +14,5 @@ cask "flexspeak" do
 
   app "Flexspeak.app"
 
-  caveats "Requires macOS 14.2 or later. This internal build is ad-hoc signed, not notarized."
+  caveats "Requires macOS 14.2 or later. This build is ad-hoc signed, not notarized."
 end

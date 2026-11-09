@@ -1,22 +1,21 @@
 # Flexspeak releases and Homebrew
 
-Every push to `main` in [flexspeak](https://github.com/zirkumflex-group/flexspeak) queues a release. Releases and this Homebrew tap are private: your GitHub account needs read access to both repositories.
+Every push to `main` in [flexspeak](https://github.com/zirkumflex-group/flexspeak) queues a release. The repository and its releases are public. This Homebrew tap is private: your GitHub account needs read access to it.
 
 ## Install on macOS
 
-Install Homebrew and GitHub CLI (`brew install gh`), then authenticate Git and release downloads:
+Install Homebrew and GitHub CLI (`brew install gh`), then let Git reach the private tap:
 
 ```sh
 gh auth login
 gh auth setup-git
-export HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)"
 brew tap zirkumflex-group/flexspeak
 brew install --cask zirkumflex-group/flexspeak/flexspeak
 ```
 
-The cask installs **Flexspeak.app** on Apple Silicon Macs using a DMG with a verified SHA-256 checksum. The same DMG opens in Finder with Flexspeak on the left, an arrow, and Applications on the right: drag the app into Applications. Both the classic Finder/Dock icon and the newer Icon Composer asset are bundled. macOS 14.2 or later is required. The token stays in your environment, not in the cask or download URL; use a token with read-only Contents access to `flexspeak` and `homebrew-flexspeak` if configuring a dedicated token.
+The cask installs **Flexspeak.app** on Apple Silicon Macs using a DMG with a verified SHA-256 checksum. The same DMG opens in Finder with Flexspeak on the left, an arrow, and Applications on the right: drag the app into Applications. Both the classic Finder/Dock icon and the newer Icon Composer asset are bundled. macOS 14.2 or later is required. The DMG downloads from the public release; only the tap itself needs your GitHub login.
 
-To update, authenticate as above if your shell no longer has the token, then:
+To update:
 
 ```sh
 brew update
@@ -29,11 +28,11 @@ The macOS build is ad-hoc signed, not Developer ID signed or notarized. macOS ma
 
 ## Windows
 
-Download `Flexspeak-windows-x64.zip` from the [latest private release](https://github.com/zirkumflex-group/flexspeak/releases/latest), extract it, and open `Flexspeak.exe`. A standalone `Flexspeak-windows-x64.exe` is also provided with a separate dependency-notices file. The ZIP includes settings documentation, a portable settings template, build metadata and dependency notices.
+Download `Flexspeak-windows-x64.zip` from the [latest release](https://github.com/zirkumflex-group/flexspeak/releases/latest), extract it, and open `Flexspeak.exe`. A standalone `Flexspeak-windows-x64.exe` is also provided with a separate dependency-notices file. The ZIP includes settings documentation, a portable settings template, build metadata and dependency notices.
 
 ## Linux / Omarchy (x86_64)
 
-Download `Flexspeak-linux-x64.pkg.tar.zst` from the latest private release and install it on Omarchy or Arch Linux:
+Download `Flexspeak-linux-x64.pkg.tar.zst` from the latest release and install it on Omarchy or Arch Linux:
 
 ```sh
 sudo pacman -U ./Flexspeak-linux-x64.pkg.tar.zst
@@ -59,9 +58,9 @@ Homebrew and the Arch package already install the app and are never offered this
 
 ## In-app updates
 
-Release builds check GitHub Releases five seconds after launch and every six hours. The newest build is the release GitHub marks **latest**. The workflow sets that mark only after every package and the Homebrew tap are published, and never moves it backwards. That release is an update when its `(version, build)` from `v{version}-build.{N}` is greater than the running build's, which comes from `CARGO_PKG_VERSION` and `NATIVE_VOICE_BUILD_NUMBER` at compile time. Local `cargo` builds have no build number and never update themselves.
+Release builds check GitHub Releases five seconds after launch and every six hours. The newest build is the release GitHub marks **latest**. The workflow sets that mark once every package is published, before it updates the Homebrew tap, and never moves it backwards. That release is an update when its `(version, build)` from `v{version}-build.{N}` is greater than the running build's, which comes from `CARGO_PKG_VERSION` and `NATIVE_VOICE_BUILD_NUMBER` at compile time. Local `cargo` builds have no build number and never update themselves.
 
-**The app reads releases anonymously, so this only works once the repository (or at least its releases) is public.** While the repository is private, GitHub answers 404. The check fails quietly, and Settings → Updates shows why.
+The app reads releases anonymously, which works because the repository is public. If GitHub can't be reached, the check fails quietly and Settings → Updates shows why.
 
 | Installation | Asset | Install on Restart |
 | --- | --- | --- |
@@ -78,14 +77,15 @@ After an in-place update, Homebrew's record still names the old cask version. `b
 
 ## Automation
 
-- PRs run formatting, Clippy and tests once on Linux. Dependencies are cached, old runs of the same PR are cancelled, and documentation-only PRs skip checks. PR code receives a read-only token and no publishing secret. Fork PR workflow execution requires owner approval.
-- Pushes to `main` run those checks, then one Windows x64, one macOS arm64 and one Linux x64 release build in parallel. The Linux binary is packaged as both a tarball and an Arch/Omarchy package without compiling it twice. Static Opus 1.6.1 is downloaded with a pinned checksum and built locally on each runner. There is no Homebrew runtime dependency.
+- PRs run Clippy, tests and the release-script tests on Windows, macOS and Linux (formatting once, on Linux), because Windows and macOS compile code Linux never sees. These checks are required to merge into `main`, so documentation-only PRs run them too. Dependencies are fetched first through the git CLI with a time limit, and only `main` saves build caches. Old runs of the same PR are cancelled. PR code receives a read-only token and no publishing secret. Fork PR workflow execution requires owner approval.
+- Pushes to `main` run those checks and, in parallel, one Windows x64, one macOS arm64 and one Linux x64 release build. Each build fetches its platform's dependencies first, then builds offline. The Linux binary is packaged as both a tarball and an Arch/Omarchy package without compiling it twice. Static Opus (version and checksum in `scripts/opus.json`) is downloaded with a pinned checksum and built locally on each runner. There is no Homebrew runtime dependency.
 - A completed build gets a unique `v0.1.0-build.N` tag (the base version comes from `Cargo.toml`). All packages upload to a draft before it is published. Packages include SHA-256 checksums. Failed builds leave the previous Homebrew version intact.
-- The publishing job updates `zirkumflex-group/homebrew-flexspeak` using the repository-scoped `HOMEBREW_TAP_DEPLOY_KEY` secret. Its private key is only supplied to the main-branch publishing job. No generated commits are pushed into the source repository, so publishing cannot loop.
+- The publishing job runs only on `main`, in the `release` environment, which admits `main` alone. It updates `zirkumflex-group/homebrew-flexspeak` with the `HOMEBREW_TAP_DEPLOY_KEY` deploy key, stored as a secret of that environment, so no other branch or job can read it. No generated commits are pushed into the source repository, so publishing cannot loop.
 - Release runs queue instead of cancelling each other (GitHub permits up to 100 pending runs). A guard prevents rerunning an older build from downgrading the tap. Published assets are reused on rerun instead of overwritten.
-- Homebrew versions include the build number, so every successful push is an upgrade even while the Cargo version stays unchanged. The tap updates before the release becomes “latest”. If tap publishing fails, rerun the failed job.
+- Homebrew versions include the build number, so every successful push is an upgrade even while the Cargo version stays unchanged. The release becomes “latest” before the tap updates, so a tap failure never holds back in-app updates; rerun the failed job to bring Homebrew up to date.
+- Build numbers are the `Release` workflow's run number. Renaming or recreating `.github/workflows/release.yml` restarts that count at 1, which would make every new build look older than the last and collide with existing tags, so keep the file in place (or carry the count over before such a change).
 
-The `Release` workflow also supports manual dispatch from `main`. Artifact uploads are retained for seven days; GitHub Release assets remain available. Private hosted runners consume the organization's included Actions minutes and any configured paid allowance.
+The `Release` workflow also supports manual dispatch. From `main` it releases; from any other branch it only builds the three packages and keeps them as workflow artifacts for seven days, for testing. GitHub Release assets remain available.
 
 ## Local validation
 
@@ -94,6 +94,6 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 actionlint
 ```
 
-`python scripts/release.py build` builds and packages on native macOS, Windows or Linux. Mac packaging also needs `dmgbuild==1.6.7` installed in a virtual environment; set `FLEXSPEAK_DMGBUILD` to that environment’s `bin/dmgbuild`. CI installs it automatically. `scripts/dmg-settings.py` records the Finder layout without UI automation; regenerate its background with `swift scripts/dmg-background.swift`. The build fails if the app lacks `Flexspeak.icns`; after changing the Icon Composer icon, regenerate that fallback as described in `scripts/render-icns.swift`. Linux packaging also requires Docker and `desktop-file-validate`. It verifies the Opus download, smoke-tests `--help` without opening audio or connecting, verifies Mac ad-hoc signatures and DMG integrity, and rejects Homebrew-linked Mac executables. Hosted release builds are still not a substitute for a two-client voice test.
+`python scripts/release.py build` builds and packages on native macOS, Windows or Linux. Mac packaging also needs dmgbuild in a virtual environment (`pip install --require-hashes -r scripts/dmg-requirements.txt`); set `FLEXSPEAK_DMGBUILD` to that environment’s `bin/dmgbuild`. CI installs it automatically. `scripts/dmg-settings.py` records the Finder layout without UI automation; regenerate its background with `swift scripts/dmg-background.swift`. The build fails if the app lacks `Flexspeak.icns`; after changing the Icon Composer icon, regenerate that fallback as described in `scripts/render-icns.swift`. Linux packaging also requires Docker (the Arch container is pinned by digest in `scripts/release.py`) and `desktop-file-validate`. It verifies the Opus download, smoke-tests `--help` without opening audio or connecting, verifies Mac ad-hoc signatures and DMG integrity, and rejects Homebrew-linked Mac executables. Hosted release builds are still not a substitute for a two-client voice test.
 
-The private cask's download strategy uses Homebrew's `CurlDownloadStrategy` hooks to attach authentication only at download time. If Homebrew changes those hooks, update `scripts/flexspeak.rb.in` in the source repository; the next release regenerates the tap.
+The cask (`scripts/flexspeak.rb.in`) downloads the DMG from the public release by its tag; each release regenerates it in the tap.
