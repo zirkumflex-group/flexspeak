@@ -807,6 +807,7 @@ enum Message {
     ShareSource(streaming::publishing::ShareSource),
     ShareAudio(bool),
     ShareFastCapture(bool),
+    ShareHardwareAv1(bool),
     ShareAudioOutput(audio::DeviceChoice),
     StartSharing,
     /// Goes live with this source straight away, publicly.
@@ -1323,6 +1324,7 @@ impl App {
         };
         let quality = sharing.quality;
         let fast_capture = sharing.fast_capture;
+        let hardware_av1 = sharing.hardware_av1;
         if self.command(client::Command::StartSharing(
             streaming::publishing::Options {
                 source,
@@ -1330,6 +1332,7 @@ impl App {
                 quality,
                 access,
                 fast_capture,
+                hardware_av1,
             },
         )) {
             self.server_mut().streaming.share_open = false;
@@ -1358,6 +1361,7 @@ impl App {
                 sharing.audio
             },
             fast_capture: sharing.fast_capture,
+            hardware_av1: sharing.hardware_av1,
         };
         if next == self.share_defaults {
             return;
@@ -2594,6 +2598,11 @@ impl App {
             Message::ShareFastCapture(on) => {
                 if !self.server().streaming.sharing.status.active {
                     self.server_mut().streaming.sharing.fast_capture = on;
+                }
+            }
+            Message::ShareHardwareAv1(on) => {
+                if !self.server().streaming.sharing.status.active {
+                    self.server_mut().streaming.sharing.hardware_av1 = on;
                 }
             }
             Message::ShareAudioOutput(device) => {

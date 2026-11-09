@@ -25,9 +25,11 @@ pub enum Input {
 }
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub enum Output {
-    /// The first frame was sent; says whether the experimental fast capture produced it.
+    /// The first frame was sent. Says whether the experimental fast capture produced it and
+    /// whether hardware AV1 is offered to viewers.
     Ready {
         fast_capture: bool,
+        hardware_av1: bool,
     },
     Offer(PeerKey, String),
     Signal(PeerKey, Value),
@@ -607,12 +609,15 @@ mod native {
             let _ = pc.add_ice_candidate(candidate).await;
         }
     }
-    /// Offered video codecs, most preferred first. On Windows, AV1 leads only when a hardware
-    /// encoder (NVENC) offers it: the build leaves libaom's software AV1 encoder out, because
-    /// it is slower than VP8. macOS's VideoToolbox factory can still list a software AV1
-    /// encoder, so there AV1 is not offered at all. VP8 always follows, for viewers that
-    /// cannot decode AV1.
-    fn video_codecs(factory: &PeerConnectionFactory) -> Vec<RtpCodecCapability> {
+    /// Offered video codecs, most preferred first. With `hardware_av1` (an experimental
+    /// option) on Windows, AV1 leads when a hardware encoder (NVENC) offers it: the build
+    /// leaves libaom's software AV1 encoder out, because it is slower than VP8. macOS's
+    /// VideoToolbox factory can still list a software AV1 encoder, so there AV1 is not
+    /// offered at all. VP8 always follows, for viewers that cannot decode AV1.
+    fn video_codecs(
+        factory: &PeerConnectionFactory,
+        hardware_av1: bool,
+    ) -> Vec<RtpCodecCapability> {
         let codecs = factory.get_rtp_sender_capabilities(MediaType::Video).codecs;
         let named = |name: &'static str| {
             codecs
@@ -621,7 +626,7 @@ mod native {
                 .cloned()
         };
         named("video/AV1")
-            .filter(|_| cfg!(target_os = "windows"))
+            .filter(|_| hardware_av1 && cfg!(target_os = "windows"))
             .chain(named("video/VP8"))
             .collect()
     }
@@ -636,6 +641,7 @@ mod native {
         events: &mpsc::Sender<Output>,
         servers: Vec<String>,
         quality: Quality,
+        codecs: &[RtpCodecCapability],
     ) -> Result<Peer> {
         let mut config = RtcConfiguration::default();
         config.continual_gathering_policy = ContinualGatheringPolicy::GatherOnce;
@@ -673,7 +679,7 @@ mod native {
         let transceiver = peer
             .pc
             .add_transceiver(MediaStreamTrack::Video(video.clone()), init())?;
-        let codecs = video_codecs(factory);
+        let codecs = codecs.to_vec();
         ensure!(
             codecs
                 .iter()
@@ -729,6 +735,10 @@ mod native {
             !options.source.kind.is_camera(),
         );
         let video_track = factory.create_video_track("shared-video", video.clone());
+        let codecs = video_codecs(&factory, options.hardware_av1);
+        let hardware_av1 = codecs
+            .first()
+            .is_some_and(|c| c.mime_type.eq_ignore_ascii_case("video/AV1"));
         // The official TS6 client silently drops an offer without an audio section, so a share
         // without system audio still negotiates this track and simply never feeds it.
         let audio = NativeAudioSource::new(AudioSourceOptions::default(), 48000, 2, 50);
@@ -869,7 +879,7 @@ mod native {
                                 Input::Add(id) if !peers.contains_key(&id) => {
                                     ensure!(peers.len() < MAX_VIEWERS,"Too many viewers");
                                     let peer = add_peer(&factory,&video_track,&audio_track,id,callbacks.clone(),overflow.clone(),events,
-                                        vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()],quality).await?;
+                                        vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()],quality,&codecs).await?;
                                     peers.insert(id,peer);
                                 },
                                 Input::Remove(id) => { peers.remove(&id); },
@@ -911,14 +921,14 @@ mod native {
                             if let Some(frame) = &mut fast_frame {
                                 frame.timestamp_us = start.elapsed().as_micros() as i64;
                                 video.capture_frame(frame); last_video = Instant::now(); frames += 1;
-                                if frames == 1 { emit(events,Output::Ready { fast_capture: true })?; }
+                                if frames == 1 { emit(events,Output::Ready { fast_capture: true, hardware_av1 })?; }
                             }
                         }
                         if let Some(buffer) = latest.lock().unwrap().take() {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             video.capture_frame(&frame); last_video = Instant::now(); frames += 1;
-                            if frames == 1 { emit(events,Output::Ready { fast_capture: fast_started })?; }
+                            if frames == 1 { emit(events,Output::Ready { fast_capture: fast_started, hardware_av1 })?; }
                         }
                     }
                     _ = tick.tick() => {
@@ -1075,6 +1085,7 @@ a=rtpmap:45 AV1/90000
                 &events,
                 vec![],
                 Quality::default(),
+                &video_codecs(&factory, true),
             )
             .await?;
             let Some(Output::Offer(_, sdp)) = output.recv().await else {
@@ -1088,7 +1099,13 @@ a=rtpmap:45 AV1/90000
             let generation = surface.begin();
             let mut receiver =
                 rtc::start_with_servers(sdp, vec![], generation, surface.clone(), vec![])?;
-            let expected = if video_codecs(&factory)[0]
+            ensure!(
+                video_codecs(&factory, false)
+                    .iter()
+                    .all(|c| c.mime_type.eq_ignore_ascii_case("video/VP8")),
+                "Without the hardware AV1 option only VP8 may be offered"
+            );
+            let expected = if video_codecs(&factory, true)[0]
                 .mime_type
                 .eq_ignore_ascii_case("video/AV1")
             {

@@ -94,16 +94,16 @@ pub const SCENES: &[Scene] = &[
     ("poke", poke),
     ("poked", poked),
     ("share", share),
-    ("share-fast-capture", share_fast_capture),
+    ("share-experimental", share_experimental),
     ("share-quick", share_quick),
     ("share-quick-no-game", share_quick_no_game),
     ("share-quick-streams", share_quick_streams),
     ("channel-tree", channel_tree),
     ("sharing", sharing),
-    ("sharing-fast-capture", sharing_fast_capture),
+    ("sharing-experimental", sharing_experimental),
     (
-        "sharing-fast-capture-fallback",
-        sharing_fast_capture_fallback,
+        "sharing-experimental-fallback",
+        sharing_experimental_fallback,
     ),
     ("sharing-alone", sharing_alone),
     ("watching", watching),
@@ -1164,27 +1164,30 @@ fn share(s: &mut App) {
     s.server_mut().streaming.share_open = true;
 }
 
-/// The experimental fast capture ticked, with its explanation (Windows only).
-fn share_fast_capture(s: &mut App) {
+/// Both experimental options ticked, with their explanations (Windows only).
+fn share_experimental(s: &mut App) {
     share(s);
-    s.server_mut().streaming.sharing.fast_capture = true;
+    let sharing = &mut s.server_mut().streaming.sharing;
+    sharing.fast_capture = true;
+    sharing.hardware_av1 = true;
 }
 
-/// The open "You are sharing" dialog says that fast capture is the one running.
-fn sharing_fast_capture(s: &mut App) {
+/// The open "You are sharing" dialog says that both experimental options are running.
+fn sharing_experimental(s: &mut App) {
     sharing(s);
     let sharing = &mut s.server_mut().streaming;
     sharing.share_open = true;
     sharing.sharing.fast_capture = true;
+    sharing.sharing.hardware_av1 = true;
     sharing.sharing.status.detail =
-        "Public stream · viewers in your channel join automatically. Fast capture is on.".into();
+        "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is on. Fast capture is on.".into();
 }
 
-/// Fast capture was asked for but could not start: the dialog says standard capture runs.
-fn sharing_fast_capture_fallback(s: &mut App) {
-    sharing_fast_capture(s);
+/// Both experimental options were asked for but are unavailable: the dialog says what runs.
+fn sharing_experimental_fallback(s: &mut App) {
+    sharing_experimental(s);
     s.server_mut().streaming.sharing.status.detail =
-        "Public stream · viewers in your channel join automatically. Fast capture was unavailable, so standard capture is used."
+        "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is unavailable on this graphics card, so VP8 is used. Fast capture was unavailable, so standard capture is used."
             .into();
 }
 

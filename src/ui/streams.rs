@@ -1529,7 +1529,24 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                     "Shares everything on this output, including notifications. Your microphone stays separate.",
                 ));
         }
-        // Experimental and Windows-only; cameras have their own capture.
+        // Experimental and Windows-only.
+        if cfg!(windows) {
+            body = body
+                .child(
+                    Checkbox::new(sharing.hardware_av1)
+                        .label("Hardware AV1 encoding (experimental)")
+                        .on_toggle_tx(move |s: &mut App, tx| {
+                            let next = !s.server().streaming.sharing.hardware_av1;
+                            dispatch(s, tx, Message::ShareHardwareAv1(next));
+                        })
+                        .build(k),
+                )
+                .child(faint(
+                    t,
+                    "Encodes on NVIDIA RTX 40 series and newer graphics cards instead of the CPU. Other cards, and viewers who can't play AV1, get VP8 as before.",
+                ));
+        }
+        // Cameras have their own capture.
         if cfg!(windows)
             && !sharing
                 .selected
