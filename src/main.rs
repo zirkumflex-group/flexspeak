@@ -4121,6 +4121,25 @@ impl App {
                 self.server_mut().chat.filter = filter;
                 self.chat_seen();
             }
+            Action::Narrow(scope) => {
+                self.server_mut().chat.narrow(scope);
+                self.chat_seen();
+            }
+            Action::Everything => {
+                self.server_mut().chat.everything = true;
+                self.chat_seen();
+            }
+            Action::SendTo(scope) => {
+                let name = match &scope {
+                    chat::Scope::Private(key) => self
+                        .chat_member(key)
+                        .map(|member| member.name.clone())
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                self.server_mut().chat.aim(scope, &name);
+                self.ui.chat_input.focused = self.chat_showing(Instant::now());
+            }
             Action::Message(id) => {
                 if self.live()
                     && let Some(member) = self.find_member(id).filter(|member| !member.is_self)

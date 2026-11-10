@@ -282,7 +282,11 @@ impl List {
 struct Head<'a> {
     channel: &'a str,
     target: &'a Scope,
-    filter: Filter,
+    filter: &'a Filter,
+    /// Tabs is on its All tab.
+    everything: bool,
+    /// Lines are tagged and the message box chooses where it sends: One Feed, or Tabs' All tab.
+    feed: bool,
     /// Each private conversation: its key, the person's name, and what's unread.
     peers: Vec<(&'a str, &'a str, u32)>,
     /// Channels you have left that still have lines: number and name.
@@ -305,7 +309,9 @@ impl<'a> Head<'a> {
                 .as_ref()
                 .map_or("", |channel| channel.name.as_str()),
             target: &chat.target,
-            filter: chat.filter,
+            filter: &chat.filter,
+            everything: chat.everything && s.chat_options.layout == Layout::Tabs,
+            feed: chat.tagged(s.chat_options.layout),
             peers: chat
                 .peers
                 .iter()
@@ -344,6 +350,21 @@ impl<'a> Head<'a> {
             .iter()
             .find(|(other, _)| *other == id)
             .map_or("", |(_, name)| *name)
+    }
+
+    /// Whether a conversation's tab is the open one.
+    fn on(&self, scope: &Scope) -> bool {
+        !self.everything && self.target == scope
+    }
+
+    /// What pointing the message box somewhere asks for: on Tabs' All tab that leaves the view
+    /// alone, elsewhere it opens the conversation.
+    fn aim(&self, scope: Scope) -> Action {
+        if self.everything {
+            Action::SendTo(scope)
+        } else {
+            Action::Target(scope)
+        }
     }
 
     fn channel_name(&self) -> &'a str {
@@ -493,19 +514,58 @@ fn glyph(t: &Theme, glyph: &'static Icon, scope: &Scope, open: bool) -> El {
         .a11y_hidden()
 }
 
+/// The tab at the far left that shows every conversation together again.
+fn all_tab(t: &Theme, selected: bool) -> El {
+    let mut tab = row()
+        .key("chat-tab-all")
+        .role("tab")
+        .label("All")
+        .help("Every conversation together")
+        .checked(selected)
+        .h(30.0)
+        .px(7.0)
+        .gap(5.0)
+        .center_y()
+        .radius(radius::CONTROL)
+        .motion(motion::QUICK)
+        .child(
+            icon(&icons::LAYOUT_GRID, 14.0)
+                .color(if selected { t.text } else { t.muted })
+                .a11y_hidden(),
+        )
+        .child(
+            text("All")
+                .font(if selected { ty::BODY_STRONG } else { ty::BODY })
+                .color(if selected { t.text } else { t.muted }),
+        );
+    if selected {
+        tab = tab.child(underline(t.text));
+    } else {
+        tab = tab
+            .focusable(true)
+            .cursor(rune::Cursor::Pointer)
+            .hover(t.wash(0.06))
+            .press(t.wash(0.10))
+            .focus_ring(2.0, -2.0, t.accent.alpha(0.7))
+            .on_press_tx(send(Message::Chat(Action::Everything)));
+    }
+    tab
+}
+
 /// Tabs, every conversation side by side: the channel, the server, one per person, then the
 /// channels you have left. The bar scrolls sideways when they don't fit.
 fn tabs(t: &Theme, head: &Head) -> El {
     if head.tab_bar == TabBar::Grouped {
         return groups(t, head);
     }
-    let on = |scope: &Scope| head.target == scope;
+    let on = |scope: &Scope| head.on(scope);
     let mut strip = row()
         .role("tablist")
         .label("Conversations")
         .h_full()
         .gap(0.0)
         .center_y()
+        .child(all_tab(t, head.everything))
         .child(tab(
             t,
             glyph(t, &icons::HASH, &Scope::Channel, on(&Scope::Channel)),
@@ -614,7 +674,7 @@ fn group_tab(
 /// Tabs grouped by kind: channels, the server, people. Each group shows the conversation of
 /// its kind that is open; pointing at it lists the rest (`lists`).
 fn groups(t: &Theme, head: &Head) -> El {
-    let channel_open = head.target.is_channel();
+    let channel_open = !head.everything && head.target.is_channel();
     let channel = match head.target {
         Scope::Past(id) => head.past_name(*id),
         _ => head.channel_name(),
@@ -625,6 +685,7 @@ fn groups(t: &Theme, head: &Head) -> El {
         .h_full()
         .gap(0.0)
         .center_y()
+        .child(all_tab(t, head.everything))
         .child(group_tab(
             t,
             List::Channels,
@@ -638,20 +699,15 @@ fn groups(t: &Theme, head: &Head) -> El {
         ))
         .child(tab(
             t,
-            glyph(
-                t,
-                &icons::GLOBE,
-                &Scope::Server,
-                *head.target == Scope::Server,
-            ),
+            glyph(t, &icons::GLOBE, &Scope::Server, head.on(&Scope::Server)),
             "Server",
             Scope::Server,
-            *head.target == Scope::Server,
+            head.on(&Scope::Server),
             head.unread_server,
         ));
     if !head.peers.is_empty() {
         let open = match head.target {
-            Scope::Private(key) => Some(head.peer_name(key)),
+            Scope::Private(key) if !head.everything => Some(head.peer_name(key)),
             _ => None,
         };
         let lead = match open {
@@ -694,6 +750,7 @@ fn list_row(
     scope: Scope,
     chosen: bool,
     unread: u32,
+    press: Action,
 ) -> El {
     let color = tint(t, &scope);
     let mut row = row()
@@ -714,7 +771,7 @@ fn list_row(
         .focus_ring(2.0, -2.0, t.accent.alpha(0.7))
         .on_press_tx(move |s: &mut App, tx: &mut Tx| {
             s.ui.chat_lists[list as usize] = RailPeek::default();
-            dispatch(s, tx, Message::Chat(Action::Target(scope.clone())));
+            dispatch(s, tx, Message::Chat(press.clone()));
         })
         .child(el().w(16.0).center().child(lead))
         .child(
@@ -741,9 +798,27 @@ fn list_row(
     row
 }
 
-/// The rows of each list.
-fn list_rows(t: &Theme, head: &Head, list: List) -> Vec<El> {
-    let on = |scope: &Scope| head.target == scope;
+/// The rows of each list. A group's rows open a conversation in Tabs and narrow the stream to
+/// it in One Feed; the message box's rows choose where it sends.
+fn list_rows(t: &Theme, head: &Head, list: List, narrow: bool) -> Vec<El> {
+    let on = |scope: &Scope| {
+        if narrow {
+            *head.filter == Filter::Only(scope.clone())
+        } else if list == List::SendTo {
+            head.target == scope
+        } else {
+            head.on(scope)
+        }
+    };
+    let press = |scope: &Scope| {
+        if narrow {
+            Action::Narrow(scope.clone())
+        } else if list == List::SendTo {
+            head.aim(scope.clone())
+        } else {
+            Action::Target(scope.clone())
+        }
+    };
     let channel = |index: usize| {
         list_row(
             t,
@@ -755,6 +830,7 @@ fn list_rows(t: &Theme, head: &Head, list: List) -> Vec<El> {
             Scope::Channel,
             on(&Scope::Channel),
             head.unread_channel,
+            press(&Scope::Channel),
         )
     };
     let people = |start: usize| {
@@ -763,7 +839,7 @@ fn list_rows(t: &Theme, head: &Head, list: List) -> Vec<El> {
             .enumerate()
             .map(move |(index, (key, name, unread))| {
                 let scope = Scope::Private((*key).to_owned());
-                let chosen = on(&scope);
+                let (chosen, press) = (on(&scope), press(&scope));
                 list_row(
                     t,
                     list,
@@ -774,6 +850,7 @@ fn list_rows(t: &Theme, head: &Head, list: List) -> Vec<El> {
                     scope,
                     chosen,
                     *unread,
+                    press,
                 )
             })
     };
@@ -781,7 +858,7 @@ fn list_rows(t: &Theme, head: &Head, list: List) -> Vec<El> {
         List::Channels => std::iter::once(channel(0))
             .chain(head.past.iter().enumerate().map(|(index, (id, name))| {
                 let scope = Scope::Past(*id);
-                let chosen = on(&scope);
+                let (chosen, press) = (on(&scope), press(&scope));
                 list_row(
                     t,
                     list,
@@ -792,6 +869,7 @@ fn list_rows(t: &Theme, head: &Head, list: List) -> Vec<El> {
                     scope,
                     chosen,
                     0,
+                    press,
                 )
             }))
             .collect(),
@@ -808,6 +886,7 @@ fn list_rows(t: &Theme, head: &Head, list: List) -> Vec<El> {
                 Scope::Server,
                 on(&Scope::Server),
                 head.unread_server,
+                press(&Scope::Server),
             )))
             .chain(people(2))
             .collect(),
@@ -820,7 +899,7 @@ fn lists(s: &App, t: &Theme, layer: &mut Vec<El>) {
     let now = Instant::now();
     let head = Head::of(s, false);
     let tabs = s.chat_options.layout == Layout::Tabs;
-    let grouped = tabs && head.tab_bar == TabBar::Grouped;
+    let grouped = head.tab_bar == TabBar::Grouped;
     let (window_w, window_h) = s.window_size;
     // Until its tab has been laid out, a list hangs from where the column starts.
     let column = if s.chat_docked() {
@@ -832,12 +911,13 @@ fn lists(s: &App, t: &Theme, layer: &mut Vec<El>) {
         let shown = match list {
             List::Channels => grouped && !head.past.is_empty(),
             List::People => grouped && !head.peers.is_empty(),
-            List::SendTo => !tabs,
+            List::SendTo => head.feed,
         };
         if !shown || !s.ui.chat_lists[list as usize].open(now) {
             continue;
         }
-        let rows = list_rows(t, &head, list);
+        // In One Feed a group's rows narrow the stream; in Tabs they open the conversation.
+        let rows = list_rows(t, &head, list, !tabs && list != List::SendTo);
         let wide = 232.0_f32.min(width(s) - 16.0);
         let anchor = rune::memo::layout(list.key());
         let left = anchor
@@ -881,9 +961,73 @@ fn lists(s: &App, t: &Theme, layer: &mut Vec<El>) {
     }
 }
 
-/// One Feed: chips that narrow the stream.
+/// One of One Feed's chips. `list` gives it a chevron and the list that opens under the pointer.
+#[allow(clippy::too_many_arguments)]
+fn chip(
+    t: &Theme,
+    key: &str,
+    label: &str,
+    glyph: Option<&'static Icon>,
+    selected: bool,
+    unread: (u32, Color),
+    list: Option<List>,
+    press: Action,
+) -> El {
+    let ink = if selected { t.canvas } else { t.muted };
+    let mut chip = row()
+        .key(key.to_owned())
+        .role("radio")
+        .label(label.to_owned())
+        .checked(selected)
+        .h(22.0)
+        .px(9.0)
+        .gap(4.0)
+        .center()
+        .radius(radius::PILL)
+        .fill(if selected { t.text } else { t.raised })
+        .motion(motion::QUICK)
+        .children(glyph.map(|glyph| icon(glyph, 11.0).color(ink).a11y_hidden()))
+        .child(
+            text(label.to_owned())
+                .font(ty::SMALL_STRONG)
+                .color(ink)
+                .max_w(110.0)
+                .truncate_fade(),
+        );
+    if unread.0 > 0 && !selected {
+        chip = chip.child(badge(t, unread.0, unread.1));
+    }
+    if let Some(list) = list {
+        chip = chip
+            .child(icon(&icons::CHEVRON_DOWN, 10.0).color(ink).a11y_hidden())
+            .help("Point here to pick one")
+            .on_hover_change(move |s: &mut App, inside, tx: &mut Tx| {
+                hover_list(s, tx, list, inside)
+            });
+    }
+    // A chip with a list stays pressable while chosen: pressing it widens back to its kind.
+    if !selected || list.is_some() {
+        chip = chip
+            .focusable(true)
+            .cursor(rune::Cursor::Pointer)
+            .hover(t.wash(0.06))
+            .press(t.wash(0.10))
+            .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                dispatch(s, tx, Message::Chat(press.clone()));
+                if let Some(list) = list {
+                    s.ui.chat_lists[list as usize].press();
+                }
+            });
+    }
+    chip
+}
+
+/// One Feed: chips that narrow the stream. Side by side there is one per kind. Grouped, the
+/// channel and people chips also list each channel and person, to narrow to just one.
 fn filters(t: &Theme, head: &Head) -> El {
     let channel = channel_label(head.channel);
+    let grouped = head.tab_bar == TabBar::Grouped;
     let mut strip = row()
         .role("radiogroup")
         .label("Show")
@@ -891,52 +1035,86 @@ fn filters(t: &Theme, head: &Head) -> El {
         .gap(6.0)
         .center_y();
     for filter in Filter::ALL {
-        let (label, glyph, unread, color): (&str, Option<&'static Icon>, u32, Color) = match filter
-        {
-            Filter::All => ("All", None, 0, t.accent),
-            Filter::Channel => (&channel, None, head.unread_channel, t.accent),
-            Filter::Server => ("Server", Some(&icons::GLOBE), head.unread_server, t.fair),
-            Filter::Private => (
+        let selected = *head.filter == filter;
+        let key = format!("chat-filter-{filter:?}");
+        let chip = match filter {
+            Filter::All => chip(
+                t,
+                &key,
+                "All",
+                None,
+                selected,
+                (0, t.accent),
+                None,
+                Action::Filter(filter),
+            ),
+            Filter::Channel if grouped => {
+                // Narrowed to one channel, the chip carries its name.
+                let (label, one) = match head.filter {
+                    Filter::Only(Scope::Channel) => (channel.clone(), true),
+                    Filter::Only(Scope::Past(id)) => (channel_label(head.past_name(*id)), true),
+                    _ => ("Channels".to_owned(), false),
+                };
+                chip(
+                    t,
+                    List::Channels.key(),
+                    &label,
+                    None,
+                    selected || one,
+                    (head.unread_channel, t.accent),
+                    (!head.past.is_empty()).then_some(List::Channels),
+                    Action::Filter(filter),
+                )
+            }
+            Filter::Channel => chip(
+                t,
+                &key,
+                &channel,
+                None,
+                selected,
+                (head.unread_channel, t.accent),
+                None,
+                Action::Filter(filter),
+            ),
+            Filter::Server => chip(
+                t,
+                &key,
+                "Server",
+                Some(&icons::GLOBE),
+                selected,
+                (head.unread_server, t.fair),
+                None,
+                Action::Filter(filter),
+            ),
+            Filter::Private if grouped => {
+                let (label, one) = match head.filter {
+                    Filter::Only(Scope::Private(key)) => (head.peer_name(key), true),
+                    _ => ("People", false),
+                };
+                chip(
+                    t,
+                    List::People.key(),
+                    label,
+                    Some(&icons::USER),
+                    selected || one,
+                    (head.unread_private(), t.private),
+                    (head.peers.len() > 1 || (one && !head.peers.is_empty()))
+                        .then_some(List::People),
+                    Action::Filter(filter),
+                )
+            }
+            Filter::Private => chip(
+                t,
+                &key,
                 "Private",
                 Some(&icons::USER),
-                head.unread_private(),
-                t.private,
+                selected,
+                (head.unread_private(), t.private),
+                None,
+                Action::Filter(filter),
             ),
+            Filter::Only(_) => continue,
         };
-        let selected = head.filter == filter;
-        let ink = if selected { t.canvas } else { t.muted };
-        let mut chip = row()
-            .key(format!("chat-filter-{filter:?}"))
-            .role("radio")
-            .label(label.to_owned())
-            .checked(selected)
-            .h(22.0)
-            .px(9.0)
-            .gap(4.0)
-            .center()
-            .radius(radius::PILL)
-            .fill(if selected { t.text } else { t.raised })
-            .motion(motion::QUICK)
-            .children(glyph.map(|glyph| icon(glyph, 11.0).color(ink).a11y_hidden()))
-            .child(
-                text(label.to_owned())
-                    .font(ty::SMALL_STRONG)
-                    .color(ink)
-                    .max_w(110.0)
-                    .truncate_fade(),
-            );
-        if unread > 0 && !selected {
-            chip = chip.child(badge(t, unread, color));
-        }
-        if !selected {
-            chip = chip
-                .focusable(true)
-                .cursor(rune::Cursor::Pointer)
-                .hover(t.wash(0.06))
-                .press(t.wash(0.10))
-                .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
-                .on_press_tx(send(Message::Chat(Action::Filter(filter))));
-        }
         strip = strip.child(chip);
     }
     bar(t, strip, head.hide)
@@ -1090,7 +1268,9 @@ fn inline_button(t: &Theme, key: &str, label: &str, help: &str, message: Message
 
 /// The message box. Who gets the message is named above the field; in One Feed that line also
 /// chooses it, listing the places when pointed at or pressed.
-fn composer(s: &App, t: &Theme, k: &Kit, head: &Head, layout: Layout) -> El {
+fn composer(s: &App, t: &Theme, k: &Kit, head: &Head) -> El {
+    let feed = head.feed;
+    let everything = head.everything;
     let (placeholder, enabled) = prompt(s, head);
     let ready = enabled && !s.server().chat.draft.trim().is_empty();
     let field = TextInput::new(&s.ui.chat_input)
@@ -1109,8 +1289,13 @@ fn composer(s: &App, t: &Theme, k: &Kit, head: &Head, layout: Layout) -> El {
         // In the feed, Escape lets go of a private or server target.
         .on_key(move |s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
             let elsewhere = s.server().chat.target != Scope::Channel;
-            if key.key == rune::Key::Escape && layout == Layout::Feed && elsewhere {
-                dispatch(s, tx, Message::Chat(Action::Target(Scope::Channel)));
+            if key.key == rune::Key::Escape && feed && elsewhere {
+                let back = if everything {
+                    Action::SendTo(Scope::Channel)
+                } else {
+                    Action::Target(Scope::Channel)
+                };
+                dispatch(s, tx, Message::Chat(back));
                 return true;
             }
             false
@@ -1125,7 +1310,7 @@ fn composer(s: &App, t: &Theme, k: &Kit, head: &Head, layout: Layout) -> El {
         ))
         .build(k);
     let mut to = recipient(t, head);
-    if layout == Layout::Feed {
+    if feed {
         let list = List::SendTo;
         to = to
             .role("button")
@@ -1152,7 +1337,7 @@ fn composer(s: &App, t: &Theme, k: &Kit, head: &Head, layout: Layout) -> El {
                     .cursor(rune::Cursor::Pointer)
                     .hover(t.wash(0.10))
                     .child(icon(&icons::X, 12.0).color(t.muted).a11y_hidden())
-                    .on_press_tx(send(Message::Chat(Action::Target(Scope::Channel)))),
+                    .on_press_tx(send(Message::Chat(head.aim(Scope::Channel)))),
             );
         }
     }
@@ -1192,17 +1377,30 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
         } else {
             "chat-history-peek"
         },
-        (chat.version, &chat.target, chat.filter, layout, t),
+        (
+            chat.version,
+            &chat.target,
+            &chat.filter,
+            chat.everything,
+            layout,
+            t,
+        ),
         || {
+            // Tabs' All tab draws lines as the feed does, each tagged with where it went.
+            let style = if head.feed {
+                Layout::Feed
+            } else {
+                Layout::Tabs
+            };
             history(
                 t,
                 k,
                 shown[skip..]
                     .iter()
-                    .map(|entry| line(t, entry, layout, chat.here))
+                    .map(|entry| line(t, entry, style, chat.here))
                     .collect(),
                 "chat-scroll",
-                match (layout, &chat.target) {
+                match (style, &chat.target) {
                     (Layout::Tabs, Scope::Past(_)) => "Nothing was said here",
                     (Layout::Tabs, _) => "No messages here yet",
                     (Layout::Feed, _) => "No messages yet",
@@ -1221,7 +1419,7 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
         })
         .child(divider(t))
         .child(lines)
-        .child(composer(s, t, k, &head, layout))
+        .child(composer(s, t, k, &head))
 }
 
 /// The column docked beside the stage, when there is room and it isn't hidden.
@@ -1425,7 +1623,9 @@ fn sample(t: &Theme, k: &Kit, layout: Layout, tab_bar: TabBar) -> El {
     let head = Head {
         channel: "Lobby",
         target: &target,
-        filter: Filter::All,
+        filter: &Filter::All,
+        everything: false,
+        feed: layout == Layout::Feed,
         peers,
         past: Vec::new(),
         unread_channel: 0,
