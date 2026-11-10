@@ -39,6 +39,7 @@ pub const SCENES: &[Scene] = &[
     ("connected-quiet", connected_quiet),
     ("connected-deafened", connected_deafened),
     ("member-states", member_states),
+    ("streaming-elsewhere", streaming_elsewhere),
     ("own-channel-only", own_channel_only),
     ("limited", limited),
     ("footer-hidden", footer_hidden),
@@ -1106,6 +1107,13 @@ fn member_states(s: &mut App) {
             }
         }
     }
+}
+
+/// Ines streams in Raid night while you sit in the Lobby: the tree marks her there too,
+/// from the server's flag, with no stream to watch from here.
+fn streaming_elsewhere(s: &mut App) {
+    connected(s);
+    s.server_mut().streaming.streamers = [4].into_iter().collect();
 }
 
 /// Deafened with the microphone left unmuted: the mute button shows the mic as on, since

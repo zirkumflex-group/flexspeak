@@ -4390,12 +4390,15 @@ impl App {
         self.begin_alert(Source::Groups);
         self.command(client::Command::SetGroups(ids, edit));
     }
-    /// Whether the member is sharing a stream; the catalog only covers your current channel.
+    /// Whether the member is sharing a stream, in any channel. The server flags streamers
+    /// everywhere you can see; the catalog adds your own channel's streams as they are found.
     fn is_streaming(&self, member: &client::Member) -> bool {
-        (member.is_self && self.server().streaming.sharing.status.live)
-            || self
-                .server()
-                .streaming
+        let streaming = &self.server().streaming;
+        if member.is_self {
+            return streaming.sharing.status.live;
+        }
+        streaming.streamers.contains(&member.id)
+            || streaming
                 .catalog
                 .iter()
                 .any(|stream| stream.publisher == member.id)

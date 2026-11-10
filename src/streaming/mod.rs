@@ -86,6 +86,9 @@ pub struct Stats {
 pub enum Event {
     Publishing(publishing::Status),
     Catalog(Vec<StreamInfo>),
+    /// Everyone the server says is streaming, in any channel you can see, so the channel tree
+    /// can mark them without asking for their streams.
+    Streamers(Vec<u16>),
     Notice(String),
     /// One watched stream's progress. `slot` is the [`Surfaces`] entry its picture goes to.
     State {
@@ -130,6 +133,8 @@ pub struct Watching {
 pub struct View {
     pub sharing: publishing::Ui,
     pub catalog: Vec<StreamInfo>,
+    /// Who is streaming in any visible channel; [`Self::catalog`] has only your own channel's.
+    pub streamers: std::collections::HashSet<u16>,
     /// Watched streams in the order they are shown: oldest first until you drag them around.
     pub watching: Vec<Watching>,
     /// The stream filling the stage, by ID; the others shrink to a strip.
@@ -158,6 +163,7 @@ impl Default for View {
         Self {
             sharing: publishing::Ui::default(),
             catalog: Vec::new(),
+            streamers: std::collections::HashSet::new(),
             watching: Vec::new(),
             focused: None,
             strip: Strip::default(),
@@ -246,6 +252,7 @@ impl View {
         self.sharing.status = publishing::Status::default();
         self.clear_picture();
         self.catalog.clear();
+        self.streamers.clear();
         self.notice.clear();
         self.share_open = false;
     }
@@ -272,6 +279,7 @@ impl View {
         match event {
             Event::Publishing(status) => self.sharing.status = status,
             Event::Catalog(catalog) => self.catalog = catalog,
+            Event::Streamers(streamers) => self.streamers = streamers.into_iter().collect(),
             Event::Notice(notice) => self.notice = notice,
             Event::State {
                 generation,

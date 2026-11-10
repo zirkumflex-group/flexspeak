@@ -57,6 +57,8 @@ pub struct Session {
     members: HashSet<u16>,
     /// Remember flags from subscribed channels before we join them.
     streaming_flags: HashMap<u16, bool>,
+    /// The streamers last sent to the window, so it only hears about changes.
+    shown_streamers: Vec<u16>,
     catalog: BTreeMap<String, StreamInfo>,
     discovery: VecDeque<u16>,
     flow: Rc<RefCell<Flow>>,
@@ -87,6 +89,7 @@ impl Session {
             channel: None,
             members: HashSet::new(),
             streaming_flags: HashMap::new(),
+            shown_streamers: Vec::new(),
             catalog: BTreeMap::new(),
             discovery: VecDeque::new(),
             flow,
@@ -109,6 +112,20 @@ impl Session {
     }
     fn publish_catalog(&self) {
         self.emit(Event::Catalog(self.catalog.values().cloned().collect()));
+    }
+    /// Tells the window who is streaming anywhere it can see, when that changes.
+    fn publish_streamers(&mut self) {
+        let mut streamers: Vec<u16> = self
+            .streaming_flags
+            .iter()
+            .filter(|(_, streaming)| **streaming)
+            .map(|(id, _)| *id)
+            .collect();
+        streamers.sort_unstable();
+        if streamers != self.shown_streamers {
+            self.shown_streamers = streamers.clone();
+            self.emit(Event::Streamers(streamers));
+        }
     }
     fn state(&self, generation: u64, phase: Phase, detail: impl Into<String>) {
         if let Some(watch) = self.find(generation) {
@@ -175,6 +192,7 @@ impl Session {
         self.supported = state.server.version.starts_with("6.");
         self.streaming_flags
             .retain(|id, _| state.clients.contains_key(&ClientId(*id)));
+        self.publish_streamers();
         let members: HashSet<_> = state
             .clients
             .values()
@@ -406,6 +424,7 @@ impl Session {
         self.catalog.clear();
         self.members.clear();
         self.streaming_flags.clear();
+        self.publish_streamers();
         self.discovery.clear();
         for ticket in self.pending.keys() {
             self.flow.borrow_mut().cancel(*ticket);
@@ -728,6 +747,7 @@ impl Session {
                 _ => {}
             }
         }
+        self.publish_streamers();
     }
 
     fn media_input(&mut self, generation: u64, input: Input) -> Result<()> {
@@ -1070,6 +1090,41 @@ mod tests {
             "notifyrespondjoinstreamrequest id=stream-a invokerid=7 decision=0",
         );
         assert!(session.watches.is_empty());
+    }
+
+    #[test]
+    fn streamers_in_other_channels_reach_the_window_without_discovery() {
+        let (mut session, mut connection, mut output) = fixture();
+        let streamers = |output: &mut mpsc::Receiver<client::Event>| {
+            let mut sent = Vec::new();
+            while let Ok(event) = output.try_recv() {
+                if let client::Event::Streaming(Event::Streamers(ids)) = event {
+                    sent.push(ids);
+                }
+            }
+            sent
+        };
+        // Client 9 is in another channel: only the server's flag says it streams.
+        session.notification(
+            &mut connection,
+            "notifycliententerview",
+            "notifycliententerview clid=9 client_is_streaming=1",
+        );
+        assert_eq!(streamers(&mut output), vec![vec![9]]);
+        assert!(session.discovery.is_empty() && session.catalog.is_empty());
+        // The same flag again changes nothing, so the window hears nothing.
+        session.notification(
+            &mut connection,
+            "notifyclientupdated",
+            "notifyclientupdated clid=9 client_is_streaming=1",
+        );
+        assert!(streamers(&mut output).is_empty());
+        session.notification(
+            &mut connection,
+            "notifyclientupdated",
+            "notifyclientupdated clid=9 client_is_streaming=0",
+        );
+        assert_eq!(streamers(&mut output), vec![Vec::<u16>::new()]);
     }
 
     #[test]
