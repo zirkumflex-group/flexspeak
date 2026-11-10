@@ -217,6 +217,28 @@ fn poke_line(t: &Theme, entry: &Entry) -> El {
         .child(lines)
 }
 
+/// The line between two days of a conversation: Today, Yesterday, or the date.
+fn day_line(t: &Theme, day: chrono::NaiveDate, today: chrono::NaiveDate) -> El {
+    use chrono::Datelike;
+    let label = match (today - day).num_days() {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ if day.year() == today.year() => day.format("%a, %-d %b").to_string(),
+        _ => day.format("%-d %b %Y").to_string(),
+    };
+    let rule = || el().grow(1.0).h(1.0).fill(t.hairline).a11y_hidden();
+    row()
+        .key(format!("chat-day-{day}"))
+        .role("separator")
+        .label(label.clone())
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(rule())
+        .child(text(label).font(ty::CAPTION).color(t.faint).a11y_hidden())
+        .child(rule())
+}
+
 /// One line of the history.
 fn line(t: &Theme, entry: &Entry, layout: Layout, here: u64) -> El {
     if entry.kind == Kind::Poke {
@@ -1370,6 +1392,7 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
     let head = Head::of(s, docked);
     let shown = chat.shown(layout);
     let skip = shown.len().saturating_sub(SHOWN);
+    let today = chrono::Local::now().date_naive();
     // Rebuilt only when a line arrives or the view changes, not with every meter reading.
     let lines = rune::memo(
         if docked {
@@ -1383,6 +1406,7 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
             &chat.filter,
             chat.everything,
             layout,
+            today,
             t,
         ),
         || {
@@ -1392,13 +1416,21 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
             } else {
                 Layout::Tabs
             };
+            // A line names the day wherever the day changes, and above the first line when the
+            // history starts before today.
+            let mut day = today;
+            let mut lines = Vec::with_capacity(shown.len() - skip);
+            for entry in &shown[skip..] {
+                if entry.day != day {
+                    day = entry.day;
+                    lines.push(day_line(t, day, today));
+                }
+                lines.push(line(t, entry, style, chat.here));
+            }
             history(
                 t,
                 k,
-                shown[skip..]
-                    .iter()
-                    .map(|entry| line(t, entry, style, chat.here))
-                    .collect(),
+                lines,
                 "chat-scroll",
                 match (style, &chat.target) {
                     (Layout::Tabs, Scope::Past(_)) => "Nothing was said here",

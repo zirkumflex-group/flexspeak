@@ -8,11 +8,12 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
+use chrono::{Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 
-/// Lines kept per server; the oldest go first.
-pub const LIMIT: usize = 500;
+/// Lines held per server while the app runs; the oldest go first. The history on disk keeps
+/// more (`chat_store`).
+pub const LIMIT: usize = 2000;
 /// The longest message a TeamSpeak server takes, in bytes.
 pub const MAX_BYTES: usize = 1024;
 /// How long a sent message waits for the server to send it back before it is shown anyway.
@@ -140,6 +141,10 @@ pub struct Entry {
     pub text: String,
     /// Local time, as `21:04`.
     pub time: String,
+    /// The local day it was said on, for the lines between days.
+    pub day: NaiveDate,
+    /// Seconds since 1970, UTC.
+    pub at: i64,
 }
 
 /// A message as the connection reports it.
@@ -189,6 +194,8 @@ pub enum Action {
     SendTo(Scope),
     /// One Feed: narrows the stream to one conversation.
     Narrow(Scope),
+    /// Forgets every server's saved conversations. Asked twice before it happens.
+    ClearHistory,
     /// Hides the column behind the window's edge, or docks it again.
     Toggle,
     /// Docks the column on this conversation.
@@ -223,6 +230,10 @@ pub struct Chat {
     sent: Vec<Sent>,
     /// Shown without waiting any longer; their late copies are dropped.
     assumed: Vec<Sent>,
+    /// Lines up to this one are in the history on disk, or came from it.
+    saved: u64,
+    /// The history on disk has been brought back, so a reconnect doesn't bring it twice.
+    restored: bool,
 }
 
 /// A message on its way to the server.
@@ -453,6 +464,7 @@ impl Chat {
                 name: place.clone(),
             });
         }
+        let now = Local::now();
         self.entries.push_back(Entry {
             id: self.next,
             scope,
@@ -463,6 +475,8 @@ impl Chat {
             room,
             text: plain(text),
             time,
+            day: now.date_naive(),
+            at: now.timestamp(),
         });
         self.next += 1;
         self.version += 1;
@@ -470,6 +484,94 @@ impl Chat {
             self.entries.pop_front();
         }
         self.entries.back().expect("just pushed")
+    }
+
+    pub fn has_unsaved(&self) -> bool {
+        self.saved < self.next
+    }
+
+    /// The lines not yet in the history on disk, each handed out once.
+    pub fn unsaved(&mut self) -> Vec<Entry> {
+        let from = std::mem::replace(&mut self.saved, self.next);
+        self.entries
+            .iter()
+            .filter(|entry| entry.id >= from)
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the history on disk still has to be brought back for this connection.
+    pub fn needs_restoring(&self) -> bool {
+        !self.restored
+    }
+
+    /// Brings back what the history on disk holds, ahead of anything said since connecting.
+    /// A conversation whose tab was closed keeps its lines but gets no tab.
+    pub fn restore(&mut self, history: crate::chat_store::Loaded) {
+        if std::mem::replace(&mut self.restored, true) {
+            return;
+        }
+        let fresh: Vec<Entry> = self.entries.drain(..).collect();
+        for line in history.lines {
+            let tab = match &line.scope {
+                Scope::Channel => Scope::Past(line.room),
+                scope => scope.clone(),
+            };
+            if !history.closed.contains(&tab) {
+                match &line.scope {
+                    Scope::Private(key) => self.remember(key, &line.place),
+                    Scope::Channel if !self.rooms.iter().any(|room| room.id == line.room) => {
+                        self.rooms.push(Room {
+                            id: line.room,
+                            name: line.place.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            let when = Local
+                .timestamp_opt(line.at, 0)
+                .single()
+                .unwrap_or_else(Local::now);
+            self.entries.push_back(Entry {
+                id: self.next,
+                scope: line.scope,
+                kind: line.kind,
+                own: line.own,
+                from: line.from,
+                place: line.place,
+                room: line.room,
+                text: line.text,
+                time: when.format("%H:%M").to_string(),
+                day: when.date_naive(),
+                at: line.at,
+            });
+            self.next += 1;
+        }
+        // What was said since connecting keeps its place after the history, still unsaved.
+        self.saved = self.next;
+        for mut entry in fresh {
+            entry.id = self.next;
+            self.next += 1;
+            self.entries.push_back(entry);
+        }
+        while self.entries.len() > LIMIT {
+            self.entries.pop_front();
+        }
+        self.version += 1;
+    }
+
+    /// Forgets every line and conversation, as clearing the history does.
+    pub fn clear(&mut self) {
+        let (here, restored) = (self.here, self.restored);
+        *self = Self {
+            here,
+            restored,
+            version: self.version + 1,
+            next: self.next,
+            saved: self.next,
+            ..Self::default()
+        };
     }
 
     /// Keeps a tab for this person, under the name they go by now.
@@ -708,6 +810,8 @@ pub fn demo() -> Vec<Entry> {
         room: 0,
         text: text.to_owned(),
         time: time.to_owned(),
+        day: NaiveDate::default(),
+        at: 0,
     };
     vec![
         line(

@@ -1214,6 +1214,62 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             "In Tabs, a list opens that conversation; in One Feed it narrows the feed to it. Channels you have left stay while they have something to read. All, at the far left, shows everything again.",
         )),
         Section::boxed(
+            "chat-history",
+            "History",
+            "chat history keep save store saved messages restart clear delete forget private database",
+            vec![
+                item(
+                    "keep chat history save messages restart",
+                    form_row(
+                        t,
+                        "Keep chat history",
+                        Some("Messages and pokes are saved on this computer and come back after a restart."),
+                        switch(
+                            "chat-history-keep",
+                            "Keep chat history",
+                            options.history,
+                            true,
+                            k,
+                            |s, history| {
+                                Message::Chat(crate::chat::Action::Options(crate::settings::Chat {
+                                    history,
+                                    ..s.chat_options
+                                }))
+                            },
+                        ),
+                    ),
+                ),
+                item(
+                    "clear chat history delete forget messages",
+                    form_row(
+                        t,
+                        "Saved conversations",
+                        Some(if s.ui.chat_clear_armed {
+                            "This forgets every server's messages and pokes for good."
+                        } else {
+                            "Forget every server's messages and pokes."
+                        }),
+                        button(
+                            t,
+                            "chat-history-clear",
+                            if s.ui.chat_clear_armed {
+                                "Press Again to Clear"
+                            } else {
+                                "Clear History"
+                            },
+                            Some(&icons::TRASH),
+                            Variant::Danger,
+                            Some(Message::Chat(crate::chat::Action::ClearHistory)),
+                        ),
+                    ),
+                ),
+            ],
+        )
+        .note(group_note(
+            t,
+            "Kept in chat.db beside the settings file, as plain text like your settings. Nothing is sent anywhere.",
+        )),
+        Section::boxed(
             "chat-hidden",
             "While Chat Is Hidden",
             "chat messages hide hidden popup pop-up notification toast stream",

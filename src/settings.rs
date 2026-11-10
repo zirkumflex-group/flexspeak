@@ -84,6 +84,8 @@ pub struct Chat {
     pub hide_while_watching: bool,
     /// How Tabs fits many conversations into its bar.
     pub tab_bar: crate::chat::TabBar,
+    /// Messages and pokes are kept in `chat.db` beside this file and come back after a restart.
+    pub history: bool,
 }
 
 impl Default for Chat {
@@ -95,6 +97,7 @@ impl Default for Chat {
             popups_private_only: false,
             hide_while_watching: false,
             tab_bar: crate::chat::TabBar::Scroll,
+            history: true,
         }
     }
 }
