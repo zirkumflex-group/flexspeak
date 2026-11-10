@@ -129,6 +129,7 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
         SettingsPage::Shortcuts => &icons::KEYBOARD,
         SettingsPage::Permissions => &icons::SHIELD,
         SettingsPage::Updates => &icons::DOWNLOAD,
+        SettingsPage::Errors => &icons::TRIANGLE_ALERT,
         SettingsPage::File => &icons::FILE_TEXT,
     }
 }
@@ -151,7 +152,14 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
             SettingsPage::Permissions,
         ],
     ),
-    (Some("App"), &[SettingsPage::Updates, SettingsPage::File]),
+    (
+        Some("App"),
+        &[
+            SettingsPage::Updates,
+            SettingsPage::Errors,
+            SettingsPage::File,
+        ],
+    ),
 ];
 
 fn sections(
@@ -216,8 +224,118 @@ fn sections(
                     .collect(),
             ),
         ],
+        SettingsPage::Errors => vec![error_log_section(s, t)],
         SettingsPage::File => vec![file_section(s, t), setup_section(s, t)],
     }
+}
+
+/// Every problem since launch, newest first, including ones whose notice has gone.
+fn error_log_section(s: &App, t: &Theme) -> Section {
+    let any = s.alerts.history().next().is_some();
+    let controls = row()
+        .gap(size::GAP)
+        .child(button(
+            t,
+            "clear-error-log",
+            "Clear",
+            None,
+            Variant::Ghost,
+            any.then_some(Message::ClearErrorLog),
+        ))
+        .child(button(
+            t,
+            "copy-error-log",
+            "Copy All",
+            Some(&icons::COPY),
+            Variant::Secondary,
+            any.then_some(Message::CopyErrorLog),
+        ));
+    let mut rows = vec![item(
+        "copy clear errors problems",
+        form_row(
+            t,
+            "Since Flexspeak started",
+            Some(if any {
+                "Newest first. Copy them into a bug report."
+            } else {
+                "Nothing has gone wrong."
+            }),
+            controls,
+        ),
+    )];
+    rows.extend(s.alerts.history().enumerate().map(|(index, entry)| {
+        item(
+            format!("{} {}", entry.heading, entry.detail),
+            logged_row(t, index, entry),
+        )
+    }));
+    Section::boxed(
+        "error-log",
+        "Error Log",
+        "errors problems failures warnings crash history log",
+        rows,
+    )
+    .note(group_note(
+        t,
+        "Kept until Flexspeak quits, up to the last 200 problems.",
+    ))
+}
+
+fn logged_row(t: &Theme, index: usize, entry: &crate::alerts::Logged) -> El {
+    let tint = super::notices::tint(t, entry.source.severity());
+    let mut title = row().w_full().gap(8.0).center_y().child(
+        text(entry.heading.clone())
+            .font(ty::BODY_STRONG)
+            .color(t.text)
+            .truncate()
+            .min_w(0.0),
+    );
+    if entry.reports > 1 {
+        title = title.child(
+            text(format!("\u{d7}{}", entry.reports))
+                .font(ty::NUMERIC)
+                .color(t.faint),
+        );
+    }
+    if entry.resolved {
+        title = title.child(
+            row()
+                .gap(4.0)
+                .center_y()
+                .child(icon(&icons::CHECK, 12.0).color(t.good).a11y_hidden())
+                .child(text("Resolved").font(ty::SMALL).color(t.faint)),
+        );
+    }
+    row()
+        .key(format!("error-log-{index}"))
+        .w_full()
+        .px(size::CARD_PAD)
+        .py(10.0)
+        .gap(12.0)
+        .items_start()
+        .child(
+            text(entry.at.format("%H:%M:%S").to_string())
+                .font(ty::NUMERIC)
+                .color(t.faint)
+                .w(56.0)
+                .pt(1.0),
+        )
+        .child(
+            icon(super::notices::glyph(entry.source), 14.0)
+                .color(tint)
+                .mt(1.0)
+                .a11y_hidden(),
+        )
+        .child(
+            col().grow(1.0).min_w(0.0).gap(2.0).child(title).child(
+                text(entry.detail.clone())
+                    .font(ty::SMALL)
+                    .color(t.muted)
+                    .wrap()
+                    .w_full()
+                    .selectable(true),
+            ),
+        )
 }
 
 /// The floating Settings window, when it is open. Its menus go above it in `layer`.

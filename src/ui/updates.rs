@@ -5,15 +5,13 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use rune::{Color, El, LineCap, Shape, canvas, col, el, icon, row, text};
 use rune_kit::{Kit, Switch};
 
-use super::theme::{Theme, motion, radius, shadow, size, ty};
-use super::widgets::{Variant, button, faint, form_row, group, icon_button, pulse};
+use super::theme::{Theme, motion, size, ty};
+use super::widgets::{Variant, button, faint, form_row, group, pulse};
 use super::{dispatch, icons};
 use crate::changelog::{self, Entry};
 use crate::updater::{Event, Notes, Phase, Progress, Retry};
 use crate::usage::format_bytes;
 use crate::{App, Message};
-
-const NOTICE_WIDTH: f32 = 320.0;
 
 fn send(event: Event) -> Option<Message> {
     Some(Message::Updater(event))
@@ -170,43 +168,16 @@ pub fn notice(s: &App, t: &Theme) -> Option<El> {
             shorten(detail),
         ),
     };
-    let badge = el()
-        .size(32.0, 32.0)
-        .radius(16.0)
-        .center()
-        .fill(tint.alpha(0.14))
-        .border(1.0, tint.alpha(0.28))
-        .child(icon(glyph, 16.0).color(tint).a11y_hidden())
-        .a11y_hidden();
-    let top = row()
-        .w_full()
-        .gap(12.0)
-        .items_start()
-        .child(badge)
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(3.0)
-                .pt(1.0)
-                .child(text(title).font(ty::BODY_STRONG).color(t.text).truncate())
-                .child(text(detail).font(ty::SMALL).color(t.muted).wrap().w_full())
-                .children(
-                    (has_notes && !s.ui.update_hover).then(|| faint(t, "Hover to see what's new")),
-                ),
-        )
-        .child(
-            icon_button(
-                t,
-                "dismiss-update",
-                &icons::CLOSE,
-                "Dismiss",
-                Variant::Ghost,
-                send(Event::Dismiss),
-            )
-            .mt(-4.0)
-            .mr(-6.0),
-        );
+    let top = super::notices::top(
+        t,
+        glyph,
+        tint,
+        title,
+        detail,
+        (has_notes && !s.ui.update_hover).then(|| faint(t, "Hover to see what's new")),
+        "dismiss-update",
+        send(Event::Dismiss),
+    );
     let later = || {
         button(
             t,
@@ -283,26 +254,13 @@ pub fn notice(s: &App, t: &Theme) -> Option<El> {
         )),
     };
     Some(
-        col()
-            .key("update-notice")
-            .role("status")
-            .label(title)
-            .live_region(rune::LiveRegion::Polite)
-            .w(NOTICE_WIDTH)
-            .padding(size::CARD_PAD)
-            .gap(12.0)
-            .radius(radius::CARD)
-            .fill(t.raised)
-            .border_gradient(1.0, t.bevel_top, t.bevel_bottom)
-            .box_shadow(shadow(0.0, 12.0, 32.0, Color::BLACK.alpha(0.45)))
-            .pin(None, Some(size::HEADER + 10.0), Some(16.0), None)
+        super::notices::card(t, "update-notice", title)
             .on_hover_change(|s: &mut App, hovering, _| s.ui.update_hover = hovering)
             .child(top)
             .children(
                 (has_notes && s.ui.update_hover).then(|| whats_new(t, &release.notes, NOTES_SHOWN)),
             )
-            .child(footer)
-            .transition(rune::Transition::opacity()),
+            .child(footer),
     )
 }
 

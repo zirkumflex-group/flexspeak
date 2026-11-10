@@ -11,6 +11,7 @@ mod home;
 pub mod icons;
 mod members;
 mod modals;
+pub mod notices;
 mod onboarding;
 mod scenes;
 mod settings;
@@ -572,10 +573,12 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         s.ui.next_quick_check = now + QUICK_SOURCE_REFRESH;
         dispatch(s, tx, Message::RefreshQuickSources);
     }
-    let wake = match s.updater.next_check {
-        Some(check) => s.next_usage_tick.min(check),
-        None => s.next_usage_tick,
-    };
+    // One-off failures fade on their own.
+    changed |= s.alerts.expire(now);
+    let wake = [s.updater.next_check, s.alerts.next_expiry()]
+        .into_iter()
+        .flatten()
+        .fold(s.next_usage_tick, Instant::min);
     tx.wake_after(wake.saturating_duration_since(now));
     if s.server_mut().streaming.sync_frame() {
         changed = true;
@@ -623,7 +626,6 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         && s.settings_page.is_none()
         && s.tab != Tab::Home
         && s.server().password_channel.is_none()
-        && s.alerts.current().is_none()
     {
         dispatch(s, tx, Message::ShowTab(Tab::Home));
         return true;
@@ -712,9 +714,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     } else {
         content
     };
-    // Under any dialog, whose scrim then covers it too.
-    layer.extend(updates::notice(s, &t));
     settings::window(s, cx, &t, k, &mut layer);
+    // Over Settings, so a problem there shows; under any dialog, whose scrim covers it too.
+    layer.extend(notices::stack(s, &t));
     modals::build(s, &t, k, &mut layer);
     let base = el()
         .key("window")

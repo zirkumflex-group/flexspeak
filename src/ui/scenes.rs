@@ -126,6 +126,15 @@ pub const SCENES: &[Scene] = &[
     ("install", install),
     ("password", password),
     ("alert", alert),
+    ("alert-dropped", alert_dropped),
+    ("alert-audio-fallback", alert_audio_fallback),
+    ("alert-no-audio", alert_no_audio),
+    ("alert-shortcut-taken", alert_shortcut_taken),
+    ("alert-several", alert_several),
+    ("alert-details", alert_details),
+    ("alert-settings", alert_settings),
+    ("settings-error-log", settings_error_log),
+    ("settings-error-log-empty", settings_error_log_empty),
     ("update-available", update_available),
     ("update-whats-new", update_whats_new),
     ("update-downloading", update_downloading),
@@ -1484,12 +1493,125 @@ fn password(s: &mut App) {
     s.server_mut().password_channel = Some(3);
 }
 
+/// A saved server that never answered: the strip offers to try again.
 fn alert(s: &mut App) {
     home(s);
-    s.alerts.raise(
+    s.alerts.raise_at(
+        "ts.zirkumflex.io",
+        Some("Zirkumflex".into()),
         Source::Connection,
         "The server did not answer within 10 seconds. Check the address and your network, then try again.",
     );
+}
+
+/// Kicked from a server: back on the saved servers, with a way back in.
+fn alert_dropped(s: &mut App) {
+    home(s);
+    s.alerts.raise_at(
+        "ts.zirkumflex.io",
+        Some("Zirkumflex".into()),
+        Source::Dropped,
+        "TeamSpeak connection failed: You were kicked from the server: Take a break",
+    );
+}
+
+const FALLBACK: &str = "“Arctis Nova 7” isn't connected, so you hear everyone through “Speakers (Realtek Audio)” until it's back.";
+
+/// Headphones unplugged mid-call: still connected, playing through the speakers.
+fn alert_audio_fallback(s: &mut App) {
+    connected(s);
+    s.alerts.raise(Source::AudioFallback, FALLBACK);
+}
+
+fn alert_no_audio(s: &mut App) {
+    connected(s);
+    s.alerts.raise(
+        Source::Audio,
+        "No playback device is connected. You stay connected, and Flexspeak picks your audio up again as soon as a device works.",
+    );
+}
+
+const TAKEN: &str = "Another app is using Ctrl+Shift+M, so the mute shortcut is off. Flexspeak takes it as soon as it's free.";
+
+/// Launched while another app holds a shortcut: the other shortcuts work.
+fn alert_shortcut_taken(s: &mut App) {
+    connected(s);
+    s.alerts.raise(Source::Shortcuts, TAKEN);
+}
+
+fn alert_several(s: &mut App) {
+    alert_shortcut_taken(s);
+    s.alerts.raise(Source::AudioFallback, FALLBACK);
+    let id = s.active.expect("connected").0;
+    for _ in 0..2 {
+        s.alerts.raise_in(
+            id,
+            None,
+            Source::Poke,
+            "That client is no longer on the server.",
+        );
+    }
+}
+
+/// A long detail, cut to fit the card.
+fn alert_details(s: &mut App) {
+    home(s);
+    s.alerts.raise(
+        Source::SettingsLoad,
+        "expected `,` or `}` at line 14 column 3 in settings.json. The file was not changed. \
+         Repair it and Reload, or Save to replace it with the values shown.",
+    );
+}
+
+fn settings_error_log_empty(s: &mut App) {
+    settings_at(s, SettingsPage::Errors);
+}
+
+/// A session where a few things went wrong: some recovered, one repeated.
+fn settings_error_log(s: &mut App) {
+    connected(s);
+    let id = s.active.expect("connected").0;
+    s.alerts.raise(Source::Shortcuts, TAKEN);
+    s.alerts.recover(Source::Shortcuts);
+    s.alerts.raise(Source::AudioFallback, FALLBACK);
+    s.alerts.raise(Source::AudioFallback, FALLBACK);
+    s.alerts.recover(Source::AudioFallback);
+    s.alerts.raise_at(
+        "ts.zirkumflex.io",
+        Some("Zirkumflex".into()),
+        Source::Dropped,
+        "TeamSpeak connection failed: The server closed the connection.",
+    );
+    s.alerts.recover_at("ts.zirkumflex.io");
+    for _ in 0..3 {
+        s.alerts.raise_in(
+            id,
+            None,
+            Source::Poke,
+            "That client is no longer on the server.",
+        );
+    }
+    s.alerts = {
+        // Their notices are long gone; only the log remains.
+        let mut alerts = std::mem::take(&mut s.alerts);
+        for incident in alerts
+            .visible()
+            .iter()
+            .map(|incident| incident.id)
+            .collect::<Vec<_>>()
+        {
+            alerts.dismiss(incident);
+        }
+        alerts
+    };
+    s.settings_path = Some("/Users/jan/Library/Application Support/Flexspeak/settings.json".into());
+    s.open_settings(SettingsPage::Errors);
+}
+
+/// Over Settings, the cards move to the bottom corner, clear of its header.
+fn alert_settings(s: &mut App) {
+    settings_shortcuts(s);
+    s.alerts.raise(Source::Shortcuts, TAKEN);
 }
 
 const RUNNING: Build = Build {

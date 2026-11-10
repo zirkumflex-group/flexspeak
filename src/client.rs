@@ -517,6 +517,32 @@ pub fn start(
     Ok((commands, output))
 }
 
+/// Tells the app what is wrong with the devices now, clearing what no longer is. False if the
+/// app's queue was full, to try again on the next tick.
+fn report_trouble(events: &mpsc::Sender<Event>, trouble: Option<&hub::Trouble>) -> bool {
+    let (warning, cleared): (Option<(Source, &str)>, &[Source]) = match trouble {
+        None => (None, &[Source::Audio, Source::AudioFallback]),
+        Some(hub::Trouble::Fallback(detail)) => {
+            (Some((Source::AudioFallback, detail)), &[Source::Audio])
+        }
+        Some(hub::Trouble::Unavailable(detail)) => {
+            (Some((Source::Audio, detail)), &[Source::AudioFallback])
+        }
+    };
+    let mut sent = cleared
+        .iter()
+        .all(|source| events.try_send(Event::Recovered(*source)).is_ok());
+    if let Some((source, detail)) = warning {
+        sent &= events
+            .try_send(Event::Warning {
+                source,
+                detail: detail.to_owned(),
+            })
+            .is_ok();
+    }
+    sent
+}
+
 fn report_transmission(events: &mpsc::Sender<Event>, reported: &mut bool, transmitting: bool) {
     if *reported != transmitting && events.try_send(Event::Transmitting(transmitting)).is_ok() {
         *reported = transmitting;
@@ -1111,6 +1137,8 @@ async fn run_connection(
         let mut last_voice = None;
         let mut last_whisper: Option<Instant> = None;
         let mut speakers = Speakers::default();
+        // What this server last told the app about the shared devices; `None` until it has.
+        let mut reported_trouble: Option<Option<hub::Trouble>> = None;
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(u64, Option<streaming::MediaEvent>), Voice(Option<Voice>), Tick }
@@ -1446,7 +1474,11 @@ async fn run_connection(
                     if events.is_closed() { break; }
                     if !connected && deadline.elapsed() > Duration::from_secs(40) { bail!("Connection timed out. Check the address, UDP port, password, and server availability."); }
                     {
-                        if let Some(failure) = audio.failure() { return Err(AudioFailure(anyhow::anyhow!(failure)).into()); }
+                        // A device going away is reported, never a reason to disconnect.
+                        let trouble = audio.trouble();
+                        if reported_trouble.as_ref() != Some(&trouble) && report_trouble(events, trouble.as_ref()) {
+                            reported_trouble = Some(trouble);
+                        }
                         let can_send = connected && controls.capture_allowed() && connection.can_send_audio() && audio.is_active();
                         audio.set_can_send(can_send);
                         audio.set_silent(controls.desired.deafened || !connected);

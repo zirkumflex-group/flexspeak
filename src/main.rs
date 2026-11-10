@@ -478,11 +478,12 @@ enum SettingsPage {
     Shortcuts,
     Permissions,
     Updates,
+    Errors,
     File,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Server,
         Self::Appearance,
         Self::Streaming,
@@ -490,6 +491,7 @@ impl SettingsPage {
         Self::Shortcuts,
         Self::Permissions,
         Self::Updates,
+        Self::Errors,
         Self::File,
     ];
 
@@ -502,6 +504,7 @@ impl SettingsPage {
             Self::Shortcuts => "Shortcuts",
             Self::Permissions => "Permissions",
             Self::Updates => "Updates",
+            Self::Errors => "Error Log",
             Self::File => "Settings File",
         }
     }
@@ -694,7 +697,8 @@ enum Message {
     RequestPermission(permissions::Kind),
     PermissionDone(permissions::Kind, Result<String, String>),
     OpenPermissionSettings(permissions::Kind),
-    DismissError,
+    /// Closes one row of the notice strip.
+    DismissAlert(u64),
     Shortcut(shortcuts::Action),
     /// Fills in setup from the TeamSpeak 6 install it found.
     ImportTs6,
@@ -707,6 +711,9 @@ enum Message {
     SaveSettings,
     ReloadSettings,
     CopySettingsPath,
+    /// Copies the error log as text, for a bug report.
+    CopyErrorLog,
+    ClearErrorLog,
     PlaybackVolume(u8),
     AudioProcessing(audio_processing::Settings),
     Transmission(transmission::Settings),
@@ -855,6 +862,15 @@ enum Message {
     CancelSetup,
 }
 
+/// "a", "a and b", "a, b and c".
+fn spoken_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 impl App {
     fn new(handle: Option<rune::AppHandle<App>>) -> Self {
         let (devices, error) = match audio::devices() {
@@ -912,6 +928,10 @@ impl App {
         app.sync_page_visibility();
         app.permissions.refresh();
         app.shortcuts = Some(shortcuts);
+        if app.shortcut_error.is_none() {
+            let keys = app.keybinds.clone();
+            app.report_taken_shortcuts(&keys);
+        }
         ui::forward_shortcuts(app.handle.clone(), events);
         app.sync_fields();
         app
@@ -2075,8 +2095,50 @@ impl App {
             }
             self.shortcut_error = None;
             self.alerts.recover(Source::Shortcuts);
+            self.report_taken_shortcuts(keys);
         }
         Ok(())
+    }
+
+    /// Says which shortcuts another app holds, or clears that once none is.
+    fn report_taken_shortcuts(&mut self, keys: &shortcuts::Keybinds) {
+        let taken = self
+            .shortcuts
+            .as_ref()
+            .map(shortcuts::Shortcuts::taken)
+            .unwrap_or_default();
+        if taken.is_empty() {
+            self.alerts.recover(Source::Shortcuts);
+            return;
+        }
+        let one = taken.len() == 1;
+        let shortcuts: Vec<String> = taken
+            .iter()
+            .map(|binding| keys.get(*binding).trim().to_owned())
+            .collect();
+        let actions: Vec<String> = taken
+            .iter()
+            .map(|binding| {
+                match binding {
+                    shortcuts::Binding::Mute => "mute",
+                    shortcuts::Binding::Deafen => "deafen",
+                    shortcuts::Binding::PushToTalk => "push-to-talk",
+                }
+                .to_owned()
+            })
+            .collect();
+        self.alerts.begin(Source::Shortcuts);
+        self.alerts.raise(
+            Source::Shortcuts,
+            format!(
+                "Another app is using {}, so the {} {} off. Flexspeak takes {} as soon as {} free.",
+                spoken_list(&shortcuts),
+                spoken_list(&actions),
+                if one { "shortcut is" } else { "shortcuts are" },
+                if one { "it" } else { "them" },
+                if one { "it's" } else { "they're" },
+            ),
+        );
     }
 
     fn start(&mut self, loopback: bool) -> Task {
@@ -2301,7 +2363,7 @@ impl App {
                     );
                 }
             }
-            Message::DismissError => self.alerts.dismiss(),
+            Message::DismissAlert(id) => self.alerts.dismiss(id),
             Message::Shortcut(action) => {
                 self.last_shortcut = Some(action);
                 match action {
@@ -2401,6 +2463,8 @@ impl App {
                     }
                 }
             }
+            Message::CopyErrorLog => return Task::Copy(self.alerts.history_text()),
+            Message::ClearErrorLog => self.alerts.clear_history(),
             Message::CopySettingsPath => {
                 if let Some(path) = &self.settings_path {
                     return Task::Copy(path.display().to_string());
@@ -2697,6 +2761,16 @@ impl App {
                 }
             }
             Message::UsageTick => {
+                // A shortcut another app held is taken as soon as it lets go.
+                if self.key_capture.is_none()
+                    && self
+                        .shortcuts
+                        .as_mut()
+                        .is_some_and(shortcuts::Shortcuts::retry)
+                {
+                    let keys = self.keybinds.clone();
+                    self.report_taken_shortcuts(&keys);
+                }
                 self.refresh_visible_permissions();
                 self.process_usage = self.process_monitor.sample();
                 let now = Instant::now();
@@ -2811,6 +2885,7 @@ impl App {
                 }
                 self.alerts.begin(Source::Connection);
                 self.alerts.begin(Source::Audio);
+                self.alerts.recover_at(&self.address.clone());
                 return self.start(false);
             }
             Message::AddServer => {
@@ -3378,7 +3453,8 @@ impl App {
                     state
                 });
                 self.alerts.recover_in(id.0, Source::Connection);
-                self.alerts.recover(Source::Audio);
+                let address = session.address.trim().to_owned();
+                self.alerts.recover_at(&address);
                 if let Some((muted, deafened)) = restored
                     && !loopback
                 {
@@ -3628,11 +3704,25 @@ impl App {
             }
             client::Event::Stopped(error) => {
                 // Name the server before it goes, so its alert isn't taken for the active one's.
-                if let Some((source, detail)) = error {
-                    self.alerts.close_server(id.0);
-                    self.raise_for(id, source, detail);
-                } else {
-                    self.alerts.close_server(id.0);
+                // Filed under its address, so connecting there again clears it.
+                let (address, name, was_connected) = (
+                    session.address.trim().to_owned(),
+                    session.title().to_owned(),
+                    session.connected,
+                );
+                self.alerts.close_server(id.0);
+                let audio_failed = matches!(error, Some((Source::Audio, _)));
+                match error {
+                    Some((Source::Connection, detail)) if !loopback => {
+                        let source = if was_connected {
+                            Source::Dropped
+                        } else {
+                            Source::Connection
+                        };
+                        self.alerts.raise_at(&address, Some(name), source, detail);
+                    }
+                    Some((source, detail)) => self.alerts.raise(source, detail),
+                    None => {}
                 }
                 if active {
                     let next = self.next_active(id);
@@ -3640,6 +3730,11 @@ impl App {
                 }
                 self.sessions.remove(index);
                 if self.sessions.is_empty() {
+                    // The devices close with the last server, and with them what was wrong.
+                    self.alerts.recover(Source::AudioFallback);
+                    if !audio_failed {
+                        self.alerts.recover(Source::Audio);
+                    }
                     self.ptt.store(false, Ordering::Release);
                     self.transmitting = false;
                     self.level = 0.0;
@@ -4148,7 +4243,7 @@ mod tests {
         let alert = app.alerts.current().unwrap();
         assert_eq!(alert.server.as_deref(), Some("Second"));
         assert_eq!(alert.source, Source::Join);
-        let _ = app.update(Message::DismissError);
+        let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
         // Its connection dropping takes it off the rail and nothing else.
         let _ = app.update(Message::Backend(
             second,
@@ -5545,6 +5640,72 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_server_is_named_and_cleared_by_connecting_there_again() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.address = "ts.example.org".into();
+        let (id, _commands) = connection(&mut app);
+        app.session_mut(id).unwrap().connected = true;
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Stopped(Some((Source::Connection, "Kicked: Take a break".into()))),
+        ));
+        let alert = app.alerts.current().unwrap();
+        assert_eq!(alert.source, Source::Dropped);
+        assert_eq!(alert.heading(), "Disconnected from ts.example.org");
+        assert_eq!(alert.address.as_deref(), Some("ts.example.org"));
+        // A device problem the last server reported closes with it.
+        app.alerts.raise(Source::AudioFallback, "Speakers stand in");
+        let (other, _more) = connection(&mut app);
+        let _ = app.update(Message::Backend(other, client::Event::Stopped(None)));
+        assert!(
+            app.alerts
+                .visible()
+                .iter()
+                .all(|alert| alert.source != Source::AudioFallback)
+        );
+        // Coming back clears why it ended.
+        let (again, _commands) = connection(&mut app);
+        let _ = app.update(Message::Backend(
+            again,
+            client::Event::Connected(String::new()),
+        ));
+        assert!(app.alerts.current().is_none());
+    }
+
+    #[test]
+    fn a_device_problem_never_ends_the_connection() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let (id, _commands) = connection(&mut app);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Warning {
+                source: Source::AudioFallback,
+                detail: "Headphones are gone".into(),
+            },
+        ));
+        assert_eq!(app.alerts.current().unwrap().source, Source::AudioFallback);
+        assert!(app.session(id).is_some());
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Recovered(Source::AudioFallback),
+        ));
+        assert!(app.alerts.current().is_none());
+    }
+
+    #[test]
+    fn lists_read_as_sentences() {
+        let words = |items: &[&str]| -> Vec<String> {
+            items.iter().map(|item| (*item).to_owned()).collect()
+        };
+        assert_eq!(spoken_list(&words(&["mute"])), "mute");
+        assert_eq!(spoken_list(&words(&["mute", "deafen"])), "mute and deafen");
+        assert_eq!(
+            spoken_list(&words(&["mute", "deafen", "push-to-talk"])),
+            "mute, deafen and push-to-talk"
+        );
+    }
+
+    #[test]
     fn background_flooding_shows_in_the_footer_without_a_dialog() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let (id, _commands) = connection(&mut app);
@@ -5579,7 +5740,7 @@ mod tests {
             client::Event::Recovered(Source::Controls),
         ));
         assert_eq!(app.alerts.current().unwrap().source, Source::Flood);
-        let _ = app.update(Message::DismissError);
+        let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
         let _ = app.update(warning());
         assert!(app.alerts.current().is_none());
         let _ = app.update(Message::Backend(
@@ -5588,11 +5749,11 @@ mod tests {
         ));
         let _ = app.update(warning());
         assert_eq!(app.alerts.current().unwrap().reports, 1);
-        let _ = app.update(Message::DismissError);
+        let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
         app.keybind_draft.toggle_mute.clear();
         let _ = app.update(Message::SaveSettings);
         assert_eq!(app.alerts.current().unwrap().source, Source::SettingsSave);
-        let _ = app.update(Message::DismissError);
+        let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
         let _ = app.update(Message::SaveSettings);
         assert_eq!(app.alerts.current().unwrap().source, Source::SettingsSave);
     }
