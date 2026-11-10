@@ -1,4 +1,4 @@
-<!doctype html><html><head><meta charset="utf-8"><title>B · One feed — channel, server and private messages in one stream</title><style>
+<!doctype html><html><head><meta charset="utf-8"><title>5 · Hidden, new private message</title><style>
 :root{
   --canvas:#1c1d20;--chrome:#232427;--surface:#26272b;--stage:#151618;--raised:#34353a;
   --hair:rgba(255,255,255,.08);--wash:rgba(255,255,255,.05);--recess:rgba(0,0,0,.22);
@@ -94,14 +94,32 @@ svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;strok
 .legend b{flex:none;width:20px;height:20px;border-radius:50%;background:#ffd84d;color:#2a2300;font-size:11px;display:grid;place-items:center}
 .ttl{font-size:16px;font-weight:650;color:#fff;padding:0 4px 12px}.ttl span{color:#9a9ba2;font-weight:500;margin-left:8px}
 .frame{position:relative;width:1120px}
+.stream{flex:1;background:#000;display:flex;align-items:center;justify-content:center;min-width:0;position:relative}
+.stream .pic{width:100%;aspect-ratio:16/9;background:repeating-linear-gradient(135deg,#1d3a66 0 34px,#25508c 34px 68px)}
+.edge{position:absolute;right:0;top:52px;bottom:40px;width:12px}
+.edge i{position:absolute;right:2px;top:50%;width:3px;height:44px;margin-top:-22px;border-radius:2px;background:var(--faint)}
+.edge.near i{width:5px;height:60px;margin-top:-30px;background:var(--muted)}
+.edge .ndot{position:absolute;right:0;top:50%;margin-top:-36px;width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 2px #000}
+.toast{position:absolute;right:16px;top:64px;width:300px;background:var(--raised);border:1px solid var(--hair);border-radius:10px;padding:10px 12px;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);display:flex;gap:10px}
+.toast.dm{border-color:rgba(201,166,255,.35)}
+.toast p{color:var(--text);line-height:1.4;margin-top:2px}
+.toast .acts{display:flex;gap:6px;margin-top:8px}
+.toast .btn{height:24px;font-size:12px;padding:0 10px}
+.peek{position:absolute;right:8px;top:60px;bottom:48px;width:340px;border-radius:12px;overflow:hidden;border:1px solid var(--hair);
+  box-shadow:0 8px 24px rgba(0,0,0,.4);display:flex}
+.peek .chat{background:var(--raised);width:100%}
+.peek .compose{background:rgba(0,0,0,.25)}
 
-body{padding:0 24px;background:#0e0f11}</style></head><body><div style="width:1120px;padding:18px 0"><div class="ttl">B · One feed<span>channel, server and private messages in one stream</span></div><div class="frame"><div class="win"><div class="hdr"><div class="lights"><i></i><i></i><i></i></div>
+
+body{padding:0 24px;background:#0e0f11}</style></head><body><div style="width:1120px;padding:18px 0">
+<div class="ttl">5 · Hidden, new private message<span>violet pop-up and dot</span></div><div class="frame"><div class="win" style="position:relative"><div class="hdr"><div class="lights"><i></i><i></i><i></i></div>
 <div class="title">Flexspeak</div>
 <div class="ib"><svg viewBox="0 0 24 24"><path d="M3 3v18h18M7 15l4-4 3 3 5-6"/></svg></div><div class="ib"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></div></div><div class="body"><div class="side"><div class="srv"><div class="tile">ZI</div><b>Zirkumflex</b><div class="ib"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div></div>
 <div class="tree">
 <div class="ch cur"><svg viewBox="0 0 24 24" class="sm chev"><path d="m6 9 6 6 6-6"/></svg><svg viewBox="0 0 24 24" class="sm"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><span class="name">Lobby</span></div>
 <div class="mem  "><span class="ring talk"></span><span class="name">Jan (you)</span></div>
-<div class="mem  "><span class="ring"></span><span class="name">Mara</span></div>
+<div class="mem  "><span class="ring"></span><span class="name">Mara</span><svg viewBox="0 0 24 24" class="sm" style="color:var(--live)"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span class="badge dm">1</span></div>
 <div class="mem  "><span class="ring"></span><span class="name">Theo</span></div>
 <div class="ch people d1"><svg viewBox="0 0 24 24" class="sm chev"><path d="m6 9 6 6 6-6"/></svg><svg viewBox="0 0 24 24" class="sm"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><span class="name">Raid night</span></div>
 <div class="mem d1 "><span class="ring"></span><span class="name">Ines</span></div>
@@ -110,20 +128,8 @@ body{padding:0 24px;background:#0e0f11}</style></head><body><div style="width:11
 </div><div class="log"><div class="ovl"><svg viewBox="0 0 24 24" class="sm chev"><path d="m6 9 6 6 6-6"/></svg>Server log</div>
 <div class="logrow"><span class="t">21:02</span>Ines moved to Raid night</div>
 <div class="logrow"><span class="t">21:04</span>Theo joined Lobby</div></div><div class="voice"><div class="dock"><div class="ib"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></div><div class="ib"><svg viewBox="0 0 24 24"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z"/></svg></div>
-<div class="ib"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><div class="ib hang"><svg viewBox="0 0 24 24"><path d="M3 15c4.5-4 13.5-4 18 0l-2 3-4-1.5v-2.5a10 10 0 0 0-6 0v2.5L5 18z"/></svg></div></div><div class="meter"><i></i></div></div></div>
-<div class="stage"><div class="stage-h"><h1>Lobby</h1><span>3 people</span></div>
-<div class="empty-line"><div>No one is sharing a screen.</div>
-<div class="btns"><span class="btn pri"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Share Main Screen</span><span class="btn">More Options</span></div></div></div><div class="chat" style="width:360px;border-left:1px solid var(--hair)"><div style="display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid var(--hair)">
-<span class="chip sel">All</span><span class="chip plain"><svg viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>Lobby</span>
-<span class="chip plain"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Server</span><span class="chip plain"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>Private <span class="badge dm" style="height:14px;min-width:14px;font-size:9.5px">2</span></span>
-<span style="flex:1"></span></div>
-<div class="msgs"><div class="m" style=""><div class="av c-lu">L</div><div style="min-width:0;flex:1">
-<div class="meta"><span class="who">Lukas</span><span class="chip srv"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Server</span><span class="when">20:58</span></div><p>Server restarts at 4am for the update</p></div></div><div class="m" style=""><div class="av c-theo">T</div><div style="min-width:0;flex:1">
-<div class="meta"><span class="who">Theo</span><span class="chip ch">#Lobby</span><span class="when">21:04</span></div><p>back, had to restart my router</p></div></div><div class="m" style=""><div class="av c-mara">M</div><div style="min-width:0;flex:1">
-<div class="meta"><span class="who">Mara</span><span class="chip ch">#Lobby</span><span class="when">21:05</span></div><p>we start the raid at half past</p></div></div><div class="m" style="background:var(--dm-tint);border-radius:8px;padding:8px 10px;margin:0 -4px"><div class="av c-mara">M</div><div style="min-width:0;flex:1">
-<div class="meta"><span class="who">Mara</span><span class="chip dm"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>to you</span><span class="when">21:06</span></div><p>psst, can you bring the spare key for the vault run?</p></div></div><div class="m" style="background:var(--dm-tint);border-radius:8px;padding:8px 10px;margin:0 -4px"><div class="av c-jan">J</div><div style="min-width:0;flex:1">
-<div class="meta"><span class="who">Jan</span><span class="chip dm"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>to Mara</span><span class="when">21:06</span></div><p>yes, got it 👍</p></div></div><div class="m" style=""><div class="av c-theo">T</div><div style="min-width:0;flex:1">
-<div class="meta"><span class="who">Theo</span><span class="chip ch">#Lobby</span><span class="when">21:07</span></div><p>can someone share the boss notes link again?</p></div></div></div><div class="typing">Esc goes back to #Lobby</div><div class="compose" style="padding-left:6px"><span class="chip dm" style="height:24px;border-radius:6px"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>To Mara <svg viewBox="0 0 24 24" class="sm "><path d="m6 9 6 6 6-6"/></svg></span>
-<span class="ph">Reply privately…</span><span class="ib" style="color:var(--faint)"><svg viewBox="0 0 24 24" class="sm"><path d="M18 6 6 18M6 6l12 12"/></svg></span><span class="ib send"><svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg></span></div></div></div><div class="foot"><span class="g"><span class="dot"></span>Good</span>
+<div class="ib"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><div class="ib hang"><svg viewBox="0 0 24 24"><path d="M3 15c4.5-4 13.5-4 18 0l-2 3-4-1.5v-2.5a10 10 0 0 0-6 0v2.5L5 18z"/></svg></div></div><div class="meter"><i></i></div></div></div><div class="stream"><div class="pic"></div></div></div><div class="foot"><span class="g"><span class="dot"></span>Good</span>
 <span>Loss in 0.0%<svg class="spark" viewBox="0 0 56 16" style="stroke:var(--good);stroke-width:1.4"><path d="M0 12 8 11 16 12 24 9 32 11 40 10 48 12 56 10"/></svg></span><span>Loss out 0.1%<svg class="spark" viewBox="0 0 56 16" style="stroke:var(--good);stroke-width:1.4"><path d="M0 12 8 11 16 12 24 9 32 11 40 10 48 12 56 10"/></svg></span><span>Ping 24 ms<svg class="spark" viewBox="0 0 56 16" style="stroke:var(--good);stroke-width:1.4"><path d="M0 12 8 11 16 12 24 9 32 11 40 10 48 12 56 10"/></svg></span>
-<span class="grow"></span><span>CPU 2.1%</span><span>RAM 84 MB</span></div></div><div class="pin" style="left:748px;top:66px">1</div><div class="pin" style="left:748px;top:430px">2</div><div class="pin" style="left:748px;top:614px">3</div></div><div class="legend"><div><b>1</b><span>Everything in one stream, like a game chat. Filters only narrow it, they never hide where you type.</span></div><div><b>2</b><span>Private lines get a tint and to you / to Mara, so they can't pass for channel talk.</span></div><div><b>3</b><span>Replying to a private line points the box at that person. Esc or ✕ goes back to the channel.</span></div></div></div></body></html>
+<span class="grow"></span><span>CPU 2.1%</span><span>RAM 84 MB</span></div><div class="toast dm"><div class="av c-mara">M</div><div style="flex:1;min-width:0">
+<div class="meta" style="display:flex;align-items:center;gap:6px"><b>Mara</b><span class="chip dm"><svg class="sm" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>to you</span><span style="flex:1"></span><span style="color:var(--faint)"><svg class="sm" viewBox="0 0 24 24" class="sm"><path d="M18 6 6 18M6 6l12 12"/></svg></span></div>
+<p>psst, can you bring the spare key for the vault run?</p><div class="acts"><span class="btn pri"><svg class="sm" viewBox="0 0 24 24" class="sm"><path d="M9 14 4 9l5-5"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>Reply</span><span class="btn ghost">Open Chat</span></div></div></div><div class="edge"><i></i><span class="ndot" style="background:var(--dm)"></span></div></div><div class="pin" style="left:774px;top:70px">1</div><div class="pin" style="left:1066px;top:346px">2</div><div class="pin" style="left:12px;top:159px">3</div></div><div class="legend"><div><b>1</b><span>A private message pops up with the violet edge and "to you", so it can't pass for channel talk.</span></div><div><b>2</b><span>The dot turns violet for a private message and wins over blue.</span></div><div><b>3</b><span>The tree marks the sender too, so it's still findable after the pop-up leaves.</span></div></div></div></body></html>

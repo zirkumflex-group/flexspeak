@@ -1,0 +1,140 @@
+<!doctype html><html><head><meta charset="utf-8"><title>1 · Tabs, watching a stream</title><style>
+:root{
+  --canvas:#1c1d20;--chrome:#232427;--surface:#26272b;--stage:#151618;--raised:#34353a;
+  --hair:rgba(255,255,255,.08);--wash:rgba(255,255,255,.05);--recess:rgba(0,0,0,.22);
+  --text:#ebebee;--muted:#a0a1a8;--faint:#75767e;--accent:#8ea8ff;--accent-tint:rgba(142,168,255,.16);
+  --good:#6fdc9a;--fair:#f2c46b;--poor:#ff7a8a;--live:#ff5a52;
+  --dm:#c9a6ff;--dm-tint:rgba(201,166,255,.12);--server:#f2c46b;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0e0f11;font-family:Inter,-apple-system,"Segoe UI",system-ui,sans-serif;font-size:13px;color:var(--text);
+  -webkit-font-smoothing:antialiased}
+.win{width:1120px;height:700px;background:var(--canvas);display:flex;flex-direction:column;overflow:hidden;border-radius:10px;
+  border:1px solid var(--hair)}
+.hdr{height:52px;display:flex;align-items:center;padding:0 12px 0 84px;gap:8px;position:relative;flex:none}
+.hdr .lights{position:absolute;left:18px;top:20px;display:flex;gap:8px}
+.hdr .lights i{width:12px;height:12px;border-radius:50%;background:#ff5f57}
+.hdr .lights i:nth-child(2){background:#febc2e}.hdr .lights i:nth-child(3){background:#28c840}
+.hdr .title{color:var(--muted);font-weight:600;flex:1}
+.ib{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--muted);flex:none}
+.ib.on{background:var(--raised);color:var(--text)}
+svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.sm svg,svg.sm{width:13px;height:13px}
+.body{flex:1;display:flex;min-height:0;border-top:1px solid var(--hair)}
+.side{width:260px;background:var(--surface);padding:12px;display:flex;flex-direction:column;gap:8px;flex:none;border-right:1px solid var(--hair)}
+.srv{display:flex;align-items:center;gap:8px}
+.tile{width:28px;height:28px;border-radius:6px;background:#b8478f;color:#fff;font-size:11.5px;font-weight:650;display:grid;place-items:center}
+.srv b{font-size:14px;font-weight:620;flex:1}
+.tree{flex:1;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.ch,.mem{height:26px;border-radius:6px;display:flex;align-items:center;gap:6px;padding:0 6px}
+.ch .chev{color:var(--faint)}
+.ch.cur{color:var(--accent);font-weight:600;background:var(--accent-tint)}
+.ch.people{color:var(--text)} .ch.empty{color:var(--muted)} .ch.locked{color:var(--faint)}
+.mem{padding-left:38px;color:var(--text)}
+.mem.sel{background:var(--accent-tint)}
+.ring{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--faint);flex:none}
+.ring.talk{border-color:var(--good);background:var(--good)}
+.name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d1{padding-left:20px}.mem.d1{padding-left:52px}
+.badge{min-width:18px;height:16px;border-radius:8px;padding:0 5px;font-size:10.5px;font-weight:650;display:grid;place-items:center;
+  background:var(--accent);color:#14161c}
+.badge.dm{background:var(--dm)} .badge.quiet{background:var(--raised);color:var(--muted)}
+.log{border-top:1px solid var(--hair);padding-top:8px;display:flex;flex-direction:column;gap:2px}
+.ovl{font-size:11px;font-weight:600;color:var(--faint);display:flex;align-items:center;gap:6px;height:20px}
+.logrow{height:22px;display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11.5px}
+.logrow .t{color:var(--faint);font-variant-numeric:tabular-nums}
+.voice{display:flex;flex-direction:column;gap:8px;padding-top:4px}
+.dock{display:flex;gap:6px}
+.dock .ib{flex:1;height:32px;background:var(--raised);color:var(--text)}
+.dock .ib.hang{background:#d9434f;color:#fff}
+.meter{height:4px;border-radius:2px;background:var(--recess);overflow:hidden}
+.meter i{display:block;height:100%;width:34%;background:var(--good)}
+.stage{flex:1;background:var(--stage);display:flex;flex-direction:column;min-width:0}
+.stage-h{padding:16px 20px 0;display:flex;align-items:baseline;gap:8px}
+.stage-h h1{font-size:17px;font-weight:600}
+.stage-h span{color:var(--muted)}
+.empty-line{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted)}
+.btns{display:flex;gap:8px}
+.btn{height:28px;padding:0 12px;border-radius:6px;display:inline-flex;align-items:center;gap:6px;font-weight:500;background:var(--raised);color:var(--text);white-space:nowrap}
+.btn.pri{background:var(--accent);color:#14161c}
+.btn.ghost{background:transparent;color:var(--muted)}
+.foot{height:40px;display:flex;align-items:center;gap:18px;padding:0 14px;color:var(--muted);font-size:11.5px;border-top:1px solid var(--hair);flex:none}
+.foot .dot{width:7px;height:7px;border-radius:50%;background:var(--good);display:inline-block;margin-right:6px}
+.foot .g{color:var(--good)}
+.spark{width:56px;height:16px;display:inline-block;vertical-align:middle;margin-left:6px}
+.foot .grow{flex:1}
+
+/* chat */
+.chat{display:flex;flex-direction:column;min-height:0;background:var(--surface)}
+.msgs{flex:1;overflow:hidden;padding:10px 14px;display:flex;flex-direction:column;gap:10px;justify-content:flex-end}
+.m{display:flex;gap:9px}
+.av{width:26px;height:26px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:11px;font-weight:650;color:#fff}
+.m .who{font-weight:600}
+.m .when{color:var(--faint);font-size:11px;margin-left:6px;font-variant-numeric:tabular-nums}
+.m p{color:var(--text);line-height:1.4;margin-top:1px}
+.m .meta{display:flex;align-items:center;gap:6px}
+.sysline{color:var(--faint);font-size:11.5px;text-align:center}
+.compose{margin:0 12px 12px;min-height:36px;border-radius:8px;background:var(--recess);border:1px solid var(--hair);display:flex;align-items:center;gap:8px;padding:0 6px 0 10px;color:var(--faint)}
+.compose .ph{flex:1}
+.compose .send{color:var(--accent)}
+.chip{height:20px;border-radius:10px;padding:0 8px;display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;white-space:nowrap}
+.chip.ch{background:var(--accent-tint);color:var(--accent)}
+.chip.dm{background:var(--dm-tint);color:var(--dm)}
+.chip.srv{background:rgba(242,196,107,.13);color:var(--server)}
+.chip.plain{background:var(--raised);color:var(--muted)}
+.chip.sel{background:var(--text);color:#16171a}
+.c-mara{background:#c0607a}.c-theo{background:#4f9e7c}.c-ines{background:#8a6bd6}.c-jan{background:#5b7be0}.c-lu{background:#c48a3c}
+.typing{color:var(--faint);font-size:11px;padding:0 14px 6px}
+
+/* annotation callouts */
+.pin{position:absolute;width:20px;height:20px;border-radius:50%;background:#ffd84d;color:#2a2300;font-size:11px;font-weight:750;
+  display:grid;place-items:center;box-shadow:0 0 0 3px rgba(0,0,0,.55)}
+.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:16px 4px 0;color:#c9cad0;font-size:12.5px;line-height:1.45}
+.legend div{display:flex;gap:9px}
+.legend b{flex:none;width:20px;height:20px;border-radius:50%;background:#ffd84d;color:#2a2300;font-size:11px;display:grid;place-items:center}
+.ttl{font-size:16px;font-weight:650;color:#fff;padding:0 4px 12px}.ttl span{color:#9a9ba2;font-weight:500;margin-left:8px}
+.frame{position:relative;width:1120px}
+.stream{flex:1;background:#000;display:flex;align-items:center;justify-content:center;min-width:0;position:relative}
+.stream .pic{width:100%;aspect-ratio:16/9;background:repeating-linear-gradient(135deg,#1d3a66 0 34px,#25508c 34px 68px)}
+.edge{position:absolute;right:0;top:52px;bottom:40px;width:12px}
+.edge i{position:absolute;right:2px;top:50%;width:3px;height:44px;margin-top:-22px;border-radius:2px;background:var(--faint)}
+.edge.near i{width:5px;height:60px;margin-top:-30px;background:var(--muted)}
+.edge .ndot{position:absolute;right:0;top:50%;margin-top:-36px;width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 2px #000}
+.toast{position:absolute;right:16px;top:64px;width:300px;background:var(--raised);border:1px solid var(--hair);border-radius:10px;padding:10px 12px;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);display:flex;gap:10px}
+.toast.dm{border-color:rgba(201,166,255,.35)}
+.toast p{color:var(--text);line-height:1.4;margin-top:2px}
+.toast .acts{display:flex;gap:6px;margin-top:8px}
+.toast .btn{height:24px;font-size:12px;padding:0 10px}
+.peek{position:absolute;right:8px;top:60px;bottom:48px;width:340px;border-radius:12px;overflow:hidden;border:1px solid var(--hair);
+  box-shadow:0 8px 24px rgba(0,0,0,.4);display:flex}
+.peek .chat{background:var(--raised);width:100%}
+.peek .compose{background:rgba(0,0,0,.25)}
+
+
+body{padding:0 24px;background:#0e0f11}</style></head><body><div style="width:1120px;padding:18px 0">
+<div class="ttl">1 · Tabs, watching a stream<span>chat column open beside the stream</span></div><div class="frame"><div class="win" style="position:relative"><div class="hdr"><div class="lights"><i></i><i></i><i></i></div>
+<div class="title">Flexspeak</div>
+<div class="ib"><svg viewBox="0 0 24 24"><path d="M3 3v18h18M7 15l4-4 3 3 5-6"/></svg></div><div class="ib"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></div></div><div class="body"><div class="side"><div class="srv"><div class="tile">ZI</div><b>Zirkumflex</b><div class="ib"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div></div>
+<div class="tree">
+<div class="ch cur"><svg viewBox="0 0 24 24" class="sm chev"><path d="m6 9 6 6 6-6"/></svg><svg viewBox="0 0 24 24" class="sm"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><span class="name">Lobby</span></div>
+<div class="mem  "><span class="ring talk"></span><span class="name">Jan (you)</span></div>
+<div class="mem  "><span class="ring"></span><span class="name">Mara</span><svg viewBox="0 0 24 24" class="sm" style="color:var(--live)"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span class="badge dm">2</span></div>
+<div class="mem  "><span class="ring"></span><span class="name">Theo</span></div>
+<div class="ch people d1"><svg viewBox="0 0 24 24" class="sm chev"><path d="m6 9 6 6 6-6"/></svg><svg viewBox="0 0 24 24" class="sm"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><span class="name">Raid night</span></div>
+<div class="mem d1 "><span class="ring"></span><span class="name">Ines</span></div>
+<div class="ch locked d1"><span style="width:13px"></span><svg viewBox="0 0 24 24" class="sm"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span class="name">Focus room</span></div>
+<div class="ch empty"><span style="width:13px"></span><svg viewBox="0 0 24 24" class="sm"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><span class="name">AFK</span></div>
+</div><div class="log"><div class="ovl"><svg viewBox="0 0 24 24" class="sm chev"><path d="m6 9 6 6 6-6"/></svg>Server log</div>
+<div class="logrow"><span class="t">21:02</span>Ines moved to Raid night</div>
+<div class="logrow"><span class="t">21:04</span>Theo joined Lobby</div></div><div class="voice"><div class="dock"><div class="ib"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></div><div class="ib"><svg viewBox="0 0 24 24"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z"/></svg></div>
+<div class="ib"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><div class="ib hang"><svg viewBox="0 0 24 24"><path d="M3 15c4.5-4 13.5-4 18 0l-2 3-4-1.5v-2.5a10 10 0 0 0-6 0v2.5L5 18z"/></svg></div></div><div class="meter"><i></i></div></div></div><div class="stream"><div class="pic"></div></div><div class="chat" style="width:340px;border-left:1px solid var(--hair);flex:none;"><div style="display:flex;align-items:center;gap:0;padding:8px 6px 0 8px;border-bottom:1px solid var(--hair);height:41px;flex:none"><div style="height:32px;padding:0 7px;display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--accent);font-weight:600;border-bottom:2px solid var(--accent)"><svg viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>Lobby</div><div style="height:32px;padding:0 7px;display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Server</div><div style="height:32px;padding:0 7px;display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--text)"><span class="av c-mara" style="width:16px;height:16px;font-size:9px">M</span>Mara<span class="badge dm">2</span></div><div style="height:32px;padding:0 7px;display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted)"><span class="av c-ines" style="width:16px;height:16px;font-size:9px">I</span>Ines</div><div style="flex:1"></div><div class="ib" title="Hide chat"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18M8 10l2 2-2 2"/></svg></div></div>
+<div style="padding:10px 14px 0;color:var(--faint);font-size:11.5px;display:flex;align-items:center;gap:6px"><svg viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg><span>Everyone in <b style="color:var(--muted)">Lobby</b> sees this</span></div>
+<div class="msgs"><div class="m" style=""><div class="av c-theo">T</div><div style="min-width:0;flex:1">
+<div class="meta"><span class="who">Theo</span><span class="when">21:04</span></div><p>back, had to restart my router</p></div></div><div class="m" style=""><div class="av c-mara">M</div><div style="min-width:0;flex:1">
+<div class="meta"><span class="who">Mara</span><span class="when">21:05</span></div><p>we start the raid at half past, Ines is setting up</p></div></div><div class="m" style=""><div class="av c-jan">J</div><div style="min-width:0;flex:1">
+<div class="meta"><span class="who">Jan</span><span class="when">21:06</span></div><p>👍 I'll join after this match</p></div></div><div class="m" style=""><div class="av c-theo">T</div><div style="min-width:0;flex:1">
+<div class="meta"><span class="who">Theo</span><span class="when">21:07</span></div><p>can someone share the boss notes link again?</p></div></div></div><div class="typing">Mara is typing…</div>
+<div class="compose"><span class="ph">Message #Lobby</span><span class="ib send"><svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg></span></div></div></div><div class="foot"><span class="g"><span class="dot"></span>Good</span>
+<span>Loss in 0.0%<svg class="spark" viewBox="0 0 56 16" style="stroke:var(--good);stroke-width:1.4"><path d="M0 12 8 11 16 12 24 9 32 11 40 10 48 12 56 10"/></svg></span><span>Loss out 0.1%<svg class="spark" viewBox="0 0 56 16" style="stroke:var(--good);stroke-width:1.4"><path d="M0 12 8 11 16 12 24 9 32 11 40 10 48 12 56 10"/></svg></span><span>Ping 24 ms<svg class="spark" viewBox="0 0 56 16" style="stroke:var(--good);stroke-width:1.4"><path d="M0 12 8 11 16 12 24 9 32 11 40 10 48 12 56 10"/></svg></span>
+<span class="grow"></span><span>CPU 2.1%</span><span>RAM 84 MB</span></div></div><div class="pin" style="left:746px;top:64px">1</div><div class="pin" style="left:1092px;top:100px">2</div><div class="pin" style="left:12px;top:159px">3</div></div><div class="legend"><div><b>1</b><span>Mara's stream keeps the stage; the chat column sits beside it at 340 pt.</span></div><div><b>2</b><span>Hide chat (panel icon) gives the stream the full width. ⌘⇧C toggles it too.</span></div><div><b>3</b><span>Unread private messages also show on the person in the tree.</span></div></div></div></body></html>
