@@ -7,7 +7,7 @@ description = "A minimal native TeamSpeak voice client"
 
 [workspace]
 members = ["."]
-exclude = ["vendor/cpal", "vendor/tsclientlib"]
+exclude = ["vendor/tsclientlib"]
 
 [dependencies]
 anyhow = "1"
@@ -93,5 +93,7 @@ webrtc-sys-build = "=0.3.21"
 [patch.crates-io]
 webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "6469898101c8cfa7fdda0215246eba52bc46778a" }
 webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "6469898101c8cfa7fdda0215246eba52bc46778a" }
-# cpal with the macOS loopback tap leaving the app's own sound out (vendor/cpal/FLEXSPEAK-PATCH.md).
-cpal = { path = "vendor/cpal" }
+# cpal 0.18.2 with one change: the macOS loopback tap leaves the app's own sound out, so
+# shared system audio does not echo the call back to viewers. Windows does the same in
+# src/streaming/process_audio.rs.
+cpal = { git = "https://github.com/zirkumflex-group/cpal", rev = "bbde53916e936766b6b7bb7fb781fe760c3b4633" }
