@@ -106,6 +106,12 @@ svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;strok
 .legend b{flex:none;width:20px;height:20px;border-radius:50%;background:#ffd84d;color:#2a2300;font-size:11px;display:grid;place-items:center}
 .ttl{font-size:16px;font-weight:650;color:#fff;padding:0 4px 12px}.ttl span{color:#9a9ba2;font-weight:500;margin-left:8px}
 .frame{position:relative;width:1120px}
+.pk{display:flex;flex-direction:column;gap:2px;padding-left:35px;position:relative;color:var(--faint);font-size:12px;opacity:.85}
+.pk .l{display:flex;align-items:center;gap:6px}
+.pk .l svg{position:absolute;left:7px;width:14px;height:14px}
+.pk b{font-weight:600;color:var(--muted)}
+.pk q{color:var(--muted);font-style:italic;quotes:"“" "”"}
+.pk .when{font-size:11px;font-variant-numeric:tabular-nums}
 .stream{flex:1;background:#000;display:flex;align-items:center;justify-content:center;min-width:0;position:relative}
 .stream .pic{width:100%;aspect-ratio:16/9;background:repeating-linear-gradient(135deg,#1d3a66 0 34px,#25508c 34px 68px)}
 .edge{position:absolute;right:0;top:52px;bottom:40px;width:12px}
@@ -158,6 +164,7 @@ I = {
     "search": '<svg><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>',
     "share": '<svg><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M9 10l3-3 3 3M12 7v6"/></svg>',
     "check": '<svg class="sm"><path d="M20 6 9 17l-5-5"/></svg>',
+    "poke": '<svg><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0M2 8c0-2 .6-3.9 1.7-5.4M22 8c0-2-.6-3.9-1.7-5.4"/></svg>',
     "filter": '<svg class="sm"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>',
 }
 
@@ -279,6 +286,71 @@ def chat_b(width=340, collapse=True, extra_style=""):
 <div class="msgs">{msgs}</div>
 <div class="compose" style="padding-left:6px"><span class="chip ch" style="height:24px;border-radius:6px">#Lobby {sm('chev').replace('chev','')}</span>
 <span class="ph">Message everyone in Lobby</span><span class="ib send">{I['send']}</span></div></div>"""
+
+
+def poke(line, when, text=""):
+    q = f"<q>{text}</q>" if text else ""
+    return f'<div class="pk"><div class="l">{I["poke"]}<span>{line}</span><span class="when">{when}</span></div>{q}</div>'
+
+
+def chat_a_mara():
+    tab = lambda inner, cls="": f'<div style="height:32px;padding:0 7px;display:flex;align-items:center;gap:5px;white-space:nowrap;{cls}">{inner}</div>'
+    bar = (f'<div style="display:flex;align-items:center;padding:8px 6px 0 8px;border-bottom:1px solid var(--hair);height:41px;flex:none">'
+           + tab(f"{I['hash']}Lobby", "color:var(--muted)")
+           + tab(f"{I['globe']}Server", "color:var(--muted)")
+           + tab('<span class="av c-mara" style="width:16px;height:16px;font-size:9px">M</span>Mara', "color:var(--dm);font-weight:600;border-bottom:2px solid var(--dm)")
+           + tab('<span class="av c-ines" style="width:16px;height:16px;font-size:9px">I</span>Ines', "color:var(--muted)")
+           + f'<div style="flex:1"></div><div class="ib">{I["pclose"]}</div></div>')
+    msgs = "".join([
+        '<div class="sysline">Today</div>',
+        poke("<b>Mara</b> poked you", "20:41", "you there? raid soon"),
+        msg("Jan", "c-jan", "20:43", "sorry, was making food, joining in 5"),
+        poke("<b>You</b> poked Mara", "20:58"),
+        msg("Mara", "c-mara", "21:06", "psst, can you bring the spare key for the vault run?"),
+        msg("Jan", "c-jan", "21:06", "yes, got it 👍"),
+        poke("<b>Mara</b> poked you", "21:09", "come to Raid night pls"),
+    ])
+    return f"""<div class="chat" style="width:340px;border-left:1px solid var(--hair);flex:none">{bar}
+<div style="padding:10px 14px 0;color:var(--faint);font-size:11.5px;display:flex;align-items:center;gap:6px">{I['user']}<span>Only you and <b style="color:var(--muted)">Mara</b> see this</span></div>
+<div class="msgs">{msgs}</div>
+<div class="compose" style="border-color:rgba(201,166,255,.35)"><span class="ph">Message Mara</span><span class="ib send">{I['send']}</span></div></div>"""
+
+
+def chat_b_pokes():
+    filters = f"""<div style="display:flex;align-items:center;gap:6px;padding:0 6px 0 12px;border-bottom:1px solid var(--hair);height:41px;flex:none">
+<span class="chip sel">All</span><span class="chip plain">{sm('hash')}Lobby</span><span class="chip plain">{sm('globe')}Server</span>
+<span class="chip plain">{sm('user')}Private</span><span style="flex:1"></span><div class="ib">{I["pclose"]}</div></div>"""
+    dm_box = "background:var(--dm-tint);border-radius:8px;padding:7px 9px;margin:0 -4px"
+    msgs = "".join([
+        poke("<b>Ines</b> poked you", "20:52", "server restart at 4, save your stuff"),
+        msg("Theo", "c-theo", "21:04", "back, had to restart my router", '<span class="chip ch">#Lobby</span>'),
+        msg("Mara", "c-mara", "21:06", "psst, can you bring the spare key?", f'<span class="chip dm">{sm("user")}to you</span>', dm_box),
+        poke("<b>You</b> poked Theo", "21:07"),
+        msg("Theo", "c-theo", "21:07", "can someone share the boss notes link again?", '<span class="chip ch">#Lobby</span>'),
+        poke("<b>Mara</b> poked you", "21:09", "come to Raid night pls"),
+    ])
+    return f"""<div class="chat" style="width:340px;border-left:1px solid var(--hair);flex:none">{filters}
+<div class="msgs">{msgs}</div>
+<div class="compose" style="padding-left:6px"><span class="chip ch" style="height:24px;border-radius:6px">#Lobby {sm('chev').replace('chev','')}</span>
+<span class="ph">Message everyone in Lobby</span><span class="ib send">{I['send']}</span></div></div>"""
+
+
+def s_pokes_tabs():
+    win = window(sidebar(tree_streaming()) + stream_stage() + chat_a_mara())
+    return win, [
+        (746, 64, "1", "Pokes live in the private tab with that person, both ways: pokes you got and pokes you sent."),
+        (746, 300, "2", "Drawn faded: a bell instead of an avatar, faint text, the poke's note in italics. Messages stay full strength."),
+        (746, 614, "3", "You can't reply to a poke with a poke here; the box sends a normal private message. Poking stays in the right-click menu."),
+    ]
+
+
+def s_pokes_feed():
+    win = window(sidebar(tree_streaming()) + stream_stage() + chat_b_pokes())
+    return win, [
+        (746, 64, "1", "In One Feed, pokes sit in the stream where they happened. The Private filter shows them too."),
+        (746, 300, "2", "Same faded look as in Tabs, so a poke never reads as a chat line or a channel message."),
+        (520, 360, "3", "A poke still opens its dialog and chimes as today. The chat just keeps the history."),
+    ]
 
 
 def stream_stage(full=False):
@@ -500,6 +572,8 @@ SCREENS = [
     ("06-peek", "6 · Hovering the handle — the chat peeks over the stream", s_peek),
     ("07-settings", "7 · Settings › Chat — pick the layout and the hidden-state pop-ups", s_settings),
     ("08-onboarding", "8 · Onboarding step — two live examples to choose from", s_onboarding),
+    ("09-pokes-tabs", "9 · Poke history, Tabs — faded lines in the private tab", s_pokes_tabs),
+    ("10-pokes-feed", "10 · Poke history, One Feed — faded lines in the stream", s_pokes_feed),
 ]
 
 if __name__ == "__main__":
