@@ -1248,7 +1248,7 @@ fn stats(s: &App, watch: &Watching) -> El {
             "{} packets · {} frames · {} shown · {}",
             stats.packets,
             stats.decoded_frames,
-            watch.ui_updates,
+            s.server().streaming.surfaces.get(watch.slot).presented(),
             usage::format_bytes(stats.bytes as f64)
         )))
         .child(line(format!(

@@ -60,6 +60,8 @@ const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormali
 /// A queued readback that has not finished in this long means the GPU stopped working for
 /// us (for example after a driver reset).
 const STALLED: Duration = Duration::from_secs(2);
+/// Polls that must find a copy unfinished, over `STALLED`, before it counts as stalled.
+const STALL_POLLS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -97,6 +99,10 @@ struct Slot {
     staging: ID3D11Texture2D,
     /// When its copy was queued; `None` while the slot is free.
     queued_at: Option<Instant>,
+    /// When a poll first found the copy unfinished, and how many polls have since. A driver
+    /// may report a copy unfinished on its first try however long ago it was queued, so a
+    /// stall counts from there, never across a pause before it.
+    busy: Option<(Instant, u32)>,
 }
 
 /// What depends on the source and share sizes; rebuilt when the source is resized.
@@ -145,6 +151,15 @@ impl Capture {
         // SAFETY: each call below is a plain COM/WinRT call with valid arguments; the
         // interfaces they return are reference counted by the `windows` crate.
         unsafe {
+            // Each share captures on a thread of its own. When the last thread in the
+            // multithreaded apartment exits, COM tears it down, and the WinRT factories the
+            // `windows` crate cached for the process go stale: the next share's first call
+            // crashed. Keeping the apartment for the process life prevents that.
+            static MTA: std::sync::Once = std::sync::Once::new();
+            MTA.call_once(|| {
+                let mut cookie = std::ptr::null_mut();
+                let _ = windows_sys::Win32::System::Com::CoIncrementMTAUsage(&mut cookie);
+            });
             // Already initialised on this thread (in either mode) is fine.
             let _ = RoInitialize(RO_INIT_MULTITHREADED);
             ensure!(
@@ -264,16 +279,6 @@ impl Capture {
     /// released.
     fn collect(&mut self) -> Result<Option<I420Buffer>> {
         let pipeline = &mut self.pipeline;
-        if let Some(&front) = pipeline.queued.front()
-            && pipeline.slots[front]
-                .queued_at
-                .is_some_and(|at| at.elapsed() > STALLED)
-        {
-            bail!(
-                "the GPU has not finished a frame in {} s",
-                STALLED.as_secs()
-            );
-        }
         let mut finished: Vec<(usize, D3D11_MAPPED_SUBRESOURCE)> = Vec::new();
         while let Some(&index) = pipeline.queued.front() {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -288,17 +293,30 @@ impl Capture {
                     Some(&mut mapped),
                 )
             };
-            match result {
-                Err(error) if error.code() == DXGI_ERROR_WAS_STILL_DRAWING => break,
-                Err(error) => {
-                    // Release what was mapped before failing.
-                    for (index, _) in finished {
-                        // SAFETY: mapped above and not yet unmapped.
-                        unsafe { self.context.Unmap(&pipeline.slots[index].staging, 0) };
-                    }
-                    return Err(error).context("Cannot read the captured frame");
+            if let Err(error) = result {
+                // Only a copy the GPU still hasn't finished counts as a stall: one that
+                // finished while this thread was paused (a slow tick, sleep) reads back as usual.
+                let drawing = error.code() == DXGI_ERROR_WAS_STILL_DRAWING;
+                let (since, polls) = pipeline.slots[index]
+                    .busy
+                    .get_or_insert_with(|| (Instant::now(), 0));
+                *polls += 1;
+                let stalled = *polls > STALL_POLLS && since.elapsed() > STALLED;
+                if drawing && !stalled {
+                    break;
                 }
-                Ok(()) => {}
+                // Release what was mapped before failing.
+                for (index, _) in finished {
+                    // SAFETY: mapped above and not yet unmapped.
+                    unsafe { self.context.Unmap(&pipeline.slots[index].staging, 0) };
+                }
+                if drawing {
+                    bail!(
+                        "the GPU has not finished a frame in {} s",
+                        STALLED.as_secs()
+                    );
+                }
+                return Err(error).context("Cannot read the captured frame");
             }
             pipeline.queued.pop_front();
             finished.push((index, mapped));
@@ -313,6 +331,7 @@ impl Capture {
             // SAFETY: mapped above; `nv12_frame` has finished with the memory.
             unsafe { self.context.Unmap(&pipeline.slots[index].staging, 0) };
             pipeline.slots[index].queued_at = None;
+            pipeline.slots[index].busy = None;
         }
         newest.transpose()
     }
@@ -474,6 +493,7 @@ impl Capture {
             self.context.Flush();
         }
         slot.queued_at = Some(Instant::now());
+        slot.busy = None;
         pipeline.queued.push_back(index);
         pipeline.target_fresh = false;
     }
@@ -574,6 +594,7 @@ fn build_pipeline(
             slots.push(Slot {
                 staging: staging.context("No readback texture")?,
                 queued_at: None,
+                busy: None,
             });
         }
         Ok(Pipeline {
@@ -749,6 +770,62 @@ mod tests {
             capture.skipped
         );
         ensure!(frames > 0, "No frames arrived");
+        Ok(())
+    }
+
+    /// A readback the GPU finished while the caller was paused longer than `STALLED` (a slow
+    /// tick, sleep) is read back, not reported as a stalled GPU: whether the pause came before
+    /// the first look at the copy or after it.
+    #[test]
+    #[ignore = "Captures the real screen with the GPU"]
+    fn a_finished_readback_survives_a_long_pause() -> Result<()> {
+        for looked_first in [false, true] {
+            let mut capture = Capture::open(
+                Target::Screen(primary()),
+                (1920, 1080),
+                Duration::from_millis(33),
+            )?;
+            let start = std::time::Instant::now();
+            while capture.pipeline.queued.is_empty() {
+                ensure!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "No readback was queued"
+                );
+                capture.poll()?;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if looked_first {
+                capture.poll()?;
+            }
+            std::thread::sleep(STALLED + Duration::from_millis(200));
+            capture
+                .poll()
+                .with_context(|| format!("after a pause (looked first: {looked_first})"))?;
+        }
+        Ok(())
+    }
+
+    /// Sharing again after a share's thread ended: the second capture opens on a new thread.
+    #[test]
+    #[ignore = "Captures the real screen with the GPU"]
+    fn a_second_share_captures_on_a_new_thread() -> Result<()> {
+        let share = || -> Result<()> {
+            let mut capture = Capture::open(
+                Target::Screen(primary()),
+                (1920, 1080),
+                Duration::from_millis(33),
+            )?;
+            for _ in 0..5 {
+                capture.poll()?;
+                std::thread::sleep(Duration::from_millis(33));
+            }
+            Ok(())
+        };
+        for _ in 0..2 {
+            std::thread::spawn(share)
+                .join()
+                .map_err(|_| anyhow!("The share's thread panicked"))??;
+        }
         Ok(())
     }
 

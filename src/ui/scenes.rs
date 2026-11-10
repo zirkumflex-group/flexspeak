@@ -1463,6 +1463,11 @@ fn watching_stats(s: &mut App) {
             ..Default::default()
         };
     }
+    // A few decoded frames were replaced by newer ones before a draw showed them.
+    let surface = s.server().streaming.surfaces.get(0).clone();
+    for _ in 0..1_786 {
+        surface.note_presented();
+    }
 }
 
 fn install(s: &mut App) {

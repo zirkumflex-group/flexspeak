@@ -28,11 +28,29 @@ pub struct Videos {
 }
 impl Videos {
     pub fn prepare(&mut self, f: &Frame<'_, App>) -> bool {
-        let visible = f.rt.instances.iter().enumerate().any(|(n, i)| {
-            i.params[1] == rune::render::KIND_EFFECT
+        let surfaces = &f.rt.state.server().streaming.surfaces;
+        // The streams some painter draws this frame, exits and drag ghosts included. Only
+        // those upload, and only those wake the window for each new frame.
+        let mut drawn = [false; MAX_WATCHES];
+        for (n, i) in f.rt.instances.iter().enumerate() {
+            if i.params[1] == rune::render::KIND_EFFECT
                 && f.rt.marks.get(n).copied().unwrap_or(0) & 0xff == VIDEO
-        });
-        if !visible {
+                && let Some(slot) = drawn.get_mut(i.uv[0] as usize)
+            {
+                *slot = true;
+            }
+        }
+        for (slot, drawn) in drawn.iter().enumerate() {
+            let surface = surfaces.get(slot);
+            surface.set_shown(*drawn);
+            // An ended stream's picture goes, even when no video is left to draw.
+            if surface.latest().is_none()
+                && let Some((_, gpu)) = &mut self.gpu
+            {
+                gpu.pictures[slot] = None;
+            }
+        }
+        if !drawn.contains(&true) {
             return false;
         }
         let key = f.device_key();
@@ -85,12 +103,8 @@ impl Videos {
             ));
         }
         let gpu = &mut self.gpu.as_mut().unwrap().1;
-        for slot in 0..MAX_WATCHES {
-            let surface = f.rt.state.server().streaming.surfaces.get(slot);
-            if surface.latest().is_none() {
-                gpu.pictures[slot] = None;
-                continue;
-            }
+        for slot in (0..MAX_WATCHES).filter(|&slot| drawn[slot]) {
+            let surface = surfaces.get(slot);
             surface.with_planes(|frame, planes| {
                 let size = (frame.width, frame.height);
                 if gpu.pictures[slot].as_ref().is_none_or(|p| p.size != size) {
@@ -140,6 +154,7 @@ impl Videos {
                     );
                 }
                 p.stamp = stamp;
+                surface.note_presented();
             });
         }
         true

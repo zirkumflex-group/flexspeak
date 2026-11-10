@@ -185,6 +185,7 @@ mod native {
         traits::{DeviceTrait, StreamTrait},
     };
     use crossbeam_queue::ArrayQueue;
+    use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::FuturesUnordered};
     /// macOS's stand-in id for its main display, which it finds by itself.
     #[cfg(target_os = "macos")]
     const MAIN_DISPLAY: u64 = 0;
@@ -588,9 +589,86 @@ mod native {
     struct Peer {
         pc: PeerConnection,
         answered: bool,
+        /// Its answer is being applied; candidates wait for it.
+        answering: bool,
         candidates: Vec<protocol::Input>,
         started: Instant,
         candidate_count: usize,
+        /// When the connection last dropped to `Disconnected`, which it can recover from.
+        disconnected: Option<Instant>,
+    }
+    /// How long one signaling step of a viewer may take.
+    const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long a viewer's connection may stay `Disconnected` before it counts as gone.
+    const RECONNECT_GRACE: Duration = Duration::from_secs(10);
+    /// How often a share nobody watches yet captures, to keep its checks alive.
+    const IDLE_FRAME: Duration = Duration::from_secs(1);
+    /// A finished signaling step of one viewer.
+    enum Step {
+        Offered(Peer, String),
+        Answered,
+        Candidates,
+    }
+    type Negotiation = LocalBoxFuture<'static, (PeerKey, Result<Step>)>;
+    /// Runs a viewer's signaling step beside the media, bounded by `NEGOTIATION_TIMEOUT`.
+    fn step(id: PeerKey, work: impl Future<Output = Result<Step>> + 'static) -> Negotiation {
+        async move {
+            let result = tokio::time::timeout(NEGOTIATION_TIMEOUT, work)
+                .await
+                .unwrap_or_else(|_| Err(anyhow!("Viewer negotiation timed out")));
+            (id, result)
+        }
+        .boxed_local()
+    }
+    async fn add_candidates(pc: PeerConnection, inputs: Vec<protocol::Input>) -> Result<Step> {
+        for input in inputs {
+            add_candidate(&pc, input).await;
+        }
+        Ok(Step::Candidates)
+    }
+    /// One viewer's answer or candidate. An error ends only that viewer.
+    fn signal(
+        peer: &mut Peer,
+        id: PeerKey,
+        signal: protocol::Input,
+        negotiating: &mut FuturesUnordered<Negotiation>,
+    ) -> Result<()> {
+        match signal {
+            protocol::Input::Answer(sdp) if !peer.answered && !peer.answering => {
+                let answer = SessionDescription::parse(&sdp, SdpType::Answer)?;
+                let pc = peer.pc.clone();
+                peer.answering = true;
+                negotiating.push(step(id, async move {
+                    pc.set_remote_description(answer).await?;
+                    Ok(Step::Answered)
+                }));
+            }
+            candidate @ protocol::Input::Candidate { .. } => {
+                peer.candidate_count += 1;
+                ensure!(
+                    peer.candidate_count <= MAX_CANDIDATES,
+                    "Too many viewer candidates"
+                );
+                if peer.answered {
+                    negotiating.push(step(id, add_candidates(peer.pc.clone(), vec![candidate])));
+                } else {
+                    peer.candidates.push(candidate);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    /// Ends one viewer's connection and tells the publisher it left.
+    fn leave(
+        peers: &mut HashMap<PeerKey, Peer>,
+        id: PeerKey,
+        events: &mpsc::Sender<Output>,
+        reason: &anyhow::Error,
+    ) -> Result<()> {
+        tracing::warn!("Viewer {id:?} left the share: {reason:#}");
+        peers.remove(&id);
+        emit(events, Output::Left(id))
     }
     impl Drop for Peer {
         fn drop(&mut self) {
@@ -638,11 +716,10 @@ mod native {
         id: PeerKey,
         callbacks: mpsc::Sender<Callback>,
         overflow: Arc<AtomicBool>,
-        events: &mpsc::Sender<Output>,
         servers: Vec<String>,
         quality: Quality,
         codecs: &[RtpCodecCapability],
-    ) -> Result<Peer> {
+    ) -> Result<(Peer, String)> {
         let mut config = RtcConfiguration::default();
         config.continual_gathering_policy = ContinualGatheringPolicy::GatherOnce;
         if !servers.is_empty() {
@@ -656,9 +733,11 @@ mod native {
         let peer = Peer {
             pc,
             answered: false,
+            answering: false,
             candidates: vec![],
             started: Instant::now(),
             candidate_count: 0,
+            disconnected: None,
         };
         let tx = callbacks.clone();
         let full = overflow.clone();
@@ -711,8 +790,7 @@ mod native {
             }
             sender.set_parameters(params)?;
         }
-        emit(events, Output::Offer(id, wire))?;
-        Ok(peer)
+        Ok((peer, wire))
     }
     pub async fn run(
         options: Options,
@@ -753,9 +831,24 @@ mod native {
         let failed = failure.clone();
         let running = active.clone();
         let intermediate = Mutex::new(None);
+        // Until someone watches, a camera's frames are converted only now and then.
+        let idle = Arc::new(AtomicBool::new(false));
+        let unwatched = idle.clone();
+        let last_conversion = Mutex::new(
+            Instant::now()
+                .checked_sub(IDLE_FRAME)
+                .unwrap_or_else(Instant::now),
+        );
         let receive = move |data: &[u8], stride, width, height| {
             if !running.load(Ordering::Acquire) {
                 return;
+            }
+            if unwatched.load(Ordering::Relaxed) {
+                let mut last = last_conversion.lock().unwrap();
+                if last.elapsed() < IDLE_FRAME / 2 {
+                    return;
+                }
+                *last = Instant::now();
             }
             match video_buffer_reusing(
                 data,
@@ -851,6 +944,15 @@ mod native {
         let (callbacks, mut callback_rx) = mpsc::channel(128);
         let overflow = Arc::new(AtomicBool::new(false));
         let mut peers: HashMap<PeerKey, Peer> = HashMap::new();
+        // Viewers whose offer is still being made, with the candidates gathered meanwhile.
+        let mut adding: HashMap<PeerKey, Vec<Value>> = HashMap::new();
+        // Each viewer's signaling runs here, beside the media, so a slow or failing viewer
+        // delays and ends only itself.
+        let mut negotiating: FuturesUnordered<Negotiation> = FuturesUnordered::new();
+        let servers: Vec<String> = vec![
+            "stun:turn.teamspeak.com:3478".into(),
+            "stun:turn2.teamspeak.com:3478".into(),
+        ];
         let start = Instant::now();
         let mut last_video = Instant::now();
         let mut last_stats = Instant::now();
@@ -869,49 +971,79 @@ mod native {
             loop {
                 if !active.load(Ordering::Acquire) { return Ok(()); }
                 ensure!(!overflow.load(Ordering::Relaxed),"Too many publisher connection events");
+                idle.store(peers.is_empty() && adding.is_empty() && frames > 0, Ordering::Relaxed);
                 tokio::select! {
                     biased;
                     _ = cancel.changed() => return Ok(()),
                     command = input.recv() => {
                         let Some(command) = command else { return Ok(()); };
-                        let action = async {
-                            match command {
-                                Input::Add(id) if !peers.contains_key(&id) => {
-                                    ensure!(peers.len() < MAX_VIEWERS,"Too many viewers");
-                                    let peer = add_peer(&factory,&video_track,&audio_track,id,callbacks.clone(),overflow.clone(),events,
-                                        vec!["stun:turn.teamspeak.com:3478".into(),"stun:turn2.teamspeak.com:3478".into()],quality,&codecs).await?;
-                                    peers.insert(id,peer);
-                                },
-                                Input::Remove(id) => { peers.remove(&id); },
-                                Input::Signal(id,signal) => if let Some(peer) = peers.get_mut(&id) {
-                                    match signal {
-                                        protocol::Input::Answer(sdp) if !peer.answered => {
-                                            peer.pc.set_remote_description(SessionDescription::parse(&sdp,SdpType::Answer)?).await?;
-                                            peer.answered = true;
-                                            for input in peer.candidates.drain(..) { add_candidate(&peer.pc,input).await; }
-                                        },
-                                        candidate @ protocol::Input::Candidate{..} => {
-                                            peer.candidate_count += 1;
-                                            ensure!(peer.candidate_count <= MAX_CANDIDATES,"Too many viewer candidates");
-                                            if peer.answered { add_candidate(&peer.pc,candidate).await; }
-                                            else { ensure!(peer.candidates.len()<MAX_CANDIDATES,"Too many early viewer candidates"); peer.candidates.push(candidate); }
-                                        },
-                                        _ => {},
-                                    }
-                                },
-                                Input::Add(_) => {},
+                        match command {
+                            Input::Add(id) if !peers.contains_key(&id) && !adding.contains_key(&id) => {
+                                if peers.len() + adding.len() >= MAX_VIEWERS {
+                                    leave(&mut peers, id, events, &anyhow!("Too many viewers"))?;
+                                    continue;
+                                }
+                                adding.insert(id, Vec::new());
+                                let (factory, video, audio) = (factory.clone(), video_track.clone(), audio_track.clone());
+                                let (callbacks, overflow, servers, codecs) = (callbacks.clone(), overflow.clone(), servers.clone(), codecs.clone());
+                                negotiating.push(step(id, async move {
+                                    let (peer, offer) = add_peer(&factory,&video,&audio,id,callbacks,overflow,servers,quality,&codecs).await?;
+                                    Ok(Step::Offered(peer, offer))
+                                }));
+                            },
+                            Input::Remove(id) => { peers.remove(&id); adding.remove(&id); },
+                            Input::Signal(id,input) => {
+                                if let Some(Err(error)) = peers.get_mut(&id).map(|peer| signal(peer,id,input,&mut negotiating)) {
+                                    leave(&mut peers, id, events, &error)?;
+                                }
+                            },
+                            Input::Add(_) => {},
+                        }
+                    },
+                    Some((id,result)) = negotiating.next(), if !negotiating.is_empty() => match result {
+                        // A viewer removed meanwhile drops (and closes) its connection here.
+                        Ok(Step::Offered(peer,offer)) => if let Some(gathered) = adding.remove(&id) {
+                            let sent = emit(events,Output::Offer(id,offer))
+                                .and_then(|()| gathered.into_iter().try_for_each(|value| emit(events,Output::Signal(id,value))));
+                            match sent {
+                                Ok(()) => { peers.insert(id,peer); },
+                                Err(error) => leave(&mut peers, id, events, &error)?,
                             }
-                            Ok::<_,anyhow::Error>(())
-                        };
-                        tokio::select! { _ = cancel.changed() => return Ok(()), result = tokio::time::timeout(Duration::from_secs(10),action) => result.context("Viewer negotiation timed out")?? }
+                        },
+                        Ok(Step::Answered) => if let Some(peer) = peers.get_mut(&id) {
+                            peer.answering = false;
+                            peer.answered = true;
+                            let early = std::mem::take(&mut peer.candidates);
+                            if !early.is_empty() { negotiating.push(step(id, add_candidates(peer.pc.clone(), early))); }
+                        },
+                        Ok(Step::Candidates) => {},
+                        Err(error) => if adding.remove(&id).is_some() || peers.contains_key(&id) {
+                            leave(&mut peers, id, events, &error)?;
+                        },
                     },
                     Some(callback) = callback_rx.recv() => match callback {
-                        Callback::Candidate(id,value) if peers.contains_key(&id) => emit(events,Output::Signal(id,value))?,
-                        Callback::State(id,PeerConnectionState::Connected) if peers.contains_key(&id) => emit(events,Output::Connected(id))?,
-                        Callback::State(id,PeerConnectionState::Failed | PeerConnectionState::Closed | PeerConnectionState::Disconnected) if peers.contains_key(&id) => { peers.remove(&id); emit(events,Output::Left(id))?; },
+                        Callback::Candidate(id,value) => if let Some(gathered) = adding.get_mut(&id) {
+                            if gathered.len() < MAX_CANDIDATES { gathered.push(value); }
+                        } else if peers.contains_key(&id) && let Err(error) = emit(events,Output::Signal(id,value)) {
+                            leave(&mut peers, id, events, &error)?;
+                        },
+                        Callback::State(id,PeerConnectionState::Connected) => if let Some(peer) = peers.get_mut(&id) {
+                            peer.disconnected = None;
+                            emit(events,Output::Connected(id))?;
+                        },
+                        // Disconnected can recover by itself; the tick ends it after a grace.
+                        Callback::State(id,PeerConnectionState::Disconnected) => if let Some(peer) = peers.get_mut(&id) {
+                            peer.disconnected.get_or_insert_with(Instant::now);
+                        },
+                        Callback::State(id,PeerConnectionState::Failed | PeerConnectionState::Closed) if peers.contains_key(&id) => {
+                            leave(&mut peers, id, events, &anyhow!("The connection ended"))?;
+                        },
                         _ => {},
                     },
                     _ = video_tick.tick() => {
+                        // Nobody watches yet: an occasional frame keeps the checks and the
+                        // first viewer's start, without capturing at full rate for no one.
+                        if idle.load(Ordering::Relaxed) && last_video.elapsed() < IDLE_FRAME { continue; }
                         if let Some(capture) = &mut capture { capture.capture_frame(); }
                         #[cfg(target_os = "windows")]
                         if let Some(fast) = &mut fast {
@@ -945,8 +1077,12 @@ mod native {
                                 level = level.max(peak); audio_frames += 1;
                             }
                         }
-                        let expired: Vec<_> = peers.iter().filter_map(|(id,p)| (!p.answered && p.started.elapsed()>Duration::from_secs(45)).then_some(*id)).collect();
-                        for id in expired { peers.remove(&id); emit(events,Output::Left(id))?; }
+                        let expired: Vec<_> = peers.iter().filter_map(|(id,p)| {
+                            let unanswered = !p.answered && p.started.elapsed() > Duration::from_secs(45);
+                            let lost = p.disconnected.is_some_and(|at| at.elapsed() > RECONNECT_GRACE);
+                            (unanswered || lost).then_some(*id)
+                        }).collect();
+                        for id in expired { leave(&mut peers, id, events, &anyhow!("It did not answer or reconnect in time"))?; }
                         if last_stats.elapsed() >= Duration::from_secs(1) {
                             let _ = events.try_send(Output::Stats { video:frames,audio:audio_frames,level });
                             level = 0.0; last_stats = Instant::now();
@@ -1069,28 +1205,23 @@ a=rtpmap:45 AV1/90000
             let video_track = factory.create_video_track("test-screen", video.clone());
             let audio = NativeAudioSource::new(AudioSourceOptions::default(), 48000, 2, 50);
             let audio_track = factory.create_audio_track("test-system-audio", audio.clone());
-            let (events, mut output) = mpsc::channel(128);
             let (callbacks, mut callback_rx) = mpsc::channel(128);
             let key = PeerKey {
                 client: 7,
                 serial: 1,
             };
-            let sender = add_peer(
+            let (sender, sdp) = add_peer(
                 &factory,
                 &video_track,
                 &audio_track,
                 key,
                 callbacks,
                 Arc::new(AtomicBool::new(false)),
-                &events,
                 vec![],
                 Quality::default(),
                 &video_codecs(&factory, true),
             )
             .await?;
-            let Some(Output::Offer(_, sdp)) = output.recv().await else {
-                bail!("Missing offer");
-            };
             ensure!(
                 sdp.contains("m=video") && sdp.contains("m=audio"),
                 "Offer must contain both tracks"
