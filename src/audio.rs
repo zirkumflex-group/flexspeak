@@ -207,6 +207,27 @@ pub fn devices() -> Result<Devices> {
     })
 }
 
+/// The chosen device while it's plugged in, else the system's default, else `None`.
+pub(crate) fn stand_in(selected: &DeviceChoice, input: bool) -> Option<DeviceChoice> {
+    let host = cpal::default_host();
+    let devices = if input {
+        host.input_devices()
+    } else {
+        host.output_devices()
+    }
+    .ok()?;
+    let mut devices = devices;
+    if devices.any(|d| d.id().is_ok_and(|id| id.to_string() == selected.id)) {
+        return Some(selected.clone());
+    }
+    let default = if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    };
+    default.and_then(|d| choice(&d).ok())
+}
+
 pub(crate) fn find_device(selected: &DeviceChoice, input: bool) -> Result<Device> {
     let host = cpal::default_host();
     let devices = if input {
@@ -603,7 +624,7 @@ impl AudioEngine {
     ) -> Result<Vec<Vec<u8>>> {
         let _trace = profiler::scope(Category::AudioProcessing, "audio.process");
         if let Some(error) = self.errors.pop() {
-            bail!("Audio device failed: {error}. Refresh devices and reconnect.");
+            bail!("Audio device failed: {error}");
         }
         if self.capture.discontinuity.swap(false, Ordering::AcqRel) {
             self.reset_capture(self.capture.enabled())?;

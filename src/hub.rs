@@ -3,6 +3,11 @@
 //! Each server keeps its own decoders behind a [`Link`]. The hub sums everything you haven't
 //! deafened into the one playback device and captures your microphone only for the active
 //! server. It opens with the first connection and closes with the last.
+//!
+//! Losing a device never ends a connection. The hub plays through the system's default device
+//! while a chosen one is unplugged and goes back to it once it returns; with nothing usable at
+//! all it keeps everyone connected and tries again until a device works. Each server reads the
+//! outcome from [`Link::trouble`].
 
 use std::{
     collections::HashSet,
@@ -26,6 +31,23 @@ use crate::streaming::Surfaces;
 /// Half a second of 20 ms frames, so a stalled connection drops audio rather than grows memory.
 const VOICE_BACKLOG: usize = 25;
 const TICK: Duration = Duration::from_millis(10);
+/// How often to try again with no working device.
+const RETRY: Duration = Duration::from_millis(1500);
+/// Devices that fail again this soon after opening wait before the next try, so a fault that
+/// opening can't fix doesn't spin.
+const SETTLE: Duration = Duration::from_secs(3);
+/// How often to look for a chosen device to come back while another stands in.
+const LOOK_BACK: Duration = Duration::from_secs(3);
+const BACKOFF_MAX: Duration = Duration::from_secs(15);
+
+/// Something wrong with the devices that every server shares and none disconnects over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trouble {
+    /// A chosen device is gone and the system's default stands in until it's back.
+    Fallback(String),
+    /// Nothing could be opened. Flexspeak keeps trying.
+    Unavailable(String),
+}
 
 /// Identifies one server connection for as long as it runs; never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -82,7 +104,7 @@ impl Line {
 #[derive(Default)]
 struct Shared {
     lines: Mutex<Vec<Arc<Line>>>,
-    failure: Mutex<Option<String>>,
+    trouble: Mutex<Option<Trouble>>,
     level: AtomicU32,
     transmitting: AtomicBool,
     buffer_bytes: AtomicUsize,
@@ -196,23 +218,15 @@ impl Device {
             .name("audio-hub".into())
             .spawn(move || {
                 // CPAL streams belong to the thread that made them, so they are opened here.
-                let engine = AudioEngine::open(
-                    &open.input,
-                    &open.output,
-                    open.volume.clone(),
-                    open.processing,
-                    open.transmission,
+                // Without a working device the connection goes ahead, and the hub keeps trying.
+                let mut core = Core::closed(thread_shared, hub, &open);
+                core.reopen(Instant::now());
+                let description = core.engine.as_ref().map_or_else(
+                    || "No audio device".to_owned(),
+                    |engine| engine.description.clone(),
                 );
-                match engine {
-                    Ok(engine) => {
-                        let description = engine.description.clone();
-                        let _ = ready.send(Ok(description));
-                        Core::new(engine, thread_shared, hub, &open).run(&stopped);
-                    }
-                    Err(error) => {
-                        let _ = ready.send(Err(error));
-                    }
-                }
+                let _ = ready.send(Ok::<_, anyhow::Error>(description));
+                core.run(&stopped);
             })?;
         let description = opened
             .recv()
@@ -225,6 +239,36 @@ impl Device {
             users: 0,
         })
     }
+}
+
+/// An error as the start of a sentence that goes on.
+fn sentence(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+        .trim_end()
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+/// What to say when a stand-in replaced a chosen device, if one did.
+fn stand_in_notice(open: &Open, input: &DeviceChoice, output: &DeviceChoice) -> Option<Trouble> {
+    let output_gone = *output != open.output;
+    let input_gone = *input != open.input;
+    let text = match (output_gone, input_gone) {
+        (false, false) => return None,
+        (true, false) => format!(
+            "“{}” isn't connected, so you hear everyone through “{}” until it's back.",
+            open.output.name, output.name
+        ),
+        (false, true) => format!(
+            "“{}” isn't connected, so you talk through “{}” until it's back.",
+            open.input.name, input.name
+        ),
+        (true, true) => format!(
+            "“{}” and “{}” aren't connected, so Flexspeak uses “{}” and “{}” until they're back.",
+            open.output.name, open.input.name, output.name, input.name
+        ),
+    };
+    Some(Trouble::Fallback(text))
 }
 
 /// Whether a session is the one the window is showing, for code that isn't audio.
@@ -262,9 +306,9 @@ impl Link {
         self.hub.active() == self.line.id
     }
 
-    /// Why the devices failed, once they have. Every server shares this outcome.
-    pub fn failure(&self) -> Option<String> {
-        self.shared.failure.lock().unwrap().clone()
+    /// What's wrong with the devices right now, if anything. Every server shares this.
+    pub fn trouble(&self) -> Option<Trouble> {
+        self.shared.trouble.lock().unwrap().clone()
     }
 
     pub fn set_can_send(&self, can_send: bool) {
@@ -323,7 +367,16 @@ impl Drop for Link {
 
 /// Runs on the hub's thread: everything here is the device's, one set per app.
 struct Core {
-    engine: AudioEngine,
+    /// `None` while no device works.
+    engine: Option<AudioEngine>,
+    /// What the first connection asked for, to open again after a device goes.
+    open: Open,
+    /// When to next try to open devices, or to look for a chosen one to come back.
+    next_attempt: Instant,
+    opened_at: Instant,
+    backoff: Duration,
+    /// The codec the last engine encoded with, for packets owed while there is none.
+    codec: CodecType,
     shared: Arc<Shared>,
     hub: Arc<AudioHub>,
     ptt: Arc<AtomicBool>,
@@ -339,9 +392,23 @@ struct Core {
 }
 
 impl Core {
+    #[cfg(test)]
     fn new(engine: AudioEngine, shared: Arc<Shared>, hub: Arc<AudioHub>, open: &Open) -> Self {
+        let mut core = Self::closed(shared, hub, open);
+        core.engine = Some(engine);
+        core
+    }
+
+    /// A hub with no devices open yet.
+    fn closed(shared: Arc<Shared>, hub: Arc<AudioHub>, open: &Open) -> Self {
+        let now = Instant::now();
         Self {
-            engine,
+            engine: None,
+            open: open.clone(),
+            next_attempt: now,
+            opened_at: now,
+            backoff: RETRY,
+            codec: CodecType::OpusVoice,
             shared,
             hub,
             ptt: open.ptt.clone(),
@@ -367,11 +434,128 @@ impl Core {
             if next + 10 * TICK < now {
                 next = now;
             }
-            if let Err(error) = self.tick(now) {
-                *self.shared.failure.lock().unwrap() = Some(format!("{error:#}"));
-                return;
+            if now >= self.next_attempt {
+                self.maintain(now);
+            }
+            if self.engine.is_none() {
+                self.silence();
+            } else if let Err(error) = self.tick(now) {
+                self.lose(&error, now);
             }
         }
+    }
+
+    fn set_trouble(&self, trouble: Option<Trouble>) {
+        *self.shared.trouble.lock().unwrap() = trouble;
+    }
+
+    /// With no device, tries again. With a stand-in, goes back to the chosen devices once
+    /// they're both plugged in again.
+    fn maintain(&mut self, now: Instant) {
+        if self.engine.is_none() {
+            self.reopen(now);
+            return;
+        }
+        let standing_in = matches!(
+            *self.shared.trouble.lock().unwrap(),
+            Some(Trouble::Fallback(_))
+        );
+        self.next_attempt = now + if standing_in { LOOK_BACK } else { RETRY };
+        if standing_in
+            && crate::audio::stand_in(&self.open.input, true).as_ref() == Some(&self.open.input)
+            && crate::audio::stand_in(&self.open.output, false).as_ref() == Some(&self.open.output)
+        {
+            self.close();
+            self.reopen(now);
+        }
+    }
+
+    /// Opens the chosen devices, or the system's defaults in place of any that are gone.
+    fn reopen(&mut self, now: Instant) {
+        let input = crate::audio::stand_in(&self.open.input, true);
+        let output = crate::audio::stand_in(&self.open.output, false);
+        let opened = match (&input, &output) {
+            (None, _) => Err(anyhow!("No microphone is connected")),
+            (_, None) => Err(anyhow!("No playback device is connected")),
+            (Some(input), Some(output)) => AudioEngine::open(
+                input,
+                output,
+                self.open.volume.clone(),
+                self.open.processing,
+                self.open.transmission,
+            ),
+        };
+        match opened {
+            Ok(engine) => {
+                self.engine = Some(engine);
+                self.opened_at = now;
+                self.next_attempt = now + RETRY;
+                self.set_trouble(stand_in_notice(
+                    &self.open,
+                    input.as_ref().expect("opened"),
+                    output.as_ref().expect("opened"),
+                ));
+            }
+            // Nothing to open, or it wouldn't open: cheap to ask again soon, so a device
+            // plugged back in is heard within a moment.
+            Err(error) => {
+                self.next_attempt = now + RETRY;
+                self.set_trouble(Some(Trouble::Unavailable(format!(
+                    "{}. You stay connected, and Flexspeak picks your audio up again as soon as \
+                     a device works.",
+                    sentence(&error)
+                ))));
+            }
+        }
+    }
+
+    /// A device stopped. Ends what you were saying, then opens whatever is there now, unless
+    /// the devices just opened and failed straight away, which waits a little first.
+    fn lose(&mut self, error: &anyhow::Error, now: Instant) {
+        tracing::warn!(%error, "Audio device failed; reopening");
+        self.close();
+        if now.saturating_duration_since(self.opened_at) < SETTLE {
+            self.next_attempt = now + self.backoff;
+            self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+            self.set_trouble(Some(Trouble::Unavailable(format!(
+                "{}. You stay connected, and Flexspeak tries again in a moment.",
+                sentence(error)
+            ))));
+        } else {
+            self.backoff = RETRY;
+            self.reopen(now);
+        }
+    }
+
+    /// Drops the devices. The server you were talking to is owed the packet that ends an
+    /// utterance, so nobody hears you as still talking.
+    fn close(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            self.codec = engine.codec;
+        }
+        if self.routed != 0 {
+            self.owed.insert(self.routed);
+        }
+        self.routed = 0;
+        self.applied = None;
+    }
+
+    /// While no device works: voices are dropped rather than queued, and nothing is sent.
+    fn silence(&mut self) {
+        let shared = self.shared.clone();
+        let lines = shared.lines.lock().unwrap();
+        for line in lines.iter() {
+            *line.incoming.lock().unwrap() = AudioHandler::new();
+        }
+        self.settle_owed(&lines);
+        shared.sound.lock().unwrap().take();
+        shared.level.store(0.0_f32.to_bits(), Ordering::Relaxed);
+        shared.transmitting.store(false, Ordering::Relaxed);
+        shared.buffer_bytes.store(0, Ordering::Relaxed);
+    }
+
+    fn engine(&mut self) -> &mut AudioEngine {
+        self.engine.as_mut().expect("ticked with devices open")
     }
 
     fn tick(&mut self, now: Instant) -> Result<()> {
@@ -381,7 +565,7 @@ impl Core {
         let active = find(self.hub.active());
         let routed = active.map_or(0, |line| line.id);
         if self.routed != routed {
-            let closing = self.engine.end_utterance()?;
+            let closing = self.engine().end_utterance()?;
             if let Some(line) = find(self.routed) {
                 for data in closing {
                     self.deliver(line, data);
@@ -393,7 +577,7 @@ impl Core {
         if let Some(line) = active {
             let codec = *line.codec.lock().unwrap();
             if self.applied != Some(codec) {
-                self.engine.set_codec(codec.0, codec.1)?;
+                self.engine().set_codec(codec.0, codec.1)?;
                 self.applied = Some(codec);
             }
         }
@@ -404,14 +588,14 @@ impl Core {
             now,
             self.transmission,
         );
-        self.engine.set_capture(capture)?;
+        self.engine().set_capture(capture)?;
         self.surfaces
             .set_audio_enabled(active.is_some_and(|line| !line.silent.load(Ordering::Acquire)));
         if let Some(samples) = shared.sound.lock().unwrap().take() {
-            self.engine.play(samples);
+            self.engine().play(samples);
         }
         let surfaces = self.surfaces.clone();
-        let packets = self.engine.tick(false, |stereo| {
+        let packets = self.engine().tick(false, |stereo| {
             for line in lines.iter() {
                 if !line.silent.load(Ordering::Acquire) {
                     line.incoming.lock().unwrap().fill_buffer(stereo);
@@ -427,20 +611,23 @@ impl Core {
         self.settle_owed(&lines);
         shared
             .level
-            .store(self.engine.level().to_bits(), Ordering::Relaxed);
+            .store(self.engine().level().to_bits(), Ordering::Relaxed);
         shared
             .transmitting
-            .store(can_send && self.engine.transmitting(), Ordering::Relaxed);
+            .store(can_send && self.engine().transmitting(), Ordering::Relaxed);
         shared
             .buffer_bytes
-            .store(self.engine.buffer_bytes(), Ordering::Relaxed);
+            .store(self.engine().buffer_bytes(), Ordering::Relaxed);
         Ok(())
     }
 
     /// Queues a frame for its server. Voice may be dropped under load; the packet ending an
     /// utterance never is, or everyone there would hear you as still talking.
     fn deliver(&mut self, line: &Line, data: Vec<u8>) {
-        let codec = self.engine.codec;
+        let codec = self
+            .engine
+            .as_ref()
+            .map_or(self.codec, |engine| engine.codec);
         if self.owed.contains(&line.id) {
             let delivered = line
                 .voice
@@ -461,7 +648,10 @@ impl Core {
     }
 
     fn settle_owed(&mut self, lines: &[Arc<Line>]) {
-        let codec = self.engine.codec;
+        let codec = self
+            .engine
+            .as_ref()
+            .map_or(self.codec, |engine| engine.codec);
         self.owed.retain(|id| {
             let Some(line) = lines.iter().find(|line| line.id == *id) else {
                 return false;
@@ -480,6 +670,37 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stand_in_is_named_only_when_a_chosen_device_is_gone() {
+        let device = |id: &str, name: &str| DeviceChoice {
+            id: id.into(),
+            name: name.into(),
+        };
+        let headset = device("headset", "Arctis");
+        let mic = device("mic", "Arctis Mic");
+        let open = Open {
+            input: mic.clone(),
+            output: headset.clone(),
+            volume: Arc::new(PlaybackVolume::default()),
+            processing: crate::audio_processing::Settings::default(),
+            transmission: crate::transmission::Settings::default(),
+            ptt: Arc::new(AtomicBool::new(false)),
+            surfaces: Arc::new(Surfaces::default()),
+        };
+        assert_eq!(stand_in_notice(&open, &mic, &headset), None);
+        let speakers = device("speakers", "Speakers");
+        let Some(Trouble::Fallback(text)) = stand_in_notice(&open, &mic, &speakers) else {
+            panic!("expected a stand-in");
+        };
+        assert!(
+            text.contains("\u{201c}Arctis\u{201d}") && text.contains("\u{201c}Speakers\u{201d}")
+        );
+        assert!(matches!(
+            stand_in_notice(&open, &device("laptop", "Laptop Mic"), &speakers),
+            Some(Trouble::Fallback(text)) if text.contains("aren't connected")
+        ));
+    }
     use crate::audio::{FRAME, RATE};
     use audiopus::{Application, Channels, SampleRate, coder::Encoder};
     use tsproto_packets::packets::{Direction, OutAudio};
@@ -531,7 +752,7 @@ mod tests {
             for sample in 0..FRAME {
                 let at = sample as f32 / RATE as f32;
                 let value = (at * 440.0 * std::f32::consts::TAU).sin() * 0.3;
-                self.core.engine.push_mic(value);
+                self.core.engine().push_mic(value);
             }
             self.tick();
         }
@@ -541,7 +762,7 @@ mod tests {
             let mut total = 0.0;
             for _ in 0..ticks {
                 self.tick();
-                let played = self.core.engine.drain_playback();
+                let played = self.core.engine().drain_playback();
                 total += played.iter().flatten().map(|v| v.abs()).sum::<f32>();
             }
             total
@@ -818,13 +1039,13 @@ mod tests {
         *b.codec.lock().unwrap() = (CodecType::OpusVoice, 3);
         rig.hub.set_active(Some(SessionId(1)));
         rig.tick();
-        assert_eq!(rig.core.engine.codec, CodecType::OpusMusic);
+        assert_eq!(rig.core.engine().codec, CodecType::OpusMusic);
         // A background server's codec is not applied until it's active.
         *b.codec.lock().unwrap() = (CodecType::OpusVoice, 4);
         rig.tick();
-        assert_eq!(rig.core.engine.codec, CodecType::OpusMusic);
+        assert_eq!(rig.core.engine().codec, CodecType::OpusMusic);
         rig.hub.set_active(Some(SessionId(2)));
         rig.tick();
-        assert_eq!(rig.core.engine.codec, CodecType::OpusVoice);
+        assert_eq!(rig.core.engine().codec, CodecType::OpusVoice);
     }
 }

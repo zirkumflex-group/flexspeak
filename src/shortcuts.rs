@@ -208,7 +208,10 @@ impl Edges {
 
 pub struct Shortcuts {
     manager: Option<GlobalHotKeyManager>,
+    /// The keys asked for: mute, deafen, then push-to-talk if set.
     bindings: Vec<HotKey>,
+    /// Those of them another app holds. The rest work, and these are tried again until free.
+    taken: Vec<HotKey>,
     edges: Arc<Mutex<Edges>>,
     ptt: Arc<AtomicBool>,
 }
@@ -240,6 +243,7 @@ impl Shortcuts {
             Self {
                 manager: None,
                 bindings: Vec::new(),
+                taken: Vec::new(),
                 edges,
                 ptt,
             },
@@ -260,31 +264,27 @@ impl Shortcuts {
                 Some(GlobalHotKeyManager::new().context("Cannot initialize global shortcuts")?);
         }
         let manager = self.manager.as_ref().unwrap();
-        let added: Vec<_> = next
+        let held: Vec<HotKey> = self
+            .bindings
             .iter()
             .copied()
-            .filter(|key| !self.bindings.contains(key))
+            .filter(|key| !self.taken.contains(key))
             .collect();
-        // Register additions before releasing old keys, preserving working bindings on conflicts.
-        for (index, key) in added.iter().enumerate() {
-            if let Err(error) = manager.register(*key) {
-                for registered in &added[..index] {
-                    if manager.unregister(*registered).is_err() {
-                        self.disable();
-                        bail!(
-                            "Shortcut registration failed and cleanup failed. Global shortcuts are disabled; try saving again. {error}"
-                        );
-                    }
-                }
-                bail!("Cannot register {key}: {error}. Previous shortcuts are unchanged.");
-            }
-        }
-        for key in self.bindings.iter().filter(|key| !next.contains(key)) {
+        // Release old keys first, so a key moving to another action is free to take again.
+        for key in held.iter().filter(|key| !next.contains(key)) {
             if let Err(error) = manager.unregister(*key) {
                 self.disable();
                 bail!(
                     "Cannot release an old shortcut: {error}. Global shortcuts are disabled; try saving again."
                 );
+            }
+        }
+        // A key another app holds doesn't stop the others: it's tried again until it's free.
+        let mut taken = Vec::new();
+        for key in next.iter().filter(|key| !held.contains(key)) {
+            if let Err(error) = manager.register(*key) {
+                tracing::info!(%key, %error, "Global shortcut is taken");
+                taken.push(*key);
             }
         }
         self.edges
@@ -293,7 +293,32 @@ impl Shortcuts {
             .bind(next.iter().map(HotKey::id).collect());
         self.ptt.store(false, Ordering::Release);
         self.bindings = next.to_vec();
+        self.taken = taken;
         Ok(())
+    }
+
+    /// Tries again for the keys another app held. True when one was freed.
+    pub fn retry(&mut self) -> bool {
+        let Some(manager) = &self.manager else {
+            return false;
+        };
+        let before = self.taken.len();
+        self.taken.retain(|key| manager.register(*key).is_err());
+        self.taken.len() != before
+    }
+
+    /// The actions whose keys another app holds.
+    pub fn taken(&self) -> Vec<Binding> {
+        self.bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| self.taken.contains(key))
+            .map(|(index, _)| match index {
+                0 => Binding::Mute,
+                1 => Binding::Deafen,
+                _ => Binding::PushToTalk,
+            })
+            .collect()
     }
 
     /// Releases every shortcut until the next `configure`, so that pressing one while recording
@@ -302,6 +327,7 @@ impl Shortcuts {
         let released = self.manager.as_ref().is_none_or(|manager| {
             self.bindings
                 .iter()
+                .filter(|key| !self.taken.contains(key))
                 .all(|key| manager.unregister(*key).is_ok())
         });
         if !released {
@@ -311,6 +337,7 @@ impl Shortcuts {
         self.ptt.store(false, Ordering::Release);
         self.edges.lock().unwrap().bind(Vec::new());
         self.bindings.clear();
+        self.taken.clear();
     }
 
     pub fn is_active(&self) -> bool {
@@ -325,6 +352,7 @@ impl Shortcuts {
         self.ptt.store(false, Ordering::Release);
         *self.edges.lock().unwrap() = Edges::default();
         self.bindings.clear();
+        self.taken.clear();
         self.manager = None;
     }
 }
