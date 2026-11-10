@@ -1168,6 +1168,52 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             "Both show channel, server and private messages in the column beside the stage.",
         )),
         Section::boxed(
+            "chat-tabs",
+            "Tabs",
+            "chat tabs bar scroll group grouped channels people history conversations",
+            vec![item(
+                "conversations in the bar side by side grouped",
+                form_row(
+                    t,
+                    "Conversations in the bar",
+                    Some(
+                        "Side by side, the bar scrolls sideways. Grouped, pointing at Channels or People lists them.",
+                    ),
+                    trailing(super::widgets::choice(
+                        t,
+                        "chat-tab-bar",
+                        "Conversations in the bar",
+                        vec![
+                            (
+                                &icons::MOVE,
+                                "Side by Side",
+                                Message::Chat(crate::chat::Action::Options(crate::settings::Chat {
+                                    tab_bar: crate::chat::TabBar::Scroll,
+                                    ..options
+                                })),
+                            ),
+                            (
+                                &icons::LAYOUT_GRID,
+                                "Grouped",
+                                Message::Chat(crate::chat::Action::Options(crate::settings::Chat {
+                                    tab_bar: crate::chat::TabBar::Grouped,
+                                    ..options
+                                })),
+                            ),
+                        ],
+                        Some(match options.tab_bar {
+                            crate::chat::TabBar::Scroll => 0,
+                            crate::chat::TabBar::Grouped => 1,
+                        }),
+                    )),
+                ),
+            )],
+        )
+        .note(group_note(
+            t,
+            "Applies to the Tabs layout. Channels you have left keep a tab while they have something to read.",
+        )),
+        Section::boxed(
             "chat-hidden",
             "While Chat Is Hidden",
             "chat messages hide hidden popup pop-up notification toast stream",

@@ -189,6 +189,13 @@ pub const SCENES: &[Scene] = &[
     ("chat-pokes-tabs", chat_pokes_tabs),
     ("chat-pokes-feed", chat_pokes_feed),
     ("chat-servers", chat_servers),
+    ("chat-history-tabs", chat_history_tabs),
+    ("chat-history-open", chat_history_open),
+    ("chat-grouped", chat_grouped),
+    ("chat-grouped-channels", chat_grouped_channels),
+    ("chat-grouped-people", chat_grouped_people),
+    ("chat-grouped-private", chat_grouped_private),
+    ("chat-grouped-history", chat_grouped_history),
     ("settings-chat", settings_chat),
     ("setup-chat", setup_chat),
     ("setup-chat-feed", setup_chat_feed),
@@ -539,7 +546,7 @@ fn chat_feed_private(s: &mut App) {
 fn chat_feed_target(s: &mut App) {
     chat_feed(s);
     s.server_mut().chat.open(mara(), MARA.1);
-    s.ui.chat_menu = true;
+    s.ui.chat_lists[2].pinned = true;
 }
 
 fn chat_empty(s: &mut App) {
@@ -705,6 +712,101 @@ fn chat_servers(s: &mut App) {
         other.chat.mark_unread(&scope);
         other.chat.mark_unread(&scope);
     }
+}
+
+/// Earlier in the evening you were in Raid night and AFK; what was said there stays to read.
+fn chat_past(s: &mut App) {
+    let chat = &mut s.server_mut().chat;
+    chat.enter(2, "Raid night");
+    let said = |chat: &mut chat::Chat, from: &str, place: &str, text: &str, time: &str| {
+        chat.add(
+            chat::Scope::Channel,
+            chat::Kind::Message,
+            false,
+            from.into(),
+            place.into(),
+            text,
+            time.into(),
+        );
+    };
+    said(
+        chat,
+        "Ines",
+        "Raid night",
+        "tank goes left, everyone else stacks",
+        "20:12",
+    );
+    said(
+        chat,
+        "Ines",
+        "Raid night",
+        "wipe at 2%, again in five",
+        "20:31",
+    );
+    chat.enter(4, "AFK");
+    said(chat, "Lukas", "AFK", "brb, dinner", "20:40");
+    chat.enter(1, "Lobby");
+}
+
+/// Side by side: the channels you left keep a tab after the others, fainter.
+fn chat_history_tabs(s: &mut App) {
+    connected(s);
+    chat_past(s);
+    say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Theo",
+        "Lobby",
+        "back, had to restart my router",
+        "21:04",
+    );
+    say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Mara",
+        "Lobby",
+        "we start the raid at half past, Ines is setting up",
+        "21:05",
+    );
+}
+
+/// A left channel's tab open: fainter, closable, and the message box offers to join again.
+fn chat_history_open(s: &mut App) {
+    chat_history_tabs(s);
+    s.server_mut().chat.open(chat::Scope::Past(2), "");
+}
+
+/// Tabs grouped by kind: channels, the server, people.
+fn chat_grouped(s: &mut App) {
+    connected(s);
+    chat_past(s);
+    chat_talk(s);
+    s.chat_options.tab_bar = chat::TabBar::Grouped;
+}
+
+/// Pointing at the channel group lists the channel you're in and the ones you left.
+fn chat_grouped_channels(s: &mut App) {
+    chat_grouped(s);
+    s.ui.chat_lists[0].pinned = true;
+}
+
+fn chat_grouped_people(s: &mut App) {
+    chat_grouped(s);
+    s.ui.chat_lists[1].pinned = true;
+}
+
+/// A private conversation open in the grouped bar: the people group carries its name.
+fn chat_grouped_private(s: &mut App) {
+    chat_grouped(s);
+    s.server_mut().chat.open(mara(), MARA.1);
+    s.server_mut().chat.mark_seen(chat::Layout::Tabs);
+}
+
+fn chat_grouped_history(s: &mut App) {
+    chat_grouped(s);
+    s.server_mut().chat.open(chat::Scope::Past(2), "");
 }
 
 fn settings_chat(s: &mut App) {
@@ -3082,6 +3184,80 @@ mod tests {
     }
 
     #[test]
+    fn double_clicking_someone_opens_their_private_chat() {
+        let mut rt = runtime(connected, (1180.0, 790.0));
+        settle(&mut rt);
+        let (x, y) = rt.find("member-2").expect("Mara's row");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.server().chat.target,
+            chat::Scope::Private("uid-2".into())
+        );
+        assert!(rt.state.ui.chat_input.focused, "ready to write");
+        assert!(rt.find("chat-tab-uid-2").is_some());
+        // Your own row does nothing.
+        let (x, y) = rt.find("member-1").unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.server().chat.target,
+            chat::Scope::Private("uid-2".into())
+        );
+    }
+
+    #[test]
+    fn a_left_channel_keeps_a_tab_to_read_and_offers_to_join_again() {
+        let mut rt = runtime(chat_history_tabs, (1180.0, 790.0));
+        settle(&mut rt);
+        click(&mut rt, "chat-tab-past-2");
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Past(2));
+        let lines = rt.state.server().chat.shown(chat::Layout::Tabs);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.place == "Raid night"));
+        // Nothing can be written there, but the channel can be joined from the message box.
+        assert!(rt.find("chat-join").is_some());
+        rt.state.server_mut().chat.draft = "hello".into();
+        let _ = rt.state.update(crate::Message::Chat(chat::Action::Send));
+        assert_eq!(rt.state.server().chat.draft, "hello", "nothing was sent");
+        click(&mut rt, "chat-tab-past-2-close");
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Channel);
+        assert!(rt.find("chat-tab-past-2").is_none());
+        assert!(rt.find("chat-tab-past-4").is_some());
+    }
+
+    #[test]
+    fn grouped_tabs_list_their_conversations_under_the_pointer() {
+        let mut rt = runtime(chat_grouped, (1180.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("chat-tab-past-2").is_none(), "one tab per kind");
+        assert!(rt.find("chat-group-channels-list").is_none());
+        // Pressing the channel group lists them at once; pointing does after a moment.
+        click(&mut rt, "chat-group-channels");
+        assert!(rt.find("chat-group-channels-list").is_some());
+        click(&mut rt, "chat-group-channels-row1");
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Past(2));
+        assert!(rt.find("chat-group-channels-list").is_none());
+        // Pressing the group goes back to the channel you're in.
+        click(&mut rt, "chat-group-channels");
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Channel);
+        // Pressing People opens whoever is waiting.
+        click(&mut rt, "chat-group-people");
+        assert_eq!(rt.state.server().chat.target, mara());
+        assert_eq!(rt.state.server().chat.unread(&mara()), 0);
+    }
+
+    #[test]
     fn one_feed_narrows_and_its_tags_point_the_message_box() {
         let mut rt = runtime(chat_feed, (1180.0, 790.0));
         settle(&mut rt);
@@ -3099,8 +3275,13 @@ mod tests {
         settle(&mut rt);
         assert_eq!(rt.state.server().chat.target, chat::Scope::Channel);
         // The chip lists every place to send to.
-        click(&mut rt, "chat-target");
-        assert!(rt.state.ui.chat_menu);
+        click(&mut rt, "chat-to");
+        assert!(rt.state.ui.chat_lists[2].open(Instant::now()));
+        assert!(rt.find("chat-to-list").is_some());
+        // Server is the second row; choosing it closes the list.
+        click(&mut rt, "chat-to-row1");
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Server);
+        assert!(rt.find("chat-to-list").is_none());
     }
 
     #[test]
@@ -3143,6 +3324,8 @@ mod tests {
         let root = temp_settings(&mut rt, "chat-settings");
         settle(&mut rt);
         click(&mut rt, "chat-layout-Feed");
+        // The page is taller than the window on some platforms.
+        scroll_into_view(&mut rt, "settings-body-Chat", "chat-popups");
         click(&mut rt, "chat-popups");
         let saved = crate::settings::load(&root.join("settings.json"))
             .unwrap()
