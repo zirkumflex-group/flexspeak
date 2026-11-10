@@ -4,6 +4,7 @@ mod alerts;
 mod audio;
 mod audio_processing;
 mod changelog;
+mod chat;
 mod client;
 mod command_flow;
 mod connection_charts;
@@ -175,6 +176,8 @@ struct App {
     share_defaults: streaming::publishing::ShareDefaults,
     /// Settings > Streaming, applied when a share starts.
     stream_options: settings::Streaming,
+    /// Settings > Chat. Saved straight to settings when changed, like `footer_hidden`.
+    chat_options: settings::Chat,
     /// TeamSpeak's sounds, from its install on this computer if there is one.
     sound_bank: sounds::Bank,
     /// The sound volume moved and hasn't been saved yet.
@@ -285,6 +288,8 @@ struct ServerSession {
     pokes: Vec<Poke>,
     /// Pokes that arrived while another server was active, for the marker on the rail.
     unseen_pokes: u32,
+    /// Text messages and pokes since connecting.
+    chat: chat::Chat,
     expanded_client: Option<u16>,
     /// Clients heard right now, including yourself while you transmit.
     talking: BTreeSet<u16>,
@@ -349,6 +354,7 @@ impl ServerSession {
             group_edit: None,
             pokes: Vec::new(),
             unseen_pokes: 0,
+            chat: chat::Chat::default(),
             expanded_client: None,
             talking: BTreeSet::new(),
             client_usage: BTreeMap::new(),
@@ -477,6 +483,7 @@ struct ServerEditor {
 enum SettingsPage {
     Server,
     Appearance,
+    Chat,
     Streaming,
     Audio,
     Shortcuts,
@@ -487,9 +494,10 @@ enum SettingsPage {
 }
 
 impl SettingsPage {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Server,
         Self::Appearance,
+        Self::Chat,
         Self::Streaming,
         Self::Audio,
         Self::Shortcuts,
@@ -503,6 +511,7 @@ impl SettingsPage {
         match self {
             Self::Server => "Server",
             Self::Appearance => "Appearance",
+            Self::Chat => "Chat",
             Self::Streaming => "Streaming",
             Self::Audio => "Audio",
             Self::Shortcuts => "Shortcuts",
@@ -871,6 +880,8 @@ enum Message {
     DeclineInstall(bool),
     RedoSetup,
     CancelSetup,
+    /// Text chat: writing, sending, and what the chat column shows.
+    Chat(chat::Action),
 }
 
 /// "a", "a and b", "a, b and c".
@@ -997,6 +1008,7 @@ impl App {
             sounds: sounds::Settings::default(),
             share_defaults: Default::default(),
             stream_options: settings::Streaming::default(),
+            chat_options: settings::Chat::default(),
             sound_bank: if cfg!(test) {
                 sounds::Bank::default()
             } else {
@@ -1009,7 +1021,7 @@ impl App {
             theme_library: themes::Library::new(&[]),
             omarchy: None,
             system_dark: true,
-            window_size: (900.0, 790.0),
+            window_size: (1180.0, 790.0),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
             handle: None,
             ui: ui::UiState::default(),
@@ -1175,6 +1187,9 @@ impl App {
         new.streaming.show_stats = show_stats;
         new.unseen_pokes = 0;
         new.activate_on_connect = false;
+        self.ui.chat_toast = None;
+        self.ui.chat_menu = false;
+        self.chat_seen();
         self.sync_page_visibility();
     }
 
@@ -1615,6 +1630,7 @@ impl App {
         self.settings_query.clear();
         self.server_editor = None;
         self.ui.open = None;
+        self.chat_seen();
     }
 
     /// The session running or starting for this saved address, if any.
@@ -1814,6 +1830,7 @@ impl App {
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
         self.stream_options = saved.streaming;
+        self.chat_options = saved.chat;
         self.share_defaults = if saved.share.quality.validate().is_ok() {
             saved.share.upgraded()
         } else {
@@ -1853,6 +1870,7 @@ impl App {
             sounds: self.sounds.clone(),
             share: self.share_defaults,
             streaming: self.stream_options,
+            chat: self.chat_options,
             skip_install_prompt: self
                 .saved
                 .as_ref()
@@ -2539,6 +2557,7 @@ impl App {
                     self.select_client(None);
                 }
                 self.tab = tab;
+                self.chat_seen();
                 self.sync_page_visibility();
                 self.refresh_visible_permissions();
                 if tab != Tab::Home {
@@ -2907,11 +2926,26 @@ impl App {
                 }
                 self.process_usage = self.process_monitor.sample();
                 let now = Instant::now();
+                let nickname = self.nickname.trim().to_owned();
                 for session in &mut self.sessions {
                     if session.connected {
                         session.connection_history.advance(now);
                         session.client_history.advance(now);
                     }
+                    // A message the server never sent back is shown after a short wait.
+                    let (own, channel) = match &session.state.current {
+                        Some(channel) => (
+                            channel
+                                .members
+                                .iter()
+                                .find(|member| member.is_self)
+                                .map_or(nickname.as_str(), |member| member.name.as_str()),
+                            channel.name.as_str(),
+                        ),
+                        None => (nickname.as_str(), ""),
+                    };
+                    let (own, channel) = (own.to_owned(), channel.to_owned());
+                    session.chat.overdue(now, &own, &channel);
                 }
                 self.cpu_history
                     .push(now, self.process_usage.cpu_percent.map(f64::from));
@@ -3201,7 +3235,16 @@ impl App {
             Message::SubmitPoke => {
                 if let Some(draft) = self.server_mut().poke.take() {
                     self.begin_alert(Source::Poke);
-                    self.command(client::Command::Poke(draft.id, draft.message));
+                    let key = self
+                        .find_member(draft.id)
+                        .map(|member| client::chat_key(&member.uid, member.id));
+                    if self.command(client::Command::Poke(draft.id, draft.message.clone()))
+                        && let Some(key) = key
+                    {
+                        self.server_mut()
+                            .chat
+                            .poke(key, &draft.name, true, &draft.message);
+                    }
                 }
             }
             Message::CancelPoke => self.server_mut().poke = None,
@@ -3386,6 +3429,7 @@ impl App {
                 }
             }
             Message::Appearance(appearance) => self.set_appearance(appearance),
+            Message::Chat(action) => return self.chat_action(action),
             Message::OpenSettingsFolder => self.open_settings_folder(),
             Message::OpenUserVolume(id) => {
                 if let Some(member) = self.find_member(id).filter(|m| !m.uid.is_empty()) {
@@ -3531,6 +3575,7 @@ impl App {
         let active = self.active == Some(id);
         let session = &mut self.sessions[index];
         let mut sounds_due = Vec::new();
+        let mut arrived = None;
         match event {
             client::Event::Activity(activities) => {
                 for activity in &activities {
@@ -3694,7 +3739,16 @@ impl App {
             client::Event::PermissionDenied => {
                 sounds_due.push(sounds::Sound::InsufficientPermissions);
             }
-            client::Event::Poked { from, message } => {
+            client::Event::Chat(message) => {
+                let channel = session
+                    .state
+                    .current
+                    .as_ref()
+                    .map_or_else(String::new, |channel| channel.name.clone());
+                arrived = session.chat.receive(message, &channel).cloned();
+            }
+            client::Event::Poked { from, key, message } => {
+                session.chat.poke(key, &from, false, &message);
                 sounds_due.push(sounds::Sound::Poke);
                 notify::show(
                     &format!("{from} poked you"),
@@ -3774,6 +3828,9 @@ impl App {
                 }
             }
             client::Event::Warning { source, detail } => {
+                if source == Source::Chat {
+                    session.chat.refused();
+                }
                 // A refused change must not keep showing as ticked.
                 if matches!(source, Source::Groups | Source::Flood)
                     && let Some(draft) = &mut session.group_edit
@@ -3899,6 +3956,225 @@ impl App {
         }
         for sound in sounds_due {
             self.play_sound(sound);
+        }
+        if let Some(entry) = arrived {
+            self.chat_arrived(id, entry);
+        }
+        Task::none()
+    }
+
+    // ---- text chat ----
+    /// Whether the chat column is docked beside the stage, rather than behind the window's edge.
+    fn chat_docked(&self) -> bool {
+        !self.chat_options.hidden
+            && self.window_size.0 >= ui::CHAT_MIN_DOCK_WINDOW
+            && !(self.chat_options.hide_while_watching
+                && self.server().streaming.active()
+                && !self.ui.chat_over_stream)
+    }
+
+    /// Whether the chat is on screen right now: docked, or peeking over the stage.
+    fn chat_showing(&self, now: Instant) -> bool {
+        self.live()
+            && self.tab == Tab::Home
+            && self.onboarding.is_none()
+            // Settings covers it.
+            && self.settings_page.is_none()
+            && (self.chat_docked() || self.ui.chat_peek_open(now))
+    }
+
+    /// Clears the unread counts of what the chat has on screen, and its pop-up.
+    fn chat_seen(&mut self) {
+        if self.chat_showing(Instant::now()) {
+            let layout = self.chat_options.layout;
+            self.server_mut().chat.mark_seen(layout);
+            self.ui.chat_toast = None;
+        }
+    }
+
+    /// Counts a message you haven't seen, and pops it up while the chat is hidden.
+    fn chat_arrived(&mut self, id: hub::SessionId, entry: chat::Entry) {
+        if entry.own {
+            return;
+        }
+        let now = Instant::now();
+        let (layout, options) = (self.chat_options.layout, self.chat_options);
+        let active = self.active == Some(id);
+        let showing = active && self.chat_showing(now);
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        if showing && session.chat.shows(layout, &entry.scope) {
+            return;
+        }
+        session.chat.mark_unread(&entry.scope);
+        if active
+            && !showing
+            && options.popups
+            && (entry.scope.is_private() || !options.popups_private_only)
+            && self.onboarding.is_none()
+        {
+            self.ui.chat_toast = Some(ui::ChatToast {
+                entry,
+                until: now + ui::ChatToast::SHOWN,
+            });
+            self.ui.chat_toast_hover = false;
+        }
+    }
+
+    /// The person a private conversation is with, while they're on the server and visible.
+    fn chat_member(&self, key: &str) -> Option<&client::Member> {
+        self.server()
+            .state
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.members)
+            .find(|member| !member.is_self && client::chat_key(&member.uid, member.id) == key)
+    }
+
+    /// Shows a conversation and points the message box at it.
+    fn chat_open(&mut self, scope: chat::Scope) {
+        let name = match &scope {
+            chat::Scope::Private(key) => self
+                .server()
+                .chat
+                .peer(key)
+                .map(|peer| peer.name.clone())
+                .or_else(|| self.chat_member(key).map(|member| member.name.clone()))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.server_mut().chat.open(scope, &name);
+        self.ui.chat_menu = false;
+    }
+
+    /// Docks the chat column if it was hidden.
+    fn chat_reveal(&mut self) {
+        if self.chat_options.hidden {
+            self.set_chat_options(settings::Chat {
+                hidden: false,
+                ..self.chat_options
+            });
+        }
+        if self.chat_options.hide_while_watching && self.server().streaming.active() {
+            self.ui.chat_over_stream = true;
+        }
+    }
+
+    /// Changes a chat setting and stores only that. Setup keeps it for its own save.
+    fn set_chat_options(&mut self, options: settings::Chat) {
+        self.chat_options = options;
+        if self.onboarding.is_none() {
+            self.save_preference(
+                |saved| saved.chat = options,
+                "The chat choice applies for now but was not saved",
+            );
+        }
+        self.chat_seen();
+    }
+
+    fn chat_action(&mut self, action: chat::Action) -> Task {
+        use chat::Action;
+        match action {
+            Action::Draft(text) => {
+                let mut end = text.len().min(chat::MAX_BYTES);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                self.server_mut().chat.draft = text[..end].to_owned();
+            }
+            Action::Send => {
+                if !self.live() {
+                    return Task::none();
+                }
+                let chat = &self.server().chat;
+                let Some(text) = chat::outgoing(&chat.draft) else {
+                    return Task::none();
+                };
+                let scope = chat.target.clone();
+                let target = match &chat.target {
+                    chat::Scope::Channel => client::ChatTarget::Channel,
+                    chat::Scope::Server => client::ChatTarget::Server,
+                    // The box is locked while they're away, so this is a race with them leaving.
+                    chat::Scope::Private(key) => match self.chat_member(key) {
+                        Some(member) => client::ChatTarget::Client(member.id),
+                        None => return Task::none(),
+                    },
+                };
+                self.begin_alert(Source::Chat);
+                if self.command(client::Command::Chat(target, text.clone())) {
+                    let chat = &mut self.server_mut().chat;
+                    chat.draft.clear();
+                    chat.sent(scope, &text, Instant::now());
+                }
+            }
+            Action::Target(scope) => {
+                self.chat_open(scope);
+                self.chat_seen();
+                self.ui.chat_input.focused = self.chat_showing(Instant::now());
+            }
+            Action::Filter(filter) => {
+                self.server_mut().chat.filter = filter;
+                self.chat_seen();
+            }
+            Action::Message(id) => {
+                if self.live()
+                    && let Some(member) = self.find_member(id).filter(|member| !member.is_self)
+                {
+                    let key = client::chat_key(&member.uid, member.id);
+                    let name = member.name.clone();
+                    self.server_mut()
+                        .chat
+                        .open(chat::Scope::Private(key), &name);
+                    self.chat_reveal();
+                    self.chat_seen();
+                    self.ui.chat_input.focused = true;
+                }
+            }
+            Action::ClosePeer(key) => self.server_mut().chat.close_peer(&key),
+            Action::Toggle => {
+                if !self.live() {
+                    return Task::none();
+                }
+                if self.chat_docked() {
+                    if self.chat_options.hide_while_watching && self.server().streaming.active() {
+                        self.ui.chat_over_stream = false;
+                    } else {
+                        self.set_chat_options(settings::Chat {
+                            hidden: true,
+                            ..self.chat_options
+                        });
+                    }
+                    // Or the message box would hold the column open as a peek.
+                    self.ui.chat_input.focused = false;
+                    self.ui.chat_peek = ui::RailPeek::default();
+                    self.ui.chat_menu = false;
+                } else if self.window_size.0 < ui::CHAT_MIN_DOCK_WINDOW {
+                    // No room to dock: hold the peek open instead, or let it go.
+                    self.ui.chat_peek.toggle_pin();
+                } else {
+                    self.chat_reveal();
+                }
+                self.chat_seen();
+            }
+            Action::Open(scope) => {
+                self.chat_open(scope);
+                self.chat_reveal();
+                self.chat_seen();
+                self.ui.chat_input.focused = true;
+            }
+            Action::Reply(scope) => {
+                // The focused message box holds the column open over the stage.
+                self.chat_open(scope);
+                self.ui.chat_input.focused = true;
+                self.chat_seen();
+            }
+            Action::DismissToast => self.ui.chat_toast = None,
+            Action::Layout(layout) => self.set_chat_options(settings::Chat {
+                layout,
+                ..self.chat_options
+            }),
+            Action::Options(options) => self.set_chat_options(options),
         }
         Task::none()
     }
@@ -4438,6 +4714,7 @@ mod tests {
             let _ = app.update(Message::Backend(
                 second,
                 client::Event::Poked {
+                    key: "uid-9".into(),
                     from: from.into(),
                     message: String::new(),
                 },
@@ -4455,6 +4732,7 @@ mod tests {
         let _ = app.update(Message::Backend(
             second,
             client::Event::Poked {
+                key: "uid-9".into(),
                 from: "Noor".into(),
                 message: String::new(),
             },
@@ -4596,7 +4874,7 @@ mod tests {
     }
 
     #[test]
-    fn first_run_only_saves_after_five_steps_and_restores_devices_without_connecting() {
+    fn first_run_only_saves_after_six_steps_and_restores_devices_without_connecting() {
         let (mut app, root) = setup_fixture("complete");
         let path = root.join("settings.json");
         assert_eq!(app.onboarding, Some(onboarding::Step::Username));
@@ -4633,6 +4911,10 @@ mod tests {
         app.active = None;
         app.loopback = false;
         let _ = app.update(Message::SetupNext);
+        assert_eq!(app.onboarding, Some(onboarding::Step::Chat));
+        // The layout picked here is kept for setup's own save.
+        let _ = app.update(Message::Chat(chat::Action::Layout(chat::Layout::Feed)));
+        let _ = app.update(Message::SetupNext);
         assert_eq!(app.onboarding, Some(onboarding::Step::Hotkeys));
         assert!(!path.exists());
         app.keybind_draft.toggle_mute = "F8".into();
@@ -4643,6 +4925,7 @@ mod tests {
         let saved = settings::load(&path).unwrap().unwrap();
         assert_eq!(saved.nickname, "Alex");
         assert_eq!(saved.servers, [settings::Server::new("voice.example:9987")]);
+        assert_eq!(saved.chat.layout, chat::Layout::Feed);
         assert_eq!(
             app.server_passwords
                 .get("voice.example:9987")
@@ -5484,6 +5767,7 @@ mod tests {
         let (mut app, _commands) = session_fixture();
         let id = app.active.unwrap();
         let poke = client::Event::Poked {
+            key: "uid-9".into(),
             from: "Mara".into(),
             message: String::new(),
         };
@@ -5652,6 +5936,7 @@ mod tests {
             let _ = app.update(Message::Backend(
                 id,
                 client::Event::Poked {
+                    key: "uid-9".into(),
                     from: from.into(),
                     message: String::new(),
                 },
@@ -5804,7 +6089,7 @@ mod tests {
         let _ = app.update(Message::Nickname("Blake".into()));
         let _ = app.update(Message::SetupNext);
         let _ = app.update(Message::Address("two.example".into()));
-        for _ in 0..4 {
+        for _ in 0..5 {
             let _ = app.update(Message::SetupNext);
         }
         assert!(app.onboarding.is_none() && !app.redoing_setup);
@@ -6479,5 +6764,234 @@ mod tests {
         let _ = app.update(Message::Backend(id, client::Event::Stopped(None)));
         assert_eq!(app.microphone_status(), "Inactive");
         assert_eq!(app.microphone_meter_level(), 0.0);
+    }
+
+    fn chat_event(scope: chat::Scope, from: &str, text: &str, own: bool) -> client::Event {
+        client::Event::Chat(chat::Incoming {
+            scope,
+            own,
+            from: from.into(),
+            peer: "Mara".into(),
+            text: text.into(),
+        })
+    }
+
+    #[test]
+    fn a_message_goes_where_the_box_points_and_links_are_marked_for_teamspeak() {
+        let (mut app, mut commands) = session_fixture();
+        let _ = app.update(Message::Chat(chat::Action::Send));
+        assert!(commands.try_recv().is_err(), "Nothing to send yet");
+        let _ = app.update(Message::Chat(chat::Action::Draft(
+            " notes: https://example.org/vault ".into(),
+        )));
+        let _ = app.update(Message::Chat(chat::Action::Send));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Chat(client::ChatTarget::Channel, text))
+                if text == "notes: [URL]https://example.org/vault[/URL]"
+        ));
+        assert!(app.server().chat.draft.is_empty());
+        // The server sends your own line back; only then does it show.
+        assert!(app.server().chat.shown(chat::Layout::Tabs).is_empty());
+
+        let _ = app.update(Message::Chat(chat::Action::Message(1)));
+        assert_eq!(
+            app.server().chat.target,
+            chat::Scope::Channel,
+            "You can't message yourself"
+        );
+        let _ = app.update(Message::Chat(chat::Action::Message(2)));
+        assert_eq!(
+            app.server().chat.target,
+            chat::Scope::Private("uid-2".into())
+        );
+        let _ = app.update(Message::Chat(chat::Action::Draft("psst".into())));
+        let _ = app.update(Message::Chat(chat::Action::Send));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Chat(client::ChatTarget::Client(2), text)) if text == "psst"
+        ));
+        // Once they've left there is nobody to send to, and the draft stays.
+        let mut state = app.server().state.clone();
+        state.channels[0].members.retain(|member| member.id != 2);
+        let id = app.active.unwrap();
+        let _ = app.update(Message::Backend(id, client::Event::State(state)));
+        let _ = app.update(Message::Chat(chat::Action::Draft("still there?".into())));
+        let _ = app.update(Message::Chat(chat::Action::Send));
+        assert!(commands.try_recv().is_err());
+        assert_eq!(app.server().chat.draft, "still there?");
+        let _ = app.update(Message::Chat(chat::Action::Target(chat::Scope::Server)));
+        let _ = app.update(Message::Chat(chat::Action::Send));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Chat(client::ChatTarget::Server, _))
+        ));
+    }
+
+    #[test]
+    fn unread_counts_follow_what_the_chat_column_shows() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let mara = chat::Scope::Private("uid-2".into());
+        assert!(app.chat_docked());
+        // Tabs is on the channel: its lines are read as they arrive, a private one is not.
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "back", false),
+        ));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(mara.clone(), "Mara", "psst", false),
+        ));
+        let chat = &app.server().chat;
+        assert_eq!(
+            (chat.unread(&chat::Scope::Channel), chat.unread(&mara)),
+            (0, 1)
+        );
+        assert_eq!(chat.shown(chat::Layout::Tabs)[0].place, "Lobby");
+        assert!(app.ui.chat_toast.is_none(), "The column is showing");
+        // Opening her tab reads it.
+        let _ = app.update(Message::Chat(chat::Action::Target(mara.clone())));
+        assert_eq!(app.server().chat.unread(&mara), 0);
+        // One Feed shows everything, so nothing arrives unread.
+        let _ = app.update(Message::Chat(chat::Action::Layout(chat::Layout::Feed)));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Server, "Lukas", "restart at 4", false),
+        ));
+        assert_eq!(app.server().chat.unread_public(), 0);
+        // Narrowed to the channel, a server line waits.
+        let _ = app.update(Message::Chat(chat::Action::Filter(chat::Filter::Channel)));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Server, "Lukas", "really", false),
+        ));
+        assert_eq!(app.server().chat.unread(&chat::Scope::Server), 1);
+    }
+
+    #[test]
+    fn a_hidden_chat_pops_messages_up_and_lights_its_handle() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let mara = chat::Scope::Private("uid-2".into());
+        let _ = app.update(Message::Chat(chat::Action::Toggle));
+        assert!(app.chat_options.hidden && !app.chat_docked());
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Me", "my own line", true),
+        ));
+        assert!(app.ui.chat_toast.is_none(), "Your own lines never pop up");
+        assert_eq!(app.server().chat.unread_public(), 0);
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "anyone?", false),
+        ));
+        assert_eq!(app.ui.chat_toast.as_ref().unwrap().entry.text, "anyone?");
+        assert_eq!(app.server().chat.unread_public(), 1);
+        // Only private ones pop up when asked; the rest still light the dot.
+        let _ = app.update(Message::Chat(chat::Action::DismissToast));
+        let _ = app.update(Message::Chat(chat::Action::Options(settings::Chat {
+            popups_private_only: true,
+            ..app.chat_options
+        })));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "hello?", false),
+        ));
+        assert!(app.ui.chat_toast.is_none());
+        assert_eq!(app.server().chat.unread_public(), 2);
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(mara.clone(), "Mara", "psst", false),
+        ));
+        assert_eq!(app.ui.chat_toast.as_ref().unwrap().entry.scope, mara);
+        // Reply peeks the column on that conversation with the box ready.
+        let _ = app.update(Message::Chat(chat::Action::Reply(mara.clone())));
+        assert!(app.ui.chat_toast.is_none() && app.ui.chat_input.focused);
+        assert!(app.chat_options.hidden, "A reply doesn't dock the column");
+        assert_eq!(app.server().chat.target, mara);
+        assert_eq!(app.server().chat.unread(&mara), 0);
+        assert_eq!(
+            app.server().chat.unread_public(),
+            2,
+            "The channel tab isn't open"
+        );
+        // Open Chat docks it.
+        let _ = app.update(Message::Chat(chat::Action::Open(chat::Scope::Channel)));
+        assert!(app.chat_docked());
+        assert_eq!(app.server().chat.unread_public(), 0);
+    }
+
+    #[test]
+    fn a_message_on_another_server_waits_without_a_pop_up() {
+        let (mut app, _commands) = session_fixture();
+        let first = app.active.unwrap();
+        let (sender, _other) = mpsc::channel(4);
+        let second = live(&mut app, sender);
+        app.server_mut().connected = true;
+        let _ = app.update(Message::Chat(chat::Action::Toggle));
+        let mara = chat::Scope::Private("uid-2".into());
+        let _ = app.update(Message::Backend(
+            first,
+            chat_event(mara.clone(), "Mara", "hi", false),
+        ));
+        assert!(app.ui.chat_toast.is_none());
+        assert_eq!(app.session(first).unwrap().chat.unread_private(), 1);
+        assert_eq!(app.session(second).unwrap().chat.unread_private(), 0);
+    }
+
+    #[test]
+    fn pokes_are_kept_in_the_conversation_both_ways() {
+        let (mut app, mut commands) = session_fixture();
+        let id = app.active.unwrap();
+        let _ = app.update(Message::OpenPoke(2));
+        let _ = app.update(Message::PokeText("Raid now".into()));
+        let _ = app.update(Message::SubmitPoke);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Poke(2, _))
+        ));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Poked {
+                from: "Mara".into(),
+                key: "uid-2".into(),
+                message: "coming".into(),
+            },
+        ));
+        let _ = app.update(Message::Chat(chat::Action::Message(2)));
+        let lines = app.server().chat.shown(chat::Layout::Tabs);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.kind == chat::Kind::Poke));
+        assert_eq!((lines[0].own, lines[0].text.as_str()), (true, "Raid now"));
+        assert_eq!((lines[1].own, lines[1].from.as_str()), (false, "Mara"));
+        assert_eq!(
+            app.server().chat.unread_private(),
+            0,
+            "A poke has its own dialog and chime"
+        );
+    }
+
+    #[test]
+    fn the_chat_layout_and_hiding_are_saved_straight_away() {
+        let (mut app, root) = saved_fixture("chat");
+        let path = root.join("settings.json");
+        let _ = app.update(Message::Chat(chat::Action::Layout(chat::Layout::Feed)));
+        let (sender, _commands) = mpsc::channel(4);
+        live(&mut app, sender);
+        app.server_mut().connected = true;
+        let _ = app.update(Message::Chat(chat::Action::Toggle));
+        let saved = settings::load(&path).unwrap().unwrap();
+        assert_eq!(saved.chat.layout, chat::Layout::Feed);
+        assert!(saved.chat.hidden);
+        let _ = app.update(Message::Chat(chat::Action::Toggle));
+        assert!(!settings::load(&path).unwrap().unwrap().chat.hidden);
+        // Too narrow to dock: the column peeks instead, and the choice stays as saved.
+        app.window_size = (crate::MIN_SIZE.0, 600.0);
+        assert!(!app.chat_docked());
+        let _ = app.update(Message::Chat(chat::Action::Toggle));
+        assert!(app.ui.chat_peek_open(Instant::now()));
+        assert!(!settings::load(&path).unwrap().unwrap().chat.hidden);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

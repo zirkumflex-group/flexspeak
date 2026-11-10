@@ -78,6 +78,8 @@ pub enum Command {
     StopWatching(Option<String>),
     /// Pokes a client with a message.
     Poke(u16, String),
+    /// Sends a text message to your channel, the whole server, or one client.
+    Chat(ChatTarget, String),
     /// Moves these clients into a channel.
     Move(Vec<u16>, u64),
     /// Kicks or bans these clients, with an optional reason.
@@ -86,6 +88,23 @@ pub enum Command {
     SetGroups(Vec<u16>, GroupEdit),
     /// Asks for the group lists, for servers that haven't sent them.
     RequestGroups,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatTarget {
+    Channel,
+    Server,
+    Client(u16),
+}
+
+/// What private conversations with someone are filed under: their identity, or their client
+/// number until the server has sent it.
+pub fn chat_key(uid: &str, id: u16) -> String {
+    if uid.is_empty() {
+        format!("#{id}")
+    } else {
+        uid.to_owned()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,8 +449,12 @@ pub enum Event {
     /// Someone poked you.
     Poked {
         from: String,
+        /// What their private conversation is filed under (`chat_key`).
+        key: String,
         message: String,
     },
+    /// A text message arrived, your own included: the server sends those back.
+    Chat(crate::chat::Incoming),
     /// The server accepted a poke or move you asked for.
     Done(Source),
     Stopped(Option<(Source, String)>),
@@ -1223,6 +1246,21 @@ async fn run_connection(
                                 Err(error) => { let _ = events.try_send(Event::Warning { source: Source::Poke, detail: error.to_string() }); },
                             }
                         },
+                        Command::Chat(target, text) => {
+                            let target = match target {
+                                ChatTarget::Channel => tsclientlib::MessageTarget::Channel,
+                                ChatTarget::Server => tsclientlib::MessageTarget::Server,
+                                ChatTarget::Client(id) if state.clients.contains_key(&ClientId(id)) => tsclientlib::MessageTarget::Client(ClientId(id)),
+                                ChatTarget::Client(_) => {
+                                    let _ = events.try_send(Event::Warning { source: Source::Chat, detail: "They are no longer on the server.".into() });
+                                    continue;
+                                },
+                            };
+                            match flow.borrow_mut().enqueue(state.send_message(target, &text), Operation::Chat) {
+                                Ok(ticket) => { requests.insert(ticket, Source::Chat); },
+                                Err(error) => { let _ = events.try_send(Event::Warning { source: Source::Chat, detail: error.to_string() }); },
+                            }
+                        },
                         Command::Move(ids, channel) => {
                             if !state.channels.contains_key(&ChannelId(channel)) {
                                 let _ = events.try_send(Event::Warning { source: Source::Move, detail: "That channel no longer exists.".into() });
@@ -1314,9 +1352,32 @@ async fn run_connection(
                             }
                         }
                         for change in &changes {
-                            if let BookEvent::Message { target: tsclientlib::MessageTarget::Poke(_), invoker, message } = change {
+                            if let BookEvent::Message { target, invoker, message } = change {
                                 let clean = |text: &str, limit: usize| text.chars().filter(|c| !c.is_control()).take(limit).collect::<String>();
-                                let _ = events.try_send(Event::Poked { from: clean(&invoker.name, 64), message: clean(message, 200) });
+                                // Filed under the identity the channel tree shows for them, so a
+                                // click on their row finds the same conversation.
+                                let key_of = |id: ClientId, fallback: Option<&tsclientlib::UidBuf>| {
+                                    let uid = state.clients.get(&id).and_then(|client| client.uid.as_ref()).or(fallback);
+                                    chat_key(&uid.map_or_else(String::new, |uid| uid_key(&uid.0)), id.0)
+                                };
+                                let from = clean(&invoker.name, 64);
+                                let sender = key_of(invoker.id, invoker.uid.as_ref());
+                                let own = invoker.id == state.own_client;
+                                let (scope, peer) = match target {
+                                    tsclientlib::MessageTarget::Poke(_) => {
+                                        let _ = events.try_send(Event::Poked { from, key: sender, message: clean(message, 200) });
+                                        continue;
+                                    },
+                                    tsclientlib::MessageTarget::Server => (crate::chat::Scope::Server, String::new()),
+                                    tsclientlib::MessageTarget::Channel => (crate::chat::Scope::Channel, String::new()),
+                                    // Your own private message comes back addressed to them.
+                                    tsclientlib::MessageTarget::Client(to) if own => (
+                                        crate::chat::Scope::Private(key_of(*to, None)),
+                                        state.clients.get(to).map_or_else(String::new, |client| clean(&client.name, 64)),
+                                    ),
+                                    tsclientlib::MessageTarget::Client(_) => (crate::chat::Scope::Private(sender), from.clone()),
+                                };
+                                let _ = events.try_send(Event::Chat(crate::chat::Incoming { scope, own, from, peer, text: message.clone() }));
                                 continue;
                             }
                             if let BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }

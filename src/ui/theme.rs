@@ -59,6 +59,8 @@ pub struct Theme {
     pub unknown: Color,
     /// Live and recording states: a warm signal colour, used sparingly.
     pub live: Color,
+    /// Private messages, wherever chat shows one: never the channel's accent.
+    pub private: Color,
     pub cpu: Color,
     pub ram: Color,
 }
@@ -235,6 +237,7 @@ impl Theme {
                 poor: rgb(0xd43d55),
                 unknown: rgb(0x6b7385),
                 live: rgb(0xe0483e),
+                private: rgb(0x8a3fd1),
                 cpu: rgb(0x0d8fa1),
                 ram: rgb(0x7655dd),
                 ..neutral
@@ -289,6 +292,7 @@ impl Theme {
             poor: rgb(0xff7a8a),
             unknown: rgb(0x8c95ab),
             live: rgb(0xff5a52),
+            private: rgb(0xd2a8ff),
             cpu: rgb(0x46cfe0),
             ram: rgb(0xa98ff8),
         }

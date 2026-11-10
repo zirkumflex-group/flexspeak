@@ -7,7 +7,7 @@ use crate::permissions::{Kind, Status};
 use crate::{
     App, ServerSession, SettingsPage, Tab,
     alerts::Source,
-    audio_processing, client, hub, onboarding, settings, transmission,
+    audio_processing, chat, client, hub, onboarding, settings, transmission,
     updater::{self, Build, Phase, Progress, Retry},
     usage,
 };
@@ -170,6 +170,28 @@ pub const SCENES: &[Scene] = &[
     ("update-settings-changelog", update_settings_changelog),
     ("update-settings-downloading", update_settings_downloading),
     ("update-check-failed", update_check_failed),
+    ("chat-tabs", chat_tabs),
+    ("chat-tabs-private", chat_tabs_private),
+    ("chat-tabs-light", chat_tabs_light),
+    ("chat-feed", chat_feed),
+    ("chat-feed-private", chat_feed_private),
+    ("chat-feed-target", chat_feed_target),
+    ("chat-empty", chat_empty),
+    ("chat-offline", chat_offline),
+    ("chat-tabs-stream", chat_tabs_stream),
+    ("chat-feed-stream", chat_feed_stream),
+    ("chat-hidden", chat_hidden),
+    ("chat-hidden-hover", chat_hidden_hover),
+    ("chat-hidden-message", chat_hidden_message),
+    ("chat-hidden-private", chat_hidden_private),
+    ("chat-peek", chat_peek),
+    ("chat-peek-feed", chat_peek_feed),
+    ("chat-pokes-tabs", chat_pokes_tabs),
+    ("chat-pokes-feed", chat_pokes_feed),
+    ("chat-servers", chat_servers),
+    ("settings-chat", settings_chat),
+    ("setup-chat", setup_chat),
+    ("setup-chat-feed", setup_chat_feed),
 ];
 
 /// Scenes keep a fixed scheme, so previews don't depend on the machine's appearance.
@@ -185,6 +207,7 @@ fn saved(s: &mut App) {
     s.onboarding = None;
     // Previews start from the default log, whatever this machine last left it at.
     s.log_pane = Default::default();
+    s.chat_options = Default::default();
     let servers = vec![
         settings::Server {
             name: "Zirkumflex".into(),
@@ -353,6 +376,350 @@ fn servers_connecting(s: &mut App) {
 fn servers_picker(s: &mut App) {
     servers(s);
     s.ui.server_picker = true;
+}
+
+/// A line of chat at a fixed time, so previews don't change with the clock.
+fn say(
+    s: &mut App,
+    scope: chat::Scope,
+    own: bool,
+    from: &str,
+    place: &str,
+    text: &str,
+    time: &str,
+) -> chat::Entry {
+    s.server_mut()
+        .chat
+        .add(
+            scope,
+            chat::Kind::Message,
+            own,
+            from.into(),
+            place.into(),
+            text,
+            time.into(),
+        )
+        .clone()
+}
+
+fn poke_line(s: &mut App, own: bool, peer: (&str, &str), text: &str, time: &str) {
+    s.server_mut().chat.add(
+        chat::Scope::Private(peer.0.into()),
+        chat::Kind::Poke,
+        own,
+        if own { "You" } else { peer.1 }.into(),
+        peer.1.into(),
+        text,
+        time.into(),
+    );
+}
+
+const MARA: (&str, &str) = ("uid-2", "Mara");
+const THEO: (&str, &str) = ("uid-3", "Theo");
+const INES: (&str, &str) = ("uid-4", "Ines");
+
+fn mara() -> chat::Scope {
+    chat::Scope::Private(MARA.0.into())
+}
+
+/// An evening in the Lobby: channel talk, a server note, and Mara writing privately, unread.
+fn chat_talk(s: &mut App) {
+    use chat::Scope;
+    say(
+        s,
+        Scope::Server,
+        false,
+        "Lukas",
+        "",
+        "Server restarts at 4 for the update",
+        "20:58",
+    );
+    say(
+        s,
+        Scope::Channel,
+        false,
+        "Theo",
+        "Lobby",
+        "back, had to restart my router",
+        "21:04",
+    );
+    say(
+        s,
+        Scope::Channel,
+        false,
+        "Mara",
+        "Lobby",
+        "we start the raid at half past, Ines is setting up",
+        "21:05",
+    );
+    say(
+        s,
+        mara(),
+        false,
+        "Mara",
+        "Mara",
+        "psst, can you bring the spare key for the vault run?",
+        "21:06",
+    );
+    say(
+        s,
+        mara(),
+        false,
+        "Mara",
+        "Mara",
+        "and don't tell Theo yet",
+        "21:06",
+    );
+    say(
+        s,
+        Scope::Channel,
+        true,
+        "Jan",
+        "Lobby",
+        "I'll join after this match",
+        "21:06",
+    );
+    say(
+        s,
+        Scope::Channel,
+        false,
+        "Theo",
+        "Lobby",
+        "can someone share the boss notes again? https://notes.zirkumflex.io/vault",
+        "21:07",
+    );
+    let chat = &mut s.server_mut().chat;
+    chat.open(Scope::Private(INES.0.into()), INES.1);
+    chat.open(Scope::Channel, "");
+    chat.mark_unread(&mara());
+    chat.mark_unread(&mara());
+}
+
+fn chat_tabs(s: &mut App) {
+    connected(s);
+    chat_talk(s);
+}
+
+/// The private tab open: its underline, audience line and close button are violet's.
+fn chat_tabs_private(s: &mut App) {
+    chat_tabs(s);
+    say(
+        s,
+        mara(),
+        true,
+        "Jan",
+        "Mara",
+        "haha ok, I'll grab it before we start",
+        "21:08",
+    );
+    s.server_mut().chat.open(mara(), MARA.1);
+    s.server_mut().chat.mark_seen(chat::Layout::Tabs);
+    s.server_mut().chat.draft = "on my way".into();
+    s.sync_fields();
+}
+
+fn chat_tabs_light(s: &mut App) {
+    chat_tabs(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+fn chat_feed(s: &mut App) {
+    chat_tabs(s);
+    s.chat_options.layout = chat::Layout::Feed;
+    s.server_mut().chat.mark_seen(chat::Layout::Feed);
+}
+
+/// The feed narrowed to private messages.
+fn chat_feed_private(s: &mut App) {
+    chat_feed(s);
+    s.server_mut().chat.filter = chat::Filter::Private;
+}
+
+/// The feed's message box pointed at Mara, with the list of places open.
+fn chat_feed_target(s: &mut App) {
+    chat_feed(s);
+    s.server_mut().chat.open(mara(), MARA.1);
+    s.ui.chat_menu = true;
+}
+
+fn chat_empty(s: &mut App) {
+    connected(s);
+}
+
+/// A private conversation with someone who has left: the message box says so and is locked.
+fn chat_offline(s: &mut App) {
+    connected(s);
+    let nora = chat::Scope::Private("uid-9".into());
+    say(
+        s,
+        nora.clone(),
+        false,
+        "Nora",
+        "Nora",
+        "gotta go, see you tomorrow",
+        "20:31",
+    );
+    s.server_mut().chat.open(nora, "Nora");
+}
+
+fn chat_tabs_stream(s: &mut App) {
+    watching_solo(s);
+    chat_talk(s);
+}
+
+fn chat_feed_stream(s: &mut App) {
+    chat_tabs_stream(s);
+    s.chat_options.layout = chat::Layout::Feed;
+    s.server_mut().chat.mark_seen(chat::Layout::Feed);
+}
+
+/// The column behind the right edge: a handle like the rail's, and nothing over the picture.
+fn chat_hidden(s: &mut App) {
+    chat_tabs_stream(s);
+    s.chat_options.hidden = true;
+    s.server_mut().chat.mark_seen(chat::Layout::Feed);
+}
+
+fn chat_hidden_hover(s: &mut App) {
+    chat_hidden(s);
+    s.ui.chat_peek.strip = true;
+    // Still waiting out the delay however long the capture takes.
+    s.ui.chat_peek.changed = Some(Instant::now() + Duration::from_secs(3600));
+}
+
+fn chat_toast(s: &mut App, entry: chat::Entry) {
+    s.server_mut().chat.mark_unread(&entry.scope);
+    s.ui.chat_toast = Some(super::ChatToast {
+        entry,
+        until: Instant::now() + Duration::from_secs(3600),
+    });
+}
+
+/// A channel message while hidden: the pop-up, and a blue dot on the handle.
+fn chat_hidden_message(s: &mut App) {
+    chat_hidden(s);
+    let entry = say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Theo",
+        "Lobby",
+        "anyone up for one more round after the raid?",
+        "21:12",
+    );
+    chat_toast(s, entry);
+}
+
+/// A private one: violet edge on the pop-up, violet dot, and Mara marked in the tree.
+fn chat_hidden_private(s: &mut App) {
+    chat_hidden(s);
+    let entry = say(
+        s,
+        mara(),
+        false,
+        "Mara",
+        "Mara",
+        "you coming? we're about to pull",
+        "21:12",
+    );
+    chat_toast(s, entry);
+}
+
+/// The pointer on the handle: the chat peeks over the stream.
+fn chat_peek(s: &mut App) {
+    chat_hidden(s);
+    s.ui.chat_peek.pinned = true;
+}
+
+fn chat_peek_feed(s: &mut App) {
+    chat_peek(s);
+    s.chat_options.layout = chat::Layout::Feed;
+}
+
+fn chat_pokes(s: &mut App) {
+    connected(s);
+    poke_line(s, false, MARA, "you there? raid soon", "20:41");
+    say(
+        s,
+        mara(),
+        true,
+        "Jan",
+        "Mara",
+        "sorry, was making food, joining in 5",
+        "20:43",
+    );
+    poke_line(s, true, MARA, "", "20:58");
+    say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Theo",
+        "Lobby",
+        "back, had to restart my router",
+        "21:04",
+    );
+    say(
+        s,
+        mara(),
+        false,
+        "Mara",
+        "Mara",
+        "psst, can you bring the spare key for the vault run?",
+        "21:06",
+    );
+    poke_line(s, true, THEO, "", "21:07");
+    say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Theo",
+        "Lobby",
+        "what",
+        "21:07",
+    );
+    poke_line(s, false, MARA, "come to Raid night pls", "21:09");
+}
+
+/// Pokes sit in the private tab with that person, both ways, faded.
+fn chat_pokes_tabs(s: &mut App) {
+    chat_pokes(s);
+    s.server_mut().chat.open(mara(), MARA.1);
+}
+
+/// In the feed they sit where they happened.
+fn chat_pokes_feed(s: &mut App) {
+    chat_pokes(s);
+    s.chat_options.layout = chat::Layout::Feed;
+}
+
+/// Private messages waiting on a server that isn't on screen mark its tile on the rail.
+fn chat_servers(s: &mut App) {
+    servers(s);
+    if let Some(other) = s
+        .sessions
+        .iter_mut()
+        .find(|session| Some(session.id) != s.active)
+    {
+        let scope = chat::Scope::Private("uid-7".into());
+        other.chat.mark_unread(&scope);
+        other.chat.mark_unread(&scope);
+        other.chat.mark_unread(&scope);
+    }
+}
+
+fn settings_chat(s: &mut App) {
+    settings_at(s, SettingsPage::Chat);
+}
+
+fn setup_chat(s: &mut App) {
+    setup(s);
+    s.chat_options = Default::default();
+    s.onboarding = Some(onboarding::Step::Chat);
+}
+
+fn setup_chat_feed(s: &mut App) {
+    setup_chat(s);
+    s.chat_options.layout = chat::Layout::Feed;
 }
 
 fn devices(s: &mut App) {
@@ -2316,7 +2683,7 @@ mod tests {
             .unwrap()
             .wanted
             .clear();
-        let row = "member-menu-item6-sub-item";
+        let row = "member-menu-item7-sub-item";
         click(&mut rt, &format!("{row}1"));
         settle(&mut rt);
         click(&mut rt, &format!("{row}4"));
@@ -2637,9 +3004,162 @@ mod tests {
         watching.iter().map(|w| w.stream.id.as_str()).collect()
     }
 
+    fn temp_settings(rt: &mut Runtime<App>, name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "flexspeak-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        rt.state.settings_path = Some(root.join("settings.json"));
+        root
+    }
+
+    #[test]
+    fn the_chat_column_switches_tabs_takes_typing_hides_and_comes_back() {
+        let mut rt = runtime(chat_tabs, (1180.0, 790.0));
+        let root = temp_settings(&mut rt, "chat-column");
+        settle(&mut rt);
+        assert!(rt.find("chat").is_some() && rt.find("chat-edge").is_none());
+        assert_eq!(rt.state.server().chat.unread(&mara()), 2);
+
+        click(&mut rt, "chat-tab-uid-2");
+        assert_eq!(rt.state.server().chat.target, mara());
+        assert_eq!(
+            rt.state.server().chat.unread(&mara()),
+            0,
+            "opening it reads it"
+        );
+        assert!(rt.state.ui.chat_input.focused, "ready to answer");
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Text("ok".into()),
+            mods: rune::Mods::default(),
+        });
+        settle(&mut rt);
+        assert_eq!(rt.state.server().chat.draft, "ok");
+        click(&mut rt, "chat-tab-uid-2-close");
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Channel);
+        assert!(rt.find("chat-tab-uid-2").is_none());
+
+        click(&mut rt, "chat-hide");
+        assert!(rt.state.chat_options.hidden);
+        assert!(rt.find("chat").is_none(), "the stage has the room");
+        assert!(rt.find("chat-edge").is_some(), "a handle stays");
+        assert!(
+            crate::settings::load(&root.join("settings.json"))
+                .unwrap()
+                .unwrap()
+                .chat
+                .hidden,
+            "saved right away"
+        );
+        click(&mut rt, "chat-edge");
+        assert!(!rt.state.chat_options.hidden && rt.find("chat").is_some());
+
+        // ⇧⌘C does the same from the keyboard.
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Command('c'),
+            mods: rune::Mods {
+                shift: true,
+                cmd: true,
+                ..Default::default()
+            },
+        });
+        settle(&mut rt);
+        assert!(rt.state.chat_options.hidden);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_narrow_window_folds_the_chat_column_to_its_handle() {
+        let mut rt = runtime(chat_tabs, crate::MIN_SIZE);
+        settle(&mut rt);
+        assert!(rt.find("chat").is_none() && rt.find("chat-edge").is_some());
+        assert!(!rt.state.chat_options.hidden, "the choice itself stays");
+        let mut rt = runtime(chat_tabs, (1180.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("chat").is_some());
+    }
+
+    #[test]
+    fn one_feed_narrows_and_its_tags_point_the_message_box() {
+        let mut rt = runtime(chat_feed, (1180.0, 790.0));
+        settle(&mut rt);
+        assert_eq!(rt.state.server().chat.shown(chat::Layout::Feed).len(), 7);
+        click(&mut rt, "chat-filter-Private");
+        assert_eq!(rt.state.server().chat.filter, chat::Filter::Private);
+        assert_eq!(rt.state.server().chat.shown(chat::Layout::Feed).len(), 2);
+        // Pressing a line's tag answers there; Escape goes back to the channel.
+        click(&mut rt, "chat-tag-3");
+        assert_eq!(rt.state.server().chat.target, mara());
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Escape,
+            mods: rune::Mods::default(),
+        });
+        settle(&mut rt);
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Channel);
+        // The chip lists every place to send to.
+        click(&mut rt, "chat-target");
+        assert!(rt.state.ui.chat_menu);
+    }
+
+    #[test]
+    fn a_pop_up_replies_in_a_peek_or_docks_the_chat() {
+        let mut rt = runtime(chat_hidden_private, (1180.0, 790.0));
+        let root = temp_settings(&mut rt, "chat-toast");
+        settle(&mut rt);
+        assert!(rt.find("chat-toast").is_some() && rt.find("chat-edge-dot").is_some());
+        assert!(rt.find("chat-peek").is_none());
+        click(&mut rt, "chat-toast-reply");
+        assert!(rt.find("chat-toast").is_none());
+        assert!(
+            rt.find("chat-peek").is_some(),
+            "the chat peeks over the stage"
+        );
+        assert!(rt.state.chat_options.hidden, "and stays hidden otherwise");
+        assert_eq!(rt.state.server().chat.target, mara());
+        assert_eq!(rt.state.server().chat.unread_private(), 0);
+
+        let mut rt = runtime(chat_hidden_message, (1180.0, 790.0));
+        let other = temp_settings(&mut rt, "chat-toast-open");
+        settle(&mut rt);
+        click(&mut rt, "chat-toast-open");
+        assert!(!rt.state.chat_options.hidden && rt.find("chat").is_some());
+        assert!(rt.find("chat-toast").is_none() && rt.find("chat-edge").is_none());
+        for root in [root, other] {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn setup_and_settings_choose_the_chat_layout() {
+        let mut rt = runtime(setup_chat, (900.0, 790.0));
+        settle(&mut rt);
+        click(&mut rt, "chat-layout-Feed");
+        assert_eq!(rt.state.chat_options.layout, chat::Layout::Feed);
+        assert_eq!(rt.state.onboarding, Some(onboarding::Step::Chat));
+
+        let mut rt = runtime(settings_chat, (1180.0, 790.0));
+        let root = temp_settings(&mut rt, "chat-settings");
+        settle(&mut rt);
+        click(&mut rt, "chat-layout-Feed");
+        click(&mut rt, "chat-popups");
+        let saved = crate::settings::load(&root.join("settings.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.chat.layout, chat::Layout::Feed);
+        assert!(!saved.chat.popups);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn five_streams_arrange_themselves_to_the_window() {
         let row_of = |rt: &Runtime<App>, id: &str| rt.find(&format!("tile-{id}")).unwrap().1;
+        // The stage to itself: the chat column docked beside it leaves fewer across.
+        fn watching_five(s: &mut App) {
+            super::watching_five(s);
+            s.chat_options.hidden = true;
+        }
         let mut wide = runtime(watching_five, (1700.0, 900.0));
         settle(&mut wide);
         assert_eq!(row_of(&wide, "s1"), row_of(&wide, "s3"), "three across");
