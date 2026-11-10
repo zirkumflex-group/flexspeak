@@ -55,10 +55,11 @@ pub enum Access {
 }
 impl Access {
     pub const ALL: [Self; 2] = [Self::Public, Self::Private];
+    /// The word on the Privacy choice: public shares let channel members join by themselves.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Public => "Public · join automatically",
-            Self::Private => "Private · approve each viewer",
+            Self::Public => "Public",
+            Self::Private => "Private",
         }
     }
     pub fn wire_value(self) -> u8 {
@@ -81,6 +82,7 @@ mod tests {
                 name: "Test screen".into(),
             },
             audio: None,
+            voice_output: None,
             quality: Quality::default(),
             access: Access::default(),
             fast_capture: false,
@@ -176,14 +178,33 @@ mod tests {
             quality.validate().unwrap();
             assert_eq!(quality.preset(), Some(preset));
         }
+        // Performance is light and keeps moving; Quality is the source up to 1440p and sharp.
+        let performance = Preset::Performance.quality();
+        assert_eq!(
+            (
+                performance.max_size(),
+                performance.fps(),
+                performance.struggle
+            ),
+            ((1280, 720), 30, Struggle::Smoothness)
+        );
+        let best = Preset::Quality.quality();
+        assert_eq!(
+            (best.max_size(), best.fps(), best.struggle),
+            ((2560, 1440), 30, Struggle::Sharpness)
+        );
+        assert_eq!(Quality::default(), best, "Quality is the default");
+        assert_eq!(Resolution::Source.max_size(), (7680, 4320));
         let mut quality = Quality {
             frame_rate: 24,
             resolution: Resolution::P2160,
             video_kbps: 12_000,
             audio_kbps: 256,
+            struggle: Struggle::Smoothness,
         };
         assert_eq!(quality.preset(), None);
         assert_eq!(quality.max_size(), (3840, 2160));
+        assert!((quality.upload_mbps() - 12.256).abs() < 1e-9);
         assert_eq!(quality.fps(), 24);
         assert_eq!(quality.bitrate(), 12_000_000);
         assert_eq!(quality.audio_bitrate(), 256_000);
@@ -196,6 +217,50 @@ mod tests {
         quality.audio_kbps = 128;
         quality.video_kbps = 20_001;
         assert!(quality.validate().is_err());
+    }
+
+    #[test]
+    fn a_running_share_takes_audio_and_quality_changes_without_restarting() {
+        let (mut publisher, mut commands, _) = fixture();
+        let unchanged = publish_media::Live {
+            audio: None,
+            quality: Quality::default(),
+        };
+        publisher.configure(unchanged).unwrap();
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing changed, nothing sent"
+        );
+        let speakers = DeviceChoice {
+            id: "speakers".into(),
+            name: "Speakers".into(),
+        };
+        let live = publish_media::Live {
+            audio: Some(speakers.clone()),
+            quality: Preset::Performance.quality(),
+        };
+        publisher.configure(live.clone()).unwrap();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(publish_media::Input::Configure(sent)) if sent == live
+        ));
+        let options = publisher.options.as_ref().unwrap();
+        assert_eq!(options.audio, Some(speakers));
+        assert_eq!(options.quality, Preset::Performance.quality());
+        assert!(
+            publisher
+                .configure(publish_media::Live {
+                    audio: None,
+                    quality: Quality {
+                        frame_rate: 0,
+                        ..Quality::default()
+                    },
+                })
+                .is_err(),
+            "invalid quality is refused"
+        );
+        publisher.stop("Stopped sharing");
+        assert!(publisher.configure(live).is_err());
     }
 
     #[test]
@@ -328,13 +393,15 @@ mod tests {
     #[test]
     fn share_defaults_round_trip_and_only_apply_while_idle() {
         let defaults = ShareDefaults {
-            quality: Preset::Sharp.quality(),
+            quality: Preset::Performance.quality(),
             access: Access::Public,
             audio: false,
         };
         let json = serde_json::to_string(&defaults).unwrap();
         assert!(
-            json.contains("\"p1080\"") && json.contains("\"public\""),
+            json.contains("\"p720\"")
+                && json.contains("\"smoothness\"")
+                && json.contains("\"public\""),
             "{json}"
         );
         assert_eq!(
@@ -344,13 +411,58 @@ mod tests {
 
         let mut ui = Ui::default();
         ui.apply(defaults);
-        assert_eq!(ui.quality.preset(), Some(Preset::Sharp));
+        assert_eq!(ui.quality.preset(), Some(Preset::Performance));
         assert_eq!(ui.access, Access::Public);
         assert!(!ui.audio);
 
         ui.status.active = true;
         ui.apply(ShareDefaults::default());
-        assert_eq!(ui.quality.preset(), Some(Preset::Sharp), "not mid-share");
+        assert_eq!(
+            ui.quality.preset(),
+            Some(Preset::Performance),
+            "not mid-share"
+        );
+    }
+
+    #[test]
+    fn choices_saved_with_the_old_presets_move_to_performance_or_quality() {
+        let saved = |json: &str| {
+            serde_json::from_str::<ShareDefaults>(json)
+                .unwrap()
+                .upgraded()
+                .quality
+                .preset()
+        };
+        let old = |resolution: &str, fps: u32, video: u32, audio: u32| {
+            format!(
+                r#"{{"quality":{{"resolution":"{resolution}","frame_rate":{fps},"video_kbps":{video},"audio_kbps":{audio}}}}}"#
+            )
+        };
+        assert_eq!(
+            saved(&old("p1080", 30, 4500, 128)),
+            Some(Preset::Quality),
+            "Sharp text"
+        );
+        for (resolution, fps, video, audio) in [
+            ("p480", 30, 1200, 64),
+            ("p720", 30, 2500, 128),
+            ("p720", 60, 4000, 128),
+        ] {
+            assert_eq!(
+                saved(&old(resolution, fps, video, audio)),
+                Some(Preset::Performance),
+                "{resolution} {fps}"
+            );
+        }
+        // Nothing saved was the old default, Balanced: it starts at the new default.
+        assert_eq!(saved("{}"), Some(Preset::Quality));
+        // Adjusted values stay as they were, now kept sharp as before.
+        let custom = serde_json::from_str::<ShareDefaults>(&old("p1080", 24, 6000, 128))
+            .unwrap()
+            .upgraded();
+        assert_eq!(custom.quality.preset(), None);
+        assert_eq!(custom.quality.frame_rate, 24);
+        assert_eq!(custom.quality.struggle, Struggle::Sharpness);
     }
 
     #[test]
@@ -413,6 +525,10 @@ impl fmt::Display for ShareSource {
 pub struct Options {
     pub source: ShareSource,
     pub audio: Option<DeviceChoice>,
+    /// Where this app plays voice and sounds. When system audio is taken from the same output,
+    /// the app's own sound is left out of it where the system allows.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    pub voice_output: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
     /// Settings > Streaming, experimental: capture screens and windows on the GPU without
@@ -423,6 +539,8 @@ pub struct Options {
     pub hardware_av1: bool,
 }
 
+/// The largest picture a share sends. A smaller source keeps its own size; nothing is
+/// enlarged.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Resolution {
@@ -432,14 +550,17 @@ pub enum Resolution {
     P1080,
     P1440,
     P2160,
+    /// The source's own size, however large.
+    Source,
 }
 impl Resolution {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::P480,
         Self::P720,
         Self::P1080,
         Self::P1440,
         Self::P2160,
+        Self::Source,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -448,6 +569,7 @@ impl Resolution {
             Self::P1080 => "1080p",
             Self::P1440 => "1440p",
             Self::P2160 => "2160p (4K)",
+            Self::Source => "Source",
         }
     }
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -458,6 +580,28 @@ impl Resolution {
             Self::P1080 => (1920, 1080),
             Self::P1440 => (2560, 1440),
             Self::P2160 => (3840, 2160),
+            // The largest picture a viewer accepts (see `rtc::present_frame`).
+            Self::Source => (7680, 4320),
+        }
+    }
+}
+
+/// What gives way when the connection or the computer can't keep up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Struggle {
+    /// Fewer frames, every one sharp: text stays readable.
+    #[default]
+    Sharpness,
+    /// A softer picture that keeps moving.
+    Smoothness,
+}
+impl Struggle {
+    pub const ALL: [Self; 2] = [Self::Sharpness, Self::Smoothness];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sharpness => "Keep it sharp",
+            Self::Smoothness => "Keep it smooth",
         }
     }
 }
@@ -470,10 +614,12 @@ pub struct Quality {
     pub frame_rate: u32,
     pub video_kbps: u32,
     pub audio_kbps: u32,
+    /// Saved before this existed as sharpness, which is what every share kept then.
+    pub struggle: Struggle,
 }
 impl Default for Quality {
     fn default() -> Self {
-        Preset::Balanced.quality()
+        Preset::Quality.quality()
     }
 }
 impl Quality {
@@ -484,6 +630,10 @@ impl Quality {
             self.frame_rate,
             self.video_kbps
         )
+    }
+    /// Upload per viewer at most, in Mbit/s: video and audio. Each viewer gets their own.
+    pub fn upload_mbps(self) -> f64 {
+        f64::from(self.video_kbps + self.audio_kbps) / 1000.0
     }
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn max_size(self) -> (u32, u32) {
@@ -520,35 +670,35 @@ impl Quality {
     }
 }
 
+/// The two ways to share without touching the details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
-    Saver,
-    Balanced,
-    Sharp,
-    Smooth,
+    /// Light on the computer and the connection; stays smooth when either struggles.
+    Performance,
+    /// The source's own size up to 1440p, sharp enough for small text.
+    Quality,
 }
 impl Preset {
-    pub const ALL: [Self; 4] = [Self::Saver, Self::Balanced, Self::Sharp, Self::Smooth];
+    pub const ALL: [Self; 2] = [Self::Performance, Self::Quality];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Saver => "Data saver",
-            Self::Balanced => "Balanced",
-            Self::Sharp => "Sharp text",
-            Self::Smooth => "Smooth motion",
+            Self::Performance => "Performance",
+            Self::Quality => "Quality",
         }
     }
     pub fn quality(self) -> Quality {
-        let (resolution, frame_rate, video_kbps, audio_kbps) = match self {
-            Self::Saver => (Resolution::P480, 30, 1200, 64),
-            Self::Balanced => (Resolution::P720, 30, 2500, 128),
-            Self::Sharp => (Resolution::P1080, 30, 4500, 128),
-            Self::Smooth => (Resolution::P720, 60, 4000, 128),
+        // Generous for their size: a screen share at 30 fps is mostly text and sharp edges,
+        // which VP8 needs bits for. Hardware AV1 makes the same bitrate look better still.
+        let (resolution, video_kbps, struggle) = match self {
+            Self::Performance => (Resolution::P720, 3000, Struggle::Smoothness),
+            Self::Quality => (Resolution::P1440, 8000, Struggle::Sharpness),
         };
         Quality {
             resolution,
-            frame_rate,
+            frame_rate: 30,
             video_kbps,
-            audio_kbps,
+            audio_kbps: 128,
+            struggle,
         }
     }
 }
@@ -586,6 +736,24 @@ impl Default for ShareDefaults {
 impl ShareDefaults {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Choices saved with the four presets before Performance and Quality: Sharp text becomes
+    /// Quality, the lighter three Performance, and anything adjusted stays as it was.
+    pub fn upgraded(mut self) -> Self {
+        let q = self.quality;
+        let old = (q.resolution, q.frame_rate, q.video_kbps, q.audio_kbps);
+        let preset = match old {
+            (Resolution::P1080, 30, 4500, 128) => Some(Preset::Quality),
+            (Resolution::P480, 30, 1200, 64)
+            | (Resolution::P720, 30, 2500, 128)
+            | (Resolution::P720, 60, 4000, 128) => Some(Preset::Performance),
+            _ => None,
+        };
+        if let Some(preset) = preset.filter(|_| q.struggle == Struggle::default()) {
+            self.quality = preset.quality();
+        }
+        self
     }
 }
 
@@ -769,6 +937,8 @@ pub struct Publisher {
     fast_capture: bool,
     /// Whether hardware AV1 is offered to viewers, once capture started.
     hardware_av1: bool,
+    /// A change to the running share the worker was too busy to take yet.
+    unsent: Option<publish_media::Live>,
 }
 
 impl Publisher {
@@ -793,27 +963,33 @@ impl Publisher {
             status: Status::default(),
             fast_capture: false,
             hardware_av1: false,
+            unsent: None,
         }
     }
     pub fn active(&self) -> bool {
         self.worker.is_some()
     }
     /// Says whether the experimental options that were asked for are the ones running.
-    fn experimental_note(&self) -> String {
+    /// The running share in a few words: who may watch, then the experimental options that
+    /// were asked for and whether they run ("Public · Hardware AV1 · Fast capture").
+    fn running_note(&self) -> String {
         let asked = |f: fn(&Options) -> bool| self.options.as_ref().is_some_and(f);
-        let av1 = match (asked(|o| o.hardware_av1), self.hardware_av1) {
-            (false, _) => "",
-            (true, true) => " Hardware AV1 encoding is on.",
-            (true, false) => {
-                " Hardware AV1 encoding is unavailable on this graphics card, so VP8 is used."
-            }
-        };
-        let capture = match (asked(|o| o.fast_capture), self.fast_capture) {
-            (false, _) => "",
-            (true, true) => " Fast capture is on.",
-            (true, false) => " Fast capture was unavailable, so standard capture is used.",
-        };
-        format!("{av1}{capture}")
+        let access = self
+            .options
+            .as_ref()
+            .map_or(Access::default(), |o| o.access);
+        let mut parts = vec![access.label()];
+        match (asked(|o| o.hardware_av1), self.hardware_av1) {
+            (false, _) => {}
+            (true, true) => parts.push("Hardware AV1"),
+            (true, false) => parts.push("VP8, AV1 unavailable"),
+        }
+        match (asked(|o| o.fast_capture), self.fast_capture) {
+            (false, _) => {}
+            (true, true) => parts.push("Fast capture"),
+            (true, false) => parts.push("Standard capture"),
+        }
+        parts.join(" · ")
     }
     #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
     /// Starts a stand-in share; it runs for as long as the returned value is held.
@@ -893,6 +1069,7 @@ impl Publisher {
     }
     pub fn stop(&mut self, detail: &str) {
         self.worker = None;
+        self.unsent = None;
         self.options = None;
         self.requests.clear();
         self.viewers.clear();
@@ -927,6 +1104,7 @@ impl Publisher {
     }
     pub fn reset(&mut self) {
         self.worker = None;
+        self.unsent = None;
         self.options = None;
         self.id = None;
         self.setup = None;
@@ -940,6 +1118,37 @@ impl Publisher {
         self.pending.clear();
         self.status = Status::default();
         self.emit();
+    }
+    /// Changes system audio and quality while sharing, without starting again. Source and
+    /// access stay as they started.
+    pub fn configure(&mut self, live: publish_media::Live) -> Result<()> {
+        live.quality.validate()?;
+        let options = self
+            .options
+            .as_mut()
+            .ok_or_else(|| anyhow!("Sharing has stopped"))?;
+        if options.audio == live.audio && options.quality == live.quality {
+            return Ok(());
+        }
+        ensure!(self.worker.is_some(), "Sharing has stopped");
+        options.audio = live.audio.clone();
+        options.quality = live.quality;
+        // A slider sends many changes; only the newest matters, and a busy worker gets it later.
+        self.unsent = Some(live);
+        self.send_configuration();
+        Ok(())
+    }
+    fn send_configuration(&mut self) {
+        let (Some(worker), Some(live)) = (&self.worker, self.unsent.take()) else {
+            return;
+        };
+        match worker.input.try_send(publish_media::Input::Configure(live)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(publish_media::Input::Configure(live))) => {
+                self.unsent = Some(live);
+            }
+            Err(_) => {}
+        }
     }
     fn warn(&self, detail: String) {
         let _ = self.events.try_send(client::Event::Warning {
@@ -1084,17 +1293,7 @@ impl Publisher {
             }
             self.id = Some(id.clone());
             self.setup = None;
-            self.status.detail = if self
-                .options
-                .as_ref()
-                .is_some_and(|o| o.access == Access::Public)
-            {
-                "Public stream · viewers in your channel join automatically."
-            } else {
-                "Private stream · approve viewers below."
-            }
-            .to_owned()
-                + &self.experimental_note();
+            self.status.detail = self.running_note();
             let _ = self
                 .events
                 .try_send(client::Event::Recovered(Source::StreamPublish));
@@ -1232,6 +1431,7 @@ impl Publisher {
             self.stop("Stopped sharing");
             return;
         }
+        self.send_configuration();
         if self.active() && self.id.is_none() && self.started.elapsed() > Duration::from_secs(60) {
             self.fail("Screen sharing did not start. Check capture permission and try again.");
         }
@@ -1328,6 +1528,7 @@ impl Publisher {
                 self.status.audio_level = level;
                 self.emit();
             }
+            publish_media::Output::Warning(detail) => self.warn(detail),
             publish_media::Output::Failed(error) => return Err(anyhow!(error)),
         }
         Ok(())

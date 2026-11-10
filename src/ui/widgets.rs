@@ -530,6 +530,67 @@ pub fn field(
     input.build(k)
 }
 
+/// A choice of a few, side by side: each an icon and a word, the chosen one raised with its
+/// icon in the accent colour. `label` names the choice for screen readers.
+pub fn choice(
+    t: &Theme,
+    key: &str,
+    label: &str,
+    options: Vec<(&'static Icon, &'static str, Message)>,
+    selected: Option<usize>,
+) -> El {
+    let mut group = row()
+        .key(key.to_owned())
+        .role("radiogroup")
+        .label(label.to_owned())
+        .equal_columns(options.len())
+        .h(size::CONTROL + 4.0)
+        .padding(2.0)
+        .gap(2.0)
+        .radius(radius::CONTROL)
+        .fill(t.recess)
+        .border(1.0, t.hairline);
+    for (index, (glyph, name, message)) in options.into_iter().enumerate() {
+        let on = selected == Some(index);
+        let mut option = row()
+            .key(format!("{key}-{index}"))
+            .role("radio")
+            .label(name)
+            .h_full()
+            .px(12.0)
+            .gap(6.0)
+            .center()
+            .radius(radius::CONTROL - 2.0)
+            .motion(motion::QUICK)
+            .child(
+                icon(glyph, 14.0)
+                    .color(if on { t.accent } else { t.muted })
+                    .a11y_hidden(),
+            )
+            .child(
+                text(name)
+                    .font(ty::LABEL)
+                    .color(if on { t.text } else { t.muted })
+                    .a11y_hidden(),
+            );
+        option = if on {
+            option
+                .fill(t.raised)
+                .border_gradient(1.0, t.bevel_top, t.bevel_bottom)
+        } else {
+            option
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .hover(t.wash(0.06))
+                .press(t.wash(0.10))
+                .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
+                .on_press_tx(send(message))
+        };
+        group = group.child(option);
+    }
+    group
+}
+
 /// A device or source picker. Options are shown by name; choosing one sends its index.
 #[allow(clippy::too_many_arguments)]
 pub fn picker(

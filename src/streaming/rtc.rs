@@ -253,6 +253,8 @@ mod native {
             let mut disconnected: Option<Instant> = None;
             let mut candidate_count = 0;
             let mut stats_request = None;
+            let mut health = crate::streaming::health::Tracker::default();
+            let mut last_audio_packets = 0;
             let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
             stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -314,7 +316,14 @@ mod native {
                     result = async { match &mut stats_request { Some(request) => request.await, None => std::future::pending().await } } => {
                         stats_request = None;
                         if let Ok(Ok(stats)) = result {
-                            let _ = output.try_send(Output::Stats(summarize_stats(&stats)));
+                            let (mut summary, counters, audio_packets) = summarize_stats(&stats);
+                            // Judged only once the picture plays: before that the phase says it.
+                            if first_frame {
+                                summary.media = health.update(Instant::now(), counters, disconnected.is_some());
+                            }
+                            summary.audio = audio_packets > last_audio_packets;
+                            last_audio_packets = audio_packets;
+                            let _ = output.try_send(Output::Stats(summary));
                         }
                     }
                 }
@@ -404,13 +413,33 @@ mod native {
         assert!(maximum <= 1, "maximum channel difference {maximum}");
     }
 
-    fn summarize_stats(stats: &[RtcStats]) -> Stats {
+    /// What the view shows, the counters [`health::Tracker`] reads, and the audio packets so far.
+    ///
+    /// [`health::Tracker`]: crate::streaming::health::Tracker
+    fn summarize_stats(stats: &[RtcStats]) -> (Stats, crate::streaming::health::Counters, u64) {
         let mut summary = Stats::default();
+        let mut counters = crate::streaming::health::Counters::default();
+        let audio_packets = stats
+            .iter()
+            .find_map(|stat| match stat {
+                RtcStats::InboundRtp(stat) if stat.stream.kind == "audio" => {
+                    Some(stat.received.packets_received)
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
         let inbound = stats.iter().find_map(|stat| match stat {
             RtcStats::InboundRtp(stat) if stat.stream.kind == "video" => Some(stat),
             _ => None,
         });
         if let Some(inbound) = inbound {
+            counters.video_packets = inbound.received.packets_received;
+            counters.packets_lost = inbound.received.packets_lost;
+            counters.frames_received = inbound.inbound.frames_received;
+            counters.frames_decoded = u64::from(inbound.inbound.frames_decoded);
+            counters.frames_dropped = u64::from(inbound.inbound.frames_dropped);
+            counters.freezes = inbound.inbound.freeze_count;
+            counters.decode_seconds = inbound.inbound.total_decode_time;
             summary.packets = inbound.received.packets_received;
             summary.bytes = inbound.inbound.bytes_received;
             summary.decoded_frames = inbound.inbound.frames_decoded as u64;
@@ -441,6 +470,11 @@ mod native {
             _ => None,
         });
         if let Some(pair) = pair {
+            // Media, control reports and the keepalive checks both ways all count as signs of life.
+            counters.link_packets = pair
+                .packets_received
+                .saturating_add(pair.responses_received)
+                .saturating_add(pair.requests_received);
             let local = stats.iter().find_map(|stat| match stat {
                 RtcStats::LocalCandidate(c) if c.rtc.id == pair.local_candidate_id => {
                     Some(&c.local_candidate)
@@ -465,7 +499,7 @@ mod native {
                 );
             }
         }
-        summary
+        (summary, counters, audio_packets)
     }
 
     #[cfg(test)]

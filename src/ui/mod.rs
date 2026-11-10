@@ -238,6 +238,8 @@ pub struct UiState {
     pub update_hover: bool,
     /// Whether the pointer is over the streams, which shows their toolbar.
     pub streams_hover: bool,
+    /// The share dialog shows its Advanced tab: resolution, frame rate and bitrates one by one.
+    pub share_advanced: bool,
     /// Whether the pointer is over the server log, which shows its search button.
     pub log_hover: bool,
     /// Whether the pointer is over the window's close button, which turns its glyph white.
@@ -285,6 +287,7 @@ impl Default for UiState {
             tile_drag: None,
             update_hover: false,
             streams_hover: false,
+            share_advanced: false,
             log_hover: false,
             #[cfg(windows)]
             close_hover: false,

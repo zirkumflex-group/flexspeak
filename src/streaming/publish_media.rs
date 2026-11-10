@@ -22,6 +22,15 @@ pub enum Input {
     Add(PeerKey),
     Remove(PeerKey),
     Signal(PeerKey, protocol::Input),
+    /// Changes system audio and quality while the share runs.
+    Configure(Live),
+}
+
+/// What a running share can change without starting again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Live {
+    pub audio: Option<crate::audio::DeviceChoice>,
+    pub quality: super::publishing::Quality,
 }
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub enum Output {
@@ -40,6 +49,9 @@ pub enum Output {
         audio: u64,
         level: f32,
     },
+    /// Something went wrong that the share carries on without, such as system audio that
+    /// could not be opened after a change.
+    Warning(String),
     Failed(String),
 }
 pub struct Publisher {
@@ -175,7 +187,7 @@ pub fn start(options: Options) -> Result<Publisher> {
 mod native {
     use super::super::{
         MAX_CANDIDATES, camera,
-        publishing::{MAX_VIEWERS, Quality, SourceKind},
+        publishing::{MAX_VIEWERS, Quality, SourceKind, Struggle},
     };
     use super::*;
     use crate::audio::{self, RateConverter};
@@ -447,14 +459,56 @@ mod native {
         }
     }
 
+    /// Where shared system audio comes from; held for as long as it records.
+    #[expect(dead_code, reason = "only held, so that it keeps recording")]
+    enum Recording {
+        /// Everything played on one output.
+        Output(cpal::Stream),
+        /// Everything every other app plays (see `process_audio`).
+        #[cfg(target_os = "windows")]
+        Others(super::super::process_audio::Capture),
+    }
     struct SystemAudio {
-        _stream: cpal::Stream,
+        _recording: Recording,
         queue: Arc<ArrayQueue<[f32; 2]>>,
         errors: Arc<ArrayQueue<String>>,
         converter: RateConverter,
     }
     impl SystemAudio {
-        fn open(selected: &audio::DeviceChoice, active: Arc<AtomicBool>) -> Result<Self> {
+        /// Records `selected`. When that is the output this app plays to (`voice_output`), the
+        /// app's own voices and sounds are left out where the system allows: on Windows by
+        /// recording every other app instead, on macOS by the patched tap (vendor/cpal).
+        fn open(
+            selected: &audio::DeviceChoice,
+            voice_output: Option<&audio::DeviceChoice>,
+            active: Arc<AtomicBool>,
+        ) -> Result<Self> {
+            #[cfg(target_os = "windows")]
+            if voice_output.is_none_or(|voice| voice.id == selected.id) {
+                use super::super::process_audio;
+                let queue = Arc::new(ArrayQueue::new(process_audio::RATE as usize / 4));
+                let errors = Arc::new(ArrayQueue::new(4));
+                match process_audio::Capture::open(queue.clone(), errors.clone(), active.clone()) {
+                    Ok(capture) => {
+                        return Ok(Self {
+                            _recording: Recording::Others(capture),
+                            queue,
+                            errors,
+                            converter: RateConverter::new(
+                                process_audio::RATE,
+                                48000,
+                                2,
+                                process_audio::RATE as usize / 100,
+                            )?,
+                        });
+                    }
+                    Err(error) => tracing::warn!(
+                        "System audio without this app's sound is unavailable, sharing the whole output: {error:#}"
+                    ),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = voice_output;
             let device = audio::find_device(selected, false)?;
             // CPAL treats a duplex Mac endpoint as microphone input, never as loopback.
             #[cfg(target_os = "macos")]
@@ -487,7 +541,7 @@ mod native {
             )?;
             stream.play()?;
             Ok(Self {
-                _stream: stream,
+                _recording: Recording::Output(stream),
                 queue,
                 errors,
                 converter,
@@ -529,7 +583,7 @@ mod native {
     #[cfg(target_os = "macos")]
     pub(super) fn request_system_audio_access(device: audio::DeviceChoice) -> Result<()> {
         // Starting tap I/O triggers macOS consent. A false flag discards every callback sample.
-        let access = SystemAudio::open(&device, Arc::new(AtomicBool::new(false)))?;
+        let access = SystemAudio::open(&device, None, Arc::new(AtomicBool::new(false)))?;
         drop(access);
         Ok(())
     }
@@ -772,11 +826,20 @@ mod native {
         let wire = offer.to_string();
         protocol::offer(&wire)?;
         peer.pc.set_local_description(offer).await?;
-        for sender in peer.pc.senders() {
+        limit(&peer.pc, quality)?;
+        Ok((peer, wire))
+    }
+    /// Caps one viewer's video and audio at the share's quality. Also used while the share
+    /// runs, so a changed bitrate or frame rate reaches viewers already watching.
+    fn limit(pc: &PeerConnection, quality: Quality) -> Result<()> {
+        for sender in pc.senders() {
             let video = matches!(sender.track(), Some(MediaStreamTrack::Video(_)));
             let mut params = sender.parameters();
             if video {
-                params.set_degradation_preference(DegradationPreference::MaintainResolution);
+                params.set_degradation_preference(match quality.struggle {
+                    Struggle::Sharpness => DegradationPreference::MaintainResolution,
+                    Struggle::Smoothness => DegradationPreference::MaintainFramerate,
+                });
             }
             for encoding in &mut params.encodings {
                 encoding.max_bitrate = Some(if video {
@@ -790,7 +853,33 @@ mod native {
             }
             sender.set_parameters(params)?;
         }
-        Ok((peer, wire))
+        Ok(())
+    }
+    /// The tick that checks the share and moves system audio along: often while there is
+    /// audio to move, otherwise once a second.
+    fn audio_tick(audio: bool) -> tokio::time::Interval {
+        let mut tick = tokio::time::interval(if audio {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_secs(1)
+        });
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick
+    }
+    fn frame_interval(quality: Quality) -> Duration {
+        Duration::from_secs_f64(1.0 / f64::from(quality.fps()))
+    }
+    fn frame_tick(quality: Quality) -> tokio::time::Interval {
+        let mut tick = tokio::time::interval(frame_interval(quality));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick
+    }
+    /// Packs a largest size into one atomic, so the capture callback reads it without a lock.
+    fn pack((width, height): (u32, u32)) -> u64 {
+        (u64::from(width) << 32) | u64::from(height)
+    }
+    fn unpack(size: u64) -> (u32, u32) {
+        ((size >> 32) as u32, size as u32)
     }
     pub async fn run(
         options: Options,
@@ -821,10 +910,14 @@ mod native {
         // without system audio still negotiates this track and simply never feeds it.
         let audio = NativeAudioSource::new(AudioSourceOptions::default(), 48000, 2, 50);
         let audio_track = factory.create_audio_track("system-audio", audio.clone());
-        let quality = options.quality;
+        let mut quality = options.quality;
         quality.validate()?;
         let max_size = quality.max_size();
-        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(quality.fps()));
+        #[cfg(target_os = "windows")]
+        let first_interval = frame_interval(quality);
+        // The largest picture, which a quality change can move while the share runs.
+        let largest = Arc::new(std::sync::atomic::AtomicU64::new(pack(max_size)));
+        let capture_largest = largest.clone();
         let latest = Arc::new(Mutex::new(None));
         let failure = Arc::new(Mutex::new(None));
         let slot = latest.clone();
@@ -855,7 +948,7 @@ mod native {
                 stride,
                 width,
                 height,
-                max_size,
+                unpack(capture_largest.load(Ordering::Relaxed)),
                 &mut intermediate.lock().unwrap(),
             ) {
                 Ok(buffer) => *slot.lock().unwrap() = Some(buffer),
@@ -874,7 +967,7 @@ mod native {
                 _ => None,
             };
             if let Some(target) = target {
-                match crate::streaming::wgc::Capture::open(target, max_size, frame_interval) {
+                match crate::streaming::wgc::Capture::open(target, max_size, first_interval) {
                     Ok(started) => fast = Some(started),
                     Err(error) => {
                         tracing::warn!(
@@ -936,10 +1029,10 @@ mod native {
             });
             capture = Some(desktop);
         }
-        let mut system_audio = options
-            .audio
+        let mut audio_device = options.audio.clone();
+        let mut system_audio = audio_device
             .as_ref()
-            .map(|device| SystemAudio::open(device, active.clone()))
+            .map(|device| SystemAudio::open(device, options.voice_output.as_ref(), active.clone()))
             .transpose()?;
         let (callbacks, mut callback_rx) = mpsc::channel(128);
         let overflow = Arc::new(AtomicBool::new(false));
@@ -959,14 +1052,8 @@ mod native {
         let mut frames = 0;
         let mut audio_frames = 0;
         let mut level = 0.0_f32;
-        let mut tick = tokio::time::interval(if system_audio.is_some() {
-            Duration::from_millis(10)
-        } else {
-            Duration::from_secs(1)
-        });
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut video_tick = tokio::time::interval(frame_interval);
-        video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut tick = audio_tick(system_audio.is_some());
+        let mut video_tick = frame_tick(quality);
         let result = async {
             loop {
                 if !active.load(Ordering::Acquire) { return Ok(()); }
@@ -992,6 +1079,40 @@ mod native {
                                 }));
                             },
                             Input::Remove(id) => { peers.remove(&id); adding.remove(&id); },
+                            Input::Configure(live) => {
+                                if live.audio != audio_device {
+                                    // The old capture goes first, so the same device can reopen.
+                                    system_audio = None;
+                                    audio_device = live.audio;
+                                    if let Some(device) = &audio_device {
+                                        match SystemAudio::open(device, options.voice_output.as_ref(), active.clone()) {
+                                            Ok(opened) => system_audio = Some(opened),
+                                            Err(error) => {
+                                                audio_device = None;
+                                                emit(events, Output::Warning(format!("System audio could not be turned on: {error:#}")))?;
+                                            }
+                                        }
+                                    }
+                                    tick = audio_tick(system_audio.is_some());
+                                    level = 0.0;
+                                }
+                                if live.quality != quality && live.quality.validate().is_ok() {
+                                    quality = live.quality;
+                                    largest.store(pack(quality.max_size()), Ordering::Relaxed);
+                                    video_tick = frame_tick(quality);
+                                    #[cfg(target_os = "windows")]
+                                    if let Some(fast) = &mut fast {
+                                        fast.reconfigure(quality.max_size(), frame_interval(quality))?;
+                                        // The last frame may be larger than the new limit.
+                                        fast_frame = None;
+                                    }
+                                    for (id, peer) in &peers {
+                                        if let Err(error) = limit(&peer.pc, quality) {
+                                            tracing::warn!("Could not apply the new quality to viewer {id:?}: {error:#}");
+                                        }
+                                    }
+                                }
+                            },
                             Input::Signal(id,input) => {
                                 if let Some(Err(error)) = peers.get_mut(&id).map(|peer| signal(peer,id,input,&mut negotiating)) {
                                     leave(&mut peers, id, events, &error)?;
@@ -1142,21 +1263,28 @@ mod native {
                 1920 * 4,
                 1920,
                 1080,
-                super::super::super::publishing::Preset::Sharp
+                super::super::super::publishing::Preset::Quality
                     .quality()
                     .max_size(),
             );
-            assert_eq!(full.map(|b| (b.width(), b.height())).unwrap(), (1920, 1080));
-            let saver = video_buffer(
+            assert_eq!(
+                full.map(|b| (b.width(), b.height())).unwrap(),
+                (1920, 1080),
+                "never enlarged"
+            );
+            let performance = video_buffer(
                 &pixels,
                 1920 * 4,
                 1920,
                 1080,
-                super::super::super::publishing::Preset::Saver
+                super::super::super::publishing::Preset::Performance
                     .quality()
                     .max_size(),
             );
-            assert_eq!(saver.map(|b| (b.width(), b.height())).unwrap(), (852, 480));
+            assert_eq!(
+                performance.map(|b| (b.width(), b.height())).unwrap(),
+                (1280, 720)
+            );
         }
 
         /// The codec name of the first payload type on the SDP's video line.

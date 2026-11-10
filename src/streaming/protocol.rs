@@ -265,7 +265,7 @@ mod tests {
             ("accessibility", "3"),
             ("mode", "1"),
             ("viewer_limit", "4"),
-            ("bitrate", "2500"),
+            ("bitrate", "8000"),
         ] {
             assert_eq!(args[0][key], value);
         }

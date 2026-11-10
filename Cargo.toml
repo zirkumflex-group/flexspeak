@@ -7,7 +7,7 @@ description = "A minimal native TeamSpeak voice client"
 
 [workspace]
 members = ["."]
-exclude = ["vendor/tsclientlib"]
+exclude = ["vendor/cpal", "vendor/tsclientlib"]
 
 [dependencies]
 anyhow = "1"
@@ -64,8 +64,11 @@ tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Experimental fast capture (src/streaming/wgc.rs): Windows Graphics Capture and the D3D11
-# video processor. The same version Rune, wgpu and cpal already build.
-windows = { version = "0.62", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture"] }
+# video processor. Also shared system audio without the app's own sound
+# (src/streaming/process_audio.rs). The same version Rune, wgpu and cpal already build.
+windows = { version = "0.62", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture"] }
+# Named for `#[implement]`, which expands to paths in it (process_audio's completion handler).
+windows-core = "0.62"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
@@ -90,3 +93,5 @@ webrtc-sys-build = "=0.3.21"
 [patch.crates-io]
 webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "6469898101c8cfa7fdda0215246eba52bc46778a" }
 webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "6469898101c8cfa7fdda0215246eba52bc46778a" }
+# cpal with the macOS loopback tap leaving the app's own sound out (vendor/cpal/FLEXSPEAK-PATCH.md).
+cpal = { path = "vendor/cpal" }
