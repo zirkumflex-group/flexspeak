@@ -95,6 +95,8 @@ pub const SCENES: &[Scene] = &[
     ("poke", poke),
     ("poked", poked),
     ("share", share),
+    ("share-advanced", share_advanced),
+    ("share-custom", share_custom),
     ("share-quick", share_quick),
     ("share-quick-no-game", share_quick_no_game),
     ("share-quick-streams", share_quick_streams),
@@ -106,6 +108,8 @@ pub const SCENES: &[Scene] = &[
         sharing_stream_options_unavailable,
     ),
     ("sharing-alone", sharing_alone),
+    ("sharing-sound", sharing_sound),
+    ("sharing-audio-off", sharing_audio_off),
     ("watching", watching),
     ("watching-solo", watching_solo),
     ("watching-solo-hover", watching_solo_hover),
@@ -123,6 +127,23 @@ pub const SCENES: &[Scene] = &[
     ("watching-grid", watching_grid),
     ("watching-focus", watching_focus),
     ("watching-stats", watching_stats),
+    ("watching-trouble-yours", watching_trouble_yours),
+    ("watching-trouble-streamer", watching_trouble_streamer),
+    ("watching-trouble-between", watching_trouble_between),
+    ("watching-trouble-paused", watching_trouble_paused),
+    ("watching-trouble-computer", watching_trouble_computer),
+    (
+        "watching-trouble-reconnecting",
+        watching_trouble_reconnecting,
+    ),
+    (
+        "watching-trouble-streamer-reconnecting",
+        watching_trouble_streamer_reconnecting,
+    ),
+    ("watching-trouble-thumbnail", watching_trouble_thumbnail),
+    ("watching-trouble-hover", watching_trouble_hover),
+    ("watching-loud", watching_loud),
+    ("sharing-live-audio", sharing_live_audio),
     ("install", install),
     ("password", password),
     ("alert", alert),
@@ -1173,21 +1194,45 @@ fn share(s: &mut App) {
     s.server_mut().streaming.share_open = true;
 }
 
+/// Every value one by one, and what gives way when the connection struggles.
+fn share_advanced(s: &mut App) {
+    share(s);
+    s.ui.share_advanced = true;
+}
+
+/// A value changed on the Advanced tab: the simple tab picks neither preset and says so.
+fn share_custom(s: &mut App) {
+    share(s);
+    s.server_mut().streaming.sharing.quality.frame_rate = 60;
+}
+
+/// Sharing with system audio going out: the sound button is lit and the meter moves.
+fn sharing_sound(s: &mut App) {
+    sharing(s);
+    let status = &mut s.server_mut().streaming.sharing.status;
+    status.audio_frames = 1200;
+    status.audio_level = 0.45;
+}
+
+/// Sharing without system audio: the sound button is off and there is no meter.
+fn sharing_audio_off(s: &mut App) {
+    sharing(s);
+    s.server_mut().streaming.sharing.audio = false;
+}
+
 /// The open "You are sharing" dialog says that AV1 and fast capture are both in use.
 fn sharing_stream_options(s: &mut App) {
     sharing(s);
     let sharing = &mut s.server_mut().streaming;
     sharing.share_open = true;
-    sharing.sharing.status.detail =
-        "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is on. Fast capture is on.".into();
+    sharing.sharing.status.detail = "Public · Hardware AV1 · Fast capture".into();
 }
 
 /// AV1 and fast capture were asked for but are unavailable: the dialog says what runs.
 fn sharing_stream_options_unavailable(s: &mut App) {
     sharing_stream_options(s);
     s.server_mut().streaming.sharing.status.detail =
-        "Public stream · viewers in your channel join automatically. Hardware AV1 encoding is unavailable on this graphics card, so VP8 is used. Fast capture was unavailable, so standard capture is used."
-            .into();
+        "Public · VP8, AV1 unavailable · Standard capture".into();
 }
 
 /// Your share is the only one in the channel: the pane says so in place of its empty state.
@@ -1202,7 +1247,7 @@ fn sharing(s: &mut App) {
     let status = &mut s.server_mut().streaming.sharing.status;
     status.active = true;
     status.live = true;
-    status.detail = "Sharing Built-in Retina Display · 720p · 30 fps".into();
+    status.detail = "Private · Fast capture".into();
     status.viewers = vec![(2, "Mara".into(), true)];
     status.requests = vec![(4, "Ines".into())];
 }
@@ -1424,7 +1469,7 @@ fn sharing_watching(s: &mut App) {
     let status = &mut s.server_mut().streaming.sharing.status;
     status.active = true;
     status.live = true;
-    status.detail = "Sharing Built-in Retina Display · 720p · 30 fps".into();
+    status.detail = "Private · Fast capture".into();
     status.viewers = vec![(2, "Mara".into(), true)];
 }
 
@@ -1444,6 +1489,115 @@ fn watching_focus(s: &mut App) {
     watching_grid(s);
     s.server_mut().streaming.focused = Some("s2".into());
     s.server_mut().streaming.set_volume(4, 40);
+}
+
+/// One watched stream's picture reads as `media`.
+fn stream_media(s: &mut App, slot: usize, media: crate::streaming::health::Media) {
+    if let Some(watch) = s
+        .server_mut()
+        .streaming
+        .watching
+        .iter_mut()
+        .find(|watch| watch.slot == slot)
+    {
+        watch.stats.media = media;
+    }
+}
+
+/// A poor reading that has lasted past the hold, so it shows.
+fn poor_reading() -> usage::ConnectionUsage {
+    usage::ConnectionUsage {
+        ping_ms: Some(240.0),
+        ping_deviation_ms: Some(60.0),
+        packet_loss_in: Some(6.0),
+        packet_loss_out: Some(4.0),
+        ..Default::default()
+    }
+}
+
+fn steady(health: usage::Health) -> usage::SteadyHealth {
+    let mut steady = usage::SteadyHealth::default();
+    let now = Instant::now();
+    steady.update(health, now - Duration::from_secs(10));
+    steady.update(health, now);
+    steady
+}
+
+/// Your own connection struggles too: the stream's trouble is put on your side.
+fn watching_trouble_yours(s: &mut App) {
+    watching_solo(s);
+    s.server_mut().connection_usage = poor_reading();
+    s.server_mut().connection_health = steady(usage::Health::Poor);
+    stream_media(s, 0, crate::streaming::health::Media::Choppy);
+}
+
+/// Mara's connection to the server struggles: the trouble is put on the streamer's side.
+fn watching_trouble_streamer(s: &mut App) {
+    watching_solo(s);
+    s.server_mut().client_usage.insert(
+        2,
+        Ok(usage::ServerUsage::preview(poor_reading(), Instant::now())),
+    );
+    s.server_mut()
+        .client_health
+        .insert(2, steady(usage::Health::Poor));
+    stream_media(s, 0, crate::streaming::health::Media::Choppy);
+}
+
+/// Both server connections are fine, yet the stream stutters.
+fn watching_trouble_between(s: &mut App) {
+    watching_solo(s);
+    stream_media(s, 0, crate::streaming::health::Media::Choppy);
+}
+
+/// The connection is alive but no new picture arrives.
+fn watching_trouble_paused(s: &mut App) {
+    watching_solo(s);
+    stream_media(s, 0, crate::streaming::health::Media::Paused);
+}
+
+/// Frames arrive but this computer drops them.
+fn watching_trouble_computer(s: &mut App) {
+    watching_solo(s);
+    stream_media(s, 0, crate::streaming::health::Media::Decoding);
+}
+
+/// The connection dropped and is trying to recover; neither side's server link explains it.
+fn watching_trouble_reconnecting(s: &mut App) {
+    watching_solo(s);
+    stream_media(s, 0, crate::streaming::health::Media::Reconnecting);
+}
+
+fn watching_trouble_streamer_reconnecting(s: &mut App) {
+    watching_trouble_streamer(s);
+    stream_media(s, 0, crate::streaming::health::Media::Reconnecting);
+}
+
+/// With the pointer over the streams, the sign steps below the floating toolbar.
+fn watching_trouble_hover(s: &mut App) {
+    watching_trouble_yours(s);
+    s.ui.streams_hover = true;
+}
+
+/// Trouble on a small tile under the stage shows the sign alone.
+fn watching_trouble_thumbnail(s: &mut App) {
+    watching_five_below(s);
+    stream_media(s, 2, crate::streaming::health::Media::Paused);
+    stream_media(s, 1, crate::streaming::health::Media::Choppy);
+}
+
+/// A quiet streamer turned up past 100%, with the bar showing.
+fn watching_loud(s: &mut App) {
+    watching_solo_hover(s);
+    s.server_mut().streaming.set_volume(2, 250);
+}
+
+/// The open "You are sharing" dialog with system audio on: quality and sound change live.
+fn sharing_live_audio(s: &mut App) {
+    sharing_stream_options(s);
+    s.server_mut().streaming.sharing.audio = true;
+    s.server_mut().streaming.sharing.status.audio_frames = 1200;
+    s.server_mut().streaming.sharing.status.audio_level = 0.4;
 }
 
 fn watching_stats(s: &mut App) {
@@ -1805,7 +1959,7 @@ mod tests {
 
     #[test]
     fn sharing_dialog_fits_small_windows_and_keeps_actions_visible_while_scrolling() {
-        let mut rt = runtime(share, crate::MIN_SIZE);
+        let mut rt = runtime(share_advanced, crate::MIN_SIZE);
         for _ in 0..30 {
             rt.frame(1.0 / 60.0);
         }
@@ -1838,7 +1992,7 @@ mod tests {
     }
 
     #[test]
-    fn share_quality_controls_are_independent_validate_and_lock_while_live() {
+    fn share_quality_controls_are_independent_validate_and_change_live() {
         use crate::Message;
         use crate::streaming::publishing::{Access, Preset, Resolution};
         let mut rt = runtime(share, (900.0, 790.0));
@@ -1863,13 +2017,19 @@ mod tests {
             !s.server().streaming.sharing.audio,
             "Camera selection must not unexpectedly share system sound"
         );
+        // While live, quality and sound change at once; what is shared and who may watch stay.
         s.server_mut().streaming.sharing.status.active = true;
-        let _ = s.update(Message::ShareQuality(Preset::Saver.quality()));
+        let _ = s.update(Message::ShareQuality(Preset::Performance.quality()));
+        let _ = s.update(Message::ShareAudio(true));
         let _ = s.update(Message::ShareAccess(Access::Private));
         let _ = s.update(Message::ShareSource(
             s.server().streaming.sharing.sources[0].clone(),
         ));
-        assert_eq!(s.server().streaming.sharing.quality, quality);
+        assert_eq!(
+            s.server().streaming.sharing.quality,
+            Preset::Performance.quality()
+        );
+        assert!(s.server().streaming.sharing.audio);
         assert_eq!(s.server().streaming.sharing.access, Access::Public);
         assert_eq!(s.server().streaming.sharing.selected, Some(camera));
     }

@@ -8,17 +8,17 @@
 //! Disconnect, in [`share_dialog`].
 
 use rune::{Color, Cx, Drag, El, Phase, SurfaceFit, Transition, Tx, col, el, icon, row, text};
-use rune_kit::{Checkbox, Dialog, Kit};
+use rune_kit::{Checkbox, Dialog, Kit, SegmentedControl};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Range, Variant, button, faint, icon_button, lit_dot, meter, muted, picker, pulse, scroll_page,
-    slider,
+    Range, Variant, button, choice, divider, faint, icon_button, lit_dot, meter, muted, picker,
+    pulse, scroll_page, slider,
 };
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
-    self, Strip, Watching,
-    publishing::{Access, Preset, PreviewState, Resolution, ShareSource, SourceKind},
+    self, Strip, Watching, health,
+    publishing::{Access, Preset, PreviewState, Resolution, ShareSource, SourceKind, Struggle},
 };
 use crate::{App, Message, usage};
 
@@ -393,7 +393,8 @@ fn notice(t: &Theme) -> El {
 /// Your own share while it runs, for the voice panel: viewers, requests to watch, and the way to
 /// stop. The source comes last so a narrow sidebar only loses the end of it.
 pub fn sharing_status(s: &App, t: &Theme) -> El {
-    let status = &s.server().streaming.sharing.status;
+    let sharing = &s.server().streaming.sharing;
+    let status = &sharing.status;
     let mut tile = col()
         .key("sharing-status")
         .w_full()
@@ -417,11 +418,12 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
                         .min_w(0.0)
                         .truncate_fade(),
                 )
+                .child(share_audio_toggle(t, sharing))
                 .child(icon_button(
                     t,
                     "manage-share",
-                    &icons::INFO,
-                    "Sharing details",
+                    &icons::SETTINGS,
+                    "Stream settings: Performance or Quality, audio, and who watches",
                     Variant::Ghost,
                     Some(Message::OpenShare),
                 ))
@@ -435,13 +437,74 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
                 )),
         )
         .child(faint(t, share_summary(s)).truncate_fade());
-    if status.audio_frames > 0 {
+    if sharing.audio && status.audio_frames > 0 {
         tile = tile.child(meter(t, "share-audio", status.audio_level.min(1.0), t.live));
     }
     for (id, name) in &status.requests {
         tile = tile.child(request_row(t, status, *id, name));
     }
     tile
+}
+
+/// Whether your share sends system audio, lit while it does; a press turns it on or off
+/// without stopping the share.
+fn share_audio_toggle(t: &Theme, sharing: &streaming::publishing::Ui) -> El {
+    let on = sharing.audio;
+    let help = if !on {
+        "System audio is not shared. Share it"
+    } else if sharing.status.audio_level > 0.01 {
+        "Sharing system audio: sound is going out. Stop sharing it"
+    } else {
+        "Sharing system audio: nothing is playing right now. Stop sharing it"
+    };
+    icon_button(
+        t,
+        "share-audio-toggle",
+        if on {
+            &icons::VOLUME_2
+        } else {
+            &icons::VOLUME_OFF
+        },
+        help,
+        if on { Variant::Active } else { Variant::Ghost },
+        Some(Message::ShareAudio(!on)),
+    )
+}
+
+/// A request to watch on one line, for the wide share dialog.
+fn request_inline(t: &Theme, status: &streaming::publishing::Status, id: u16, name: &str) -> El {
+    row()
+        .key(format!("request-{id}"))
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .transition(Transition::opacity().combined(Transition::scale(0.98)))
+        .child(pulse(t.fair))
+        .child(
+            text(format!("{name} wants to watch"))
+                .font(ty::BODY)
+                .color(t.text)
+                .grow(1.0)
+                .min_w(0.0)
+                .truncate_fade(),
+        )
+        .child(button(
+            t,
+            "allow",
+            "Allow",
+            None,
+            Variant::Primary,
+            (status.viewers.len() < streaming::publishing::MAX_VIEWERS)
+                .then_some(Message::DecideViewer(id, true)),
+        ))
+        .child(button(
+            t,
+            "deny",
+            "Deny",
+            None,
+            Variant::Secondary,
+            Some(Message::DecideViewer(id, false)),
+        ))
 }
 
 fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name: &str) -> El {
@@ -891,6 +954,25 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
     if s.server().streaming.show_stats && mode != Mode::Thumbnail {
         video = video.child(stats(s, watch).absolute(10.0, 10.0));
     }
+    if let Some(problem) = s.stream_problem(watch) {
+        video = video.child(
+            row()
+                .key("trouble-corner")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .padding(if mode == Mode::Thumbnail { 6.0 } else { 10.0 })
+                // Below the toolbar that floats over the top right while the pointer is here.
+                .pt(if s.ui.streams_hover && mode != Mode::Thumbnail {
+                    TOOLS_CLEARANCE
+                } else if mode == Mode::Thumbnail {
+                    6.0
+                } else {
+                    10.0
+                })
+                .child(el().grow(1.0))
+                .child(trouble(t, problem, mode == Mode::Thumbnail)),
+        );
+    }
     if mode == Mode::Grid {
         video = video.child(
             row()
@@ -1097,6 +1179,14 @@ fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, 
     )
 }
 
+/// A stream's volume slider: up to 300%, remembered for each streamer.
+const STREAM_VOLUME: Range = Range {
+    min: 0,
+    max: streaming::MAX_VOLUME as i32,
+    step: 1,
+    key_step: 5,
+};
+
 /// Under a stream: who and what, its volume, focus and stop.
 fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -> El {
     let id = watch.stream.id.clone();
@@ -1137,7 +1227,8 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
                     .truncate_fade(),
                 ),
         );
-    if watch.stream.has_audio {
+    // A share can turn its audio on after it was announced without; audio arriving counts.
+    if watch.stream.has_audio || watch.stats.audio {
         bar = bar.child(icon_button(
             t,
             "stream-mute",
@@ -1152,10 +1243,7 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
                 "Mute stream"
             },
             Variant::Ghost,
-            Some(Message::StreamVolume(
-                publisher,
-                if volume == 0 { 100 } else { 0 },
-            )),
+            Some(Message::ToggleStreamMute(publisher)),
         ));
         // In a narrow box the name matters more; maximizing brings the slider back.
         if volume_slider {
@@ -1165,16 +1253,26 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
                 } else {
                     64.0
                 })
-                .child(slider(
-                    t,
-                    "stream-volume",
-                    "Stream volume",
-                    i32::from(volume),
-                    format!("{volume}%"),
-                    Range::PERCENT,
-                    move |s: &App| i32::from(s.server().streaming.volume(publisher)),
-                    move |value| Message::StreamVolume(publisher, value.clamp(0, 100) as u8),
-                )),
+                .child(
+                    slider(
+                        t,
+                        "stream-volume",
+                        "Stream volume",
+                        i32::from(volume),
+                        format!("{volume}%"),
+                        STREAM_VOLUME,
+                        move |s: &App| i32::from(s.server().streaming.volume(publisher)),
+                        move |value| {
+                            Message::StreamVolume(
+                                publisher,
+                                value.clamp(0, STREAM_VOLUME.max) as u16,
+                            )
+                        },
+                    )
+                    .help(format!(
+                        "Stream volume: {volume}%. Above 100% it is amplified."
+                    )),
+                ),
             );
         }
     }
@@ -1211,6 +1309,52 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
         Variant::Ghost,
         Some(Message::StopWatching(Some(id))),
     ))
+}
+
+/// How far a stream's trouble sign steps down while the toolbar floats over the top right.
+const TOOLS_CLEARANCE: f32 = 72.0;
+
+/// A stream's trouble over the top right of its picture: what is wrong and whose side it is
+/// most likely on, in a few words, with the reasoning in the tooltip. A small tile shows the
+/// sign alone.
+fn trouble(t: &Theme, problem: health::Problem, compact: bool) -> El {
+    use health::Trouble;
+    let glyph = match (problem.trouble, problem.reconnecting) {
+        (Trouble::YourComputer, _) => &icons::CPU,
+        (Trouble::StreamerPaused, _) => &icons::MONITOR_PAUSE,
+        (Trouble::Yours, false) => &icons::WIFI,
+        (Trouble::Yours, true) => &icons::WIFI_OFF,
+        (Trouble::Streamers, _) => &icons::SCREEN_SHARE,
+        (Trouble::Between, false) => &icons::TRIANGLE_ALERT,
+        (Trouble::Between, true) => &icons::ROTATE_CW,
+    };
+    let colour = if problem.serious() { t.poor } else { t.fair };
+    let help = format!(
+        "{}
+{}",
+        problem.label(),
+        problem.explanation()
+    );
+    let mut badge = row()
+        .key("trouble")
+        .gap(6.0)
+        .center_y()
+        .px(if compact { 4.0 } else { 9.0 })
+        .py(if compact { 4.0 } else { 5.0 })
+        .radius(radius::ROW)
+        .fill(Color::BLACK.alpha(0.62))
+        .help(help.clone())
+        .label(help)
+        .transition(Transition::opacity())
+        .child(icon(glyph, 14.0).color(colour));
+    if !compact {
+        badge = badge.child(
+            text(problem.label())
+                .font(ty::CAPTION)
+                .color(Color::WHITE.alpha(0.9)),
+        );
+    }
+    badge
 }
 
 /// Codec, size, frame rate and transport, over the corner of the picture.
@@ -1317,7 +1461,6 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
         return;
     }
     let sharing = &s.server().streaming.sharing;
-    let quality = sharing.quality;
     let status = &sharing.status;
     let mut menus = Vec::new();
     let height = cx
@@ -1326,24 +1469,38 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
     let actions;
     let mut body = col().key("share-body").w_full().px(16.0).pb(16.0).gap(14.0);
     if status.active {
-        body = body
-            .child(muted(t, status.detail.clone()))
-            .child(faint(
-                t,
-                format!(
-                    "{} / {} viewers · {} video frames · {} audio blocks",
+        // One line on what runs, then who watches, then the settings that change live.
+        let mut summary = row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(lit_dot(t.live))
+            .child(
+                text(format!(
+                    "{} / {} watching",
                     status.viewers.len(),
-                    streaming::publishing::MAX_VIEWERS,
-                    status.video_frames,
-                    status.audio_frames
-                ),
-            ))
-            .child(meter(
+                    streaming::publishing::MAX_VIEWERS
+                ))
+                .font(ty::BODY_STRONG)
+                .color(t.text),
+            );
+        if !status.detail.is_empty() {
+            summary = summary.child(
+                faint(t, format!("· {}", status.detail))
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .truncate_fade(),
+            );
+        }
+        body = body.child(summary);
+        if sharing.audio {
+            body = body.child(meter(
                 t,
                 "share-audio-level",
                 status.audio_level.min(1.0),
                 t.live,
             ));
+        }
         for (id, name, ready) in &status.viewers {
             body = body.child(
                 row()
@@ -1366,8 +1523,11 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
             );
         }
         for (id, name) in &status.requests {
-            body = body.child(request_row(t, status, *id, name));
+            body = body.child(request_inline(t, status, *id, name));
         }
+        body = body.child(divider(t));
+        // Quality and sound change while live; what is shared and who may watch stay.
+        body = audio_field(s, k, quality_fields(s, t, k, body, false, &mut menus));
         actions = row()
             .w_full()
             .gap(size::GAP)
@@ -1429,106 +1589,8 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                         (!sharing.loading).then_some(Message::RefreshShareSources),
                     )),
             )
-            .children(source_preview(s, t))
-            .child(field_label(t, "Preset"))
-            .child(preset_picker(s, k, &mut menus))
-            .child(
-                row()
-                    .w_full()
-                    .gap(16.0)
-                    .child(
-                        col()
-                            .grow(1.0)
-                            .min_w(0.0)
-                            .gap(10.0)
-                            .child(field_label(t, "Resolution"))
-                            .child(resolution_picker(s, k, &mut menus)),
-                    )
-                    .child(col().grow(1.0).min_w(0.0).child(quality_slider(
-                        t,
-                        "share-fps",
-                        "Frame rate",
-                        quality.frame_rate as i32,
-                        format!("{} fps", quality.frame_rate),
-                        Range { min: 5, max: 60, step: 1, key_step: 1 },
-                        |s: &App| s.server().streaming.sharing.quality.frame_rate as i32,
-                        |value| Message::ShareFrameRate(value as u32),
-                    ))),
-            )
-            .child(quality_slider(
-                t,
-                "share-video-bitrate",
-                "Video bitrate",
-                quality.video_kbps as i32,
-                format!("{} kbps", quality.video_kbps),
-                Range { min: 250, max: 20_000, step: 50, key_step: 50 },
-                |s: &App| s.server().streaming.sharing.quality.video_kbps as i32,
-                |value| Message::ShareVideoBitrate(value as u32),
-            ))
-            .child(faint(
-                t,
-                "Resolution, frame rate and bitrate are maximums. Actual quality depends on the source and connection. Bitrate is per viewer.",
-            ))
-            .child(field_label(t, "Who can watch"))
-            .child(picker(
-                k,
-                s,
-                "share-access",
-                Access::ALL.iter().map(|access| access.label().to_owned()).collect(),
-                Some(sharing.access.label()),
-                "Access",
-                true,
-                SHARE_PICKER,
-                |index| Message::ShareAccess(Access::ALL[index]),
-                &mut menus,
-            ))
-            .child(
-                Checkbox::new(sharing.audio)
-                    .label("Share system audio")
-                    .on_toggle_tx(move |s: &mut App, tx| {
-                        let next = !s.server().streaming.sharing.audio;
-                        dispatch(s, tx, Message::ShareAudio(next));
-                    })
-                    .build(k),
-            );
-        if sharing.audio {
-            let outputs: Vec<String> = s.devices.outputs.iter().map(|d| d.name.clone()).collect();
-            let current = sharing
-                .audio_device
-                .as_ref()
-                .or(s.devices.output.as_ref())
-                .map(|device| device.name.clone());
-            body = body
-                .child(picker(
-                    k,
-                    s,
-                    "share-output",
-                    outputs,
-                    current.as_deref(),
-                    "System audio output",
-                    true,
-                    SHARE_PICKER,
-                    {
-                        let outputs = s.devices.outputs.clone();
-                        move |index| Message::ShareAudioOutput(outputs[index].clone())
-                    },
-                    &mut menus,
-                ))
-                .child(quality_slider(
-                    t,
-                    "share-audio-bitrate",
-                    "Audio bitrate",
-                    quality.audio_kbps as i32,
-                    format!("{} kbps", quality.audio_kbps),
-                    Range { min: 32, max: 320, step: 16, key_step: 16 },
-                    |s: &App| s.server().streaming.sharing.quality.audio_kbps as i32,
-                    |value| Message::ShareAudioBitrate(value as u32),
-                ))
-                .child(faint(
-                    t,
-                    "Shares everything on this output, including notifications. Your microphone stays separate.",
-                ));
-        }
+            .children(source_preview(s, t));
+        body = audio_field(s, k, quality_fields(s, t, k, body, true, &mut menus));
         if !status.detail.is_empty() {
             body = body.child(muted(t, status.detail.clone()));
         }
@@ -1536,18 +1598,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
             .w_full()
             .gap(size::GAP)
             .center_y()
-            .child(
-                faint(
-                    t,
-                    if sharing.access == Access::Public {
-                        "Anyone in your channel can join. Up to four viewers."
-                    } else {
-                        "You approve each viewer. Up to four can watch."
-                    },
-                )
-                .grow(1.0)
-                .min_w(0.0),
-            )
+            .child(el().grow(1.0))
             .child(button(
                 t,
                 "cancel-share",
@@ -1604,27 +1655,209 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
     layer.extend(menus);
 }
 
-/// A preset fills all four quality values; any change after that reads "Custom".
-fn preset_picker(s: &App, k: &Kit, menus: &mut Vec<El>) -> El {
-    let label = |preset: Preset| format!("{} · {}", preset.label(), preset.quality().label());
-    let current = s
-        .server()
-        .streaming
-        .sharing
-        .quality
-        .preset()
-        .map_or_else(|| "Custom".to_owned(), label);
-    picker(
-        k,
-        s,
-        "share-quality",
-        Preset::ALL.into_iter().map(label).collect(),
-        Some(&current),
-        "Preset",
-        true,
-        SHARE_PICKER,
-        |index| Message::ShareQuality(Preset::ALL[index].quality()),
-        menus,
+/// Performance or Quality, and while choosing a share also who may watch at the far end,
+/// with one line saying what it sends and a toggle for every value one by one. Editing a value
+/// there makes the line read "Custom" until a preset is picked again.
+fn quality_fields(s: &App, t: &Theme, k: &Kit, body: El, privacy: bool, menus: &mut Vec<El>) -> El {
+    let sharing = &s.server().streaming.sharing;
+    let quality = sharing.quality;
+    let preset = quality.preset();
+    let advanced = s.ui.share_advanced;
+    let mut choices = row().w_full().gap(16.0).items_end().child(
+        col()
+            .gap(10.0)
+            .child(field_label(t, "Preset"))
+            .child(choice(
+                t,
+                "share-preset",
+                "Preset",
+                Preset::ALL
+                    .iter()
+                    .map(|p| {
+                        let glyph = match p {
+                            Preset::Performance => &icons::GAUGE,
+                            Preset::Quality => &icons::SPARKLES,
+                        };
+                        (glyph, p.label(), Message::ShareQuality(p.quality()))
+                    })
+                    .collect(),
+                Preset::ALL.iter().position(|p| Some(*p) == preset),
+            )),
+    );
+    if privacy {
+        // Set once and left alone, so it sits at the far end.
+        choices = choices.child(el().grow(1.0)).child(
+            col()
+                .gap(10.0)
+                .child(field_label(t, "Privacy"))
+                .child(choice(
+                    t,
+                    "share-privacy",
+                    "Privacy",
+                    Access::ALL
+                        .iter()
+                        .map(|access| {
+                            let glyph = match access {
+                                Access::Public => &icons::GLOBE,
+                                Access::Private => &icons::LOCK,
+                            };
+                            (glyph, access.label(), Message::ShareAccess(*access))
+                        })
+                        .collect(),
+                    Access::ALL.iter().position(|a| *a == sharing.access),
+                )),
+        );
+    }
+    let mut line = format!(
+        "{} · {} fps · up to {:.1} Mbit/s per viewer",
+        quality.resolution.label(),
+        quality.frame_rate,
+        quality.upload_mbps()
+    );
+    if preset.is_none() {
+        line = format!("Custom · {line}");
+    }
+    let body = body.child(choices).child(
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .mt(-6.0)
+            .child(faint(t, line).grow(1.0).min_w(0.0).truncate_fade())
+            .child(button(
+                t,
+                "share-advanced",
+                "Advanced",
+                Some(if advanced {
+                    &icons::CHEVRON_UP
+                } else {
+                    &icons::CHEVRON_DOWN
+                }),
+                Variant::Ghost,
+                Some(Message::ShareAdvanced(!advanced)),
+            )),
+    );
+    if advanced {
+        advanced_fields(s, t, k, body, menus)
+    } else {
+        body
+    }
+}
+
+/// Resolution, frame rate, bitrates, what gives way, and the audio output, one by one.
+fn advanced_fields(s: &App, t: &Theme, k: &Kit, body: El, menus: &mut Vec<El>) -> El {
+    let sharing = &s.server().streaming.sharing;
+    let quality = sharing.quality;
+    let mut body = body
+        .child(
+            row()
+                .w_full()
+                .gap(16.0)
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(10.0)
+                        .child(field_label(t, "Resolution"))
+                        .child(resolution_picker(s, k, menus)),
+                )
+                .child(col().grow(1.0).min_w(0.0).child(quality_slider(
+                    t,
+                    "share-fps",
+                    "Frame rate",
+                    quality.frame_rate as i32,
+                    format!("{} fps", quality.frame_rate),
+                    Range {
+                        min: 5,
+                        max: 60,
+                        step: 1,
+                        key_step: 1,
+                    },
+                    |s: &App| s.server().streaming.sharing.quality.frame_rate as i32,
+                    |value| Message::ShareFrameRate(value as u32),
+                ))),
+        )
+        .child(quality_slider(
+            t,
+            "share-video-bitrate",
+            "Video bitrate per viewer",
+            quality.video_kbps as i32,
+            format!("{} kbps", quality.video_kbps),
+            Range {
+                min: 250,
+                max: 20_000,
+                step: 50,
+                key_step: 50,
+            },
+            |s: &App| s.server().streaming.sharing.quality.video_kbps as i32,
+            |value| Message::ShareVideoBitrate(value as u32),
+        ))
+        .child(field_label(t, "When the connection struggles"))
+        .child(
+            SegmentedControl::new(
+                &Struggle::ALL.map(Struggle::label),
+                Struggle::ALL.iter().position(|s| *s == quality.struggle),
+            )
+            .label("When the connection struggles")
+            .on_pick(|s: &mut App, index, tx| {
+                dispatch(s, tx, Message::ShareStruggle(Struggle::ALL[index]));
+            })
+            .build(k),
+        );
+    if sharing.audio {
+        let outputs: Vec<String> = s.devices.outputs.iter().map(|d| d.name.clone()).collect();
+        let current = sharing
+            .audio_device
+            .as_ref()
+            .or(s.devices.output.as_ref())
+            .map(|device| device.name.clone());
+        body = body
+            .child(field_label(t, "System audio from"))
+            .child(picker(
+                k,
+                s,
+                "share-output",
+                outputs,
+                current.as_deref(),
+                "System audio output",
+                true,
+                SHARE_PICKER,
+                {
+                    let outputs = s.devices.outputs.clone();
+                    move |index| Message::ShareAudioOutput(outputs[index].clone())
+                },
+                menus,
+            ))
+            .child(quality_slider(
+                t,
+                "share-audio-bitrate",
+                "Audio bitrate per viewer",
+                quality.audio_kbps as i32,
+                format!("{} kbps", quality.audio_kbps),
+                Range {
+                    min: 32,
+                    max: 320,
+                    step: 16,
+                    key_step: 16,
+                },
+                |s: &App| s.server().streaming.sharing.quality.audio_kbps as i32,
+                |value| Message::ShareAudioBitrate(value as u32),
+            ));
+    }
+    body
+}
+
+/// Whether system audio is shared; Flexspeak's own voices and sounds are left out of it.
+fn audio_field(s: &App, k: &Kit, body: El) -> El {
+    let sharing = &s.server().streaming.sharing;
+    body.child(
+        Checkbox::new(sharing.audio)
+            .label("Share system audio")
+            .on_toggle_tx(move |s: &mut App, tx| {
+                let next = !s.server().streaming.sharing.audio;
+                dispatch(s, tx, Message::ShareAudio(next));
+            })
+            .build(k),
     )
 }
 

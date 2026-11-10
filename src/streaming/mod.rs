@@ -1,5 +1,8 @@
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod games;
+pub mod health;
+#[cfg(target_os = "windows")]
+mod process_audio;
 mod protocol;
 mod publish_media;
 pub mod publishing;
@@ -7,6 +10,7 @@ mod rtc;
 mod session;
 #[cfg(target_os = "windows")]
 mod wgc;
+pub use publish_media::Live as LiveShare;
 pub use publish_media::quick_sources as quick_share_sources;
 #[cfg(target_os = "macos")]
 pub use publish_media::request_system_audio_access;
@@ -71,6 +75,11 @@ pub struct Stats {
     pub fps: f64,
     pub width: u32,
     pub height: u32,
+    /// Whether the picture is in trouble, from its own counters (see [`health`]).
+    pub media: health::Media,
+    /// Whether stream audio arrives, so its volume control shows even when the share was
+    /// announced without audio and turned it on later.
+    pub audio: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +100,9 @@ pub enum Event {
         stats: Stats,
     },
 }
+
+/// The loudest a stream can be turned up, in percent.
+pub const MAX_VOLUME: u16 = 300;
 
 /// The most streams watched at once; each has its own picture and audio.
 pub const MAX_WATCHES: usize = 5;
@@ -130,8 +142,10 @@ pub struct View {
     pub show_stats: bool,
     /// The share dialog is open.
     pub share_open: bool,
-    /// Each publisher's stream volume in percent, kept for the session.
-    pub volumes: std::collections::HashMap<u16, u8>,
+    /// Each publisher's stream volume in percent. The app seeds it from the saved volumes.
+    pub volumes: std::collections::HashMap<u16, u16>,
+    /// The volume a muted stream had, to go back to when it is unmuted.
+    unmuted: std::collections::HashMap<u16, u16>,
     /// Generations stopped from this window, so a late state from them can't bring them back.
     stopped: u64,
     pub notice: String,
@@ -151,6 +165,7 @@ impl Default for View {
             show_stats: false,
             share_open: false,
             volumes: std::collections::HashMap::new(),
+            unmuted: std::collections::HashMap::new(),
             stopped: 0,
             notice: String::new(),
             surfaces: Arc::new(Surfaces::default()),
@@ -197,13 +212,27 @@ impl View {
         };
         self.focused = Some(replacement.to_owned());
     }
-    /// A watched stream's volume in percent; streams start at full volume.
-    pub fn volume(&self, publisher: u16) -> u8 {
+    /// A watched stream's volume in percent; streams start at 100%.
+    pub fn volume(&self, publisher: u16) -> u16 {
         self.volumes.get(&publisher).copied().unwrap_or(100)
     }
-    /// Sets a publisher's stream volume, and remembers it for the session.
-    pub fn set_volume(&mut self, publisher: u16, percent: u8) {
-        let percent = percent.min(100);
+    /// Mutes a stream, or brings it back to the volume it had.
+    pub fn toggle_mute(&mut self, publisher: u16) {
+        match self.volume(publisher) {
+            0 => {
+                let back = self.unmuted.remove(&publisher).unwrap_or(100);
+                self.set_volume(publisher, back);
+            }
+            volume => {
+                self.set_volume(publisher, 0);
+                self.unmuted.insert(publisher, volume);
+            }
+        }
+    }
+    /// Sets a publisher's stream volume, up to [`MAX_VOLUME`]; above 100% it is amplified.
+    pub fn set_volume(&mut self, publisher: u16, percent: u16) {
+        let percent = percent.min(MAX_VOLUME);
+        self.unmuted.remove(&publisher);
         self.volumes.insert(publisher, percent);
         for watch in &self.watching {
             if watch.stream.publisher == publisher {
@@ -410,7 +439,7 @@ struct AudioState {
     disabled: bool,
 }
 
-/// A stream's own volume, 0–100%, as `f32` bits.
+/// A stream's own volume, 0–300%, as `f32` bits.
 struct Volume(std::sync::atomic::AtomicU32);
 
 impl Default for Volume {
@@ -438,11 +467,13 @@ impl Surface {
     pub fn set_waker(&self, waker: rune::Waker) {
         *self.waker.lock().unwrap() = Some(waker);
     }
-    /// This stream's playback volume, 0–1, on top of the app's playback volume.
+    /// This stream's playback volume, 0–3, on top of the app's playback volume. The playback
+    /// mix eases what goes past full scale back in (see `audio::soft_limit`).
     pub fn set_volume(&self, volume: f32) {
+        let most = f32::from(MAX_VOLUME) / 100.0;
         self.volume
             .0
-            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+            .store(volume.clamp(0.0, most).to_bits(), Ordering::Relaxed);
     }
     pub fn volume(&self) -> f32 {
         f32::from_bits(self.volume.0.load(Ordering::Relaxed))

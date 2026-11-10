@@ -253,6 +253,26 @@ impl Capture {
         }
     }
 
+    /// Changes the largest size and the frame rate while the capture runs, for a share whose
+    /// quality changed. Frames still on the GPU at the old size are dropped.
+    pub fn reconfigure(&mut self, max_size: (u32, u32), frame_interval: Duration) -> Result<()> {
+        if max_size != self.max_size {
+            self.pipeline = build_pipeline(
+                &self.device,
+                &self.video_device,
+                &self.video_context,
+                self.pipeline.input,
+                max_size,
+            )?;
+            self.max_size = max_size;
+        }
+        // As at the start: half a tick.
+        let _ = self.session.SetMinUpdateInterval(TimeSpan {
+            Duration: (frame_interval.as_nanos() / 200) as i64,
+        });
+        Ok(())
+    }
+
     /// Called once per video tick. Returns the newest frame the GPU has finished since the
     /// last call, if any, and converts the newest captured frame for a later call. Never
     /// waits for the GPU. Windows only sends frames when the picture changes, so the caller

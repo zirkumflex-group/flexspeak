@@ -70,6 +70,8 @@ pub enum Command {
     RefreshStreams,
     WatchStream(String),
     StartSharing(streaming::publishing::Options),
+    /// Changes system audio and quality of the running share.
+    ConfigureSharing(streaming::LiveShare),
     StopSharing,
     DecideViewer(u16, bool),
     /// Stops the stream with this ID, or every watched stream.
@@ -1243,6 +1245,9 @@ async fn run_connection(
                                 streams.publisher.start(options)
                             };
                             if let Err(error) = result { let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() }); }
+                        },
+                        Command::ConfigureSharing(live) => if let Err(error) = streams.publisher.configure(live) {
+                            let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() });
                         },
                         Command::StopSharing => streams.publisher.stop("Stopped sharing"),
                         Command::DecideViewer(id, allow) => if let Err(error) = streams.publisher.decide(id,allow) {

@@ -166,6 +166,10 @@ struct App {
     user_audio: BTreeMap<String, settings::UserAudio>,
     /// `user_audio` as the voice threads read it.
     user_gains: client::UserGains,
+    /// Each streamer's stream volume, by identity, as saved.
+    stream_volumes: BTreeMap<String, u16>,
+    /// When a stream volume last changed without being saved; saved a moment after a drag.
+    stream_volumes_changed: Option<Instant>,
     sound_cues: bool,
     sounds: sounds::Settings,
     share_defaults: streaming::publishing::ShareDefaults,
@@ -796,8 +800,10 @@ enum Message {
     HideOtherStreams(bool),
     /// Trades two watched streams' places.
     SwapStreams(String, String),
-    /// A publisher's stream volume, in percent.
-    StreamVolume(u16, u8),
+    /// A publisher's stream volume, in percent, up to `streaming::MAX_VOLUME`.
+    StreamVolume(u16, u16),
+    /// Mutes a publisher's stream, or brings back the volume it had.
+    ToggleStreamMute(u16),
     ToggleStreamStats,
     OpenShare,
     CloseShare,
@@ -807,6 +813,10 @@ enum Message {
     ShareVideoBitrate(u32),
     ShareAudioBitrate(u32),
     ShareAccess(streaming::publishing::Access),
+    /// What gives way when a share's connection or computer can't keep up.
+    ShareStruggle(streaming::publishing::Struggle),
+    /// The share dialog's Advanced tab, or its simple one.
+    ShareAdvanced(bool),
     RefreshShareSources,
     ShareSources(Result<Vec<streaming::publishing::ShareSource>, String>),
     ShareSource(streaming::publishing::ShareSource),
@@ -960,6 +970,8 @@ impl App {
             appearance: settings::Appearance::default(),
             user_audio: BTreeMap::new(),
             user_gains: client::UserGains::default(),
+            stream_volumes: BTreeMap::new(),
+            stream_volumes_changed: None,
             sound_cues: true,
             sounds: sounds::Settings::default(),
             share_defaults: Default::default(),
@@ -1337,6 +1349,7 @@ impl App {
             streaming::publishing::Options {
                 source,
                 audio,
+                voice_output: self.output.clone(),
                 quality,
                 access,
                 fast_capture,
@@ -1351,6 +1364,28 @@ impl App {
             self.ui.open = None;
         }
         Task::none()
+    }
+
+    /// Sends the dialog's audio and quality to the running share, if there is one.
+    fn configure_share(&mut self) {
+        let sharing = &self.server().streaming.sharing;
+        if !sharing.status.active {
+            return;
+        }
+        let audio = sharing
+            .audio
+            .then(|| {
+                sharing
+                    .audio_device
+                    .clone()
+                    .or_else(|| self.devices.output.clone())
+            })
+            .flatten();
+        let live = streaming::LiveShare {
+            audio,
+            quality: sharing.quality,
+        };
+        self.command(client::Command::ConfigureSharing(live));
     }
 
     fn remember_share(&mut self) {
@@ -1413,6 +1448,15 @@ impl App {
             self.user_audio.insert(uid, audio);
         }
         self.sync_user_gains();
+    }
+
+    fn save_stream_volumes(&mut self) {
+        self.stream_volumes_changed = None;
+        let volumes = self.stream_volumes.clone();
+        self.save_preference(
+            |saved| saved.stream_volumes = volumes,
+            "That stream volume applies for now but was not saved",
+        );
     }
 
     fn save_user_audio(&mut self) {
@@ -1731,11 +1775,12 @@ impl App {
         self.appearance = saved.appearance;
         self.user_audio = saved.user_audio;
         self.sync_user_gains();
+        self.stream_volumes = saved.stream_volumes;
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
         self.stream_options = saved.streaming;
         self.share_defaults = if saved.share.quality.validate().is_ok() {
-            saved.share
+            saved.share.upgraded()
         } else {
             Default::default()
         };
@@ -1768,6 +1813,7 @@ impl App {
             appearance: self.appearance.clone(),
             custom_themes: self.custom_themes.clone(),
             user_audio: self.user_audio.clone(),
+            stream_volumes: self.stream_volumes.clone(),
             sound_cues: self.sound_cues,
             sounds: self.sounds.clone(),
             share: self.share_defaults,
@@ -2485,7 +2531,25 @@ impl App {
             }
             Message::SwapStreams(from, to) => self.server_mut().streaming.swap(&from, &to),
             Message::StreamVolume(publisher, percent) => {
-                self.server_mut().streaming.set_volume(publisher, percent)
+                let percent = percent.min(streaming::MAX_VOLUME);
+                self.server_mut().streaming.set_volume(publisher, percent);
+                // Kept for this streamer by identity, so their stream starts there next time.
+                if let Some(uid) = self
+                    .find_member(publisher)
+                    .filter(|member| !member.uid.is_empty())
+                    .map(|member| member.uid.clone())
+                {
+                    if percent == 100 {
+                        self.stream_volumes.remove(&uid);
+                    } else {
+                        self.stream_volumes.insert(uid, percent);
+                    }
+                    self.stream_volumes_changed = Some(Instant::now());
+                }
+            }
+            // Muting is for now; the saved volume stays what it was.
+            Message::ToggleStreamMute(publisher) => {
+                self.server_mut().streaming.toggle_mute(publisher)
             }
             Message::ToggleStreamStats => {
                 self.server_mut().streaming.show_stats = !self.server().streaming.show_stats
@@ -2505,9 +2569,11 @@ impl App {
                 self.remember_share();
                 self.ui.open = None;
             }
+            // While sharing, the quality changes at once, for viewers already watching too.
             Message::ShareQuality(quality) => {
-                if !self.server().streaming.sharing.status.active && quality.validate().is_ok() {
+                if quality.validate().is_ok() {
                     self.server_mut().streaming.sharing.quality = quality;
+                    self.configure_share();
                 }
             }
             Message::ShareResolution(resolution) => {
@@ -2538,6 +2604,14 @@ impl App {
                 };
                 return self.update(Message::ShareQuality(quality));
             }
+            Message::ShareStruggle(struggle) => {
+                let quality = streaming::publishing::Quality {
+                    struggle,
+                    ..self.server().streaming.sharing.quality
+                };
+                return self.update(Message::ShareQuality(quality));
+            }
+            Message::ShareAdvanced(advanced) => self.ui.share_advanced = advanced,
             Message::ShareAccess(access) => {
                 if !self.server().streaming.sharing.status.active {
                     self.server_mut().streaming.sharing.access = access;
@@ -2599,9 +2673,8 @@ impl App {
                 sharing.finish_preview(&source, still);
             }
             Message::ShareAudio(audio) => {
-                if !self.server().streaming.sharing.status.active {
-                    self.server_mut().streaming.sharing.audio = audio;
-                }
+                self.server_mut().streaming.sharing.audio = audio;
+                self.configure_share();
             }
             Message::StreamingHardwareAv1(on) => {
                 self.stream_options.hardware_av1 = on;
@@ -2618,9 +2691,8 @@ impl App {
                 );
             }
             Message::ShareAudioOutput(device) => {
-                if !self.server().streaming.sharing.status.active {
-                    self.server_mut().streaming.sharing.audio_device = Some(device);
-                }
+                self.server_mut().streaming.sharing.audio_device = Some(device);
+                self.configure_share();
             }
             Message::StartSharing => {
                 if let Some(source) = self.server().streaming.sharing.selected.clone() {
@@ -2698,6 +2770,12 @@ impl App {
             }
             Message::UsageTick => {
                 self.refresh_visible_permissions();
+                if self
+                    .stream_volumes_changed
+                    .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(1))
+                {
+                    self.save_stream_volumes();
+                }
                 self.process_usage = self.process_monitor.sample();
                 let now = Instant::now();
                 for session in &mut self.sessions {
@@ -3277,6 +3355,9 @@ impl App {
                 }
             }
             Message::Close => {
+                if self.stream_volumes_changed.is_some() {
+                    self.save_stream_volumes();
+                }
                 if self.idle() {
                     return Task::Exit;
                 }
@@ -3514,6 +3595,19 @@ impl App {
                 sounds_due.extend(share_sounds);
                 if let streaming::Event::Catalog(catalog) = &event {
                     log_stream_changes(session, catalog);
+                }
+                // A streamer's stream starts at the volume saved for them.
+                if let streaming::Event::State { stream, .. } = &event
+                    && !session.streaming.volumes.contains_key(&stream.publisher)
+                    && let Some(volume) = session
+                        .state
+                        .channels
+                        .iter()
+                        .flat_map(|channel| &channel.members)
+                        .find(|member| member.id == stream.publisher && !member.uid.is_empty())
+                        .and_then(|member| self.stream_volumes.get(&member.uid))
+                {
+                    session.streaming.volumes.insert(stream.publisher, *volume);
                 }
                 session.streaming.update(event.clone());
                 match &event {
@@ -3867,6 +3961,19 @@ impl App {
                 .map_or(reading, |steady| steady.show(reading));
             (health, quality.health_tooltip())
         }
+    }
+    /// A playing stream's trouble, with the side it is most likely on.
+    fn stream_problem(&self, watch: &streaming::Watching) -> Option<streaming::health::Problem> {
+        if watch.phase != streaming::Phase::Receiving {
+            return None;
+        }
+        let (ours, _, _) = self.footer_connection_status();
+        let theirs = self
+            .find_member(watch.stream.publisher)
+            .map_or(usage::Health::Unknown, |member| {
+                self.member_health(member, true).0
+            });
+        streaming::health::attribute(watch.stats.media, ours, theirs)
     }
     fn client_quality(&self, id: u16, now: Instant) -> usage::ConnectionUsage {
         self.server()
@@ -4761,15 +4868,15 @@ mod tests {
     fn share_settings_are_remembered_when_the_dialog_closes() {
         use streaming::publishing::{Access, Preset};
         let (mut app, _commands) = session_fixture();
-        let _ = app.update(Message::ShareQuality(Preset::Sharp.quality()));
+        let _ = app.update(Message::ShareQuality(Preset::Performance.quality()));
         let _ = app.update(Message::ShareAccess(Access::Public));
         assert_ne!(
             app.share_defaults.quality,
-            Preset::Sharp.quality(),
+            Preset::Performance.quality(),
             "not while dragging"
         );
         let _ = app.update(Message::CloseShare);
-        assert_eq!(app.share_defaults.quality, Preset::Sharp.quality());
+        assert_eq!(app.share_defaults.quality, Preset::Performance.quality());
         assert_eq!(app.share_defaults.access, Access::Public);
         assert!(app.share_defaults.audio);
     }
@@ -5409,6 +5516,85 @@ mod tests {
             app.server().poke.is_none(),
             "Disconnecting drops an unsent poke"
         );
+    }
+
+    fn watch_event(publisher: u16, generation: u64) -> client::Event {
+        client::Event::Streaming(streaming::Event::State {
+            generation,
+            slot: 0,
+            stream: streaming::StreamInfo {
+                id: format!("stream-{publisher}"),
+                publisher,
+                name: "Screen".into(),
+                viewers: 1,
+                has_audio: true,
+                server_relayed: false,
+            },
+            phase: streaming::Phase::Receiving,
+            detail: String::new(),
+        })
+    }
+
+    #[test]
+    fn stream_volume_goes_to_300_percent_and_is_remembered_per_streamer() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let _ = app.update(Message::Backend(id, watch_event(2, 900)));
+        let _ = app.update(Message::StreamVolume(2, 1000));
+        assert_eq!(app.server().streaming.volume(2), streaming::MAX_VOLUME);
+        assert!((app.server().streaming.surfaces.get(0).volume() - 3.0).abs() < 1e-6);
+        let _ = app.update(Message::StreamVolume(2, 250));
+        assert_eq!(app.stream_volumes.get("uid-2"), Some(&250));
+        assert!(app.stream_volumes_changed.is_some(), "saved a moment later");
+
+        // Muting is for now: unmuting brings 250% back, and the saved volume stays.
+        let _ = app.update(Message::ToggleStreamMute(2));
+        assert_eq!(app.server().streaming.volume(2), 0);
+        assert_eq!(app.stream_volumes.get("uid-2"), Some(&250));
+        let _ = app.update(Message::ToggleStreamMute(2));
+        assert_eq!(app.server().streaming.volume(2), 250);
+
+        // A later session starts Mara's stream at her saved volume, even under a new client id.
+        let (mut later, _commands) = session_fixture();
+        later.stream_volumes = app.stream_volumes.clone();
+        let id = later.active.unwrap();
+        let _ = later.update(Message::Backend(id, watch_event(2, 901)));
+        assert_eq!(later.server().streaming.volume(2), 250);
+        assert!((later.server().streaming.surfaces.get(0).volume() - 2.5).abs() < 1e-6);
+        // Back at 100% the streamer is forgotten again.
+        let _ = later.update(Message::StreamVolume(2, 100));
+        assert!(later.stream_volumes.is_empty());
+    }
+
+    #[test]
+    fn changing_quality_or_audio_while_sharing_reaches_the_running_share() {
+        let (mut app, mut commands) = session_fixture();
+        let _ = app.update(Message::ShareFrameRate(24));
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing runs before going live"
+        );
+        app.server_mut().streaming.sharing.status.active = true;
+        app.server_mut().streaming.sharing.audio = false;
+        let _ = app.update(Message::ShareFrameRate(48));
+        match commands.try_recv() {
+            Ok(client::Command::ConfigureSharing(live)) => {
+                assert_eq!(live.quality.frame_rate, 48);
+                assert!(live.audio.is_none());
+            }
+            other => panic!("Unexpected command: {other:?}"),
+        }
+        let output = audio::DeviceChoice {
+            id: "speakers".into(),
+            name: "Speakers".into(),
+        };
+        let _ = app.update(Message::ShareAudioOutput(output.clone()));
+        let _ = commands.try_recv();
+        let _ = app.update(Message::ShareAudio(true));
+        match commands.try_recv() {
+            Ok(client::Command::ConfigureSharing(live)) => assert_eq!(live.audio, Some(output)),
+            other => panic!("Unexpected command: {other:?}"),
+        }
     }
 
     #[test]

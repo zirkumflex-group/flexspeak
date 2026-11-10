@@ -138,7 +138,9 @@ impl Capture {
         let mut context = Box::new(Context {
             frame: Box::new(frame),
         });
+        // Cameras rarely go past 1080p, and a larger format only costs more to convert.
         let (width, height) = quality.max_size();
+        let (width, height) = (width.min(1920), height.min(1080));
         // SAFETY: the boxed context stays at a stable address for the complete capture lifetime.
         let pointer = unsafe {
             flex_camera_start(

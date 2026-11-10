@@ -41,6 +41,9 @@ pub struct Settings {
     /// What you've set for other people, by identity. Only changes what you hear.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub user_audio: BTreeMap<String, UserAudio>,
+    /// Each streamer's stream volume in percent, by identity; streams at 100% stay out.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub stream_volumes: BTreeMap<String, u16>,
     /// Whether the app plays its short event sounds at all.
     #[serde(skip_serializing_if = "is_true")]
     pub sound_cues: bool,
@@ -297,6 +300,7 @@ impl Default for Settings {
             auto_download_updates: true,
             appearance: Appearance::default(),
             user_audio: BTreeMap::new(),
+            stream_volumes: BTreeMap::new(),
             sound_cues: true,
             sounds: crate::sounds::Settings::default(),
             share: Default::default(),

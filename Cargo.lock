@@ -976,8 +976,6 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
 dependencies = [
  "alsa",
  "block2 0.6.2",
@@ -1680,6 +1678,7 @@ dependencies = [
  "webrtc-sys-build",
  "wgpu",
  "windows",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 
