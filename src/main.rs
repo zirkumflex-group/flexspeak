@@ -824,6 +824,7 @@ enum Message {
     ShareStruggle(streaming::publishing::Struggle),
     /// The share dialog's Advanced tab, or its simple one.
     ShareAdvanced(bool),
+    ShareGroup(streaming::publishing::SourceGroup),
     RefreshShareSources,
     ShareSources(Result<Vec<streaming::publishing::ShareSource>, String>),
     ShareSource(streaming::publishing::ShareSource),
@@ -1307,22 +1308,36 @@ impl App {
         self.hub.play(samples);
     }
 
-    /// Takes the one picture of the chosen source, if it doesn't have one yet.
+    /// Takes one picture of each screen for its tile and of the chosen source, unless they
+    /// have one already.
     fn take_share_preview(&mut self) -> Task {
-        let Some(source) = self.server().streaming.sharing.selected.clone() else {
-            return Task::none();
-        };
-        if !self.server().streaming.share_open
-            || self.server().streaming.sharing.status.active
-            || !self.server_mut().streaming.sharing.begin_preview(&source)
-        {
+        if !self.server().streaming.share_open || self.server().streaming.sharing.status.active {
             return Task::none();
         }
-        let wanted = source.clone();
-        Task::perform(
-            async move { streaming::share_still(wanted).await.ok().flatten() },
-            move |still| Message::SharePreview(source.clone(), still),
-        )
+        let sharing = &self.server().streaming.sharing;
+        let mut wanted: Vec<_> = sharing
+            .sources
+            .iter()
+            .filter(|source| matches!(source.kind, streaming::publishing::SourceKind::Screen(_)))
+            .cloned()
+            .collect();
+        if let Some(selected) = sharing.selected.clone()
+            && !wanted.contains(&selected)
+        {
+            wanted.push(selected);
+        }
+        let tasks: Vec<Task> = wanted
+            .into_iter()
+            .filter(|source| self.server_mut().streaming.sharing.begin_preview(source))
+            .map(|source| {
+                let wanted = source.clone();
+                Task::perform(
+                    async move { streaming::share_still(wanted).await.ok().flatten() },
+                    move |still| Message::SharePreview(source.clone(), still),
+                )
+            })
+            .collect();
+        Task::batch(tasks)
     }
 
     /// Keeps what this share used for the next one, on every server.
@@ -2632,6 +2647,7 @@ impl App {
                 self.server_mut().streaming.sharing.previews.clear();
                 self.remember_share();
                 self.ui.open = None;
+                self.ui.share_group = None;
             }
             // While sharing, the quality changes at once, for viewers already watching too.
             Message::ShareQuality(quality) => {
@@ -2676,6 +2692,41 @@ impl App {
                 return self.update(Message::ShareQuality(quality));
             }
             Message::ShareAdvanced(advanced) => self.ui.share_advanced = advanced,
+            // Switching to Screen, Window or Camera picks the likely one of that kind: the main
+            // screen, the game being played, the camera. Windows without a game wait for a pick.
+            Message::ShareGroup(group) => {
+                use streaming::publishing::{SourceGroup, default_source};
+                if self.server().streaming.sharing.status.active {
+                    return Task::none();
+                }
+                self.ui.share_group = Some(group);
+                let sharing = &self.server().streaming.sharing;
+                let kind =
+                    |source: &streaming::publishing::ShareSource| SourceGroup::of(&source.kind);
+                if sharing.selected.as_ref().map(kind) == Some(group) {
+                    return Task::none();
+                }
+                let next = match group {
+                    SourceGroup::Screen => default_source(&sharing.sources, &self.ui.quick_sources),
+                    SourceGroup::Window => sharing
+                        .sources
+                        .iter()
+                        .find(|source| {
+                            kind(source) == SourceGroup::Window
+                                && self.ui.quick_sources.iter().any(|q| q.kind == source.kind)
+                        })
+                        .cloned(),
+                    SourceGroup::Camera => sharing
+                        .sources
+                        .iter()
+                        .find(|source| kind(source) == SourceGroup::Camera)
+                        .cloned(),
+                };
+                match next {
+                    Some(source) => return self.update(Message::ShareSource(source)),
+                    None => self.server_mut().streaming.sharing.selected = None,
+                }
+            }
             Message::ShareAccess(access) => {
                 if !self.server().streaming.sharing.status.active {
                     self.server_mut().streaming.sharing.access = access;
@@ -2713,8 +2764,12 @@ impl App {
                         {
                             self.server_mut().streaming.sharing.selected = None;
                         }
-                        if sources.len() == 1 {
-                            self.server_mut().streaming.sharing.selected = sources.first().cloned();
+                        if self.server().streaming.sharing.selected.is_none() {
+                            self.server_mut().streaming.sharing.selected =
+                                streaming::publishing::default_source(
+                                    &sources,
+                                    &self.ui.quick_sources,
+                                );
                         }
                         self.server_mut().streaming.sharing.sources = sources;
                         return self.take_share_preview();

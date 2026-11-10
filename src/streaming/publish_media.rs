@@ -355,7 +355,7 @@ mod native {
         {
             let mut sources = vec![ShareSource {
                 kind: SourceKind::Screen(None),
-                name: "Choose a screen or window…".into(),
+                name: "Screen or window".into(),
             }];
             sources.extend(camera::sources());
             Ok(sources)
@@ -363,6 +363,7 @@ mod native {
         #[cfg(target_os = "windows")]
         {
             let mut sources = Vec::new();
+            let primary = primary_screen();
             for window in [false, true] {
                 for (index, source) in capturer(window, false)?
                     .get_source_list()
@@ -382,7 +383,9 @@ mod native {
                         } else {
                             SourceKind::Screen(Some(source.id()))
                         },
-                        name: if name.is_empty() {
+                        name: if !window && Some(source.id()) == primary {
+                            "Main screen".into()
+                        } else if name.is_empty() {
                             format!("Screen {}", index + 1)
                         } else {
                             name

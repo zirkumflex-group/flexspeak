@@ -95,6 +95,9 @@ pub const SCENES: &[Scene] = &[
     ("poke", poke),
     ("poked", poked),
     ("share", share),
+    ("share-opened", share_opened),
+    ("share-windows", share_windows),
+    ("share-mac", share_mac),
     ("share-advanced", share_advanced),
     ("share-custom", share_custom),
     ("share-quick", share_quick),
@@ -1203,6 +1206,130 @@ fn share(s: &mut App) {
     s.server_mut().streaming.share_open = true;
 }
 
+/// A stand-in picture of a source, striped in its own colours.
+fn fake_still(dark: [u8; 3], light: [u8; 3]) -> crate::streaming::publishing::Still {
+    let (width, height) = (320_u32, 180_u32);
+    let rgba = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let [r, g, b] = if ((x + y) / 24).is_multiple_of(2) {
+                dark
+            } else {
+                light
+            };
+            [r, g, b, 255_u8]
+        })
+        .collect();
+    crate::streaming::publishing::Still {
+        width,
+        height,
+        rgba,
+    }
+}
+
+/// Gives every preview the dialog asked for a stand-in picture, as if each capture came back.
+fn finish_share_previews(s: &mut App) {
+    let colours = [
+        ([30, 70, 130], [30, 90, 160]),
+        ([60, 40, 90], [80, 55, 120]),
+        ([35, 80, 60], [45, 105, 80]),
+        ([90, 60, 30], [120, 80, 40]),
+    ];
+    let sharing = &mut s.server_mut().streaming.sharing;
+    let taking: Vec<_> = sharing
+        .previews
+        .iter()
+        .filter(|preview| {
+            matches!(
+                preview.state,
+                crate::streaming::publishing::PreviewState::Taking
+            )
+        })
+        .map(|preview| preview.source.clone())
+        .collect();
+    for source in taking {
+        let index = sharing
+            .sources
+            .iter()
+            .position(|other| *other == source)
+            .unwrap_or(0);
+        let (dark, light) = colours[index % colours.len()];
+        sharing.finish_preview(&source, Some(fake_still(dark, light)));
+    }
+}
+
+/// The dialog as the voice panel's share button opens it: the screens, windows and cameras
+/// were just found and nothing was picked by hand, so the main screen is.
+fn share_opened(s: &mut App) {
+    use crate::streaming::publishing::{ShareSource, SourceKind};
+    connected(s);
+    s.ui.quick_sources = vec![
+        ShareSource {
+            kind: SourceKind::Screen(Some(1)),
+            name: "Main screen".into(),
+        },
+        ShareSource {
+            kind: SourceKind::Window(2),
+            name: "Counter-Strike 2".into(),
+        },
+    ];
+    s.server_mut().streaming.share_open = true;
+    s.server_mut().streaming.sharing.loading = true;
+    let window = |id, name: &str| ShareSource {
+        kind: SourceKind::Window(id),
+        name: name.into(),
+    };
+    let sources = vec![
+        ShareSource {
+            kind: SourceKind::Screen(Some(0)),
+            name: "Screen 2".into(),
+        },
+        ShareSource {
+            kind: SourceKind::Screen(Some(1)),
+            name: "Main screen".into(),
+        },
+        window(3, "flexspeak — Visual Studio Code"),
+        window(4, "Spotify Premium"),
+        window(2, "Counter-Strike 2"),
+        window(5, "Patch notes — Firefox"),
+        window(6, "File Explorer"),
+        window(7, "Steam"),
+        ShareSource {
+            kind: SourceKind::Camera("demo-camera".into()),
+            name: "Camera · Built-in camera".into(),
+        },
+    ];
+    let _ = s.update(crate::Message::ShareSources(Ok(sources)));
+    finish_share_previews(s);
+}
+
+/// Window picked: the game being played is chosen and listed first, the others below it.
+fn share_windows(s: &mut App) {
+    use crate::streaming::publishing::SourceGroup;
+    share_opened(s);
+    let _ = s.update(crate::Message::ShareGroup(SourceGroup::Window));
+    finish_share_previews(s);
+}
+
+/// On a Mac the system asks which screen or window once sharing starts, so the one tile says so.
+fn share_mac(s: &mut App) {
+    use crate::streaming::publishing::{ShareSource, SourceKind};
+    connected(s);
+    s.server_mut().streaming.share_open = true;
+    s.server_mut().streaming.sharing.loading = true;
+    let sources = vec![
+        ShareSource {
+            kind: SourceKind::Screen(None),
+            name: "Screen or window".into(),
+        },
+        ShareSource {
+            kind: SourceKind::Camera("demo-camera".into()),
+            name: "FaceTime HD Camera".into(),
+        },
+    ];
+    let _ = s.update(crate::Message::ShareSources(Ok(sources)));
+}
+
 /// Every value one by one, and what gives way when the connection struggles.
 fn share_advanced(s: &mut App) {
     share(s);
@@ -1235,6 +1362,7 @@ fn sharing_stream_options(s: &mut App) {
     let sharing = &mut s.server_mut().streaming;
     sharing.share_open = true;
     sharing.sharing.status.detail = "Public · Hardware AV1 · Fast capture".into();
+    sharing.sharing.status.access = crate::streaming::publishing::Access::Public;
 }
 
 /// AV1 and fast capture were asked for but are unavailable: the dialog says what runs.
