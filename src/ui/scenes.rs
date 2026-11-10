@@ -3324,6 +3324,8 @@ mod tests {
         let root = temp_settings(&mut rt, "chat-settings");
         settle(&mut rt);
         click(&mut rt, "chat-layout-Feed");
+        // The page is taller than the window on some platforms.
+        scroll_into_view(&mut rt, "settings-body-Chat", "chat-popups");
         click(&mut rt, "chat-popups");
         let saved = crate::settings::load(&root.join("settings.json"))
             .unwrap()
