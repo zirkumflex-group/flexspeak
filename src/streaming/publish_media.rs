@@ -477,7 +477,7 @@ mod native {
     impl SystemAudio {
         /// Records `selected`. When that is the output this app plays to (`voice_output`), the
         /// app's own voices and sounds are left out where the system allows: on Windows by
-        /// recording every other app instead, on macOS by the patched tap (vendor/cpal).
+        /// recording every other app instead, on macOS by the patched tap in our cpal fork.
         fn open(
             selected: &audio::DeviceChoice,
             voice_output: Option<&audio::DeviceChoice>,
