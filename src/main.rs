@@ -1188,7 +1188,7 @@ impl App {
         new.unseen_pokes = 0;
         new.activate_on_connect = false;
         self.ui.chat_toast = None;
-        self.ui.chat_menu = false;
+        self.ui.chat_lists = Default::default();
         self.chat_seen();
         self.sync_page_visibility();
     }
@@ -3703,6 +3703,9 @@ impl App {
                     session.group_edit = None;
                 }
                 session.state = state;
+                if let Some(channel) = &session.state.current {
+                    session.chat.enter(channel.id, &channel.name);
+                }
                 let mut join = None;
                 if session.connected
                     && !session.state.channels.is_empty()
@@ -4045,7 +4048,6 @@ impl App {
             _ => String::new(),
         };
         self.server_mut().chat.open(scope, &name);
-        self.ui.chat_menu = false;
     }
 
     /// Docks the chat column if it was hidden.
@@ -4100,6 +4102,8 @@ impl App {
                         Some(member) => client::ChatTarget::Client(member.id),
                         None => return Task::none(),
                     },
+                    // History of a channel you left: there is nobody to write to.
+                    chat::Scope::Past(_) => return Task::none(),
                 };
                 self.begin_alert(Source::Chat);
                 if self.command(client::Command::Chat(target, text.clone())) {
@@ -4132,6 +4136,21 @@ impl App {
                 }
             }
             Action::ClosePeer(key) => self.server_mut().chat.close_peer(&key),
+            Action::ClosePast(id) => self.server_mut().chat.close_past(id),
+            Action::People => {
+                let chat = &self.server().chat;
+                let waiting =
+                    |peer: &&chat::Peer| chat.unread(&chat::Scope::Private(peer.key.clone())) > 0;
+                let pick = chat
+                    .peers
+                    .iter()
+                    .find(waiting)
+                    .or(chat.peers.last())
+                    .map(|peer| chat::Scope::Private(peer.key.clone()));
+                if let Some(scope) = pick {
+                    return self.chat_action(Action::Target(scope));
+                }
+            }
             Action::Toggle => {
                 if !self.live() {
                     return Task::none();
@@ -4148,7 +4167,7 @@ impl App {
                     // Or the message box would hold the column open as a peek.
                     self.ui.chat_input.focused = false;
                     self.ui.chat_peek = ui::RailPeek::default();
-                    self.ui.chat_menu = false;
+                    self.ui.chat_lists = Default::default();
                 } else if self.window_size.0 < ui::CHAT_MIN_DOCK_WINDOW {
                     // No room to dock: hold the peek open instead, or let it go.
                     self.ui.chat_peek.toggle_pin();
@@ -6938,6 +6957,43 @@ mod tests {
         assert!(app.ui.chat_toast.is_none());
         assert_eq!(app.session(first).unwrap().chat.unread_private(), 1);
         assert_eq!(app.session(second).unwrap().chat.unread_private(), 0);
+    }
+
+    #[test]
+    fn changing_channel_leaves_the_old_one_as_history() {
+        let (mut app, mut commands) = session_fixture();
+        let id = app.active.unwrap();
+        // The fixture is already in the Lobby; tell the chat as a State event would.
+        let state = app.server().state.clone();
+        let _ = app.update(Message::Backend(id, client::Event::State(state.clone())));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "in the lobby", false),
+        ));
+        let mut moved = state.clone();
+        moved.current = Some(moved.channels[1].clone());
+        let _ = app.update(Message::Backend(id, client::Event::State(moved)));
+        let chat = &app.server().chat;
+        assert!(
+            chat.shown(chat::Layout::Tabs).is_empty(),
+            "Games starts empty"
+        );
+        assert_eq!(chat.past().map(|room| room.id).collect::<Vec<_>>(), [1]);
+        // The Lobby's lines can be read but not added to.
+        let _ = app.update(Message::Chat(chat::Action::Target(chat::Scope::Past(1))));
+        assert_eq!(app.server().chat.shown(chat::Layout::Tabs).len(), 1);
+        let _ = app.update(Message::Chat(chat::Action::Draft("hello".into())));
+        let _ = app.update(Message::Chat(chat::Action::Send));
+        assert!(commands.try_recv().is_err());
+        // Back in the Lobby its tab is the channel tab again.
+        let _ = app.update(Message::Backend(id, client::Event::State(state)));
+        assert_eq!(app.server().chat.target, chat::Scope::Channel);
+        assert_eq!(app.server().chat.shown(chat::Layout::Tabs).len(), 1);
+        let _ = app.update(Message::Chat(chat::Action::Send));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Chat(client::ChatTarget::Channel, _))
+        ));
     }
 
     #[test]

@@ -99,6 +99,10 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
                 }
             }
         })
+        // A double-click opens the private chat with them; the first click has selected them.
+        .on_double_press_tx(move |s: &mut App, tx: &mut Tx| {
+            dispatch(s, tx, Message::Chat(crate::chat::Action::Message(id)));
+        })
 }
 
 /// The selection when the pressed member is part of it, else just that member.

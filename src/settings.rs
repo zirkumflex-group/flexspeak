@@ -82,6 +82,8 @@ pub struct Chat {
     pub popups_private_only: bool,
     /// The column hides itself while a stream is being watched.
     pub hide_while_watching: bool,
+    /// How Tabs fits many conversations into its bar.
+    pub tab_bar: crate::chat::TabBar,
 }
 
 impl Default for Chat {
@@ -92,6 +94,7 @@ impl Default for Chat {
             popups: true,
             popups_private_only: false,
             hide_while_watching: false,
+            tab_bar: crate::chat::TabBar::Scroll,
         }
     }
 }

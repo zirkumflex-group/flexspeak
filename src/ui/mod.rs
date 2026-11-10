@@ -256,8 +256,9 @@ pub struct UiState {
     /// The chat was asked back while "hide while watching" had it hidden; lasts until the
     /// streams end.
     pub chat_over_stream: bool,
-    /// One Feed's list of places to send to is open.
-    pub chat_menu: bool,
+    /// The lists that open under the pointer in the chat column: the channel group, the people
+    /// group, and the message box's choice of where to send (`chat::List`).
+    pub chat_lists: [RailPeek; 3],
     /// What one click can share, refreshed while you could go live.
     pub quick_sources: Vec<crate::streaming::publishing::ShareSource>,
     pub quick_checking: bool,
@@ -318,7 +319,7 @@ impl Default for UiState {
             chat_toast: None,
             chat_toast_hover: false,
             chat_over_stream: false,
-            chat_menu: false,
+            chat_lists: Default::default(),
             quick_sources: Vec::new(),
             quick_checking: false,
             next_quick_check: Instant::now(),
@@ -423,7 +424,15 @@ fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
         }),
         _ => false,
     };
+    let chatting = matches!(message, Message::Chat(_));
+    let target = chatting.then(|| s.server().chat.target.clone());
     let task = s.update(message);
+    // A conversation opened from elsewhere may have its tab scrolled out of the bar.
+    if let Some(before) = target
+        && s.server().chat.target != before
+    {
+        tx.scroll_into_view_in("chat-bar-strip", chat::tab_key(&s.server().chat.target));
+    }
     execute(s, tx, task);
     s.sync_fields();
     sync_tray(s);
@@ -646,6 +655,9 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         s.chat_seen();
         changed = true;
     }
+    for list in &mut s.ui.chat_lists {
+        changed |= list.expired(now);
+    }
     let toast_expiry =
         s.ui.chat_toast
             .as_ref()
@@ -687,6 +699,14 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if key.key == rune::Key::Escape && s.ui.chat_peek.unpin() {
+        return true;
+    }
+    if key.key == rune::Key::Escape
+        && s.ui
+            .chat_lists
+            .iter_mut()
+            .fold(false, |any, list| list.unpin() | any)
+    {
         return true;
     }
     // ⇧⌘C hides the chat column or brings it back.

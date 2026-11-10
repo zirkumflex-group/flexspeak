@@ -35,6 +35,17 @@ pub enum Layout {
     Feed,
 }
 
+/// How Tabs fits many conversations into its bar (Settings › Chat).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBar {
+    /// Every conversation is a tab; the bar scrolls sideways.
+    #[default]
+    Scroll,
+    /// One tab per kind: channels, the server, people. Pointing at one lists its conversations.
+    Grouped,
+}
+
 impl Layout {
     pub const ALL: [Self; 2] = [Self::Tabs, Self::Feed];
 
@@ -57,15 +68,22 @@ impl Layout {
 /// conversation survives them reconnecting under a new client number.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum Scope {
+    /// The channel you are in, wherever that is.
     #[default]
     Channel,
     Server,
     Private(String),
+    /// What was said in a channel you have since left, by its number. To read, not to write to.
+    Past(u64),
 }
 
 impl Scope {
     pub fn is_private(&self) -> bool {
         matches!(self, Self::Private(_))
+    }
+
+    pub fn is_channel(&self) -> bool {
+        matches!(self, Self::Channel | Self::Past(_))
     }
 }
 
@@ -92,7 +110,7 @@ impl Filter {
     pub fn shows(self, scope: &Scope) -> bool {
         match self {
             Self::All => true,
-            Self::Channel => *scope == Scope::Channel,
+            Self::Channel => scope.is_channel(),
             Self::Server => *scope == Scope::Server,
             Self::Private => scope.is_private(),
         }
@@ -110,6 +128,8 @@ pub struct Entry {
     pub from: String,
     /// A channel message: the channel's name then. A private one: the other person's name.
     pub place: String,
+    /// The channel a channel message was said in; 0 for the others.
+    pub room: u64,
     pub text: String,
     /// Local time, as `21:04`.
     pub time: String,
@@ -133,6 +153,13 @@ pub struct Peer {
     pub name: String,
 }
 
+/// A channel something was said in while you were there.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Room {
+    pub id: u64,
+    pub name: String,
+}
+
 /// What the chat column asks for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -145,6 +172,10 @@ pub enum Action {
     Message(u16),
     /// Forgets a private conversation's tab; its lines come back if it is opened again.
     ClosePeer(String),
+    /// Forgets a left channel's tab.
+    ClosePast(u64),
+    /// Shows a private conversation: one with something unread, else the latest.
+    People,
     /// Hides the column behind the window's edge, or docks it again.
     Toggle,
     /// Docks the column on this conversation.
@@ -164,6 +195,10 @@ pub struct Chat {
     pub version: u64,
     /// People with a private conversation, oldest first.
     pub peers: Vec<Peer>,
+    /// The channel you are in.
+    pub here: u64,
+    /// Channels with lines in the history, oldest first, the current one among them.
+    rooms: Vec<Room>,
     /// Where the message box sends, and in Tabs the conversation shown.
     pub target: Scope,
     pub filter: Filter,
@@ -199,8 +234,52 @@ impl Chat {
     pub fn shown(&self, layout: Layout) -> Vec<&Entry> {
         self.entries
             .iter()
-            .filter(|entry| self.shows(layout, &entry.scope))
+            .filter(|entry| match (layout, &self.target) {
+                (Layout::Feed, _) => self.filter.shows(&entry.scope),
+                // The channel tab is the channel you're in; one you left has its own.
+                (Layout::Tabs, Scope::Channel) => {
+                    entry.scope == Scope::Channel && entry.room == self.here
+                }
+                (Layout::Tabs, Scope::Past(room)) => {
+                    entry.scope == Scope::Channel && entry.room == *room
+                }
+                (Layout::Tabs, target) => entry.scope == *target,
+            })
             .collect()
+    }
+
+    /// You are in this channel now. Its earlier lines, if you were here before, are the
+    /// channel tab's again.
+    pub fn enter(&mut self, id: u64, name: &str) {
+        if let Some(room) = self.rooms.iter_mut().find(|room| room.id == id)
+            && room.name != name
+            && !name.is_empty()
+        {
+            room.name = name.to_owned();
+            self.version += 1;
+        }
+        if self.here == id {
+            return;
+        }
+        self.here = id;
+        if self.target == Scope::Past(id) {
+            self.target = Scope::Channel;
+        }
+        self.version += 1;
+    }
+
+    /// The channels you have left that still have something to read, oldest first.
+    pub fn past(&self) -> impl Iterator<Item = &Room> {
+        self.rooms.iter().filter(|room| room.id != self.here)
+    }
+
+    pub fn close_past(&mut self, id: u64) {
+        self.rooms
+            .retain(|room| room.id != id || room.id == self.here);
+        if self.target == Scope::Past(id) {
+            self.target = Scope::Channel;
+        }
+        self.version += 1;
     }
 
     /// Whether a layout has this conversation on screen while the column is showing.
@@ -244,7 +323,7 @@ impl Chat {
         for sent in due {
             let place = match &sent.scope {
                 Scope::Channel => channel.to_owned(),
-                Scope::Server => String::new(),
+                Scope::Server | Scope::Past(_) => String::new(),
                 Scope::Private(key) => self
                     .peer(key)
                     .map_or_else(String::new, |peer| peer.name.clone()),
@@ -277,7 +356,7 @@ impl Chat {
         }
         let place = match &message.scope {
             Scope::Channel => channel.to_owned(),
-            Scope::Server => String::new(),
+            Scope::Server | Scope::Past(_) => String::new(),
             Scope::Private(_) => message.peer,
         };
         Some(self.push(
@@ -331,6 +410,18 @@ impl Chat {
         if let Scope::Private(key) = &scope {
             self.remember(key, &place);
         }
+        // A channel line belongs to the channel you're in as it arrives.
+        let room = if scope == Scope::Channel {
+            self.here
+        } else {
+            0
+        };
+        if scope == Scope::Channel && !self.rooms.iter().any(|known| known.id == room) {
+            self.rooms.push(Room {
+                id: room,
+                name: place.clone(),
+            });
+        }
         self.entries.push_back(Entry {
             id: self.next,
             scope,
@@ -338,6 +429,7 @@ impl Chat {
             own,
             from,
             place,
+            room,
             text: plain(text),
             time,
         });
@@ -561,6 +653,7 @@ pub fn demo() -> Vec<Entry> {
         own,
         from: from.to_owned(),
         place: place.to_owned(),
+        room: 0,
         text: text.to_owned(),
         time: time.to_owned(),
     };
@@ -737,6 +830,41 @@ mod tests {
         chat.refused();
         assert!(!chat.overdue(base + Duration::from_secs(3), "Jan", "Lobby"));
         assert!(chat.is_empty_for_tests());
+    }
+
+    #[test]
+    fn a_channel_you_leave_keeps_its_lines_as_history() {
+        let mut chat = Chat::default();
+        chat.enter(1, "Lobby");
+        chat.receive(incoming(Scope::Channel, "Theo", "in the lobby"), "Lobby");
+        chat.enter(2, "Raid night");
+        assert!(chat.shown(Layout::Tabs).is_empty(), "A fresh channel tab");
+        chat.receive(incoming(Scope::Channel, "Ines", "pulling"), "Raid night");
+        assert_eq!(chat.shown(Layout::Tabs)[0].text, "pulling");
+        let past: Vec<_> = chat.past().map(|room| room.name.as_str()).collect();
+        assert_eq!(past, ["Lobby"]);
+        // The feed still has both, each under its own channel's name.
+        let places: Vec<_> = chat
+            .shown(Layout::Feed)
+            .iter()
+            .map(|line| line.place.as_str())
+            .collect();
+        assert_eq!(places, ["Lobby", "Raid night"]);
+        assert!(Filter::Channel.shows(&Scope::Past(1)));
+
+        chat.open(Scope::Past(1), "");
+        assert_eq!(chat.shown(Layout::Tabs)[0].text, "in the lobby");
+        // Going back makes it the channel tab again, with what was said before.
+        chat.enter(1, "Lobby");
+        assert_eq!(chat.target, Scope::Channel);
+        assert_eq!(chat.shown(Layout::Tabs)[0].text, "in the lobby");
+        assert_eq!(chat.past().count(), 1, "Raid night is the one left now");
+        chat.close_past(2);
+        assert_eq!(chat.past().count(), 0);
+        // A channel nothing was said in leaves no tab.
+        chat.enter(3, "AFK");
+        chat.enter(1, "Lobby");
+        assert_eq!(chat.past().count(), 0);
     }
 
     #[test]
