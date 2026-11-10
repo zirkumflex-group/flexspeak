@@ -95,24 +95,31 @@ pub enum Kind {
 }
 
 /// What One Feed is narrowed to.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum Filter {
     #[default]
     All,
+    /// Every channel, the ones you left included.
     Channel,
     Server,
+    /// Every private conversation.
     Private,
+    /// One conversation: the channel you are in, one you left, or one person.
+    Only(Scope),
 }
 
 impl Filter {
     pub const ALL: [Self; 4] = [Self::All, Self::Channel, Self::Server, Self::Private];
 
-    pub fn shows(self, scope: &Scope) -> bool {
+    /// Whether a conversation's lines pass. `Scope::Channel` is the channel you are in, so a
+    /// feed narrowed to one you left shows nothing that arrives.
+    pub fn shows(&self, scope: &Scope) -> bool {
         match self {
             Self::All => true,
             Self::Channel => scope.is_channel(),
             Self::Server => *scope == Scope::Server,
             Self::Private => scope.is_private(),
+            Self::Only(only) => only == scope,
         }
     }
 }
@@ -176,6 +183,12 @@ pub enum Action {
     ClosePast(u64),
     /// Shows a private conversation: one with something unread, else the latest.
     People,
+    /// Tabs: shows every conversation together, as the feed does.
+    Everything,
+    /// Points the message box somewhere without changing what is shown.
+    SendTo(Scope),
+    /// One Feed: narrows the stream to one conversation.
+    Narrow(Scope),
     /// Hides the column behind the window's edge, or docks it again.
     Toggle,
     /// Docks the column on this conversation.
@@ -202,6 +215,8 @@ pub struct Chat {
     /// Where the message box sends, and in Tabs the conversation shown.
     pub target: Scope,
     pub filter: Filter,
+    /// Tabs is on its All tab: every conversation together, tagged as the feed tags them.
+    pub everything: bool,
     pub draft: String,
     unread: Vec<(Scope, u32)>,
     /// Sent and not yet seen coming back, oldest first.
@@ -234,18 +249,28 @@ impl Chat {
     pub fn shown(&self, layout: Layout) -> Vec<&Entry> {
         self.entries
             .iter()
-            .filter(|entry| match (layout, &self.target) {
-                (Layout::Feed, _) => self.filter.shows(&entry.scope),
-                // The channel tab is the channel you're in; one you left has its own.
-                (Layout::Tabs, Scope::Channel) => {
-                    entry.scope == Scope::Channel && entry.room == self.here
+            .filter(|entry| {
+                let one = match layout {
+                    Layout::Tabs if self.everything => return true,
+                    Layout::Tabs => &self.target,
+                    Layout::Feed => match &self.filter {
+                        Filter::Only(one) => one,
+                        filter => return filter.shows(&entry.scope),
+                    },
+                };
+                match one {
+                    // The channel you're in; one you left has lines of its own.
+                    Scope::Channel => entry.scope == Scope::Channel && entry.room == self.here,
+                    Scope::Past(room) => entry.scope == Scope::Channel && entry.room == *room,
+                    one => entry.scope == *one,
                 }
-                (Layout::Tabs, Scope::Past(room)) => {
-                    entry.scope == Scope::Channel && entry.room == *room
-                }
-                (Layout::Tabs, target) => entry.scope == *target,
             })
             .collect()
+    }
+
+    /// Whether lines are drawn as the feed draws them: tagged by where they went.
+    pub fn tagged(&self, layout: Layout) -> bool {
+        layout == Layout::Feed || self.everything
     }
 
     /// You are in this channel now. Its earlier lines, if you were here before, are the
@@ -265,6 +290,9 @@ impl Chat {
         if self.target == Scope::Past(id) {
             self.target = Scope::Channel;
         }
+        if self.filter == Filter::Only(Scope::Past(id)) {
+            self.filter = Filter::Only(Scope::Channel);
+        }
         self.version += 1;
     }
 
@@ -279,13 +307,16 @@ impl Chat {
         if self.target == Scope::Past(id) {
             self.target = Scope::Channel;
         }
+        if self.filter == Filter::Only(Scope::Past(id)) {
+            self.filter = Filter::Channel;
+        }
         self.version += 1;
     }
 
     /// Whether a layout has this conversation on screen while the column is showing.
     pub fn shows(&self, layout: Layout, scope: &Scope) -> bool {
         match layout {
-            Layout::Tabs => *scope == self.target,
+            Layout::Tabs => self.everything || *scope == self.target,
             Layout::Feed => self.filter.shows(scope),
         }
     }
@@ -473,6 +504,23 @@ impl Chat {
             self.filter = Filter::All;
         }
         self.target = scope;
+        self.everything = false;
+    }
+
+    /// Points the message box at a conversation, leaving what is shown as it is.
+    pub fn aim(&mut self, scope: Scope, name: &str) {
+        if let Scope::Private(key) = &scope {
+            self.remember(key, name);
+        }
+        self.target = scope;
+    }
+
+    /// One Feed shows this conversation alone, and writes to it where it can be written to.
+    pub fn narrow(&mut self, scope: Scope) {
+        if matches!(scope, Scope::Channel | Scope::Private(_)) {
+            self.target = scope.clone();
+        }
+        self.filter = Filter::Only(scope);
     }
 
     pub fn close_peer(&mut self, key: &str) {
@@ -481,6 +529,9 @@ impl Chat {
             .retain(|(scope, _)| *scope != Scope::Private(key.to_owned()));
         if self.target == Scope::Private(key.to_owned()) {
             self.target = Scope::Channel;
+        }
+        if self.filter == Filter::Only(Scope::Private(key.to_owned())) {
+            self.filter = Filter::Private;
         }
         self.version += 1;
     }
@@ -518,9 +569,10 @@ impl Chat {
     /// Clears what `layout` has on screen. True when that changed a count.
     pub fn mark_seen(&mut self, layout: Layout) -> bool {
         let before = self.unread.len();
-        let (target, filter) = (self.target.clone(), self.filter);
+        let (target, filter, everything) =
+            (self.target.clone(), self.filter.clone(), self.everything);
         self.unread.retain(|(scope, _)| match layout {
-            Layout::Tabs => *scope != target,
+            Layout::Tabs => !everything && *scope != target,
             Layout::Feed => !filter.shows(scope),
         });
         self.unread.len() != before
@@ -865,6 +917,52 @@ mod tests {
         chat.enter(3, "AFK");
         chat.enter(1, "Lobby");
         assert_eq!(chat.past().count(), 0);
+    }
+
+    #[test]
+    fn the_feed_narrows_to_one_conversation_and_tabs_can_show_everything() {
+        let mut chat = Chat::default();
+        let mara = Scope::Private("m".into());
+        chat.enter(1, "Lobby");
+        chat.receive(incoming(Scope::Channel, "Theo", "lobby talk"), "Lobby");
+        chat.enter(2, "Raid night");
+        chat.receive(incoming(Scope::Channel, "Ines", "raid talk"), "Raid night");
+        chat.receive(incoming(mara.clone(), "Mara", "psst"), "Raid night");
+        chat.receive(
+            incoming(Scope::Private("i".into()), "Ines", "hey"),
+            "Raid night",
+        );
+        let texts = |chat: &Chat, layout| -> Vec<String> {
+            chat.shown(layout)
+                .iter()
+                .map(|line| line.text.clone())
+                .collect()
+        };
+
+        chat.narrow(Scope::Past(1));
+        assert_eq!(texts(&chat, Layout::Feed), ["lobby talk"]);
+        assert_eq!(chat.target, Scope::Channel, "Nothing to write to there");
+        chat.narrow(Scope::Channel);
+        assert_eq!(texts(&chat, Layout::Feed), ["raid talk"]);
+        chat.narrow(mara.clone());
+        assert_eq!(texts(&chat, Layout::Feed), ["psst"]);
+        assert_eq!(chat.target, mara, "The box follows the person");
+        // A line from someone else waits unread while narrowed.
+        assert!(!chat.shows(Layout::Feed, &Scope::Private("i".into())));
+        chat.close_peer("m");
+        assert_eq!(chat.filter, Filter::Private);
+
+        // Tabs' All tab shows the lot and reads the lot; opening a tab leaves it.
+        chat.mark_unread(&Scope::Server);
+        chat.everything = true;
+        assert_eq!(chat.shown(Layout::Tabs).len(), 4);
+        assert!(chat.tagged(Layout::Tabs));
+        assert!(chat.mark_seen(Layout::Tabs));
+        // The message box can be pointed elsewhere without leaving it.
+        chat.aim(Scope::Server, "");
+        assert!(chat.everything);
+        chat.open(Scope::Server, "");
+        assert!(!chat.everything && !chat.tagged(Layout::Tabs));
     }
 
     #[test]

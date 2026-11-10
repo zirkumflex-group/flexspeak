@@ -196,6 +196,13 @@ pub const SCENES: &[Scene] = &[
     ("chat-grouped-people", chat_grouped_people),
     ("chat-grouped-private", chat_grouped_private),
     ("chat-grouped-history", chat_grouped_history),
+    ("chat-tabs-all", chat_tabs_all),
+    ("chat-grouped-all", chat_grouped_all),
+    ("chat-feed-grouped", chat_feed_grouped),
+    ("chat-feed-grouped-channels", chat_feed_grouped_channels),
+    ("chat-feed-grouped-people", chat_feed_grouped_people),
+    ("chat-feed-grouped-channel", chat_feed_grouped_channel),
+    ("chat-feed-grouped-person", chat_feed_grouped_person),
     ("settings-chat", settings_chat),
     ("setup-chat", setup_chat),
     ("setup-chat-feed", setup_chat_feed),
@@ -807,6 +814,50 @@ fn chat_grouped_private(s: &mut App) {
 fn chat_grouped_history(s: &mut App) {
     chat_grouped(s);
     s.server_mut().chat.open(chat::Scope::Past(2), "");
+}
+
+/// Tabs on its All tab: every conversation together, tagged, and the message box chooses
+/// where it sends.
+fn chat_tabs_all(s: &mut App) {
+    connected(s);
+    chat_past(s);
+    chat_talk(s);
+    s.server_mut().chat.everything = true;
+    s.server_mut().chat.mark_seen(chat::Layout::Tabs);
+}
+
+fn chat_grouped_all(s: &mut App) {
+    chat_tabs_all(s);
+    s.chat_options.tab_bar = chat::TabBar::Grouped;
+}
+
+/// One Feed with its chips grouped: Channels and People list what they hold.
+fn chat_feed_grouped(s: &mut App) {
+    chat_grouped(s);
+    s.chat_options.layout = chat::Layout::Feed;
+    s.server_mut().chat.mark_seen(chat::Layout::Feed);
+}
+
+fn chat_feed_grouped_channels(s: &mut App) {
+    chat_feed_grouped(s);
+    s.ui.chat_lists[0].pinned = true;
+}
+
+fn chat_feed_grouped_people(s: &mut App) {
+    chat_feed_grouped(s);
+    s.ui.chat_lists[1].pinned = true;
+}
+
+/// The feed narrowed to a channel you left: its chip carries the name.
+fn chat_feed_grouped_channel(s: &mut App) {
+    chat_feed_grouped(s);
+    s.server_mut().chat.narrow(chat::Scope::Past(2));
+}
+
+/// Narrowed to one person: the message box follows.
+fn chat_feed_grouped_person(s: &mut App) {
+    chat_feed_grouped(s);
+    s.server_mut().chat.narrow(mara());
 }
 
 fn settings_chat(s: &mut App) {
@@ -3255,6 +3306,66 @@ mod tests {
         click(&mut rt, "chat-group-people");
         assert_eq!(rt.state.server().chat.target, mara());
         assert_eq!(rt.state.server().chat.unread(&mara()), 0);
+    }
+
+    #[test]
+    fn the_all_tab_shows_every_conversation_and_a_tag_leads_back_to_one() {
+        let mut rt = runtime(chat_tabs, (1180.0, 790.0));
+        settle(&mut rt);
+        assert_eq!(rt.state.server().chat.shown(chat::Layout::Tabs).len(), 4);
+        click(&mut rt, "chat-tab-all");
+        assert!(rt.state.server().chat.everything);
+        assert_eq!(rt.state.server().chat.shown(chat::Layout::Tabs).len(), 7);
+        assert_eq!(
+            rt.state.server().chat.unread_private(),
+            0,
+            "all of it is read"
+        );
+        // The message box chooses where it sends, without leaving the tab.
+        click(&mut rt, "chat-to");
+        click(&mut rt, "chat-to-row1");
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Server);
+        assert!(rt.state.server().chat.everything);
+        // A line's tag opens its conversation.
+        click(&mut rt, "chat-tag-3");
+        assert_eq!(rt.state.server().chat.target, mara());
+        assert!(!rt.state.server().chat.everything);
+        // Grouped has the same tab.
+        let mut rt = runtime(chat_grouped, (1180.0, 790.0));
+        settle(&mut rt);
+        click(&mut rt, "chat-tab-all");
+        assert!(rt.state.server().chat.everything);
+        click(&mut rt, "chat-group-channels");
+        assert!(!rt.state.server().chat.everything);
+    }
+
+    #[test]
+    fn grouped_chips_narrow_the_feed_to_one_channel_or_person() {
+        let mut rt = runtime(chat_feed_grouped, (1180.0, 790.0));
+        settle(&mut rt);
+        let shown = |rt: &Runtime<App>| rt.state.server().chat.shown(chat::Layout::Feed).len();
+        assert_eq!(shown(&rt), 10);
+        // The chip itself is every channel; its list picks one.
+        click(&mut rt, "chat-group-channels");
+        assert_eq!(rt.state.server().chat.filter, chat::Filter::Channel);
+        assert_eq!(shown(&rt), 7);
+        assert!(rt.find("chat-group-channels-list").is_some());
+        click(&mut rt, "chat-group-channels-row1");
+        assert_eq!(
+            rt.state.server().chat.filter,
+            chat::Filter::Only(chat::Scope::Past(2))
+        );
+        assert_eq!(shown(&rt), 2);
+        assert_eq!(rt.state.server().chat.target, chat::Scope::Channel);
+        // A person: the feed is theirs alone and the message box follows.
+        click(&mut rt, "chat-group-people");
+        assert_eq!(rt.state.server().chat.filter, chat::Filter::Private);
+        click(&mut rt, "chat-group-people-row0");
+        assert_eq!(rt.state.server().chat.filter, chat::Filter::Only(mara()));
+        assert_eq!(rt.state.server().chat.target, mara());
+        assert_eq!(shown(&rt), 2);
+        click(&mut rt, "chat-filter-All");
+        assert_eq!(shown(&rt), 10);
     }
 
     #[test]

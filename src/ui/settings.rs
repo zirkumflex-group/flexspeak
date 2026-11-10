@@ -1169,7 +1169,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
         )),
         Section::boxed(
             "chat-tabs",
-            "Tabs",
+            "Conversations",
             "chat tabs bar scroll group grouped channels people history conversations",
             vec![item(
                 "conversations in the bar side by side grouped",
@@ -1177,7 +1177,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
                     t,
                     "Conversations in the bar",
                     Some(
-                        "Side by side, the bar scrolls sideways. Grouped, pointing at Channels or People lists them.",
+                        "Side by side, each gets its own place and the bar scrolls sideways. Grouped, pointing at Channels or People lists them.",
                     ),
                     trailing(super::widgets::choice(
                         t,
@@ -1211,7 +1211,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
         )
         .note(group_note(
             t,
-            "Applies to the Tabs layout. Channels you have left keep a tab while they have something to read.",
+            "In Tabs, a list opens that conversation; in One Feed it narrows the feed to it. Channels you have left stay while they have something to read. All, at the far left, shows everything again.",
         )),
         Section::boxed(
             "chat-hidden",
