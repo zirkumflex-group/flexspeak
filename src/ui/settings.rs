@@ -124,6 +124,7 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
     match page {
         SettingsPage::Server => &icons::SERVER,
         SettingsPage::Appearance => &icons::PALETTE,
+        SettingsPage::Chat => &icons::MESSAGE,
         SettingsPage::Streaming => &icons::MONITOR_UP,
         SettingsPage::Audio => &icons::AUDIO_LINES,
         SettingsPage::Shortcuts => &icons::KEYBOARD,
@@ -141,6 +142,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
         &[
             SettingsPage::Server,
             SettingsPage::Appearance,
+            SettingsPage::Chat,
             SettingsPage::Streaming,
         ],
     ),
@@ -173,6 +175,7 @@ fn sections(
     match page {
         SettingsPage::Server => vec![servers_section(s, t, k), identity_section(s, t, k)],
         SettingsPage::Appearance => appearance_sections(s, t, k),
+        SettingsPage::Chat => chat_sections(s, t, k),
         SettingsPage::Streaming => vec![streaming_section(s, t, k)],
         SettingsPage::Audio => vec![
             Section::boxed(
@@ -1148,6 +1151,101 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
         sections.insert(0, omarchy_section(s, t, k, &current.name));
     }
     sections
+}
+
+/// How text chat is laid out, and what a message does while the chat column is hidden.
+fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
+    let options = s.chat_options;
+    vec![
+        Section::open(
+            "chat-layout",
+            "Chat Layout",
+            "chat messages text tabs feed layout conversation private channel server",
+            vec![item("tabs one feed", super::chat::layout_choice(s, t, k))],
+        )
+        .note(group_note(
+            t,
+            "Both show channel, server and private messages in the column beside the stage.",
+        )),
+        Section::boxed(
+            "chat-hidden",
+            "While Chat Is Hidden",
+            "chat messages hide hidden popup pop-up notification toast stream",
+            vec![
+                item(
+                    "show new messages popup pop-up notification",
+                    form_row(
+                        t,
+                        "Show new messages",
+                        Some("A pop-up at the top right for 5 seconds."),
+                        switch(
+                            "chat-popups",
+                            "Show new messages",
+                            options.popups,
+                            true,
+                            k,
+                            |s, popups| {
+                                Message::Chat(crate::chat::Action::Options(crate::settings::Chat {
+                                    popups,
+                                    ..s.chat_options
+                                }))
+                            },
+                        ),
+                    ),
+                ),
+                item(
+                    "only private messages popup pop-up",
+                    form_row(
+                        t,
+                        "Only private messages",
+                        Some("Channel and server messages just light the dot."),
+                        switch(
+                            "chat-popups-private",
+                            "Only private messages",
+                            options.popups_private_only,
+                            options.popups,
+                            k,
+                            |s, popups_private_only| {
+                                Message::Chat(crate::chat::Action::Options(crate::settings::Chat {
+                                    popups_private_only,
+                                    ..s.chat_options
+                                }))
+                            },
+                        ),
+                    ),
+                ),
+                item(
+                    "hide chat while watching a stream",
+                    form_row(
+                        t,
+                        "Hide chat while watching a stream",
+                        Some("Folds it to the edge while a stream is on the stage."),
+                        switch(
+                            "chat-hide-watching",
+                            "Hide chat while watching a stream",
+                            options.hide_while_watching,
+                            true,
+                            k,
+                            |s, hide_while_watching| {
+                                Message::Chat(crate::chat::Action::Options(crate::settings::Chat {
+                                    hide_while_watching,
+                                    ..s.chat_options
+                                }))
+                            },
+                        ),
+                    ),
+                ),
+            ],
+        )
+        .note(group_note(
+            t,
+            if cfg!(target_os = "macos") {
+                "Hide the chat with the button at its top right or ⇧⌘C. A handle on the window's right edge brings it back."
+            } else {
+                "Hide the chat with the button at its top right or Ctrl+Shift+C. A handle on the window's right edge brings it back."
+            },
+        )),
+    ]
 }
 
 /// The icon beside the clock (Windows) or in the menu bar (macOS) that shows your mute state.

@@ -5,6 +5,7 @@
 //! `Tx`, and mirrors the app's text values into the fields that edit them.
 
 mod charts;
+mod chat;
 mod footer;
 mod fx;
 mod home;
@@ -30,6 +31,7 @@ use tokio::sync::mpsc;
 
 use crate::{App, Message, Tab, client, shortcuts, usage};
 
+pub use chat::MIN_DOCK_WINDOW as CHAT_MIN_DOCK_WINDOW;
 pub use theme::Theme;
 
 /// A [`Task::Stream`] job: interim messages go to the callback, the result is the last one.
@@ -106,6 +108,25 @@ impl RailPeek {
     fn unpin(&mut self) -> bool {
         std::mem::take(&mut self.pinned)
     }
+
+    /// Holds it open, or lets it go, from the keyboard.
+    pub fn toggle_pin(&mut self) {
+        self.pinned = !self.pinned;
+    }
+}
+
+/// A message shown at the top right while the chat column is hidden.
+#[derive(Debug, Clone)]
+pub struct ChatToast {
+    pub entry: crate::chat::Entry,
+    /// When it leaves, unless the pointer is holding it.
+    pub until: Instant,
+}
+
+impl ChatToast {
+    pub const SHOWN: Duration = Duration::from_secs(5);
+    /// How long it stays once the pointer lets go of it.
+    const AFTER_HOVER: Duration = Duration::from_secs(2);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +247,17 @@ pub struct UiState {
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
     pub rail_peek: RailPeek,
+    /// The chat column while it hides behind the right edge, as the rail does behind the left.
+    pub chat_peek: RailPeek,
+    pub chat_input: TextEdit,
+    pub chat_toast: Option<ChatToast>,
+    /// The pointer is over the pop-up, which keeps it up.
+    pub chat_toast_hover: bool,
+    /// The chat was asked back while "hide while watching" had it hidden; lasts until the
+    /// streams end.
+    pub chat_over_stream: bool,
+    /// One Feed's list of places to send to is open.
+    pub chat_menu: bool,
     /// What one click can share, refreshed while you could go live.
     pub quick_sources: Vec<crate::streaming::publishing::ShareSource>,
     pub quick_checking: bool,
@@ -281,6 +313,12 @@ impl Default for UiState {
             rail_menu: None,
             move_menu: false,
             rail_peek: RailPeek::default(),
+            chat_peek: RailPeek::default(),
+            chat_input: TextEdit::new(""),
+            chat_toast: None,
+            chat_toast_hover: false,
+            chat_over_stream: false,
+            chat_menu: false,
             quick_sources: Vec::new(),
             quick_checking: false,
             next_quick_check: Instant::now(),
@@ -303,6 +341,14 @@ impl Default for UiState {
             press_point: (0.0, 0.0),
             row_origin: (0.0, 0.0),
         }
+    }
+}
+
+impl UiState {
+    /// Whether the hidden chat column is peeking over the stage: the pointer is on its handle or
+    /// on it, or its message box is being typed in.
+    pub fn chat_peek_open(&self, now: Instant) -> bool {
+        self.chat_peek.open(now) || self.chat_input.focused
     }
 }
 
@@ -341,6 +387,8 @@ impl App {
             .as_ref()
             .map_or(String::new(), |draft| draft.reason.clone());
         mirror(&mut self.ui.moderation_reason, &reason);
+        let draft = self.server().chat.draft.clone();
+        mirror(&mut self.ui.chat_input, &draft);
     }
 }
 
@@ -581,7 +629,29 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     }
     // One-off failures fade on their own.
     changed |= s.alerts.expire(now);
-    let wake = [s.updater.next_check, s.alerts.next_expiry()]
+    // So does a chat pop-up, unless the pointer is holding it.
+    if !s.ui.chat_toast_hover
+        && s.ui
+            .chat_toast
+            .as_ref()
+            .is_some_and(|toast| now >= toast.until)
+    {
+        s.ui.chat_toast = None;
+        changed = true;
+    }
+    if !s.server().streaming.active() {
+        s.ui.chat_over_stream = false;
+    }
+    if s.ui.chat_peek.expired(now) {
+        s.chat_seen();
+        changed = true;
+    }
+    let toast_expiry =
+        s.ui.chat_toast
+            .as_ref()
+            .filter(|_| !s.ui.chat_toast_hover)
+            .map(|toast| toast.until);
+    let wake = [s.updater.next_check, s.alerts.next_expiry(), toast_expiry]
         .into_iter()
         .flatten()
         .fold(s.next_usage_tick, Instant::min);
@@ -614,6 +684,19 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if key.key == rune::Key::Escape && s.ui.rail_peek.unpin() {
+        return true;
+    }
+    if key.key == rune::Key::Escape && s.ui.chat_peek.unpin() {
+        return true;
+    }
+    // ⇧⌘C hides the chat column or brings it back.
+    if key.is_command('c')
+        && key.mods.shift
+        && s.onboarding.is_none()
+        && s.settings_page.is_none()
+        && s.live()
+    {
+        dispatch(s, tx, Message::Chat(crate::chat::Action::Toggle));
         return true;
     }
     // Escape drops a member selection first.
@@ -732,8 +815,13 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         // Settings reads it for its margins. Recording it must not commit: a committing layout
         // handler would re-run layout every frame.
         .on_layout_tx(|s: &mut App, r: [f32; 4], tx: &mut Tx| {
+            // The one width that changes the view: where the chat column docks or folds away.
+            let docks = |width: f32| width >= chat::MIN_DOCK_WINDOW;
+            let crossed = docks(s.window_size.0) != docks(r[2]);
             s.window_size = (r[2], r[3]);
-            tx.live_only();
+            if !crossed {
+                tx.live_only();
+            }
         });
     let base = base.child(
         col()
@@ -777,7 +865,8 @@ pub fn run() {
         poll: Some(poll),
         on_key: Some(on_key),
         scenes: scenes::SCENES,
-        ..AppSpec::new("Flexspeak", (900.0, 790.0), placeholder, view)
+        // Wide enough for the chat column beside the stage (`chat::MIN_DOCK_WINDOW`).
+        ..AppSpec::new("Flexspeak", (1180.0, 790.0), placeholder, view)
     };
     let app = rune::App::new(spec);
     let handle = app.handle();

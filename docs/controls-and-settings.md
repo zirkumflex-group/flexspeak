@@ -2,7 +2,7 @@
 
 ## First launch
 
-When `settings.json` does not exist, the app opens a five-step setup: username, one saved server, OS permissions, audio devices/local testing, and hotkeys. It writes the configuration only after **Finish setup** succeeds. Closing an unfinished setup leaves no default file behind, so the next launch starts setup again. A valid existing configuration skips setup. A malformed or unreadable file is preserved and opens **Settings → Settings File** with an error instead of being replaced by onboarding.
+When `settings.json` does not exist, the app opens a six-step setup: username, one saved server, OS permissions, audio devices/local testing, the chat layout, and hotkeys. It writes the configuration only after **Finish setup** succeeds. Closing an unfinished setup leaves no default file behind, so the next launch starts setup again. A valid existing configuration skips setup. A malformed or unreadable file is preserved and opens **Settings → Settings File** with an error instead of being replaced by onboarding.
 
 If a TeamSpeak 6 install is found, the first step offers to carry over its settings. Nothing is read until that button is pressed. The display name, saved server addresses, the microphone and speakers (matched by name) and push-to-talk with its release delay are then filled in, and the Username, Server and Devices steps show each value under **From TeamSpeak 6**, with **Use** to return to it after a change. Every imported server is saved unless removed there. The display name shares a record with login data: only that field is copied out, and the rest is neither kept nor logged. Server passwords, identities and shortcuts are not imported. TeamSpeak does not document this file, so anything unexpected is skipped. The location is confirmed on macOS (`~/Library/Preferences/TeamSpeak/Default/settings.db`); the Windows and Linux equivalents are assumed.
 
@@ -66,6 +66,19 @@ The slider directly below **Settings → Audio → Playback** controls this app 
 While connected, the server sidebar places icon-only Disconnect, Mute and Deafen controls above the server name. Hover to see their actions. Audio settings live in the top-right Settings tab. Channel headings use speaker icons, clear spacing and a border on hover; clicking the heading joins the channel, while its separate arrow expands/collapses the hierarchy. The current channel stays highlighted. User avatars, channel user counts and separate Join/Joined buttons are omitted. Client rows show a health dot before the name and microphone/sound icons only while muted or deafened (including unavailable audio hardware). The app subscribes to channel updates once per connection. A channel whose members are not visible is explicitly marked rather than reported as empty.
 
 Channel names are clickable when the server allows access or access is not known in advance; the server accepts or rejects the request. Explicit denials and unsupported voice codecs disable joining. Password-protected channels prompt only after clicking the channel name; passwords remain in memory and are cleared after submission or cancellation. Missing/incorrect passwords reopen the prompt with an error. Press Escape or Cancel to dismiss it. The server always makes the final decision, including passwords, channel capacity and permission changes.
+
+## Text chat
+
+A chat column sits to the right of the stage while you are connected. It carries the three places TeamSpeak sends text to: your channel, the whole server, and one person. **Settings → Chat** (and a step of setup) picks its layout, and the choice is saved at once:
+
+- **Tabs** shows one conversation at a time: a tab for the channel, one for the server, and one per person you message. The message box names where it sends.
+- **One Feed** shows every line in one stream, tagged `#Channel`, `Server` or `to you` / `to Name`, with private lines on a tint. Chips narrow it to one kind. A chip beside the message box chooses where it sends; pressing a line's tag points it there, and Escape returns to the channel.
+
+Right-click someone in the channel tree and choose **Message** to write to them. A private conversation is filed under the person's identity, so it survives them reconnecting; the message box locks while they are off the server. Web addresses are links. Nothing is saved: the history lasts as long as the connection, as a TeamSpeak server keeps none. Messages are sent as the server takes them (up to 1024 bytes, addresses wrapped in `[URL]` for TeamSpeak's own clients), and a refusal shows as a "Message not sent" notice.
+
+Pokes you receive and send are kept in the conversation as faded lines with a bell. They still chime and open their dialog.
+
+The panel button at the column's top right, or ⇧⌘C (Ctrl+Shift+C), hides the column behind a handle on the window's right edge, the twin of the server rail's on the left. Pointing at the handle peeks the chat over the stage, and pressing it docks the column again. In a window narrower than 1000 points the column always peeks instead of docking. While it is hidden, a new message lights a dot on the handle (violet for a private one) and pops up at the top right for five seconds with **Reply** and **Open Chat**; Settings → Chat can limit pop-ups to private messages, turn them off, or hide the column by itself while a stream is being watched. Unread private messages also show as a count on the person in the tree, and on the server's tile in the rail while another server is on screen.
 
 ## Connection health
 

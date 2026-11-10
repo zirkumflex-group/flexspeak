@@ -14,7 +14,7 @@ use super::widgets::{
     Variant, body, button, card, divider, faint, heading, icon_button, labelled, meter, muted,
     overline, pulse, scroll_page, struck,
 };
-use super::{RailPeek, dispatch, footer, icons, members, send, statistics, streams};
+use super::{RailPeek, chat, dispatch, footer, icons, members, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -139,6 +139,12 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
         if hidden {
             rail_edge(s, t, k, layer);
         }
+        // The chat column docks beside the stage, or waits behind the right edge as the rail
+        // does behind the left.
+        let chat = chat::column(s, t, k, layer);
+        if chat.is_none() {
+            chat::edge(s, t, k, layer);
+        }
         return row()
             .w_full()
             .h_full()
@@ -152,6 +158,11 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
                     .grow(1.0)
                     .min_w(0.0)
                     .child(streams::view(s, cx, t, k, layer)),
+            )
+            .children(
+                chat.map(|chat| [vertical_rule(t), chat])
+                    .into_iter()
+                    .flatten(),
             );
     }
     saved_servers(s, t, k)
@@ -465,8 +476,19 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
     if !session.talking.is_empty() {
         tile = tile.border(2.0, t.good);
     }
+    let unread = session.chat.unread_private();
     if session.unseen_pokes > 0 {
         tile = tile.child(poke_marker(t, session.unseen_pokes));
+    } else if unread > 0 && !active {
+        // Private messages waiting on a server that isn't on screen.
+        tile = tile.child(
+            chat::badge(t, unread, t.private)
+                .absolute(22.0, -5.0)
+                .border(2.0, t.canvas)
+                .h(20.0)
+                .min_w(20.0)
+                .radius(10.0),
+        );
     }
     if !session.connected && !session.stopping {
         tile = tile.child(
@@ -1443,6 +1465,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         .is_some_and(|drag| drag.ids.contains(&member.id)),
                     s.is_streaming(member),
                     s.user_audio(&member.uid).muted,
+                    private_unread(s, member),
                 )
             })
             .collect();
@@ -1665,6 +1688,11 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
                 .child(icon(&icons::SCREEN_SHARE, 13.0).color(t.live)),
         );
     }
+    let unread = private_unread(s, member);
+    if unread > 0 {
+        entry = entry
+            .child(chat::badge(t, unread, t.private).help("Private messages you haven't read"));
+    }
     if !member.is_self && s.user_audio(&member.uid).muted {
         entry = entry.child(
             el().help("Muted by you")
@@ -1678,6 +1706,19 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         );
     }
     entry
+}
+
+/// Private messages from this person you haven't read.
+fn private_unread(s: &App, member: &client::Member) -> u32 {
+    if member.is_self {
+        return 0;
+    }
+    s.server()
+        .chat
+        .unread(&crate::chat::Scope::Private(client::chat_key(
+            &member.uid,
+            member.id,
+        )))
 }
 
 /// Three rising bars, the first `lit` of them in `colour`: a weak signal reads as one.

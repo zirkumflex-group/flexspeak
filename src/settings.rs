@@ -64,6 +64,42 @@ pub struct Settings {
     /// The server log's height under the channel list, and whether it is folded away.
     #[serde(skip_serializing_if = "LogPane::is_default")]
     pub log_pane: LogPane,
+    /// Settings > Chat. Saved straight away when changed, like `footer_hidden`.
+    #[serde(skip_serializing_if = "Chat::is_default")]
+    pub chat: Chat,
+}
+
+/// How text chat shows, and what happens while its column is hidden (Settings > Chat).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(default, deny_unknown_fields)]
+pub struct Chat {
+    pub layout: crate::chat::Layout,
+    /// The column is tucked behind the window's right edge.
+    pub hidden: bool,
+    /// A new message pops up at the top right while the column is hidden.
+    pub popups: bool,
+    /// Only private messages pop up; channel and server ones just light the dot.
+    pub popups_private_only: bool,
+    /// The column hides itself while a stream is being watched.
+    pub hide_while_watching: bool,
+}
+
+impl Default for Chat {
+    fn default() -> Self {
+        Self {
+            layout: crate::chat::Layout::Tabs,
+            hidden: false,
+            popups: true,
+            popups_private_only: false,
+            hide_while_watching: false,
+        }
+    }
+}
+
+impl Chat {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// How screen sharing encodes and captures (Settings > Streaming). Both apply to the next
@@ -307,6 +343,7 @@ impl Default for Settings {
             streaming: Streaming::default(),
             custom_themes: Vec::new(),
             skip_install_prompt: false,
+            chat: Chat::default(),
         }
     }
 }

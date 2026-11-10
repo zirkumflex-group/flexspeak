@@ -207,6 +207,14 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         .on_close(close)
         .group_label(title);
     if ids.len() == 1 && !member.is_self {
+        menu = menu.item(
+            MenuItem::new("Message")
+                .lead(tinted(&icons::MESSAGE, t.private, true))
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    close(s);
+                    dispatch(s, tx, Message::Chat(crate::chat::Action::Message(id)));
+                }),
+        );
         let denied = member.can_poke == Some(false);
         let mut poke = MenuItem::new("Poke…")
             .lead(tinted(&icons::HAND, t.fair, !denied))

@@ -1,4 +1,4 @@
-//! First-run setup: five steps in one centred card, with fixed Back / Continue controls.
+//! First-run setup: six steps in one centred card, with fixed Back / Continue controls.
 
 use rune::{Cx, El, Transition, col, el, icon, row, text};
 use rune_kit::Kit;
@@ -214,7 +214,12 @@ fn stepper(t: &Theme, step: Step) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(6.0)
-                .label(format!("Step {} of 5: {}", item.index() + 1, item.title()))
+                .label(format!(
+                    "Step {} of {}: {}",
+                    item.index() + 1,
+                    Step::ALL.len(),
+                    item.title()
+                ))
                 .child(
                     el().w_full()
                         .h(3.0)
@@ -302,6 +307,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
                     "Stop the local test before continuing. You can also test devices later in Settings."
                 },
             )),
+        Step::Chat => col()
+            .w_full()
+            .gap(14.0)
+            .child(super::widgets::body(
+                t,
+                "Pick how messages from your channel, the server and single people show up. You can switch any time in Settings › Chat.",
+            ))
+            .child(super::chat::layout_choice(s, t, k)),
         Step::Hotkeys => settings::shortcut_settings(s, t, k),
     };
     let mut content = col()
@@ -382,7 +395,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
             col()
                 .key("setup")
                 .w_full()
-                .max_w(640.0)
+                .max_w(720.0)
                 .h_full()
                 .max_h(680.0)
                 .child(content),

@@ -22,8 +22,9 @@ const LIMIT: usize = 200;
 /// sits in the bottom corner instead, clear of Settings' own header.
 pub fn stack(s: &App, t: &Theme) -> Option<El> {
     let update = super::updates::notice(s, t);
+    let message = super::chat::toast(s, t);
     let visible = s.alerts.visible();
-    if update.is_none() && visible.is_empty() {
+    if update.is_none() && message.is_none() && visible.is_empty() {
         return None;
     }
     let hidden = visible.len().saturating_sub(SHOWN);
@@ -32,6 +33,7 @@ pub fn stack(s: &App, t: &Theme) -> Option<El> {
         .w(WIDTH)
         .gap(8.0)
         .children(update)
+        .children(message)
         .children(
             visible
                 .iter()

@@ -4,15 +4,17 @@ pub enum Step {
     Server,
     Permissions,
     Devices,
+    Chat,
     Hotkeys,
 }
 
 impl Step {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Username,
         Self::Server,
         Self::Permissions,
         Self::Devices,
+        Self::Chat,
         Self::Hotkeys,
     ];
 
@@ -25,6 +27,7 @@ impl Step {
             Self::Server => "Your server",
             Self::Permissions => "Permissions",
             Self::Devices => "Your audio devices",
+            Self::Chat => "Your chat",
             Self::Hotkeys => "Your shortcuts",
         }
     }

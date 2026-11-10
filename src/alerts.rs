@@ -34,6 +34,8 @@ pub enum Source {
     StreamFrame,
     StreamPublish,
     Poke,
+    /// A text message the server didn't take.
+    Chat,
     Move,
     Moderate,
     Groups,
@@ -63,6 +65,7 @@ impl Source {
                 | Self::Subscription
                 | Self::Flood
                 | Self::Poke
+                | Self::Chat
                 | Self::Move
                 | Self::Moderate
                 | Self::Groups
@@ -118,6 +121,7 @@ impl Source {
             Self::StreamFrame => "Video frame dropped",
             Self::StreamPublish => "Screen sharing stopped",
             Self::Poke => "Poke not sent",
+            Self::Chat => "Message not sent",
             Self::Move => "Couldn't move",
             Self::Moderate => "Couldn't kick or ban",
             Self::Groups => "Groups not changed",

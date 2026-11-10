@@ -26,6 +26,7 @@ pub enum Operation {
     StreamAdmit,
     PublisherInfo,
     Poke,
+    Chat,
     Move,
     Moderate,
     Groups,
@@ -47,6 +48,7 @@ impl Operation {
             Self::StreamAdmit => "viewer admission",
             Self::PublisherInfo => "publisher information",
             Self::Poke => "poke",
+            Self::Chat => "message",
             Self::Move => "client move",
             Self::Moderate => "kick or ban",
             Self::Groups => "group change",
@@ -379,6 +381,7 @@ mod tests {
         for operation in [
             Operation::Join,
             Operation::Poke,
+            Operation::Chat,
             Operation::Move,
             Operation::Moderate,
             Operation::Groups,
