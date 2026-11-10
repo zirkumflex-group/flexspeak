@@ -240,6 +240,8 @@ pub struct UiState {
     pub streams_hover: bool,
     /// The share dialog shows its Advanced tab: resolution, frame rate and bitrates one by one.
     pub share_advanced: bool,
+    /// The share dialog's Screen, Window or Camera choice while nothing of that kind is picked.
+    pub share_group: Option<crate::streaming::publishing::SourceGroup>,
     /// Whether the pointer is over the server log, which shows its search button.
     pub log_hover: bool,
     /// Whether the pointer is over the window's close button, which turns its glyph white.
@@ -288,6 +290,7 @@ impl Default for UiState {
             update_hover: false,
             streams_hover: false,
             share_advanced: false,
+            share_group: None,
             log_hover: false,
             #[cfg(windows)]
             close_hover: false,

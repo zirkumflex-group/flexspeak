@@ -46,6 +46,31 @@ impl SourceKind {
     }
 }
 
+/// The share dialog's three kinds of source, one shown at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceGroup {
+    Screen,
+    Window,
+    Camera,
+}
+impl SourceGroup {
+    pub const ALL: [Self; 3] = [Self::Screen, Self::Window, Self::Camera];
+    pub fn of(kind: &SourceKind) -> Self {
+        match kind {
+            SourceKind::Screen(_) => Self::Screen,
+            SourceKind::Window(_) => Self::Window,
+            SourceKind::Camera(_) => Self::Camera,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Screen => "Screen",
+            Self::Window => "Window",
+            Self::Camera => "Camera",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Access {
@@ -106,6 +131,26 @@ mod tests {
     fn notify(publisher: &mut Publisher, name: &str, fields: &str) {
         let args = protocol::parse(name, &format!("{name} {fields}")).unwrap();
         publisher.notification(name, &args[0]);
+    }
+    #[test]
+    fn dialog_starts_on_the_main_screen() {
+        let source = |kind, name: &str| ShareSource {
+            kind,
+            name: name.into(),
+        };
+        let sources = [
+            source(SourceKind::Screen(Some(0)), "Screen 1"),
+            source(SourceKind::Screen(Some(1)), "Main screen"),
+            source(SourceKind::Window(7), "Game"),
+        ];
+        let quick = [source(SourceKind::Screen(Some(1)), "Main screen")];
+        assert_eq!(default_source(&sources, &quick), Some(sources[1].clone()));
+        // Before the quick sources are known, the first screen.
+        assert_eq!(default_source(&sources, &[]), Some(sources[0].clone()));
+        // No screen at all: a lone source is still the obvious one.
+        let camera = [source(SourceKind::Camera("c".into()), "Camera")];
+        assert_eq!(default_source(&camera, &quick), Some(camera[0].clone()));
+        assert_eq!(default_source(&[], &quick), None);
     }
     #[test]
     fn viewers_must_be_in_channel_and_explicitly_approved() {
@@ -623,14 +668,6 @@ impl Default for Quality {
     }
 }
 impl Quality {
-    pub fn label(self) -> String {
-        format!(
-            "{} · {} fps · {} kbps",
-            self.resolution.label(),
-            self.frame_rate,
-            self.video_kbps
-        )
-    }
     /// Upload per viewer at most, in Mbit/s: video and audio. Each viewer gets their own.
     pub fn upload_mbps(self) -> f64 {
         f64::from(self.video_kbps + self.audio_kbps) / 1000.0
@@ -709,11 +746,34 @@ pub struct Status {
     pub active: bool,
     pub live: bool,
     pub detail: String,
+    /// Who may watch the running share. A quick share is public whatever the dialog says.
+    pub access: Access,
     pub requests: Vec<(u16, String)>,
     pub viewers: Vec<(u16, String, bool)>,
     pub video_frames: u64,
     pub audio_frames: u64,
     pub audio_level: f32,
+}
+
+/// The source the share dialog starts on when none was picked: the main screen, so Go Live
+/// works at once. `quick` names it (the quick share list starts with it); without that, the
+/// first screen, which on a Mac is the system picker.
+pub fn default_source(sources: &[ShareSource], quick: &[ShareSource]) -> Option<ShareSource> {
+    let main = quick
+        .iter()
+        .find(|source| matches!(source.kind, SourceKind::Screen(_)));
+    main.and_then(|main| sources.iter().find(|source| source.kind == main.kind))
+        .or_else(|| {
+            sources
+                .iter()
+                .find(|source| matches!(source.kind, SourceKind::Screen(_)))
+        })
+        .or(if sources.len() == 1 {
+            sources.first()
+        } else {
+            None
+        })
+        .cloned()
 }
 
 /// What sharing starts with, kept between runs. Which source is left out: windows come and go.
@@ -1002,6 +1062,10 @@ impl Publisher {
         self.status.stop = self.worker.as_ref().map(|worker| worker.stop.clone());
         self.status.active = self.active();
         self.status.live = self.id.is_some() && self.active();
+        self.status.access = self
+            .options
+            .as_ref()
+            .map_or_else(Access::default, |o| o.access);
         self.status.requests = self
             .requests
             .iter()

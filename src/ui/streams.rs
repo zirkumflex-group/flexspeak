@@ -18,7 +18,9 @@ use super::widgets::{
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
     self, Strip, Watching, health,
-    publishing::{Access, Preset, PreviewState, Resolution, ShareSource, SourceKind, Struggle},
+    publishing::{
+        Access, Preset, PreviewState, Resolution, ShareSource, SourceGroup, SourceKind, Struggle,
+    },
 };
 use crate::{App, Message, usage};
 
@@ -338,12 +340,13 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
             ),
         );
     if sharing {
-        state = state.child(
-            text(share_summary(s))
+        state = state.child(share_summary(
+            s,
+            text(share_summary_text(s))
                 .font(ty::SMALL)
                 .color(t.faint)
                 .align(rune::Align::Center),
-        );
+        ));
     } else if supported && streaming::AVAILABLE {
         state = state.child(go_live(s, t));
     }
@@ -369,20 +372,27 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
     content.child(state)
 }
 
-/// Your own share in a line: how many watch it, and what it shows.
-fn share_summary(s: &App) -> String {
-    let sharing = &s.server().streaming.sharing;
-    let source = if sharing.status.detail.is_empty() {
-        sharing.quality.label()
+/// Your own share in a few words: how many watch it and who may. Until it is live, what it is
+/// waiting for. The encoder and capture details move to the tooltip and the share dialog.
+fn share_summary(s: &App, line: El) -> El {
+    let detail = &s.server().streaming.sharing.status.detail;
+    if detail.is_empty() {
+        line
     } else {
-        let detail = sharing.status.detail.strip_prefix("Sharing ");
-        detail.unwrap_or(&sharing.status.detail).to_owned()
+        line.help(detail.clone())
+    }
+}
+
+fn share_summary_text(s: &App) -> String {
+    let status = &s.server().streaming.sharing.status;
+    if !status.live && !status.detail.is_empty() {
+        return status.detail.clone();
+    }
+    let watching = match status.viewers.len() {
+        0 => "No one watching yet".to_owned(),
+        count => format!("{count} of {} watching", streaming::publishing::MAX_VIEWERS),
     };
-    format!(
-        "{} / {} viewers · {source}",
-        sharing.status.viewers.len(),
-        streaming::publishing::MAX_VIEWERS
-    )
+    format!("{watching} · {}", status.access.label())
 }
 
 /// A note on the main pane, recessed into it.
@@ -436,7 +446,10 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
                     Some(Message::StopSharing),
                 )),
         )
-        .child(faint(t, share_summary(s)).truncate_fade());
+        .child(share_summary(
+            s,
+            faint(t, share_summary_text(s)).truncate_fade(),
+        ));
     if sharing.audio && status.audio_frames > 0 {
         tile = tile.child(meter(t, "share-audio", status.audio_level.min(1.0), t.live));
     }
@@ -1421,38 +1434,250 @@ fn stats(s: &App, watch: &Watching) -> El {
     panel
 }
 
-/// The one picture of the chosen source, taken when the dialog opened or it was picked.
-fn source_preview(s: &App, t: &Theme) -> Option<El> {
+/// What to share, laid out rather than behind a menu: Screen, Window or Camera, then the
+/// screens as small pictures to click, or the windows or cameras as rows beside a picture of the
+/// chosen one. The main screen starts chosen, so Go Live works at once.
+fn source_picker(s: &App, t: &Theme, k: &Kit) -> El {
     let sharing = &s.server().streaming.sharing;
-    let source = sharing.selected.as_ref()?;
-    if source.kind == SourceKind::Screen(None) {
-        return Some(faint(
+    let groups: Vec<SourceGroup> = SourceGroup::ALL
+        .into_iter()
+        .filter(|group| {
+            sharing
+                .sources
+                .iter()
+                .any(|source| SourceGroup::of(&source.kind) == *group)
+        })
+        .collect();
+    let current = sharing
+        .selected
+        .as_ref()
+        .map(|source| SourceGroup::of(&source.kind))
+        .or(s.ui.share_group)
+        .filter(|group| groups.contains(group))
+        .or(groups.first().copied());
+    let mut header = row().w_full().gap(10.0).center_y();
+    header = if groups.is_empty() {
+        header.child(muted(
             t,
-            "Your Mac shows its own previews when you start sharing.",
-        ));
-    }
-    let caption = |words: &'static str| text(words).font(ty::SMALL).color(Color::WHITE.alpha(0.7));
-    let content = match sharing.preview(source) {
-        Some(PreviewState::Ready(pixels)) => {
-            el().w_full().h_full().pixels_fit(pixels, SurfaceFit::Fit)
-        }
-        Some(PreviewState::Unavailable) => caption("No preview available"),
-        _ => col()
-            .gap(8.0)
-            .center()
-            .child(pulse(t.accent))
-            .child(caption("Taking a preview…")),
+            if sharing.loading {
+                "Looking for screens, windows and cameras…"
+            } else {
+                "No screen, window or camera found."
+            },
+        ))
+    } else {
+        header.child(choice(
+            t,
+            "share-group",
+            "What to share",
+            groups
+                .iter()
+                .map(|group| {
+                    (
+                        group_icon(*group),
+                        group.label(),
+                        Message::ShareGroup(*group),
+                    )
+                })
+                .collect(),
+            current.and_then(|current| groups.iter().position(|group| *group == current)),
+        ))
     };
-    Some(
-        el().key("share-preview")
+    header = header.child(el().grow(1.0)).child(icon_button(
+        t,
+        "find-sources",
+        &icons::REFRESH,
+        "Refresh screens, windows and cameras",
+        Variant::Ghost,
+        (!sharing.loading).then_some(Message::RefreshShareSources),
+    ));
+    let picker = col().key("share-source").w_full().gap(12.0).child(header);
+    match current {
+        Some(SourceGroup::Screen) => picker.child(screen_tiles(s, t)),
+        Some(group) => picker.child(source_rows(s, t, k, group)),
+        None => picker,
+    }
+}
+
+fn group_icon(group: SourceGroup) -> &'static rune::Icon {
+    match group {
+        SourceGroup::Screen => &icons::MONITOR,
+        SourceGroup::Window => &icons::APP_WINDOW,
+        SourceGroup::Camera => &icons::VIDEO,
+    }
+}
+
+/// Every screen as a small picture with its name below; a click picks it.
+fn screen_tiles(s: &App, t: &Theme) -> El {
+    let sharing = &s.server().streaming.sharing;
+    let mut tiles = row()
+        .key("share-screens")
+        .w_full()
+        .gap(SHARE_TILE_GAP)
+        .flex_wrap();
+    let mut screens: Vec<&ShareSource> = sharing
+        .sources
+        .iter()
+        .filter(|source| SourceGroup::of(&source.kind) == SourceGroup::Screen)
+        .collect();
+    screens.sort_by_key(|source| !s.ui.quick_sources.iter().any(|q| q.kind == source.kind));
+    for (index, source) in screens.into_iter().enumerate() {
+        let on = sharing.selected.as_ref() == Some(source);
+        let mut tile = col()
+            .key(format!("share-screen-{index}"))
+            .role("radio")
+            .label(source.name.clone())
+            .w(SHARE_TILE_WIDTH)
+            .gap(6.0)
+            .child(source_frame(s, t, Some(source), on))
+            .child(
+                text(source.name.clone())
+                    .font(ty::CAPTION)
+                    .color(if on { t.text } else { t.muted })
+                    .truncate_fade()
+                    .a11y_hidden(),
+            );
+        if !on {
+            tile = tile
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .on_press_tx(super::send(Message::ShareSource(source.clone())));
+        }
+        tiles = tiles.child(tile);
+    }
+    tiles
+}
+
+/// A source's picture at tile size: the still once taken, outlined in the accent while chosen.
+fn source_frame(s: &App, t: &Theme, source: Option<&ShareSource>, on: bool) -> El {
+    let sharing = &s.server().streaming.sharing;
+    let caption = |words: &'static str| {
+        text(words)
+            .font(ty::CAPTION)
+            .color(Color::WHITE.alpha(0.6))
+            .align(rune::Align::Center)
             .w_full()
-            .h(SHARE_PREVIEW_HEIGHT)
-            .radius(radius::ROW)
-            .clip_rounded(radius::ROW)
-            .fill(Color::BLACK)
+            .wrap()
+    };
+    let content = match source {
+        None => caption("Pick one on the right"),
+        // A Mac asks which screen or window once sharing starts, with its own previews.
+        Some(source) if source.kind == SourceKind::Screen(None) => col()
+            .w_full()
+            .gap(6.0)
             .center()
-            .child(content),
-    )
+            .px(10.0)
+            .child(icon(&icons::MONITOR_UP, 18.0).color(Color::WHITE.alpha(0.6)))
+            .child(caption("Your Mac asks which one when you go live")),
+        Some(source) => match sharing.preview(source) {
+            Some(PreviewState::Ready(pixels)) => {
+                el().w_full().h_full().pixels_fit(pixels, SurfaceFit::Fit)
+            }
+            Some(PreviewState::Unavailable) => caption("No preview"),
+            _ => pulse(t.accent),
+        },
+    };
+    let picture = el()
+        .w_full()
+        .h_full()
+        .radius(radius::ROW)
+        .clip_rounded(radius::ROW)
+        .fill(Color::BLACK)
+        .border(1.0, t.hairline)
+        .center()
+        .child(content);
+    let ring = el()
+        .w(SHARE_TILE_WIDTH)
+        .h(SHARE_TILE_HEIGHT)
+        .padding(3.0)
+        .radius(radius::ROW + 3.0);
+    if on {
+        ring.border(2.0, t.accent).child(picture)
+    } else {
+        ring.child(picture)
+    }
+}
+
+/// Windows or cameras as rows, the game being played first, beside a picture of the chosen one.
+fn source_rows(s: &App, t: &Theme, k: &Kit, group: SourceGroup) -> El {
+    let sharing = &s.server().streaming.sharing;
+    let game = |source: &ShareSource| {
+        group == SourceGroup::Window && s.ui.quick_sources.iter().any(|q| q.kind == source.kind)
+    };
+    let mut sources: Vec<&ShareSource> = sharing
+        .sources
+        .iter()
+        .filter(|source| SourceGroup::of(&source.kind) == group)
+        .collect();
+    sources.sort_by_key(|source| !game(source));
+    let mut rows = col().key("share-rows").w_full().gap(2.0);
+    for (index, source) in sources.iter().enumerate() {
+        let on = sharing.selected.as_ref() == Some(*source);
+        let glyph = if game(source) {
+            &icons::GAMEPAD
+        } else {
+            group_icon(group)
+        };
+        let mut line = row()
+            .key(format!("share-row-{index}"))
+            .role("radio")
+            .label(source.name.clone())
+            .w_full()
+            .h(SHARE_ROW)
+            .px(8.0)
+            .gap(8.0)
+            .center_y()
+            .radius(radius::ROW)
+            .child(
+                icon(glyph, 14.0)
+                    .color(if on { t.accent } else { t.muted })
+                    .a11y_hidden(),
+            )
+            .child(
+                text(source.name.clone())
+                    .font(ty::BODY)
+                    .color(if on { t.text } else { t.muted })
+                    .truncate_fade()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .a11y_hidden(),
+            );
+        line = if on {
+            line.fill(t.wash(0.08))
+        } else {
+            line.focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .hover(t.wash(0.05))
+                .press(t.wash(0.09))
+                .on_press_tx(super::send(Message::ShareSource((*source).clone())))
+        };
+        rows = rows.child(line);
+    }
+    let chosen = sharing
+        .selected
+        .as_ref()
+        .filter(|source| SourceGroup::of(&source.kind) == group);
+    row()
+        .key("share-pick")
+        .w_full()
+        .gap(SHARE_TILE_GAP)
+        .items_start()
+        .child(source_frame(s, t, chosen, chosen.is_some()))
+        .child(
+            el().grow(1.0).min_w(0.0).child(
+                k.scroll_bar(
+                    col()
+                        .key("share-rows-scroll")
+                        .w_full()
+                        .max_h(SHARE_ROW * 4.5 + 8.0)
+                        .scroll(rune::ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .scroll_edge_fade(8.0)
+                        .child(rows),
+                ),
+            ),
+        )
 }
 
 /// Choosing what to share, its quality and audio; or, while sharing, who watches.
@@ -1549,47 +1774,7 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                 Some(Message::StopSharing),
             ));
     } else {
-        let names: Vec<String> = sharing
-            .sources
-            .iter()
-            .map(|source| source.name.clone())
-            .collect();
-        body = body
-            .child(field_label(t, "Screen, window or camera"))
-            .child(
-                row()
-                    .w_full()
-                    .gap(10.0)
-                    .center_y()
-                    .child(el().grow(1.0).min_w(0.0).child(picker(
-                        k,
-                        s,
-                        "share-source",
-                        names,
-                        sharing.selected.as_ref().map(|source| source.name.as_str()),
-                        if sharing.loading {
-                            "Looking for sources…"
-                        } else {
-                            "Choose a screen, window or camera…"
-                        },
-                        true,
-                        SHARE_PICKER,
-                        {
-                            let sources = sharing.sources.clone();
-                            move |index| Message::ShareSource(sources[index].clone())
-                        },
-                        &mut menus,
-                    )))
-                    .child(icon_button(
-                        t,
-                        "find-sources",
-                        &icons::REFRESH,
-                        "Refresh screens, windows and cameras",
-                        Variant::Secondary,
-                        (!sharing.loading).then_some(Message::RefreshShareSources),
-                    )),
-            )
-            .children(source_preview(s, t));
+        body = body.child(source_picker(s, t, k));
         body = audio_field(s, k, quality_fields(s, t, k, body, true, &mut menus));
         if !status.detail.is_empty() {
             body = body.child(muted(t, status.detail.clone()));
@@ -1881,7 +2066,11 @@ fn resolution_picker(s: &App, k: &Kit, menus: &mut Vec<El>) -> El {
 
 /// The share dialog's pickers span its width.
 const SHARE_PICKER: f32 = 480.0;
-const SHARE_PREVIEW_HEIGHT: f32 = 200.0;
+/// Three source pictures fill the dialog's width, 16:9 like most screens.
+const SHARE_TILE_GAP: f32 = 12.0;
+const SHARE_TILE_WIDTH: f32 = (528.0 - 2.0 * SHARE_TILE_GAP) / 3.0;
+const SHARE_TILE_HEIGHT: f32 = SHARE_TILE_WIDTH * 9.0 / 16.0;
+const SHARE_ROW: f32 = 28.0;
 
 fn field_label(t: &Theme, label: &str) -> El {
     text(label.to_owned())
