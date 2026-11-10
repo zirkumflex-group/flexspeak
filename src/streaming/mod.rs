@@ -1,3 +1,5 @@
+#[cfg(target_os = "ios")]
+pub mod broadcast;
 mod protocol;
 mod publish_media;
 pub mod publishing;
@@ -15,7 +17,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-pub const AVAILABLE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+pub const AVAILABLE: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "ios"
+));
 pub const MAX_SDP_BYTES: usize = 64 * 1024;
 pub const MAX_CANDIDATES: usize = 256;
 
@@ -366,7 +372,10 @@ static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 
 /// Decoded RGBA, rows top first. Only the native receivers (macOS, Windows) produce one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "ios")),
+    allow(dead_code)
+)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
@@ -393,6 +402,9 @@ struct SurfaceState {
     image: Option<Image>,
     audio: std::collections::VecDeque<[f32; 2]>,
     audio_disabled: bool,
+    /// The newest picture for the SwiftUI view, which can't draw `rune::Pixels`.
+    #[cfg(target_os = "ios")]
+    latest_image: Option<Image>,
 }
 
 /// A stream's own volume, 0–100%, as `f32` bits.
@@ -443,6 +455,10 @@ impl Surface {
         state.sequence = 0;
         state.frame = None;
         state.audio.clear();
+        #[cfg(target_os = "ios")]
+        {
+            state.latest_image = None;
+        }
         let generation = state.generation;
         drop(state);
         self.release_pixels();
@@ -454,6 +470,10 @@ impl Surface {
             state.active = false;
             state.frame = None;
             state.audio.clear();
+            #[cfg(target_os = "ios")]
+            {
+                state.latest_image = None;
+            }
             drop(state);
             self.release_pixels();
         }
@@ -480,12 +500,25 @@ impl Surface {
         {
             state.image = Some(image.clone());
         }
+        #[cfg(target_os = "ios")]
+        {
+            state.latest_image = Some(image);
+        }
         // Hold the lock while replacing the pixels, so a concurrent `end` cannot be overtaken.
+        #[cfg(not(target_os = "ios"))]
         self.pixels.set(image.width, image.height, image.pixels);
         drop(state);
         if reshaped && let Some(waker) = self.waker.lock().unwrap().as_ref() {
             waker();
         }
+    }
+    /// Copies the newest picture into `buffer` once, if one arrived since the last call.
+    #[cfg(target_os = "ios")]
+    pub fn copy_latest(&self, buffer: &mut [u8]) -> Option<(u32, u32)> {
+        let image = self.state.lock().unwrap().latest_image.take()?;
+        let target = buffer.get_mut(..image.pixels.len())?;
+        target.copy_from_slice(&image.pixels);
+        Some((image.width, image.height))
     }
     /// The newest frame's description, if a session is showing one.
     pub fn latest(&self) -> Option<Frame> {
@@ -503,7 +536,7 @@ impl Surface {
             state.audio.clear();
         }
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios", test))]
     pub fn publish_audio(&self, generation: u64, pcm: &[i16]) {
         let mut state = self.state.lock().unwrap();
         if !state.active || state.generation != generation || state.audio_disabled {

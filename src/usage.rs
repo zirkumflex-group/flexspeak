@@ -4,6 +4,7 @@ use std::{
 };
 
 use rune::{Color, Shape, shape::LineCap};
+#[cfg(not(target_os = "ios"))]
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tsclientlib::{ConnectionStats, PacketStat, data::ConnectionClientData};
 
@@ -106,12 +107,14 @@ fn memory_detail_bytes() -> Option<u64> {
     None
 }
 
+#[cfg(not(target_os = "ios"))]
 pub struct ProcessMonitor {
     system: System,
     pid: Pid,
     primed: bool,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl ProcessMonitor {
     pub fn new() -> Self {
         Self {

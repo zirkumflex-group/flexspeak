@@ -1677,6 +1677,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "flexspeak-ios"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audiopus",
+ "audiopus_sys",
+ "cpal",
+ "cpu-time",
+ "crossbeam-queue",
+ "directories",
+ "futures",
+ "libc",
+ "libwebrtc",
+ "nnnoiseless",
+ "rubato",
+ "rune",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tsclientlib",
+ "tsproto-packets",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

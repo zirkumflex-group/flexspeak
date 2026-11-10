@@ -1,7 +1,7 @@
 use super::{MAX_SDP_BYTES, StreamInfo};
 use anyhow::{Result, bail, ensure};
 use serde_json::Value;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios", test))]
 use serde_json::json;
 use std::{collections::BTreeMap, str};
 use tsproto_packets::{
@@ -219,7 +219,7 @@ pub fn incoming_signal(value: &str) -> Result<Option<Input>> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios", test))]
 pub fn answer(sdp: String) -> Value {
     json!({"cmd":"answer", "args":{"answer":sdp}})
 }

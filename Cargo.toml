@@ -6,7 +6,7 @@ rust-version = "1.99"
 description = "A minimal native TeamSpeak voice client"
 
 [workspace]
-members = ["."]
+members = [".", "crates/flexspeak-ios"]
 exclude = ["vendor/tsclientlib"]
 
 [dependencies]

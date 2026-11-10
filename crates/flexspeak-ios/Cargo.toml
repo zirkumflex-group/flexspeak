@@ -1,0 +1,31 @@
+[package]
+name = "flexspeak-ios"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "The Flexspeak voice session, for the SwiftUI iOS app"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+anyhow = "1"
+audiopus = "0.3.0-rc.0"
+audiopus_sys = { version = "0.2.2", features = ["static"] }
+cpal = "0.18.2"
+cpu-time = "1"
+crossbeam-queue = "0.3"
+directories = "6"
+futures = "0.3"
+rubato = { version = "0.16.2", default-features = false }
+rune = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+tsclientlib = { path = "../../vendor/tsclientlib", default-features = false, features = ["audio"] }
+tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5" }
+nnnoiseless = { version = "0.5.2", default-features = false }
+libc = "0.2"
+libwebrtc = "=0.3.54"

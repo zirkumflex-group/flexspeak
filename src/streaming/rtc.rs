@@ -4,7 +4,10 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "ios")),
+    allow(dead_code)
+)]
 pub enum Output {
     Signal(Value),
     TransportConnected,
@@ -25,14 +28,14 @@ impl Drop for Receiver {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "ios")))]
 pub fn start(_: String, _: Vec<Input>, _: u64, _: Arc<Surface>) -> Result<Receiver> {
     anyhow::bail!(
         "The experimental native video receiver is currently available on Mac and Windows."
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))]
 pub fn start(
     offer: String,
     candidates: Vec<Input>,
@@ -51,7 +54,7 @@ pub fn start(
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))]
 pub(super) fn start_with_servers(
     offer: String,
     candidates: Vec<Input>,
@@ -91,7 +94,7 @@ pub(super) fn start_with_servers(
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))]
 mod native {
     use super::*;
     use crate::streaming::{MAX_CANDIDATES, protocol};

@@ -30,6 +30,7 @@ pub enum Output {
     Signal(PeerKey, Value),
     Connected(PeerKey),
     Left(PeerKey),
+    Rejected(PeerKey, String),
     Stats { video: u64, audio: u64, level: f32 },
     Failed(String),
 }
@@ -92,7 +93,7 @@ pub fn sources() -> Result<Vec<ShareSource>> {
 pub async fn still(_: ShareSource) -> Result<Option<Still>> {
     Ok(None)
 }
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "ios")))]
 pub fn start(_: Options) -> Result<Publisher> {
     anyhow::bail!("Screen sharing is available on Mac and Windows")
 }
@@ -125,7 +126,7 @@ pub fn sources() -> Result<Vec<ShareSource>> {
 pub fn request_system_audio_access(device: crate::audio::DeviceChoice) -> Result<()> {
     native::request_system_audio_access(device)
 }
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))]
 pub fn start(options: Options) -> Result<Publisher> {
     let (input, commands) = mpsc::channel(64);
     let (events, output) = mpsc::channel(128);
@@ -152,28 +153,32 @@ pub fn start(options: Options) -> Result<Publisher> {
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))]
 mod native {
+    #[cfg(not(target_os = "ios"))]
+    use super::super::camera;
     use super::super::{
-        MAX_CANDIDATES, camera,
+        MAX_CANDIDATES,
         publishing::{MAX_VIEWERS, Quality, SourceKind},
     };
     use super::*;
     use crate::audio::{self, RateConverter};
     use anyhow::{Context, anyhow, bail, ensure};
+    #[cfg(not(target_os = "ios"))]
     use cpal::{
         FromSample, Sample, SampleFormat, SizedSample,
         traits::{DeviceTrait, StreamTrait},
     };
     use crossbeam_queue::ArrayQueue;
+    #[cfg(not(target_os = "ios"))]
+    use libwebrtc::desktop_capturer::{
+        CaptureError, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
+    };
     use libwebrtc::{
         MediaType,
         audio_frame::AudioFrame,
         audio_source::{AudioSourceOptions, native::NativeAudioSource},
         audio_track::RtcAudioTrack,
-        desktop_capturer::{
-            CaptureError, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
-        },
         ice_candidate::IceCandidate,
         media_stream_track::MediaStreamTrack,
         peer_connection::{OfferOptions, PeerConnection, PeerConnectionState},
@@ -195,6 +200,7 @@ mod native {
         time::{Duration, Instant},
     };
 
+    #[cfg(not(target_os = "ios"))]
     fn capturer(window: bool) -> Result<DesktopCapturer> {
         #[cfg(target_os = "macos")]
         let source_type = {
@@ -213,10 +219,12 @@ mod native {
             anyhow!("Screen capture is unavailable. Check screen-recording permission.")
         })
     }
+    #[cfg(not(target_os = "ios"))]
     pub async fn camera_access() -> Result<()> {
         camera::request_access().await
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub fn still(source: &ShareSource) -> Result<Option<Still>> {
         let (window, id) = match &source.kind {
             SourceKind::Camera(id) => return camera::still(id).map(Some),
@@ -250,6 +258,7 @@ mod native {
         }
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub fn sources() -> Result<Vec<ShareSource>> {
         #[cfg(target_os = "macos")]
         {
@@ -294,6 +303,7 @@ mod native {
             Ok(sources)
         }
     }
+    #[cfg(not(target_os = "ios"))]
     fn video_buffer(
         data: &[u8],
         stride: u32,
@@ -331,12 +341,14 @@ mod native {
         }
     }
 
+    #[cfg(not(target_os = "ios"))]
     struct SystemAudio {
         _stream: cpal::Stream,
         queue: Arc<ArrayQueue<[f32; 2]>>,
         errors: Arc<ArrayQueue<String>>,
         converter: RateConverter,
     }
+    #[cfg(not(target_os = "ios"))]
     impl SystemAudio {
         fn open(selected: &audio::DeviceChoice, active: Arc<AtomicBool>) -> Result<Self> {
             let device = audio::find_device(selected, false)?;
@@ -417,6 +429,7 @@ mod native {
         drop(access);
         Ok(())
     }
+    #[cfg(not(target_os = "ios"))]
     fn stereo_sample<T: SizedSample>(frame: &[T]) -> [f32; 2]
     where
         f32: FromSample<T>,
@@ -439,6 +452,7 @@ mod native {
             }
         }
     }
+    #[cfg(not(target_os = "ios"))]
     fn loopback<T: SizedSample>(
         device: &cpal::Device,
         config: &cpal::SupportedStreamConfig,
@@ -464,6 +478,109 @@ mod native {
             move |error| audio::report_stream_error(error, &errors),
             Some(Duration::from_secs(5)),
         )?)
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    fn screen_rotation() -> VideoRotation {
+        VideoRotation::VideoRotation0
+    }
+    #[cfg(target_os = "ios")]
+    fn screen_rotation() -> VideoRotation {
+        match super::super::broadcast::rotation() {
+            90 => VideoRotation::VideoRotation90,
+            180 => VideoRotation::VideoRotation180,
+            270 => VideoRotation::VideoRotation270,
+            _ => VideoRotation::VideoRotation0,
+        }
+    }
+    /// One broadcast picture as I420, shrunk to fit the chosen quality whichever way up it is.
+    #[cfg(target_os = "ios")]
+    fn screen_buffer(
+        picture: &super::super::broadcast::Picture<'_>,
+        (long, short): (u32, u32),
+    ) -> Result<I420Buffer> {
+        let (width, height) = (picture.width, picture.height);
+        ensure!(
+            (2..=8192).contains(&width)
+                && (2..=8192).contains(&height)
+                && width.is_multiple_of(2)
+                && height.is_multiple_of(2),
+            "Unsupported broadcast dimensions"
+        );
+        ensure!(
+            picture.y_stride >= width
+                && picture.uv_stride >= width
+                && picture.y.len() >= picture.y_stride as usize * height as usize
+                && picture.uv.len() >= picture.uv_stride as usize * height as usize / 2,
+            "Invalid broadcast buffer"
+        );
+        let mut buffer = I420Buffer::new(width, height);
+        let (sy, su, sv) = buffer.strides();
+        let (y, u, v) = buffer.data_mut();
+        libwebrtc::native::yuv_helper::nv12_to_i420(
+            picture.y,
+            picture.y_stride,
+            picture.uv,
+            picture.uv_stride,
+            y,
+            sy,
+            u,
+            su,
+            v,
+            sv,
+            width as i32,
+            height as i32,
+        );
+        let (max_width, max_height) = if height > width {
+            (short, long)
+        } else {
+            (long, short)
+        };
+        let scale = (f64::from(max_width) / f64::from(width))
+            .min(f64::from(max_height) / f64::from(height))
+            .min(1.0);
+        Ok(if scale < 1.0 {
+            buffer.scale(
+                ((f64::from(width) * scale) as i32 / 2 * 2).max(2),
+                ((f64::from(height) * scale) as i32 / 2 * 2).max(2),
+            )
+        } else {
+            buffer
+        })
+    }
+
+    /// Picks the connection details worth sending. Each one is a server command, paced to four
+    /// a second from a queue of 56, and a phone has many network addresses. These limits let
+    /// all four viewers fit in that queue at once.
+    #[derive(Default)]
+    struct CandidateFilter {
+        hosts: usize,
+        others: usize,
+    }
+    impl CandidateFilter {
+        const MAX_HOSTS: usize = 8;
+        const MAX_OTHERS: usize = 4;
+
+        /// Audio and video share the first section's connection, and viewers only use UDP.
+        fn keep(&mut self, sdp: &str, section: i32) -> bool {
+            let fields: Vec<_> = sdp.split_whitespace().collect();
+            if section != 0 || !fields.get(2).is_some_and(|p| p.eq_ignore_ascii_case("udp")) {
+                return false;
+            }
+            let host = fields
+                .iter()
+                .position(|field| *field == "typ")
+                .and_then(|index| fields.get(index + 1))
+                .is_some_and(|kind| *kind == "host");
+            // Separate limits, because reflexive details only arrive after every host one.
+            let (used, limit) = if host {
+                (&mut self.hosts, Self::MAX_HOSTS)
+            } else {
+                (&mut self.others, Self::MAX_OTHERS)
+            };
+            *used += 1;
+            *used <= limit
+        }
     }
 
     enum Callback {
@@ -524,9 +641,17 @@ mod native {
             candidate_count: 0,
         };
         let tx = callbacks.clone();
-        let full = overflow.clone();
+        let mut filter = CandidateFilter::default();
         peer.pc.on_ice_candidate(Some(Box::new(move |c| {
-            if tx.try_send(Callback::Candidate(id,serde_json::json!({"cmd":"iceCandidate","args":{"sdp":c.candidate(),"mid":c.sdp_mid(),"mLine":c.sdp_mline_index()}}))).is_err() { full.store(true,Ordering::Relaxed); }
+            let sdp = c.candidate();
+            if filter.keep(&sdp, c.sdp_mline_index()) {
+                let args =
+                    serde_json::json!({"sdp":sdp,"mid":c.sdp_mid(),"mLine":c.sdp_mline_index()});
+                let _ = tx.try_send(Callback::Candidate(
+                    id,
+                    serde_json::json!({"cmd":"iceCandidate","args":args}),
+                ));
+            }
         })));
         peer.pc
             .on_connection_state_change(Some(Box::new(move |state| {
@@ -611,6 +736,17 @@ mod native {
         let slot = latest.clone();
         let failed = failure.clone();
         let running = active.clone();
+        #[cfg(target_os = "ios")]
+        let _broadcast = super::super::broadcast::attach(Box::new(move |picture| {
+            if !running.load(Ordering::Acquire) {
+                return;
+            }
+            match screen_buffer(&picture, max_size) {
+                Ok(buffer) => *slot.lock().unwrap() = Some(buffer),
+                Err(error) => *failed.lock().unwrap() = Some(error.to_string()),
+            }
+        }));
+        #[cfg(not(target_os = "ios"))]
         let receive = move |data: &[u8], stride, width, height| {
             if !running.load(Ordering::Acquire) {
                 return;
@@ -620,48 +756,57 @@ mod native {
                 Err(error) => *failed.lock().unwrap() = Some(error.to_string()),
             }
         };
+        #[cfg(not(target_os = "ios"))]
         let mut capture = None;
+        #[cfg(not(target_os = "ios"))]
         let mut camera_capture = None;
-        if let SourceKind::Camera(id) = &options.source.kind {
-            tokio::select! {
-                biased;
-                _ = cancel.changed() => return Ok(()),
-                result = camera::request_access() => result?,
-            }
-            if !active.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            camera_capture = Some(camera::Capture::open(id, quality, receive)?);
-        } else {
-            let (window, id) = match options.source.kind {
-                SourceKind::Window(id) => (true, Some(id)),
-                SourceKind::Screen(id) => (false, id),
-                SourceKind::Camera(_) => unreachable!(),
-            };
-            let mut desktop = capturer(window)?;
-            let selected = id
-                .map(|id| {
-                    desktop
-                        .get_source_list()
-                        .into_iter()
-                        .find(|source| source.id() == id)
-                        .ok_or_else(|| {
-                            anyhow!("The selected screen or window is no longer available")
-                        })
-                })
-                .transpose()?;
-            let failed = failure.clone();
-            desktop.start_capture(selected, move |frame| match frame {
-                Ok(frame) => receive(frame.data(), frame.stride(), frame.width(), frame.height()),
-                Err(CaptureError::Permanent) => {
-                    *failed.lock().unwrap() = Some(
-                        "Screen capture stopped. Check permission or select another window.".into(),
-                    )
+        #[cfg(not(target_os = "ios"))]
+        {
+            if let SourceKind::Camera(id) = &options.source.kind {
+                tokio::select! {
+                    biased;
+                    _ = cancel.changed() => return Ok(()),
+                    result = camera::request_access() => result?,
                 }
-                Err(CaptureError::Temporary) => {}
-            });
-            capture = Some(desktop);
+                if !active.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                camera_capture = Some(camera::Capture::open(id, quality, receive)?);
+            } else {
+                let (window, id) = match options.source.kind {
+                    SourceKind::Window(id) => (true, Some(id)),
+                    SourceKind::Screen(id) => (false, id),
+                    SourceKind::Camera(_) => unreachable!(),
+                };
+                let mut desktop = capturer(window)?;
+                let selected = id
+                    .map(|id| {
+                        desktop
+                            .get_source_list()
+                            .into_iter()
+                            .find(|source| source.id() == id)
+                            .ok_or_else(|| {
+                                anyhow!("The selected screen or window is no longer available")
+                            })
+                    })
+                    .transpose()?;
+                let failed = failure.clone();
+                desktop.start_capture(selected, move |frame| match frame {
+                    Ok(frame) => {
+                        receive(frame.data(), frame.stride(), frame.width(), frame.height())
+                    }
+                    Err(CaptureError::Permanent) => {
+                        *failed.lock().unwrap() = Some(
+                            "Screen capture stopped. Check permission or select another window."
+                                .into(),
+                        )
+                    }
+                    Err(CaptureError::Temporary) => {}
+                });
+                capture = Some(desktop);
+            }
         }
+        #[cfg(not(target_os = "ios"))]
         let mut system_audio = options
             .audio
             .as_ref()
@@ -689,6 +834,7 @@ mod native {
                     _ = cancel.changed() => return Ok(()),
                     command = input.recv() => {
                         let Some(command) = command else { return Ok(()); };
+                        let (Input::Add(viewer) | Input::Remove(viewer) | Input::Signal(viewer,_)) = command;
                         let action = async {
                             match command {
                                 Input::Add(id) if !peers.contains_key(&id) => {
@@ -718,18 +864,25 @@ mod native {
                             }
                             Ok::<_,anyhow::Error>(())
                         };
-                        tokio::select! { _ = cancel.changed() => return Ok(()), result = tokio::time::timeout(Duration::from_secs(10),action) => result.context("Viewer negotiation timed out")?? }
+                        tokio::select! { _ = cancel.changed() => return Ok(()), result = tokio::time::timeout(Duration::from_secs(10),action) => {
+                            // One viewer's failure must not end the share for the others.
+                            if let Err(error) = result.context("Viewer negotiation timed out").and_then(|outcome| outcome) {
+                                peers.remove(&viewer);
+                                let _ = events.try_send(Output::Rejected(viewer,error.to_string()));
+                            }
+                        } }
                     },
                     Some(callback) = callback_rx.recv() => match callback {
-                        Callback::Candidate(id,value) if peers.contains_key(&id) => emit(events,Output::Signal(id,value))?,
+                        Callback::Candidate(id,value) if peers.contains_key(&id) => { let _ = events.try_send(Output::Signal(id,value)); },
                         Callback::State(id,PeerConnectionState::Connected) if peers.contains_key(&id) => emit(events,Output::Connected(id))?,
                         Callback::State(id,PeerConnectionState::Failed | PeerConnectionState::Closed | PeerConnectionState::Disconnected) if peers.contains_key(&id) => { peers.remove(&id); emit(events,Output::Left(id))?; },
                         _ => {},
                     },
                     _ = video_tick.tick() => {
-                        if let Some(capture) = &mut capture { capture.capture_frame(); }
+                        #[cfg(not(target_os = "ios"))]
+                        { if let Some(capture) = &mut capture { capture.capture_frame(); } }
                         if let Some(buffer) = latest.lock().unwrap().take() {
-                            let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
+                            let mut frame = VideoFrame::new(screen_rotation(),buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             video.capture_frame(&frame); last_video = Instant::now(); frames += 1;
                             if frames == 1 { emit(events,Output::Ready)?; }
@@ -740,6 +893,8 @@ mod native {
                         let stalled_camera = options.source.kind.is_camera() && frames > 0 && last_video.elapsed() > Duration::from_secs(5);
                         ensure!(!stalled_camera, "Camera stopped delivering video. Check its connection and start sharing again.");
                         ensure!(frames > 0 || last_video.elapsed() < Duration::from_secs(60),"No video frames arrived. Check capture permission and choose an available source.");
+                        #[cfg(not(target_os = "ios"))]
+                        {
                         if let Some(capture) = &mut system_audio {
                             for _ in 0..4 {
                                 let Some((frame,peak)) = capture.next()? else { break; };
@@ -748,6 +903,7 @@ mod native {
                                 }
                                 level = level.max(peak); audio_frames += 1;
                             }
+                        }
                         }
                         let expired: Vec<_> = peers.iter().filter_map(|(id,p)| (!p.answered && p.started.elapsed()>Duration::from_secs(45)).then_some(*id)).collect();
                         for id in expired { peers.remove(&id); emit(events,Output::Left(id))?; }
@@ -764,8 +920,11 @@ mod native {
         audio_track.set_enabled(false);
         audio.clear_buffer();
         peers.clear();
+        #[cfg(not(target_os = "ios"))]
         drop(capture);
+        #[cfg(not(target_os = "ios"))]
         drop(camera_capture);
+        #[cfg(not(target_os = "ios"))]
         drop(system_audio);
         result
     }
@@ -786,6 +945,25 @@ mod native {
             assert_eq!(stereo_sample(&[f32::NAN, f32::INFINITY]), [0.0, 0.0]);
         }
         const HD: (u32, u32) = (1280, 720);
+
+        #[test]
+        fn only_usable_connection_details_are_sent_and_reflexive_ones_are_never_crowded_out() {
+            let host = "candidate:1 1 udp 2122260223 192.168.1.2 5000 typ host generation 0";
+            let reflexive =
+                "candidate:2 1 UDP 1686052607 203.0.113.9 5000 typ srflx raddr 0.0.0.0 rport 0";
+            let tcp = "candidate:3 1 tcp 1518280447 192.168.1.2 9 typ host tcptype passive";
+            let mut filter = CandidateFilter::default();
+            assert!(!filter.keep(host, 1), "audio shares the first connection");
+            assert!(!filter.keep(tcp, 0), "viewers only use UDP");
+            assert!(!filter.keep("nonsense", 0));
+            let hosts = (0..40).filter(|_| filter.keep(host, 0)).count();
+            assert_eq!(hosts, CandidateFilter::MAX_HOSTS);
+            assert!(filter.keep(reflexive, 0), "still room after the hosts");
+            let others = 1 + (0..40).filter(|_| filter.keep(reflexive, 0)).count();
+            assert_eq!(others, CandidateFilter::MAX_OTHERS);
+            let per_viewer = 1 + CandidateFilter::MAX_HOSTS + CandidateFilter::MAX_OTHERS;
+            assert!(per_viewer * MAX_VIEWERS <= 56, "fits the command queue");
+        }
 
         #[test]
         fn capture_conversion_preserves_bgra_channels_padding_and_bounds() {

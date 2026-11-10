@@ -195,6 +195,14 @@ impl Device {
         let thread = std::thread::Builder::new()
             .name("audio-hub".into())
             .spawn(move || {
+                // iOS otherwise treats this thread as ordinary work and lets its 10 ms ticks slip.
+                #[cfg(target_os = "ios")]
+                unsafe {
+                    libc::pthread_set_qos_class_self_np(
+                        libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
+                        0,
+                    );
+                }
                 // CPAL streams belong to the thread that made them, so they are opened here.
                 let engine = AudioEngine::open(
                     &open.input,

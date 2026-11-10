@@ -225,6 +225,84 @@ mod tests {
         assert!(!publisher.viewers[&2].ready);
         assert!(publisher.pending.is_empty());
     }
+    fn admit_viewer(
+        publisher: &mut Publisher,
+        commands: &mut mpsc::Receiver<publish_media::Input>,
+        client: u16,
+    ) -> PeerKey {
+        publisher.members.insert(client, format!("Viewer {client}"));
+        notify(
+            publisher,
+            "notifyjoinstreamrequest",
+            &format!("id=ours clid={client}"),
+        );
+        publisher.decide(client, true).unwrap();
+        let publish_media::Input::Add(key) = commands.try_recv().unwrap() else {
+            panic!("Expected admitted viewer")
+        };
+        key
+    }
+    fn candidate() -> serde_json::Value {
+        serde_json::json!({"cmd":"iceCandidate","args":{"sdp":"candidate","mid":"0","mLine":0}})
+    }
+    #[test]
+    fn a_burst_of_connection_details_never_ends_the_share() {
+        let (mut publisher, mut commands, _output) = fixture();
+        let first = admit_viewer(&mut publisher, &mut commands, 2);
+        let second = admit_viewer(&mut publisher, &mut commands, 3);
+        for _ in 0..100 {
+            for key in [first, second] {
+                publisher
+                    .media_event(publish_media::Output::Signal(key, candidate()))
+                    .expect("a lost connection detail must not stop the share");
+            }
+        }
+        assert!(publisher.active());
+        assert_eq!(publisher.viewers.len(), 2);
+    }
+    #[test]
+    fn a_viewer_who_cannot_be_offered_a_connection_leaves_alone() {
+        let (mut publisher, mut commands, _output) = fixture();
+        let first = admit_viewer(&mut publisher, &mut commands, 2);
+        let second = admit_viewer(&mut publisher, &mut commands, 3);
+        for _ in 0..100 {
+            let _ = publisher.media_event(publish_media::Output::Signal(first, candidate()));
+        }
+        publisher
+            .media_event(publish_media::Output::Offer(second, "v=0".into()))
+            .expect("one viewer's offer must not stop the share");
+        assert!(publisher.active());
+        assert!(publisher.viewers.contains_key(&2));
+        assert!(!publisher.viewers.contains_key(&3));
+    }
+    #[test]
+    fn the_server_limiting_viewer_signalling_keeps_the_share_running() {
+        let (mut publisher, mut commands, _output) = fixture();
+        let viewer = admit_viewer(&mut publisher, &mut commands, 2);
+        publisher
+            .media_event(publish_media::Output::Signal(viewer, candidate()))
+            .unwrap();
+        let ticket = *publisher.pending.keys().next().unwrap();
+        let flooded = Err(CommandError {
+            error: tsclientlib::TsError::ClientIsFlooding,
+            missing_permission: None,
+        });
+        assert!(publisher.result(ticket, &flooded));
+        assert!(publisher.active());
+        assert!(publisher.viewers.contains_key(&2));
+    }
+    #[test]
+    fn a_failed_negotiation_removes_only_that_viewer() {
+        let (mut publisher, mut commands, _output) = fixture();
+        admit_viewer(&mut publisher, &mut commands, 2);
+        let second = admit_viewer(&mut publisher, &mut commands, 3);
+        publisher
+            .media_event(publish_media::Output::Rejected(second, "bad answer".into()))
+            .unwrap();
+        assert!(publisher.active());
+        assert!(publisher.viewers.contains_key(&2));
+        assert!(!publisher.viewers.contains_key(&3));
+    }
     #[test]
     fn denied_requests_stay_denied_and_requests_are_bounded() {
         let (mut publisher, mut commands, _output) = fixture();
@@ -432,7 +510,7 @@ impl Resolution {
             Self::P2160 => "2160p (4K)",
         }
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios", test))]
     pub fn max_size(self) -> (u32, u32) {
         match self {
             Self::P480 => (854, 480),
@@ -467,18 +545,18 @@ impl Quality {
             self.video_kbps
         )
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios", test))]
     pub fn max_size(self) -> (u32, u32) {
         self.resolution.max_size()
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios", test))]
     pub fn fps(self) -> u32 {
         self.frame_rate
     }
     pub fn bitrate(self) -> u64 {
         u64::from(self.video_kbps) * 1000
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios", test))]
     pub fn audio_bitrate(self) -> u64 {
         u64::from(self.audio_kbps) * 1000
     }
@@ -579,7 +657,7 @@ pub struct Still {
     pub rgba: Vec<u8>,
 }
 #[cfg_attr(
-    not(any(target_os = "macos", target_os = "windows", test)),
+    not(any(target_os = "macos", target_os = "windows", target_os = "ios", test)),
     allow(dead_code)
 )]
 impl Still {
@@ -1139,22 +1217,23 @@ impl Publisher {
                 self.setup = None;
                 self.uncertain_start = false;
             }
-            if error.error == tsclientlib::TsError::ClientIsFlooding {
-                self.stop("Sharing stopped while the server limits requests");
-            } else {
-                match kind {
-                    Pending::Setup(_) => {
-                        self.fail(&format!("The server rejected sharing: {}", error.error))
-                    }
-                    Pending::Peer(peer) => {
-                        self.remove_viewer(peer.client);
-                        self.warn(format!("Viewer signaling rejected: {}", error.error));
-                    }
-                    Pending::Stop => self.warn(format!(
-                        "Capture stopped; the server rejected stop sharing: {}",
-                        error.error
-                    )),
+            let flooded = error.error == tsclientlib::TsError::ClientIsFlooding;
+            match kind {
+                // The command queue is already backing off; a viewer left without an offer
+                // expires on its own, and everyone else keeps watching.
+                Pending::Peer(_) if flooded => {}
+                _ if flooded => self.stop("Sharing stopped while the server limits requests"),
+                Pending::Setup(_) => {
+                    self.fail(&format!("The server rejected sharing: {}", error.error))
                 }
+                Pending::Peer(peer) => {
+                    self.remove_viewer(peer.client);
+                    self.warn(format!("Viewer signaling rejected: {}", error.error));
+                }
+                Pending::Stop => self.warn(format!(
+                    "Capture stopped; the server rejected stop sharing: {}",
+                    error.error
+                )),
             }
         }
         true
@@ -1240,11 +1319,13 @@ impl Publisher {
                         .id
                         .as_deref()
                         .ok_or_else(|| anyhow!("Sharing has stopped"))?;
-                    self.send(
-                        protocol::admit(id, peer.client, Some(&sdp))?,
-                        Pending::Peer(peer),
-                        Operation::StreamAdmit,
-                    )?;
+                    let sent = protocol::admit(id, peer.client, Some(&sdp)).and_then(|packet| {
+                        self.send(packet, Pending::Peer(peer), Operation::StreamAdmit)
+                    });
+                    if let Err(error) = sent {
+                        self.remove_viewer(peer.client);
+                        self.warn(format!("Could not admit viewer: {error}"));
+                    }
                 }
             }
             publish_media::Output::Signal(peer, value) => {
@@ -1253,11 +1334,10 @@ impl Publisher {
                         .id
                         .as_deref()
                         .ok_or_else(|| anyhow!("Sharing has stopped"))?;
-                    self.send(
-                        protocol::signal_to(id, peer.client, &value)?,
-                        Pending::Peer(peer),
-                        Operation::StreamSignal,
-                    )?;
+                    // Losing one connection detail costs one route at most.
+                    let _ = protocol::signal_to(id, peer.client, &value).and_then(|packet| {
+                        self.send(packet, Pending::Peer(peer), Operation::StreamSignal)
+                    });
                 }
             }
             publish_media::Output::Connected(peer) => {
@@ -1269,6 +1349,12 @@ impl Publisher {
             publish_media::Output::Left(peer) => {
                 if self.current(Pending::Peer(peer)) {
                     self.remove_viewer(peer.client);
+                }
+            }
+            publish_media::Output::Rejected(peer, reason) => {
+                if self.current(Pending::Peer(peer)) {
+                    self.remove_viewer(peer.client);
+                    self.warn(format!("Viewer negotiation failed: {reason}"));
                 }
             }
             publish_media::Output::Stats {

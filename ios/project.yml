@@ -1,0 +1,110 @@
+name: Flexspeak
+options:
+  bundleIdPrefix: io.zirkumflex
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    DEAD_CODE_STRIPPING: YES
+targets:
+  Flexspeak:
+    type: application
+    platform: iOS
+    sources:
+      - Flexspeak
+      - Shared
+    preBuildScripts:
+      - name: Build the Rust session
+        script: sh "$SRCROOT/build-rust.sh"
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.zirkumflex.flexspeak
+        SWIFT_OBJC_BRIDGING_HEADER: Flexspeak/Bridge.h
+        LIBRARY_SEARCH_PATHS: "$(BUILT_PRODUCTS_DIR)"
+        OTHER_LDFLAGS: "-ObjC -lflexspeak_ios -lc++ -lresolv"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_KEY_CFBundleDisplayName: Flexspeak
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Flexspeak sends your voice to the TeamSpeak server when you unmute."
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+    info:
+      path: Flexspeak/Info.plist
+      properties:
+        UIBackgroundModes: [audio]
+        FlexspeakKeychainGroup: $(AppIdentifierPrefix)io.zirkumflex.flexspeak.shared
+        CFBundleDisplayName: Flexspeak
+        NSMicrophoneUsageDescription: "Flexspeak sends your voice to the TeamSpeak server when you unmute."
+        UILaunchScreen: {}
+        UIUserInterfaceStyle: Dark
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    entitlements:
+      path: Flexspeak/Flexspeak.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)io.zirkumflex.flexspeak.shared
+    dependencies:
+      - target: FlexspeakBroadcast
+      - sdk: ReplayKit.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreFoundation.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreText.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: Foundation.framework
+      - sdk: IOSurface.framework
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: UIKit.framework
+      - sdk: VideoToolbox.framework
+      - sdk: OpenGLES.framework
+      - sdk: GLKit.framework
+      - sdk: MetalKit.framework
+      - sdk: Network.framework
+  FlexspeakBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - FlexspeakBroadcast
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.zirkumflex.flexspeak.broadcast
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_CFBundleDisplayName: Flexspeak
+    info:
+      path: FlexspeakBroadcast/Info.plist
+      properties:
+        CFBundleDisplayName: Flexspeak
+        FlexspeakKeychainGroup: $(AppIdentifierPrefix)io.zirkumflex.flexspeak.shared
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    entitlements:
+      path: FlexspeakBroadcast/FlexspeakBroadcast.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)io.zirkumflex.flexspeak.shared
+    dependencies:
+      - sdk: ReplayKit.framework
+      - sdk: Accelerate.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework

@@ -432,7 +432,7 @@ impl AudioEngine {
             input_config.sample_rate(),
             input_rate,
             output_rate,
-            output_config.sample_rate() as usize / 50,
+            playback_target(output_config.sample_rate(), cfg!(target_os = "ios")),
             description,
         )
     }
@@ -891,7 +891,27 @@ pub fn cue_samples(cue: Cue) -> Vec<f32> {
     }
 }
 
+/// How many frames the worker keeps queued for the device. About 20 ms is enough on desktop;
+/// iOS asks for larger chunks and can delay the worker, so it gets three times that.
+fn playback_target(rate: u32, ios: bool) -> usize {
+    rate as usize * if ios { 3 } else { 1 } / 50
+}
+
+/// iOS keeps a stream running across route changes, such as AirPods connecting, and CPAL still
+/// reports them as errors.
+#[cfg(any(target_os = "ios", test))]
+fn is_route_change(kind: cpal::ErrorKind, text: &str) -> bool {
+    matches!(
+        kind,
+        cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::StreamInvalidated
+    ) && text.contains("Audio route changed")
+}
+
 pub(crate) fn report_stream_error(error: cpal::Error, errors: &ArrayQueue<String>) {
+    #[cfg(target_os = "ios")]
+    if is_route_change(error.kind(), &error.to_string()) {
+        return;
+    }
     // CPAL continues the stream after an xrun; a dropped buffer is not a device failure.
     if error.kind() != cpal::ErrorKind::Xrun {
         let _ = errors.push(error.to_string());
@@ -1032,6 +1052,12 @@ fn record_playback<T: SizedSample>(
     }
 }
 
+/// Playback callbacks that ran out of audio, and the size of the latest one in frames.
+#[cfg(target_os = "ios")]
+pub static PLAYBACK_GAPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "ios")]
+pub static PLAYBACK_CALLBACK_FRAMES: AtomicU64 = AtomicU64::new(0);
+
 fn write_playback<T: SizedSample + FromSample<f32>>(
     data: &mut [T],
     channels: usize,
@@ -1040,9 +1066,16 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
     target_gain: f32,
     gain_step: f32,
 ) {
+    #[cfg(target_os = "ios")]
+    let mut starved = false;
     for frame in data.chunks_exact_mut(channels) {
         *gain += (target_gain - *gain).clamp(-gain_step, gain_step);
-        let [left, right] = queue.pop().unwrap_or([0.0; 2]);
+        let popped = queue.pop();
+        #[cfg(target_os = "ios")]
+        {
+            starved |= popped.is_none();
+        }
+        let [left, right] = popped.unwrap_or([0.0; 2]);
         frame.fill(T::EQUILIBRIUM);
         frame[0] = T::from_sample(if channels == 1 {
             (left + right) * 0.5 * *gain
@@ -1053,6 +1086,13 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
             frame[1] = T::from_sample(right * *gain);
         }
     }
+    #[cfg(target_os = "ios")]
+    {
+        PLAYBACK_CALLBACK_FRAMES.store((data.len() / channels) as u64, Ordering::Relaxed);
+        if starved {
+            PLAYBACK_GAPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1061,6 +1101,58 @@ mod tests {
     use audiopus::coder::Decoder;
     use tsclientlib::{ClientId, audio::AudioHandler};
     use tsproto_packets::packets::{AudioData, InAudioBuf};
+
+    /// Two seconds of 10 ms worker ticks against device callbacks of `frames`; the callbacks
+    /// that found too little audio queued.
+    fn starved_callbacks(target: usize, frames: usize) -> usize {
+        let mut engine =
+            AudioEngine::without_devices(crate::transmission::Settings::default()).unwrap();
+        engine.output_target = target;
+        let mut starved = 0;
+        let mut next_callback = 0;
+        for tick in 0..200 {
+            engine.tick(false, |_| {}).unwrap();
+            let elapsed = (tick + 1) * RATE / 100;
+            while next_callback + frames <= elapsed {
+                if (0..frames)
+                    .filter(|_| engine.playback.pop().is_some())
+                    .count()
+                    < frames
+                {
+                    starved += 1;
+                }
+                next_callback += frames;
+            }
+        }
+        starved
+    }
+
+    #[test]
+    fn the_ios_playback_queue_covers_a_phone_sized_callback() {
+        assert!(starved_callbacks(playback_target(48_000, false), 1024) > 0);
+        assert_eq!(starved_callbacks(playback_target(48_000, true), 1024), 0);
+        assert_eq!(starved_callbacks(playback_target(48_000, true), 2048), 0);
+    }
+
+    #[test]
+    fn only_route_changes_survive_on_ios() {
+        assert!(is_route_change(
+            cpal::ErrorKind::DeviceChanged,
+            "Audio route changed"
+        ));
+        assert!(is_route_change(
+            cpal::ErrorKind::StreamInvalidated,
+            "Audio route changed"
+        ));
+        assert!(!is_route_change(
+            cpal::ErrorKind::StreamInvalidated,
+            "Audio media services were reset"
+        ));
+        assert!(!is_route_change(
+            cpal::ErrorKind::DeviceNotAvailable,
+            "No suitable audio route"
+        ));
+    }
 
     #[test]
     fn the_soft_limit_leaves_normal_levels_alone_and_keeps_peaks_inside_full_scale() {
