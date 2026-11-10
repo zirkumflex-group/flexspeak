@@ -119,6 +119,10 @@ mod native {
         time::{Duration, Instant},
     };
 
+    const INTERRUPTED: &str = "The video connection was interrupted. Watch again to reconnect.";
+    /// How long the connection may stay `Disconnected` before the watch ends.
+    const RECONNECT_GRACE: Duration = Duration::from_secs(10);
+
     enum Callback {
         Candidate(Value),
         State(PeerConnectionState),
@@ -245,6 +249,8 @@ mod native {
             }
             let started = Instant::now();
             let mut first_frame = false;
+            // When the connection dropped to `Disconnected`, which it can recover from.
+            let mut disconnected: Option<Instant> = None;
             let mut candidate_count = 0;
             let mut stats_request = None;
             let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
@@ -268,8 +274,13 @@ mod native {
                     },
                     event = callback_rx.recv() => match event {
                         Some(Callback::Candidate(value)) => send(output, Output::Signal(value))?,
-                        Some(Callback::State(PeerConnectionState::Connected)) => send(output, Output::TransportConnected)?,
-                        Some(Callback::State(PeerConnectionState::Disconnected | PeerConnectionState::Failed | PeerConnectionState::Closed)) => bail!("The video connection was interrupted. Watch again to reconnect."),
+                        Some(Callback::State(PeerConnectionState::Connected)) => {
+                            // A recovered connection keeps playing; only the first one is news.
+                            if !first_frame && disconnected.is_none() { send(output, Output::TransportConnected)?; }
+                            disconnected = None;
+                        },
+                        Some(Callback::State(PeerConnectionState::Disconnected)) => { disconnected.get_or_insert_with(Instant::now); },
+                        Some(Callback::State(PeerConnectionState::Failed | PeerConnectionState::Closed)) => bail!(INTERRUPTED),
                         Some(Callback::Track(MediaStreamTrack::Video(track))) => {
                             if let Some(stream) = &mut video { stream.close(); }
                             video = Some(NativeVideoStream::new(track));
@@ -295,6 +306,7 @@ mod native {
                     },
                     _ = stats_tick.tick() => {
                         ensure!(first_frame || started.elapsed() < Duration::from_secs(30), "No decoded video arrived within 30 seconds");
+                        ensure!(disconnected.is_none_or(|at| at.elapsed() < RECONNECT_GRACE), INTERRUPTED);
                         if stats_request.is_none() {
                             stats_request = Some(Box::pin(tokio::time::timeout(Duration::from_secs(2), pc.get_stats())));
                         }

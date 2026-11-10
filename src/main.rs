@@ -4325,7 +4325,6 @@ mod tests {
                 detail: String::new(),
                 stats: streaming::Stats::default(),
                 frame: None,
-                ui_updates: 0,
             });
         app.server_mut().streaming.sharing.status.active = true;
         app.server_mut().streaming.strip = streaming::Strip::Beside;

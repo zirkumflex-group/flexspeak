@@ -339,6 +339,14 @@ impl App {
 
 /// Runs one message on the UI thread and carries out what it returns.
 pub fn dispatch(s: &mut App, tx: &mut Tx, message: Message) {
+    if !dispatch_visible(s, tx, message) {
+        tx.live_only();
+    }
+}
+
+/// `dispatch`, saying whether the message changed anything on screen. Backend updates
+/// deliver through `update_if` with this, since `live_only` can't stop their commit.
+fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
     // Exact equality preserves the meter's accessibility value as well as its pixels.
     // Statistics consumes counters and buffer sizes even when the meter is unchanged.
     let invisible = match &message {
@@ -364,9 +372,7 @@ pub fn dispatch(s: &mut App, tx: &mut Tx, message: Message) {
     execute(s, tx, task);
     s.sync_fields();
     sync_tray(s);
-    if invisible {
-        tx.live_only();
-    }
+    !invisible
 }
 
 /// Keeps the notification-area icon in step with the server on screen. Cheap when nothing
@@ -463,10 +469,11 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
                             };
                             batch.push(event);
                         }
-                        handle.update(move |s, tx| {
-                            for event in batch {
-                                dispatch(s, tx, Message::Backend(id, event));
-                            }
+                        // One visible event redraws the batch, wherever it falls in it.
+                        handle.update_if(move |s, tx| {
+                            batch.into_iter().fold(false, |visible, event| {
+                                dispatch_visible(s, tx, Message::Backend(id, event)) | visible
+                            })
                         });
                     }
                 });

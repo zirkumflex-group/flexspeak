@@ -113,7 +113,6 @@ pub struct Watching {
     pub detail: String,
     pub stats: Stats,
     pub frame: Option<Frame>,
-    pub ui_updates: u64,
 }
 
 pub struct View {
@@ -281,7 +280,6 @@ impl View {
                     detail,
                     stats: Stats::default(),
                     frame: None,
-                    ui_updates: 0,
                 };
                 match index {
                     Some(index) if self.watching[index].generation == generation => {
@@ -324,7 +322,6 @@ impl View {
             if previous.is_some_and(|previous| frame.sequence <= previous.sequence) {
                 continue;
             }
-            watch.ui_updates += frame.sequence - previous.map_or(0, |previous| previous.sequence);
             watch.frame = Some(frame);
             changed |= previous.is_none_or(|previous| {
                 (previous.width, previous.height, previous.rotation)
@@ -401,8 +398,16 @@ struct SurfaceState {
     planes: [Vec<u8>; 3],
     #[cfg(test)]
     image: Option<Image>,
-    audio: std::collections::VecDeque<[f32; 2]>,
-    audio_disabled: bool,
+}
+
+/// Stream audio, apart from the pictures: the voice tick that mixes it never waits behind a
+/// frame copy.
+#[derive(Default)]
+struct AudioState {
+    generation: u64,
+    active: bool,
+    samples: std::collections::VecDeque<[f32; 2]>,
+    disabled: bool,
 }
 
 /// A stream's own volume, 0–100%, as `f32` bits.
@@ -418,8 +423,14 @@ impl Default for Volume {
 #[derive(Default)]
 pub struct Surface {
     state: Mutex<SurfaceState>,
+    audio: Mutex<AudioState>,
     waker: Mutex<Option<rune::Waker>>,
     volume: Volume,
+    /// Set while no painter draws this stream: a new frame of the same shape then doesn't
+    /// wake the window, which would redraw everything for a picture nobody sees.
+    hidden: std::sync::atomic::AtomicBool,
+    /// Frames this session uploaded to the GPU for drawing.
+    presented: std::sync::atomic::AtomicU64,
 }
 
 impl Surface {
@@ -446,10 +457,14 @@ impl Surface {
         {
             state.image = None;
         }
-        state.audio.clear();
         let generation = state.generation;
         drop(state);
-
+        let mut audio = self.audio.lock().unwrap();
+        audio.generation = generation;
+        audio.active = true;
+        audio.samples.clear();
+        drop(audio);
+        self.presented.store(0, Ordering::Relaxed);
         generation
     }
     pub fn end(&self, generation: u64) {
@@ -457,13 +472,30 @@ impl Surface {
         if state.generation == generation {
             state.active = false;
             state.frame = None;
+            // A stopped 4K stream would otherwise keep its 12 MiB of planes.
+            state.planes = Default::default();
             #[cfg(test)]
             {
                 state.image = None;
             }
-            state.audio.clear();
-            drop(state);
         }
+        drop(state);
+        let mut audio = self.audio.lock().unwrap();
+        if audio.generation == generation {
+            audio.active = false;
+            audio.samples = Default::default();
+        }
+    }
+    /// Whether any painter draws this stream; see `hidden`.
+    pub(crate) fn set_shown(&self, shown: bool) {
+        self.hidden.store(!shown, Ordering::Relaxed);
+    }
+    pub(crate) fn note_presented(&self) {
+        self.presented.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Frames this session drew, as opposed to the ones it decoded.
+    pub fn presented(&self) -> u64 {
+        self.presented.load(Ordering::Relaxed)
     }
     /// Copies tightly packed planes into a reusable latest-frame mailbox. The decoder may
     /// immediately reuse its borrowed buffers after this call returns.
@@ -484,6 +516,10 @@ impl Surface {
             let w = if n == 0 { width } else { width.div_ceil(2) } as usize;
             let h = if n == 0 { height } else { height.div_ceil(2) } as usize;
             state.planes[n].resize(w * h, 0);
+            // After a large drop in size (4K to 1080p), keep only what the new size needs.
+            if state.planes[n].capacity() > 2 * w * h {
+                state.planes[n].shrink_to_fit();
+            }
             for row in 0..h {
                 state.planes[n][row * w..(row + 1) * w]
                     .copy_from_slice(&source[row * strides[n]..row * strides[n] + w]);
@@ -509,6 +545,9 @@ impl Surface {
             });
         }
         state.sequence += 1;
+        let reshaped = state
+            .frame
+            .is_none_or(|f| (f.width, f.height, f.rotation) != (width, height, rotation));
         state.frame = Some(Frame {
             generation,
             sequence: state.sequence,
@@ -517,7 +556,10 @@ impl Surface {
             height,
         });
         drop(state);
-        if let Some(waker) = self.waker.lock().unwrap().as_ref() {
+        // A new shape changes the view, so it wakes the window even while nothing draws it.
+        if (reshaped || !self.hidden.load(Ordering::Relaxed))
+            && let Some(waker) = self.waker.lock().unwrap().as_ref()
+        {
             waker();
         }
     }
@@ -589,35 +631,35 @@ impl Surface {
         self.state.lock().unwrap().image.take()
     }
     pub fn set_audio_enabled(&self, enabled: bool) {
-        let mut state = self.state.lock().unwrap();
-        state.audio_disabled = !enabled;
+        let mut audio = self.audio.lock().unwrap();
+        audio.disabled = !enabled;
         if !enabled {
-            state.audio.clear();
+            audio.samples.clear();
         }
     }
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn publish_audio(&self, generation: u64, pcm: &[i16]) {
-        let mut state = self.state.lock().unwrap();
-        if !state.active || state.generation != generation || state.audio_disabled {
+        let mut audio = self.audio.lock().unwrap();
+        if !audio.active || audio.generation != generation || audio.disabled {
             return;
         }
         for frame in pcm.as_chunks::<2>().0 {
-            if state.audio.len() == 3840 {
-                state.audio.pop_front();
+            if audio.samples.len() == 3840 {
+                audio.samples.pop_front();
             }
-            state
-                .audio
+            audio
+                .samples
                 .push_back([f32::from(frame[0]) / 32768.0, f32::from(frame[1]) / 32768.0]);
         }
     }
     pub fn mix_audio(&self, stereo: &mut [f32]) {
-        let mut state = self.state.lock().unwrap();
-        if !state.active || state.audio_disabled {
+        let mut audio = self.audio.lock().unwrap();
+        if !audio.active || audio.disabled {
             return;
         }
         let volume = self.volume();
         for frame in stereo.as_chunks_mut::<2>().0 {
-            let Some([left, right]) = state.audio.pop_front() else {
+            let Some([left, right]) = audio.samples.pop_front() else {
                 break;
             };
             frame[0] += left * volume;
@@ -645,7 +687,7 @@ mod tests {
         let surface = Surface::default();
         let first = surface.begin();
         surface.publish_audio(first, &vec![16384; 20000]);
-        assert_eq!(surface.state.lock().unwrap().audio.len(), 3840);
+        assert_eq!(surface.audio.lock().unwrap().samples.len(), 3840);
         let mut mixed = [0.25, -0.25];
         surface.mix_audio(&mut mixed);
         assert_eq!(mixed, [0.75, 0.25]);
@@ -688,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn the_view_tracks_the_newest_frame_and_wakes_for_every_upload() {
+    fn the_view_tracks_the_newest_frame_and_wakes_for_every_shown_upload() {
         let mut view = View::default();
         let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = wakes.clone();
@@ -713,14 +755,32 @@ mod tests {
             !view.sync_frame(),
             "Same-shape frames redraw without the view"
         );
-        assert_eq!(view.watching[0].ui_updates, 4);
         assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 4);
         surface.publish(generation, image(2, 4), 0.0);
         assert!(view.sync_frame());
         assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 5);
+        // Off screen, only a change of shape wakes the window.
+        surface.set_shown(false);
+        surface.publish(generation, image(2, 4), 0.0);
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 5);
+        surface.publish(generation, image(4, 2), 0.0);
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 6);
+        surface.set_shown(true);
+        // A stale end leaves the session's pictures; its own end frees them.
+        surface.end(generation + 1000);
+        assert!(surface.latest().is_some());
         view.clear_picture();
         assert!(view.watching.is_empty());
         assert_eq!(surface.latest(), None);
+        assert!(
+            surface
+                .state
+                .lock()
+                .unwrap()
+                .planes
+                .iter()
+                .all(|p| p.capacity() == 0)
+        );
         surface.publish(generation, image(4, 2), 0.0);
         assert!(
             !view.sync_frame(),
