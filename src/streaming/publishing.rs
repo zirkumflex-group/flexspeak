@@ -527,6 +527,7 @@ pub struct Options {
     pub audio: Option<DeviceChoice>,
     /// Where this app plays voice and sounds. When system audio is taken from the same output,
     /// the app's own sound is left out of it where the system allows.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub voice_output: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,

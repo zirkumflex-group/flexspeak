@@ -913,6 +913,7 @@ mod native {
         let mut quality = options.quality;
         quality.validate()?;
         let max_size = quality.max_size();
+        #[cfg(target_os = "windows")]
         let first_interval = frame_interval(quality);
         // The largest picture, which a quality change can move while the share runs.
         let largest = Arc::new(std::sync::atomic::AtomicU64::new(pack(max_size)));

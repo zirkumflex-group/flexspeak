@@ -5,6 +5,8 @@
 //! ([`attribute`]): stream video goes straight between the two clients, so the server links are
 //! only a proxy for each side's network, and trouble neither of them explains is put between
 //! the two.
+// Only the Mac and Windows receivers read stream stats; elsewhere the tracker goes unused.
+#![cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 
 use crate::usage::Health;
 use std::time::{Duration, Instant};
