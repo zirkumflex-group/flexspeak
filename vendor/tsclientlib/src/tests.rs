@@ -43,3 +43,45 @@ fn negative_iconid() {
 fn big_iconid() {
 	test_iconid("18446744073225738240", 3811153920);
 }
+
+fn network_error() -> tsproto::client::Error {
+	// WSAENOBUFS: Windows ran out of UDP ports or socket buffers.
+	tsproto::client::Error::TsProto(tsproto::Error::Network(std::io::Error::from_raw_os_error(
+		10055,
+	)))
+}
+
+#[test]
+fn network_error_disconnects_temporarily() {
+	assert!(matches!(
+		crate::temporary_disconnect(&network_error()),
+		Some(crate::TemporaryDisconnectReason::Network(_))
+	));
+	assert!(matches!(
+		crate::temporary_disconnect(&tsproto::client::Error::TsProto(tsproto::Error::Timeout(
+			"ping"
+		))),
+		Some(crate::TemporaryDisconnectReason::Timeout("ping"))
+	));
+	assert!(crate::temporary_disconnect(&tsproto::client::Error::ConnectionEnd).is_none());
+}
+
+#[test]
+fn reconnect_retries_while_the_network_is_unusable() {
+	let failed = |error| crate::Error::ConnectFailed { address: "server".into(), errors: vec![error] };
+	assert!(crate::retry_reconnect(&failed(crate::Error::Connect(network_error()))));
+	assert!(crate::retry_reconnect(&failed(crate::Error::Io(std::io::Error::from_raw_os_error(
+		10055
+	)))));
+	assert!(crate::retry_reconnect(&failed(crate::Error::Connect(
+		tsproto::client::Error::TsProto(tsproto::Error::Timeout("init"))
+	))));
+	// The server answered and refused: retrying would not change that.
+	assert!(!crate::retry_reconnect(&failed(crate::Error::Connect(
+		tsproto::client::Error::ConnectionEnd
+	))));
+	assert!(!crate::retry_reconnect(&crate::Error::ConnectFailed {
+		address: "server".into(),
+		errors: Vec::new()
+	}));
+}

@@ -150,6 +150,41 @@ pub enum TemporaryDisconnectReason {
 	/// This corresponds to the `Serverstop` and `ClientdisconnectServerShutdown` reasons.
 	/// This often happens on server restarts, so the connection will try to reconnect.
 	Serverstop,
+	/// The network refused to send or receive a packet, for example because Windows briefly ran
+	/// out of UDP ports or socket buffers (os error 10055). Reconnecting opens a new socket.
+	Network(std::io::ErrorKind),
+}
+
+/// Whether an error on an established connection only interrupts it, so a reconnect should
+/// follow instead of giving up.
+fn temporary_disconnect(error: &client::Error) -> Option<TemporaryDisconnectReason> {
+	match error {
+		client::Error::TsProto(tsproto::Error::Timeout(reason)) => {
+			Some(TemporaryDisconnectReason::Timeout(reason))
+		}
+		client::Error::TsProto(tsproto::Error::Network(error)) => {
+			Some(TemporaryDisconnectReason::Network(error.kind()))
+		}
+		_ => None,
+	}
+}
+
+/// Whether a failed reconnect attempt should be tried again: the server did not answer, or the
+/// network was not usable yet (no socket, no name resolution, a refused send).
+fn retry_reconnect(error: &Error) -> bool {
+	match error {
+		Error::ResolveAddress(_) => true,
+		Error::ConnectFailed { errors, .. } => errors.iter().any(|error| {
+			matches!(
+				error,
+				Error::Io(_)
+					| Error::Connect(client::Error::TsProto(
+						tsproto::Error::Timeout(_) | tsproto::Error::Network(_)
+					))
+			)
+		}),
+		_ => false,
+	}
 }
 
 pub trait OutCommandExt {
@@ -1154,21 +1189,11 @@ impl Connection {
 					Poll::Ready(Some(Ok(StreamItem::IdentityLevelIncreasing(level))))
 				}
 				Poll::Ready(Err(e)) => {
-					if *reconnect {
-						if let Error::ConnectFailed { errors, .. } = &e {
-							for e in errors {
-								if let Error::Connect(client::Error::TsProto(
-									tsproto::Error::Timeout(reason),
-								)) = e
-								{
-									debug!(timeout = reason, "Connect failed, reconnecting");
-									let fut =
-										Self::connect(self.options.clone(), true).in_current_span();
-									self.state = ConnectionState::Connecting(Box::pin(fut), true);
-									return self.poll_next(cx);
-								}
-							}
-						}
+					if *reconnect && retry_reconnect(&e) {
+						debug!(error = %e, "Connect failed, reconnecting");
+						let fut = Self::connect(self.options.clone(), true).in_current_span();
+						self.state = ConnectionState::Connecting(Box::pin(fut), true);
+						return self.poll_next(cx);
 					}
 					Poll::Ready(Some(Err(e)))
 				}
@@ -1226,14 +1251,14 @@ impl Connection {
 							break Poll::Ready(None);
 						}
 
-						if let client::Error::TsProto(tsproto::Error::Timeout(reason)) = e {
-							// Reconnect on timeout
-							warn!(timeout = reason, "Connection failed, reconnecting");
+						if let Some(reason) = temporary_disconnect(&e) {
+							// Reconnect on a timeout or a network error
+							warn!(error = %e, "Connection failed, reconnecting");
 							let fut = Self::connect(self.options.clone(), true);
 							self.state =
 								ConnectionState::Connecting(Box::pin(fut.in_current_span()), true);
 							return Poll::Ready(Some(Ok(StreamItem::DisconnectedTemporarily(
-								TemporaryDisconnectReason::Timeout(reason),
+								reason,
 							))));
 						} else {
 							break Poll::Ready(Some(Err(Error::ConnectionFailed(e))));
