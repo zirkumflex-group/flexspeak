@@ -68,7 +68,8 @@ fn network_error_disconnects_temporarily() {
 
 #[test]
 fn reconnect_retries_while_the_network_is_unusable() {
-	let failed = |error| crate::Error::ConnectFailed { address: "server".into(), errors: vec![error] };
+	let failed =
+		|error| crate::Error::ConnectFailed { address: "server".into(), errors: vec![error] };
 	assert!(crate::retry_reconnect(&failed(crate::Error::Connect(network_error()))));
 	assert!(crate::retry_reconnect(&failed(crate::Error::Io(std::io::Error::from_raw_os_error(
 		10055
