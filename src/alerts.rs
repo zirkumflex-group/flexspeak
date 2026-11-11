@@ -36,6 +36,8 @@ pub enum Source {
     Poke,
     /// A text message the server didn't take.
     Chat,
+    /// The chat history file couldn't be read or written.
+    ChatHistory,
     Move,
     Moderate,
     Groups,
@@ -122,6 +124,7 @@ impl Source {
             Self::StreamPublish => "Screen sharing stopped",
             Self::Poke => "Poke not sent",
             Self::Chat => "Message not sent",
+            Self::ChatHistory => "Chat history not saved",
             Self::Move => "Couldn't move",
             Self::Moderate => "Couldn't kick or ban",
             Self::Groups => "Groups not changed",

@@ -5,6 +5,7 @@ mod audio;
 mod audio_processing;
 mod changelog;
 mod chat;
+mod chat_store;
 mod client;
 mod command_flow;
 mod connection_charts;
@@ -178,6 +179,10 @@ struct App {
     stream_options: settings::Streaming,
     /// Settings > Chat. Saved straight to settings when changed, like `footer_hidden`.
     chat_options: settings::Chat,
+    /// The chat history on disk, opened the first time it is needed.
+    chat_store: Option<chat_store::Store>,
+    /// It couldn't be opened or written; it is left alone until the app restarts.
+    chat_store_failed: bool,
     /// TeamSpeak's sounds, from its install on this computer if there is one.
     sound_bank: sounds::Bank,
     /// The sound volume moved and hasn't been saved yet.
@@ -1009,6 +1014,8 @@ impl App {
             share_defaults: Default::default(),
             stream_options: settings::Streaming::default(),
             chat_options: settings::Chat::default(),
+            chat_store: None,
+            chat_store_failed: false,
             sound_bank: if cfg!(test) {
                 sounds::Bank::default()
             } else {
@@ -1630,6 +1637,7 @@ impl App {
         self.settings_query.clear();
         self.server_editor = None;
         self.ui.open = None;
+        self.ui.chat_clear_armed = false;
         self.chat_seen();
     }
 
@@ -2324,6 +2332,13 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task {
+        let task = self.update_inner(message);
+        // Whatever the message added to a conversation goes to the history on disk.
+        self.chat_persist();
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task {
         let _trace = profiler::scope(profiler::Category::Ui, "ui.update");
         match message {
             Message::SetupNext => {
@@ -3576,6 +3591,9 @@ impl App {
         let session = &mut self.sessions[index];
         let mut sounds_due = Vec::new();
         let mut arrived = None;
+        // A first connection brings the server's saved conversations back.
+        let restore =
+            matches!(event, client::Event::Connected(_)) && session.chat.needs_restoring();
         match event {
             client::Event::Activity(activities) => {
                 for activity in &activities {
@@ -3960,10 +3978,96 @@ impl App {
         for sound in sounds_due {
             self.play_sound(sound);
         }
+        if restore && !self.loopback {
+            self.chat_restore(id);
+        }
         if let Some(entry) = arrived {
             self.chat_arrived(id, entry);
         }
         Task::none()
+    }
+
+    // ---- chat history ----
+    /// Runs `work` on the history file, opening it on first use. A failure is reported once
+    /// and the file is then left alone until the app restarts. `forced` works on it even
+    /// while keeping history is switched off, as clearing it must.
+    fn with_history<T>(
+        &mut self,
+        forced: bool,
+        work: impl FnOnce(&mut chat_store::Store) -> anyhow::Result<T>,
+    ) -> Option<T> {
+        if self.chat_store_failed || !(forced || self.chat_options.history) {
+            return None;
+        }
+        let result = match &mut self.chat_store {
+            Some(store) => work(store),
+            None => {
+                let path = self
+                    .settings_path
+                    .as_deref()?
+                    .parent()?
+                    .join(chat_store::FILE);
+                chat_store::Store::open(&path).and_then(|mut store| {
+                    let value = work(&mut store);
+                    self.chat_store = Some(store);
+                    value
+                })
+            }
+        };
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.chat_store = None;
+                self.chat_store_failed = true;
+                self.alerts.raise(
+                    Source::ChatHistory,
+                    format!("{error:#}. Messages are kept until you quit."),
+                );
+                None
+            }
+        }
+    }
+
+    /// What a server's history is filed under: the address it is connected by.
+    fn history_key(session: &ServerSession) -> String {
+        session.address.trim().to_ascii_lowercase()
+    }
+
+    /// Writes the lines added since the last time to the history on disk.
+    fn chat_persist(&mut self) {
+        for index in 0..self.sessions.len() {
+            if !self.sessions[index].chat.has_unsaved() {
+                continue;
+            }
+            let lines = self.sessions[index].chat.unsaved();
+            if self.loopback {
+                continue;
+            }
+            let server = Self::history_key(&self.sessions[index]);
+            self.with_history(false, |store| store.append(&server, &lines));
+        }
+    }
+
+    /// Brings a server's saved conversations back when it first connects.
+    fn chat_restore(&mut self, id: hub::SessionId) {
+        let Some(server) = self.session(id).map(Self::history_key) else {
+            return;
+        };
+        if let Some(history) = self.with_history(false, |store| store.load(&server))
+            && let Some(session) = self.session_mut(id)
+        {
+            session.chat.restore(history);
+        }
+    }
+
+    /// Remembers that a conversation's tab was closed, or opened again.
+    fn chat_tab(&mut self, scope: &chat::Scope, closed: bool) {
+        let server = Self::history_key(self.server());
+        let scope = scope.clone();
+        self.with_history(false, |store| match closed {
+            true => store.close(&server, &scope),
+            false => store.reopen(&server, &scope),
+        });
     }
 
     // ---- text chat ----
@@ -4047,6 +4151,9 @@ impl App {
                 .unwrap_or_default(),
             _ => String::new(),
         };
+        if matches!(scope, chat::Scope::Private(_) | chat::Scope::Past(_)) {
+            self.chat_tab(&scope, false);
+        }
         self.server_mut().chat.open(scope, &name);
     }
 
@@ -4154,8 +4261,27 @@ impl App {
                     self.ui.chat_input.focused = true;
                 }
             }
-            Action::ClosePeer(key) => self.server_mut().chat.close_peer(&key),
-            Action::ClosePast(id) => self.server_mut().chat.close_past(id),
+            Action::ClosePeer(key) => {
+                self.chat_tab(&chat::Scope::Private(key.clone()), true);
+                self.server_mut().chat.close_peer(&key);
+            }
+            Action::ClosePast(id) => {
+                self.chat_tab(&chat::Scope::Past(id), true);
+                self.server_mut().chat.close_past(id);
+            }
+            Action::ClearHistory => {
+                // The first press asks; the second, while Settings is still open, clears.
+                if !std::mem::replace(&mut self.ui.chat_clear_armed, true) {
+                    return Task::none();
+                }
+                self.ui.chat_clear_armed = false;
+                self.with_history(true, |store| store.clear());
+                for session in &mut self.sessions {
+                    session.chat.clear();
+                }
+                self.ui.chat_toast = None;
+                self.settings_message = Some("Chat history cleared".into());
+            }
             Action::People => {
                 let chat = &self.server().chat;
                 let waiting =
@@ -7016,6 +7142,92 @@ mod tests {
             commands.try_recv(),
             Ok(client::Command::Chat(client::ChatTarget::Channel, _))
         ));
+    }
+
+    #[test]
+    fn conversations_come_back_after_a_restart_until_history_is_off_or_cleared() {
+        let (mut app, root) = saved_fixture("chat-history");
+        let settings_file = root.join("settings.json");
+        let mara = chat::Scope::Private("uid-2".into());
+        let connect = |app: &mut App| {
+            let (sender, commands) = mpsc::channel(16);
+            let id = live(app, sender);
+            let _ = app.update(Message::Backend(
+                id,
+                client::Event::Connected("test".into()),
+            ));
+            (id, commands)
+        };
+        let restart = || {
+            let mut app = App::with_devices(audio::Devices::default(), None);
+            app.load_settings(settings_file.clone());
+            app
+        };
+        let (id, _commands) = connect(&mut app);
+        assert!(app.server().chat.shown(chat::Layout::Feed).is_empty());
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "see you tomorrow", false),
+        ));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(mara.clone(), "Mara", "psst", false),
+        ));
+        assert!(root.join(chat_store::FILE).exists());
+
+        // The next launch has both lines again, and Mara's tab, with nothing unread.
+        let mut app = restart();
+        let (id, _commands) = connect(&mut app);
+        let texts = |app: &App| -> Vec<String> {
+            let lines = app.server().chat.shown(chat::Layout::Feed);
+            lines.iter().map(|line| line.text.clone()).collect()
+        };
+        assert_eq!(texts(&app), ["see you tomorrow", "psst"]);
+        assert_eq!(app.server().chat.peers[0].name, "Mara");
+        assert_eq!(app.server().chat.unread_private(), 0);
+        // A reconnect in the same run doesn't bring them a second time.
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Connected("test".into()),
+        ));
+        assert_eq!(texts(&app).len(), 2);
+        // A closed tab stays closed after a restart.
+        let _ = app.update(Message::Chat(chat::Action::ClosePeer("uid-2".into())));
+        // With history off, what is said now is gone after a restart.
+        let _ = app.update(Message::Chat(chat::Action::Options(settings::Chat {
+            history: false,
+            ..app.chat_options
+        })));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "off the record", false),
+        ));
+        let mut app = restart();
+        assert!(!app.chat_options.history);
+        let (_id, _commands) = connect(&mut app);
+        assert!(
+            texts(&app).is_empty(),
+            "Nothing is read while it is off either"
+        );
+        let _ = app.update(Message::Chat(chat::Action::Options(settings::Chat {
+            history: true,
+            ..app.chat_options
+        })));
+        let mut app = restart();
+        let (_id, _commands) = connect(&mut app);
+        assert_eq!(texts(&app), ["see you tomorrow", "psst"]);
+        assert!(app.server().chat.peers.is_empty(), "Mara's tab was closed");
+
+        // Clearing asks twice, then empties the file and the window.
+        let _ = app.update(Message::Chat(chat::Action::ClearHistory));
+        assert_eq!(texts(&app).len(), 2);
+        let _ = app.update(Message::Chat(chat::Action::ClearHistory));
+        assert!(texts(&app).is_empty());
+        let mut app = restart();
+        let (_id, _commands) = connect(&mut app);
+        assert!(texts(&app).is_empty());
+        assert!(app.alerts.visible().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

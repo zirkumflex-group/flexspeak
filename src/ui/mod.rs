@@ -259,6 +259,8 @@ pub struct UiState {
     /// The lists that open under the pointer in the chat column: the channel group, the people
     /// group, and the message box's choice of where to send (`chat::List`).
     pub chat_lists: [RailPeek; 3],
+    /// Clear History was pressed once and waits for the press that confirms it.
+    pub chat_clear_armed: bool,
     /// What one click can share, refreshed while you could go live.
     pub quick_sources: Vec<crate::streaming::publishing::ShareSource>,
     pub quick_checking: bool,
@@ -320,6 +322,7 @@ impl Default for UiState {
             chat_toast_hover: false,
             chat_over_stream: false,
             chat_lists: Default::default(),
+            chat_clear_armed: false,
             quick_sources: Vec::new(),
             quick_checking: false,
             next_quick_check: Instant::now(),

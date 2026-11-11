@@ -204,6 +204,9 @@ pub const SCENES: &[Scene] = &[
     ("chat-feed-grouped-people", chat_feed_grouped_people),
     ("chat-feed-grouped-channel", chat_feed_grouped_channel),
     ("chat-feed-grouped-person", chat_feed_grouped_person),
+    ("chat-restored", chat_restored),
+    ("chat-restored-feed", chat_restored_feed),
+    ("settings-chat-history", settings_chat_history),
     ("settings-chat", settings_chat),
     ("setup-chat", setup_chat),
     ("setup-chat-feed", setup_chat_feed),
@@ -859,6 +862,82 @@ fn chat_feed_grouped_channel(s: &mut App) {
 fn chat_feed_grouped_person(s: &mut App) {
     chat_feed_grouped(s);
     s.server_mut().chat.narrow(mara());
+}
+
+/// After a restart: yesterday's conversations are back from the history, a line between the
+/// days, and today's follow.
+fn chat_restored(s: &mut App) {
+    use crate::chat_store::{Loaded, Stored};
+    connected(s);
+    // Yesterday evening by this computer's clock, whatever today is.
+    let midnight = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|time| time.and_local_timezone(chrono::Local).single())
+        .map_or(0, |time| time.timestamp());
+    let line = |scope: chat::Scope, from: &str, place: &str, text: &str, before: i64| Stored {
+        room: if scope == chat::Scope::Channel { 1 } else { 0 },
+        scope,
+        kind: chat::Kind::Message,
+        own: from == "Jan",
+        from: from.into(),
+        place: place.into(),
+        text: text.into(),
+        at: midnight - before * 60,
+    };
+    s.server_mut().chat.restore(Loaded {
+        lines: vec![
+            line(
+                chat::Scope::Channel,
+                "Theo",
+                "Lobby",
+                "same time tomorrow?",
+                228,
+            ),
+            line(
+                chat::Scope::Channel,
+                "Mara",
+                "Lobby",
+                "yes, eight sharp",
+                226,
+            ),
+            line(mara(), "Mara", "Mara", "bring the spare key tomorrow", 220),
+            line(chat::Scope::Channel, "Jan", "Lobby", "see you then", 219),
+        ],
+        closed: Vec::new(),
+    });
+    s.server_mut().chat.enter(1, "Lobby");
+    say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Theo",
+        "Lobby",
+        "back, had to restart my router",
+        "21:04",
+    );
+    say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Mara",
+        "Lobby",
+        "we start the raid at half past",
+        "21:05",
+    );
+}
+
+fn chat_restored_feed(s: &mut App) {
+    chat_restored(s);
+    s.chat_options.layout = chat::Layout::Feed;
+}
+
+/// Settings › Chat scrolled to History, with Clear History pressed once.
+fn settings_chat_history(s: &mut App) {
+    settings_chat(s);
+    s.settings_query = "history".into();
+    s.ui.chat_clear_armed = true;
+    s.sync_fields();
 }
 
 fn settings_chat(s: &mut App) {
@@ -3429,6 +3508,42 @@ mod tests {
         for root in [root, other] {
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn clearing_the_chat_history_takes_two_presses() {
+        let mut rt = runtime(settings_chat, (1180.0, 790.0));
+        let root = temp_settings(&mut rt, "chat-clear");
+        settle(&mut rt);
+        scroll_into_view(&mut rt, "settings-body-Chat", "chat-history-clear");
+        click(&mut rt, "chat-history-clear");
+        assert!(rt.state.ui.chat_clear_armed, "the first press only asks");
+        assert!(rt.state.settings_message.is_none());
+        click(&mut rt, "chat-history-clear");
+        assert!(!rt.state.ui.chat_clear_armed);
+        assert_eq!(
+            rt.state.settings_message.as_deref(),
+            Some("Chat history cleared")
+        );
+        // Leaving Settings between the two presses forgets the first.
+        click(&mut rt, "chat-history-clear");
+        rt.state.close_settings();
+        assert!(!rt.state.ui.chat_clear_armed);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_restored_conversation_names_the_day_it_was_said() {
+        let mut rt = runtime(chat_restored, (1180.0, 790.0));
+        settle(&mut rt);
+        let today = chrono::Local::now().date_naive();
+        let yesterday = today.pred_opt().unwrap();
+        assert!(rt.find(&format!("chat-day-{yesterday}")).is_some());
+        assert!(rt.find(&format!("chat-day-{today}")).is_some());
+        // Only today's lines: no line names the day.
+        let mut rt = runtime(chat_tabs, (1180.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find(&format!("chat-day-{today}")).is_none());
     }
 
     #[test]
