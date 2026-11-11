@@ -25,6 +25,21 @@ OPUS_VERSION = OPUS["version"]
 OPUS_SHA256 = OPUS["sha256"]
 # The Arch packaging container, by digest so a new image can't change a release silently.
 ARCH_IMAGE = "archlinux:base-devel@sha256:2de80105abb49f813a85393c6758a4334deb6bcec4a2411bd2f059c0bee6ee4c"
+# Every platform Flexspeak builds for: its runner, the cache its checks save, and the packages
+# a release carries for it. Which of them PRs check and releases build is the switch file.
+PLATFORMS = {
+    # First: the release's safety-net test runs on the first enabled platform, and Linux is
+    # the quickest runner.
+    "linux": {"os": "ubuntu-24.04", "platform": "linux-x64", "cache": "linux-checks",
+              "packages": ["Flexspeak-linux-x64.tar.gz", "Flexspeak-linux-x64.pkg.tar.zst"]},
+    "windows": {"os": "windows-2022", "platform": "windows-x64", "cache": "windows-checks",
+                "packages": ["Flexspeak-windows-x64.exe", "Flexspeak-windows-x64.zip"]},
+    # macOS 26 for its Xcode: the Liquid Glass icon only compiles there (Xcode 26 crashes on it
+    # under 15), and a cache from another image holds that image's Xcode paths and won't link.
+    "macos": {"os": "macos-26", "platform": "macos-arm64", "cache": "macos-26-checks",
+              "packages": ["Flexspeak-macos-arm64.dmg"]},
+}
+SWITCHES = ROOT / ".github/platforms.json"
 
 
 def run(*args, **kwargs):
@@ -353,10 +368,36 @@ def cask(release, output, artifacts=OUTPUT):
     output.write_text(rendered, encoding="utf-8")
 
 
+def enabled_platforms(everything=False):
+    """The platforms the switch file turns on, in `PLATFORMS` order (all of them with
+    `everything`). A typo there fails loudly rather than dropping a platform."""
+    switches = json.loads(SWITCHES.read_text(encoding="utf-8"))
+    if (not isinstance(switches, dict) or set(switches) != set(PLATFORMS)
+            or not all(type(on) is bool for on in switches.values())):
+        raise ValueError(f"{SWITCHES.name} must set each of {', '.join(PLATFORMS)} to true or false")
+    names = [name for name in PLATFORMS if everything or switches[name]]
+    if not names:
+        raise ValueError(f"{SWITCHES.name} turns every platform off")
+    return names
+
+
+def platform_outputs(everything=False):
+    """GitHub Actions job outputs: the matrix the checks and builds run, where the release's
+    test runs, and whether Homebrew gets a cask."""
+    names = enabled_platforms(everything)
+    include = [{key: PLATFORMS[name][key] for key in ("os", "platform", "cache")} for name in names]
+    return {
+        "matrix": json.dumps({"include": include}, separators=(",", ":")),
+        "test-os": include[0]["os"],
+        "test-cache": include[0]["cache"],
+        "macos": json.dumps("macos" in names),
+    }
+
+
 def checksums():
-    required = {"Flexspeak-windows-x64.exe", "Flexspeak-windows-x64.zip",
-                "Flexspeak-macos-arm64.dmg", "Flexspeak-linux-x64.tar.gz",
-                "Flexspeak-linux-x64.pkg.tar.zst", "THIRD-PARTY-LICENSES.txt"}
+    required = {"THIRD-PARTY-LICENSES.txt"}
+    for name in enabled_platforms():
+        required.update(PLATFORMS[name]["packages"])
     if not required.issubset(path.name for path in OUTPUT.iterdir()):
         raise ValueError("Missing release artifacts")
     (OUTPUT / "SHA256SUMS.txt").write_text("".join(
@@ -372,10 +413,13 @@ if __name__ == "__main__":
         fetch()
     elif sys.argv[1:] == ["checksums"]:
         checksums()
+    elif sys.argv[1:2] == ["platforms"] and sys.argv[2:] in ([], ["--all"]):
+        for key, value in platform_outputs(everything=sys.argv[2:] == ["--all"]).items():
+            print(f"{key}={value}")
     elif len(sys.argv) == 4 and sys.argv[1] == "notes":
         notes(Path(sys.argv[2]), Path(sys.argv[3]))
     elif len(sys.argv) == 4 and sys.argv[1] == "cask":
         cask(json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")), Path(sys.argv[3]))
     else:
-        sys.exit("Usage: release.py build | fetch | checksums | notes COMMIT OUTPUT"
-                 " | cask RELEASE_JSON OUTPUT_RB")
+        sys.exit("Usage: release.py build | fetch | checksums | platforms [--all]"
+                 " | notes COMMIT OUTPUT | cask RELEASE_JSON OUTPUT_RB")

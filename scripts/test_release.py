@@ -1,4 +1,5 @@
 import copy
+import json
 import re
 import tempfile
 from pathlib import Path
@@ -97,15 +98,23 @@ class HomebrewReleaseTests(unittest.TestCase):
                     release.cask(data, self.output, self.root)
                 self.assertEqual(self.output.read_text(encoding="utf-8"), "previous cask")
 
-    def test_release_requires_linux_packages_before_writing_checksums(self):
+    def test_release_requires_every_enabled_platforms_packages_before_writing_checksums(self):
         names = ["Flexspeak-windows-x64.exe", "Flexspeak-windows-x64.zip",
                  "Flexspeak-macos-arm64.dmg", "THIRD-PARTY-LICENSES.txt"]
         for name in names:
             (self.root / name).write_bytes(b"test artifact")
-        with patch.object(release, "OUTPUT", self.root):
+        switches = self.root / "platforms.json"
+        with patch.object(release, "OUTPUT", self.root), patch.object(release, "SWITCHES", switches):
+            switches.write_text('{"windows": true, "macos": true, "linux": true}', encoding="utf-8")
             with self.assertRaises(ValueError):
                 release.checksums()
             self.assertFalse((self.root / "SHA256SUMS.txt").exists())
+            # With Linux off, a release is complete without its packages.
+            switches.write_text('{"windows": true, "macos": true, "linux": false}', encoding="utf-8")
+            release.checksums()
+            listed = (self.root / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(listed), 4)
+            switches.write_text('{"windows": true, "macos": true, "linux": true}', encoding="utf-8")
             for name in ("Flexspeak-linux-x64.tar.gz", "Flexspeak-linux-x64.pkg.tar.zst"):
                 (self.root / name).write_bytes(b"linux artifact")
             release.checksums()
@@ -190,6 +199,51 @@ class OpusBuildTests(unittest.TestCase):
         self.assertEqual(self.build(), 3)
 
 
+class PlatformSwitchTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.switches = Path(self.directory.name) / "platforms.json"
+        patcher = patch.object(release, "SWITCHES", self.switches)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def outputs(self, switches, everything=False):
+        self.switches.write_text(json.dumps(switches), encoding="utf-8")
+        return release.platform_outputs(everything)
+
+    def test_the_committed_switch_file_is_valid(self):
+        with patch.object(release, "SWITCHES", release.ROOT / ".github/platforms.json"):
+            self.assertTrue(release.enabled_platforms())
+
+    def test_a_platform_that_is_off_is_neither_checked_nor_built(self):
+        outputs = self.outputs({"windows": True, "macos": True, "linux": False})
+        matrix = json.loads(outputs["matrix"])["include"]
+        self.assertEqual([entry["platform"] for entry in matrix], ["windows-x64", "macos-arm64"])
+        self.assertEqual(matrix[0], {"os": "windows-2022", "platform": "windows-x64", "cache": "windows-checks"})
+        # The release's test moves to the first platform that is on, with that one's cache.
+        self.assertEqual((outputs["test-os"], outputs["test-cache"]), ("windows-2022", "windows-checks"))
+        self.assertEqual(outputs["macos"], "true")
+        self.assertEqual(self.outputs({"windows": True, "macos": False, "linux": False})["macos"], "false")
+
+    def test_linux_runs_the_release_test_while_it_is_on(self):
+        outputs = self.outputs({"windows": True, "macos": True, "linux": True})
+        self.assertEqual((outputs["test-os"], outputs["test-cache"]), ("ubuntu-24.04", "linux-checks"))
+
+    def test_a_manual_check_of_everything_ignores_the_switches(self):
+        outputs = self.outputs({"windows": True, "macos": False, "linux": False}, everything=True)
+        self.assertEqual(len(json.loads(outputs["matrix"])["include"]), len(release.PLATFORMS))
+
+    def test_a_typo_or_nothing_on_fails_instead_of_dropping_a_platform(self):
+        for switches in ({"windows": True, "macos": True},
+                         {"windows": True, "macos": True, "linux": False, "freebsd": True},
+                         {"windows": True, "macos": "false", "linux": False},
+                         {"windows": False, "macos": False, "linux": False},
+                         [True, True, True]):
+            with self.subTest(switches=switches), self.assertRaises(ValueError):
+                self.outputs(switches)
+
+
 class InAppUpdaterContractTests(unittest.TestCase):
     """The app downloads release assets by name; renaming one here must not strand it."""
 
@@ -202,7 +256,11 @@ class InAppUpdaterContractTests(unittest.TestCase):
             (self.root / name).write_bytes(name.encode())
         (self.root / "Flexspeak-windows-x64.zip").write_bytes(b"zip")
         (self.root / "THIRD-PARTY-LICENSES.txt").write_bytes(b"notices")
-        with patch.object(release, "OUTPUT", self.root):
+        packages = {name for platform in release.PLATFORMS.values() for name in platform["packages"]}
+        self.assertTrue(set(names.values()) <= packages)
+        switches = self.root / "platforms.json"
+        switches.write_text(json.dumps(dict.fromkeys(release.PLATFORMS, True)), encoding="utf-8")
+        with patch.object(release, "OUTPUT", self.root), patch.object(release, "SWITCHES", switches):
             release.checksums()
         listed = {line.split("  ", 1)[1] for line in (self.root / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines()}
         self.assertTrue(set(names.values()) <= listed)
@@ -223,28 +281,37 @@ class InAppUpdaterContractTests(unittest.TestCase):
         # Builds of several pushes run side by side; only the publish job queues.
         self.assertNotIn("concurrency:\n", before)
         self.assertIn("    concurrency:\n      group: release-publish\n      queue: max\n", publish)
-        self.assertIn("    needs: [test, build]\n", publish)
+        self.assertIn("    needs: [platforms, test, build]\n", publish)
         self.assertIn("    if: github.ref == 'refs/heads/main'\n    environment: release\n", publish)
         # A quick build can publish before an older, slower one.
         self.assertIn("(( BASH_REMATCH[1] > GITHUB_RUN_NUMBER ))", publish)
         self.assertIn("(( GITHUB_RUN_NUMBER < $(cat homebrew-tap/.release-run) ))", publish)
 
-    def test_a_release_is_tested_on_linux_from_the_checks_cache(self):
+    def test_a_release_is_tested_on_one_platform_from_the_checks_cache(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         test = workflow.split("\n  test:\n")[1].split("\n  build:\n")[0]
         self.assertNotIn("uses: ./.github/workflows", workflow)
-        self.assertIn("runs-on: ubuntu-24.04\n", test)
-        self.assertIn("shared-key: linux-checks\n", test)
+        self.assertIn("runs-on: ${{ needs.platforms.outputs.test-os }}\n", test)
+        self.assertIn("shared-key: ${{ needs.platforms.outputs.test-cache }}\n", test)
         self.assertIn("save-if: false\n", test)
         self.assertIn("run: cargo test --locked\n", test)
-        # rust-cache keys on Cargo's environment: the cache is only found with the checks' own.
+        # rust-cache keys on Cargo's environment and the workspace: the cache is only found
+        # with the checks' own setup, on whichever platform the test lands.
         checks = (release.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        env = re.search(r"\n    env:\n((?:      .+\n)+)", checks)[1]
+        check = checks.split("\n  check:\n")[1].split("\n  passed:\n")[0]
+        env = re.search(r"\n    env:\n((?:      .+\n)+)", check)[1]
         for line in env.splitlines():
             if not line.lstrip().startswith("#"):
                 self.assertIn(line + "\n", test)
-        self.assertIn("shared-key: ${{ matrix.cache }}\n", checks)
-        self.assertIn("cache: linux-checks\n", checks)
+        for setup in ("drive-size: 20GB", 'target-feature=+crt-static" >> "$GITHUB_ENV"',
+                      "workspaces: ${{ env.DEV_DRIVE_WORKSPACE || '.' }}"):
+            self.assertIn(setup, check)
+            self.assertIn(setup, test)
+        self.assertIn("shared-key: ${{ matrix.cache }}\n", check)
+        # Both workflows build their matrix from the switch file.
+        self.assertIn("matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}\n", check)
+        build = workflow.split("\n  build:\n")[1].split("\n  publish:\n")[0]
+        self.assertIn("matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}\n", build)
 
     def test_documentation_alone_releases_nothing_but_shipped_files_do(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -261,8 +328,8 @@ class InAppUpdaterContractTests(unittest.TestCase):
         checks = (release.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("\n  pull_request:\n  push:\n    branches: [main]\n", checks)
         self.assertNotIn("workflow_call", checks)
-        self.assertIn("    name: Checks passed\n    needs: [check]\n    if: always()\n", checks)
-        self.assertIn('[ "$RESULT" = success ]', checks)
+        self.assertIn("    name: Checks passed\n    needs: [platforms, format, check]\n    if: always()\n", checks)
+        self.assertIn('[ "$PLATFORMS" = success ] && [ "$FORMAT" = success ] && [ "$RESULT" = success ]', checks)
         source = (release.ROOT / "src/updater.rs").read_text(encoding="utf-8")
         self.assertIn('split_once("-build.")', source)
         self.assertIn("releases/latest", source)
