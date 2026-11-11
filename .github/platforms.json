@@ -1,5 +1,5 @@
 {
   "windows": true,
-  "macos": true,
+  "macos": false,
   "linux": false
 }
