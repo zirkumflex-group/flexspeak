@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tsclientlib::{ClientId, audio::AudioHandler};
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf};
 
-use crate::audio::{AudioEngine, DeviceChoice, PlaybackVolume};
+use crate::audio::{AudioEngine, Chime, DeviceChoice, PlaybackVolume};
 use crate::profiler::{self, Category};
 use crate::streaming::Surfaces;
 
@@ -39,6 +39,10 @@ const SETTLE: Duration = Duration::from_secs(3);
 /// How often to look for a chosen device to come back while another stands in.
 const LOOK_BACK: Duration = Duration::from_secs(3);
 const BACKOFF_MAX: Duration = Duration::from_secs(15);
+/// How long the devices stay open after the last server has gone, for a sound still playing.
+const LAST_SOUND: Duration = Duration::from_secs(4);
+/// What the device still holds once the last sample has been handed to it.
+const SOUND_TAIL: Duration = Duration::from_millis(60);
 
 /// Something wrong with the devices that every server shares and none disconnects over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,8 +112,8 @@ struct Shared {
     level: AtomicU32,
     transmitting: AtomicBool,
     buffer_bytes: AtomicUsize,
-    /// The next sound to play, already at its final volume.
-    sound: Mutex<Option<Vec<f32>>>,
+    /// Sounds on their way to the device, already at their final volume.
+    sounds: Mutex<Vec<Chime>>,
 }
 
 struct Device {
@@ -125,6 +129,10 @@ struct Device {
 pub struct AudioHub {
     active: AtomicU64,
     device: Mutex<Option<Device>>,
+    /// Connections waiting for the devices, which a sound playing out must not hold up.
+    opening: AtomicUsize,
+    /// Set as the app quits: nothing is left to play, and nothing is waited for.
+    hushed: AtomicBool,
 }
 
 impl AudioHub {
@@ -134,11 +142,25 @@ impl AudioHub {
             .store(id.map_or(0, |id| id.0), Ordering::Release);
     }
 
-    /// Plays a short sound on the shared device. Nothing plays until a server has opened it.
-    pub fn play(&self, samples: Vec<f32>) {
-        if let Some(device) = self.device.lock().unwrap().as_ref() {
-            *device.shared.sound.lock().unwrap() = Some(samples);
+    /// Plays a short sound on the shared device. Nothing plays until a server has opened it,
+    /// nor while the devices are opening or closing: this is called from the window's thread,
+    /// which must not wait for them.
+    pub fn play(&self, chime: Chime) {
+        /// More than the device will line up anyway, should it stop taking them.
+        const PENDING: usize = 8;
+        if let Ok(device) = self.device.try_lock()
+            && let Some(device) = device.as_ref()
+        {
+            let mut sounds = device.shared.sounds.lock().unwrap();
+            if sounds.len() < PENDING {
+                sounds.push(chime);
+            }
         }
+    }
+
+    /// Stops every sound and stops waiting for one to finish. For quitting.
+    pub fn hush(&self) {
+        self.hushed.store(true, Ordering::Release);
     }
 
     fn active(&self) -> u64 {
@@ -152,7 +174,9 @@ impl AudioHub {
     /// Joins a server to the hub, opening the devices if it's the first. Blocks while they
     /// open, which can include a permission dialog, so never call this on the UI thread.
     pub fn attach(self: &Arc<Self>, id: SessionId, open: Open) -> Result<Link> {
+        self.opening.fetch_add(1, Ordering::AcqRel);
         let mut device = self.device.lock().unwrap();
+        self.opening.fetch_sub(1, Ordering::AcqRel);
         if device.is_none() {
             *device = Some(Device::open(self.clone(), open)?);
         }
@@ -428,7 +452,7 @@ impl Core {
             let now = Instant::now();
             match stopped.recv_timeout(next.saturating_duration_since(now)) {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                _ => return,
+                _ => return self.finish_sounds(),
             }
             // After a stall, carry on rather than rush through the missed ticks.
             if next + 10 * TICK < now {
@@ -442,6 +466,38 @@ impl Core {
             } else if let Err(error) = self.tick(now) {
                 self.lose(&error, now);
             }
+        }
+    }
+
+    /// Whether a sound is on its way to the device or still coming out of it.
+    fn sounding(&self) -> bool {
+        self.engine.as_ref().is_some_and(|engine| {
+            engine.sounding() || !self.shared.sounds.lock().unwrap().is_empty()
+        })
+    }
+
+    /// Plays out the sounds already due before the devices go, so the last server leaving
+    /// doesn't cut off "Disconnected" or "Kicked". Gives way to a new connection and to quitting.
+    fn finish_sounds(&mut self) {
+        if !self.sounding() {
+            return;
+        }
+        let started = Instant::now();
+        let mut quiet_since = None;
+        while started.elapsed() < LAST_SOUND
+            && self.hub.opening.load(Ordering::Acquire) == 0
+            && !self.hub.hushed.load(Ordering::Acquire)
+        {
+            let now = Instant::now();
+            if self.sounding() {
+                quiet_since = None;
+            } else if now.duration_since(*quiet_since.get_or_insert(now)) >= SOUND_TAIL {
+                break;
+            }
+            if self.tick(now).is_err() {
+                break;
+            }
+            std::thread::sleep(TICK);
         }
     }
 
@@ -548,7 +604,7 @@ impl Core {
             *line.incoming.lock().unwrap() = AudioHandler::new();
         }
         self.settle_owed(&lines);
-        shared.sound.lock().unwrap().take();
+        shared.sounds.lock().unwrap().clear();
         shared.level.store(0.0_f32.to_bits(), Ordering::Relaxed);
         shared.transmitting.store(false, Ordering::Relaxed);
         shared.buffer_bytes.store(0, Ordering::Relaxed);
@@ -591,8 +647,12 @@ impl Core {
         self.engine().set_capture(capture)?;
         self.surfaces
             .set_audio_enabled(active.is_some_and(|line| !line.silent.load(Ordering::Acquire)));
-        if let Some(samples) = shared.sound.lock().unwrap().take() {
-            self.engine().play(samples);
+        if self.hub.hushed.load(Ordering::Acquire) {
+            shared.sounds.lock().unwrap().clear();
+            self.engine().hush();
+        }
+        for chime in std::mem::take(&mut *shared.sounds.lock().unwrap()) {
+            self.engine().play(chime);
         }
         let surfaces = self.surfaces.clone();
         let packets = self.engine().tick(false, |stereo| {

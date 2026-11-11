@@ -4,13 +4,15 @@
 //! category's sections trail. Every section is a list of rows with search terms, so a query
 //! narrows the panel to the rows that match across all categories.
 
+use std::f32::consts::FRAC_PI_2;
+
 use rune::{Color, Cx, El, Icon, Tx, col, el, icon, row, text};
 use rune_kit::{Kit, Switch, TextInput};
 
 use super::theme::{Theme, motion, radius, shadow, size, ty};
 use super::widgets::{
-    Range, Variant, button, divider, field, form_row, group, group_note, group_title, icon_button,
-    labelled, meter, muted, percent_slider, picker, scroll_page, slider,
+    Range, Variant, button, divider, faint, field, form_row, group, group_note, group_title,
+    icon_button, labelled, meter, muted, percent_slider, picker, scroll_page, slider,
 };
 use super::{dispatch, icons, send, updates};
 use crate::settings::{Appearance, ColorScheme, ThemeName};
@@ -2077,26 +2079,148 @@ fn sound_cues_row(s: &App, t: &Theme, k: &Kit) -> Row {
     )
 }
 
-/// The volume of every sound, and which sound each event uses.
+/// A switch that sends `message`, for rows made in a loop.
+fn switch_to(key: &str, label: &str, on: bool, enabled: bool, k: &Kit, message: Message) -> El {
+    Switch::new(on)
+        .label(label)
+        .hide_label()
+        .disabled(!enabled)
+        .on_toggle_tx(move |s: &mut App, tx| super::dispatch(s, tx, message.clone()))
+        .build(k)
+        .key(key.to_owned())
+}
+
+/// One group of sounds: pressing its name opens it to the single sounds, and its switch turns
+/// them all off at once.
+fn sound_group_row(s: &App, t: &Theme, k: &Kit, group: crate::sounds::Group, open: bool) -> El {
+    let total = group.sounds().count();
+    let on = group
+        .sounds()
+        .filter(|sound| s.sounds.sound_on(*sound))
+        .count();
+    let group_on = s.sounds.group_on(group);
+    let summary = if !group_on {
+        "Off".to_owned()
+    } else if on == total {
+        format!("{total} sounds")
+    } else {
+        format!("{on} of {total} on")
+    };
+    let name = row()
+        .key(format!("{}-open", group.key()))
+        .role("button")
+        .label(group.title())
+        .expanded(open)
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(44.0)
+        .pl(size::CARD_PAD)
+        .gap(10.0)
+        .center_y()
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .focus_ring(2.0, 0.0, t.accent.alpha(0.7))
+        .on_press_tx(move |s: &mut App, _| {
+            if !s.ui.sound_groups.remove(&group) {
+                s.ui.sound_groups.insert(group);
+            }
+        })
+        .child(
+            icon(&icons::CHEVRON_RIGHT, 14.0)
+                .color(t.faint)
+                .rotate(if open { FRAC_PI_2 } else { 0.0 })
+                .motion(motion::QUICK)
+                .a11y_hidden(),
+        )
+        .child(
+            text(group.title())
+                .font(ty::BODY)
+                .color(t.text)
+                .grow(1.0)
+                .a11y_hidden(),
+        )
+        .child(faint(t, summary).a11y_hidden());
+    row()
+        .w_full()
+        .gap(16.0)
+        .pr(size::CARD_PAD)
+        .center_y()
+        .child(name)
+        .child(switch_to(
+            group.key(),
+            group.title(),
+            group_on,
+            s.sound_cues,
+            k,
+            Message::SoundGroup(group, !group_on),
+        ))
+}
+
+/// One sound inside an opened group, set in from the group's name.
+fn sound_row(s: &App, t: &Theme, k: &Kit, sound: crate::sounds::Sound, connected: bool) -> El {
+    let on = s.sounds.sound_on(sound);
+    let preview = icon_button(
+        t,
+        &format!("preview-{}", sound.key()),
+        &icons::PLAY,
+        if connected {
+            "Play this sound"
+        } else {
+            "Connect to a server to hear it"
+        },
+        Variant::Ghost,
+        connected.then_some(Message::PreviewSound(sound)),
+    );
+    row()
+        .w_full()
+        .min_h(40.0)
+        .pl(size::CARD_PAD + 24.0)
+        .pr(size::CARD_PAD)
+        .gap(12.0)
+        .center_y()
+        .child(
+            text(sound.title())
+                .font(ty::BODY)
+                .color(if s.sounds.plays(sound) {
+                    t.text
+                } else {
+                    t.muted
+                })
+                .grow(1.0)
+                .min_w(0.0)
+                .wrap(),
+        )
+        .child(preview)
+        .child(switch_to(
+            sound.key(),
+            sound.title(),
+            on,
+            s.sound_cues && s.sounds.group_on(sound.group()),
+            k,
+            Message::SoundOn(sound, !on),
+        ))
+}
+
+/// Whether sounds play and how loud, the one pack they all come from, and which events have
+/// one: a switch for each group, opening to a switch for each sound.
 fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
-    use crate::sounds::{Sound, Source};
+    use crate::sounds::{Group, Pack};
+    const TITLE: &str = "Sound Cues";
+    const TERMS: &str = "audio sound cues";
     let connected = s.sessions.iter().any(|session| session.connected);
-    let volume = s.sounds.volume_percent;
-    let packs: Vec<Source> = [Source::Flexspeak, Source::Soft, Source::TeamSpeak]
+    let volume = s.sounds.volume;
+    let packs: Vec<Pack> = Pack::ALL
         .into_iter()
-        .filter(|&pack| pack != Source::TeamSpeak || !s.sound_bank.is_empty())
+        .filter(|&pack| pack != Pack::TeamSpeak || !s.sound_bank.is_empty())
         .collect();
     let pack_names = packs.iter().map(|p| p.title().to_owned()).collect();
-    let chosen = |sound| s.sound_bank.usable(sound, s.sounds.source(sound));
-    let first = chosen(Sound::ALL[0]);
-    let pack = Sound::ALL.into_iter().all(|sound| chosen(sound) == first);
     let pack_picker = picker(
         k,
         s,
         "sound-pack",
         pack_names,
-        (pack && first != Source::Off).then_some(first.title()),
-        "Mixed",
+        Some(s.sound_bank.shown(s.sounds.pack).title()),
+        "Choose…",
         s.sound_cues,
         size::FORM_CONTROL,
         move |index| Message::SoundPack(packs[index]),
@@ -2115,7 +2239,7 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
                     "sound-volume",
                     "Sound volume",
                     volume,
-                    |s| s.sounds.volume_percent,
+                    |s| s.sounds.volume,
                     Message::SoundVolume,
                 )),
             ),
@@ -2125,70 +2249,35 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
             form_row(
                 t,
                 "Sound pack",
-                Some("Sets every sound below at once."),
+                Some("One set of sounds for everything below."),
                 trailing(pack_picker),
             ),
         ),
     ];
-    for sound in Sound::ALL {
-        let choices: Vec<Source> = [
-            Source::Flexspeak,
-            Source::Soft,
-            Source::TeamSpeak,
-            Source::Off,
-        ]
-        .into_iter()
-        .filter(|&choice| s.sound_bank.usable(sound, choice) == choice)
-        .collect();
-        let names = choices.iter().map(|c| c.title().to_owned()).collect();
-        let current = s.sound_bank.usable(sound, s.sounds.source(sound));
-        let chooser = picker(
-            k,
-            s,
-            sound.key(),
-            names,
-            Some(current.title()),
-            "Choose…",
-            s.sound_cues,
-            size::FORM_CONTROL - 36.0,
-            move |index| Message::SoundSource(sound, choices[index]),
-            layer,
-        );
-        let preview = icon_button(
-            t,
-            &format!("preview-{}", sound.key()),
-            &icons::PLAY,
-            if connected {
-                "Play this sound"
-            } else {
-                "Connect to a server to hear it"
-            },
-            Variant::Ghost,
-            (connected && current != Source::Off).then_some(Message::PreviewSound(sound)),
-        );
+    // A search for one sound shows it under its group without the group being opened.
+    let query = s.settings_query.trim();
+    let hunting = !query.is_empty() && !matches(&format!("{TITLE} {TERMS}"), query);
+    for group in Group::ALL {
+        let open = s.ui.sound_groups.contains(&group);
+        let titles: Vec<&str> = group.sounds().map(|sound| sound.title()).collect();
         rows.push(item(
-            format!("sound cues {}", sound.title().to_lowercase()),
-            form_row(
-                t,
-                sound.title(),
-                None,
-                trailing(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .center_y()
-                        .child(preview)
-                        .child(el().grow(1.0).min_w(0.0).child(chooser)),
-                ),
-            ),
+            format!("sound cues {} {}", group.title(), titles.join(" ")).to_lowercase(),
+            sound_group_row(s, t, k, group, open),
         ));
+        for sound in group.sounds() {
+            let terms = format!("sound cues {}", sound.title().to_lowercase());
+            if open || (hunting && matches(&terms, query)) {
+                rows.push(item(terms, sound_row(s, t, k, sound, connected)));
+            }
+        }
     }
     let note = if s.sound_bank.is_empty() {
-        "TeamSpeak's sounds appear here if TeamSpeak is installed on this computer."
+        "TeamSpeak's sounds appear as a pack if TeamSpeak is installed on this computer."
     } else {
-        "TeamSpeak's sounds are read from TeamSpeak on this computer."
+        "TeamSpeak's sounds are read from TeamSpeak on this computer and played equally loud. \
+         It has none for stream viewers, so Flexspeak plays one made to match."
     };
-    Section::boxed("sounds", "Sound Cues", "audio sound cues", rows).note(group_note(t, note))
+    Section::boxed("sounds", TITLE, TERMS, rows).note(group_note(t, note))
 }
 
 fn typing_row(s: &App, t: &Theme, k: &Kit) -> Row {
