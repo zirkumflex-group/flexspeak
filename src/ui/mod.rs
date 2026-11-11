@@ -290,6 +290,8 @@ pub struct UiState {
     pub warm_blur: bool,
     /// Settings → Updates lists every release, not only the latest.
     pub changelog_open: bool,
+    /// The groups of sounds opened to their single sounds in Settings → Audio.
+    pub sound_groups: std::collections::BTreeSet<crate::sounds::Group>,
     /// Where the current press started, in window points.
     pub press_point: (f32, f32),
     /// The window position of the member row or stream last under the pointer, to place drags.
@@ -341,6 +343,7 @@ impl Default for UiState {
             log_search: TextEdit::new(""),
             warm_blur: true,
             changelog_open: false,
+            sound_groups: std::collections::BTreeSet::new(),
             user_volume: None,
             press_point: (0.0, 0.0),
             row_origin: (0.0, 0.0),

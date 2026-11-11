@@ -344,8 +344,8 @@ pub struct AudioEngine {
     output_rate: RateConverter,
     pcm: VecDeque<f32>,
     monitor: VecDeque<f32>,
-    /// A notification sound still to play, mixed over voice even while deafened.
-    chime: VecDeque<f32>,
+    /// Notification sounds still to play, mixed over voice even while deafened.
+    chimes: Chimes,
     encoder: Encoder,
     pub codec: CodecType,
     output_target: usize,
@@ -519,7 +519,7 @@ impl AudioEngine {
             output_rate,
             pcm: VecDeque::new(),
             monitor: VecDeque::new(),
-            chime: VecDeque::new(),
+            chimes: Chimes::default(),
             encoder,
             codec: CodecType::OpusVoice,
             output_target,
@@ -585,9 +585,19 @@ impl AudioEngine {
         Ok(packets)
     }
 
-    /// Plays a short sound over whatever is playing, replacing one already going.
-    pub fn play(&mut self, samples: Vec<f32>) {
-        self.chime = samples.into();
+    /// Plays a short sound over the voices, after any sound already going unless it is urgent.
+    pub fn play(&mut self, chime: Chime) {
+        self.chimes.add(chime);
+    }
+
+    /// Whether a notification sound is playing or waiting.
+    pub fn sounding(&self) -> bool {
+        self.chimes.sounding()
+    }
+
+    /// Drops every notification sound, playing or waiting.
+    pub fn hush(&mut self) {
+        self.chimes = Chimes::default();
     }
 
     pub fn level(&self) -> f32 {
@@ -708,7 +718,7 @@ impl AudioEngine {
             } else {
                 mix(&mut stereo);
                 for frame in stereo.as_chunks_mut::<2>().0 {
-                    let Some(sample) = self.chime.pop_front() else {
+                    let Some(sample) = self.chimes.next() else {
                         break;
                     };
                     frame[0] += sample;
@@ -758,6 +768,94 @@ fn soft_limit(sample: f32) -> f32 {
     sample.signum() * (KNEE + room * ((level - KNEE) / room).tanh())
 }
 
+/// One notification sound on its way to the output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chime {
+    /// Which sound this is. One that is already playing or waiting isn't added again.
+    pub id: u16,
+    /// Starts now, in place of whatever was playing: what you just did yourself must answer at
+    /// once, and doing it again must not line up behind itself.
+    pub urgent: bool,
+    pub samples: Vec<f32>,
+}
+
+/// The sounds due on the output: one playing, and a short line behind it.
+///
+/// Sounds wait their turn rather than cut each other off, but only a little: a burst of events
+/// is heard as its first few sounds, not as a backlog that plays on after it is over.
+#[derive(Debug, Default)]
+struct Chimes {
+    playing: VecDeque<f32>,
+    playing_id: Option<u16>,
+    /// How much of the playing sound has been heard.
+    played: usize,
+    waiting: VecDeque<Chime>,
+}
+
+impl Chimes {
+    /// How many sounds may wait behind the one playing.
+    const WAITING: usize = 2;
+    /// A sound that would start later than this says nothing useful any more.
+    const LATE: usize = RATE * 3;
+    /// The same sound again this soon is the same news, as when several people arrive at once.
+    const REPEAT: usize = RATE;
+    /// How long a replaced sound takes to fade, so cutting it doesn't click.
+    const FADE: usize = RATE / 200;
+
+    fn add(&mut self, chime: Chime) {
+        if chime.samples.is_empty() {
+            return;
+        }
+        if chime.urgent {
+            self.waiting.retain(|waiting| waiting.id != chime.id);
+            let fading: Vec<f32> = self.playing.iter().take(Self::FADE).copied().collect();
+            self.start(chime);
+            let length = fading.len();
+            for (index, (sample, old)) in self.playing.iter_mut().zip(fading).enumerate() {
+                *sample += old * (length - index) as f32 / length as f32;
+            }
+            return;
+        }
+        if !self.sounding() {
+            return self.start(chime);
+        }
+        let repeated = (self.playing_id == Some(chime.id) && self.played < Self::REPEAT)
+            || self.waiting.iter().any(|waiting| waiting.id == chime.id);
+        let delay = self.playing.len()
+            + self
+                .waiting
+                .iter()
+                .map(|waiting| waiting.samples.len())
+                .sum::<usize>();
+        if !repeated && self.waiting.len() < Self::WAITING && delay <= Self::LATE {
+            self.waiting.push_back(chime);
+        }
+    }
+
+    fn start(&mut self, chime: Chime) {
+        self.playing = chime.samples.into();
+        self.playing_id = Some(chime.id);
+        self.played = 0;
+    }
+
+    fn next(&mut self) -> Option<f32> {
+        if self.playing.is_empty() {
+            let chime = self.waiting.pop_front()?;
+            self.start(chime);
+        }
+        let sample = self.playing.pop_front();
+        self.played += 1;
+        if self.playing.is_empty() {
+            self.playing_id = None;
+        }
+        sample
+    }
+
+    fn sounding(&self) -> bool {
+        !self.playing.is_empty() || !self.waiting.is_empty()
+    }
+}
+
 /// A short sound the app plays itself. Rising means on and falling means off; the microphone's
 /// notes sit higher than the headphones'.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -771,6 +869,8 @@ pub enum Cue {
     Moved,
     ViewerJoined,
     ViewerLeft,
+    StreamOn,
+    StreamOff,
 }
 
 /// Sine notes, each with a quick attack and a soft decay.
@@ -797,6 +897,8 @@ pub enum Voice {
     Bell,
     Glass,
     Drop,
+    /// A plain tone that swells in, like TeamSpeak's own stream sounds.
+    Swell,
 }
 
 /// Attack and length in seconds, then each partial's frequency ratio, level and decay.
@@ -838,6 +940,11 @@ impl Voice {
                 0.006,
                 0.22,
                 [(1.0, 1.0, 14.0), (2.0, 0.1, 30.0), (3.0, 0.0, 1.0)],
+            ),
+            Self::Swell => (
+                0.05,
+                0.34,
+                [(1.0, 1.0, 8.0), (2.0, 0.05, 16.0), (3.0, 0.0, 1.0)],
             ),
         };
         Shape {
@@ -909,6 +1016,8 @@ pub fn cue_samples(cue: Cue) -> Vec<f32> {
         Cue::Moved => tones(&[(659.3, step), (523.3, step), (659.3, step)], 0.2),
         Cue::ViewerJoined => tones(&[(784.0, step), (1046.5, step)], 0.16),
         Cue::ViewerLeft => tones(&[(1046.5, step), (784.0, step)], 0.16),
+        Cue::StreamOn => tones(&[(659.3, step), (784.0, step), (1046.5, step)], 0.16),
+        Cue::StreamOff => tones(&[(1046.5, step), (784.0, step), (659.3, step)], 0.16),
     }
 }
 
@@ -1189,6 +1298,8 @@ mod tests {
             Cue::Moved,
             Cue::ViewerJoined,
             Cue::ViewerLeft,
+            Cue::StreamOn,
+            Cue::StreamOff,
         ]
         .map(cue_samples);
         for cue in &cues {
@@ -1212,6 +1323,102 @@ mod tests {
                 .iter()
                 .all(|sample| sample.abs() < 0.06)
         );
+    }
+
+    fn chime(id: u16, level: f32, length: usize) -> Chime {
+        Chime {
+            id,
+            urgent: false,
+            samples: vec![level; length],
+        }
+    }
+
+    fn heard(chimes: &mut Chimes) -> Vec<f32> {
+        std::iter::from_fn(|| chimes.next()).collect()
+    }
+
+    #[test]
+    fn sounds_wait_their_turn_instead_of_cutting_each_other_off() {
+        let mut chimes = Chimes::default();
+        chimes.add(chime(1, 0.1, 3));
+        chimes.add(chime(2, 0.2, 2));
+        assert_eq!(chimes.next(), Some(0.1), "the first is already playing");
+        chimes.add(chime(3, 0.3, 1));
+        assert_eq!(heard(&mut chimes), [0.1, 0.1, 0.2, 0.2, 0.3]);
+        assert!(!chimes.sounding());
+        chimes.add(chime(1, 0.1, 0));
+        assert!(!chimes.sounding(), "nothing to play");
+    }
+
+    #[test]
+    fn a_burst_of_sounds_is_cut_down_to_its_first_few() {
+        let mut chimes = Chimes::default();
+        for id in 1..=10 {
+            chimes.add(chime(id, f32::from(id), 2));
+        }
+        assert_eq!(heard(&mut chimes), [1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+
+        // Five people arriving at once are one sound, and so are two a moment apart.
+        for _ in 0..5 {
+            chimes.add(chime(7, 0.7, RATE * 2));
+        }
+        assert!(chimes.waiting.is_empty());
+        for _ in 0..RATE / 2 {
+            chimes.next();
+        }
+        chimes.add(chime(7, 0.7, RATE * 2));
+        assert!(chimes.waiting.is_empty(), "still the same news");
+        // Later than that it is someone else, heard once more however many follow.
+        for _ in 0..RATE {
+            chimes.next();
+        }
+        chimes.add(chime(7, 0.7, RATE * 2));
+        chimes.add(chime(7, 0.7, RATE * 2));
+        assert_eq!(chimes.waiting.len(), 1);
+
+        // Nothing lines up to start seconds after the event it is about.
+        let mut chimes = Chimes::default();
+        chimes.add(chime(1, 0.1, Chimes::LATE + 1));
+        chimes.add(chime(2, 0.2, 2));
+        assert!(chimes.waiting.is_empty(), "would start too late");
+        for _ in 0..2 {
+            chimes.next();
+        }
+        chimes.add(chime(2, 0.2, 2));
+        assert_eq!(chimes.waiting.len(), 1);
+    }
+
+    #[test]
+    fn what_you_just_did_is_heard_at_once_and_never_lines_up() {
+        // Like a real sound, it starts from silence.
+        let urgent = |id, level: f32| Chime {
+            id,
+            urgent: true,
+            samples: [vec![0.0; Chimes::FADE], vec![level; Chimes::FADE]].concat(),
+        };
+        let mut chimes = Chimes::default();
+        chimes.add(chime(1, 0.5, RATE));
+        chimes.add(chime(2, 0.2, 2));
+        chimes.next();
+        // Muting and unmuting over and over: only the last one is left to play.
+        for _ in 0..6 {
+            chimes.add(urgent(8, 0.1));
+            chimes.add(urgent(9, 0.3));
+        }
+        let played = heard(&mut chimes);
+        assert_eq!(played.len(), Chimes::FADE * 2 + 2, "then what was waiting");
+        assert_eq!(played[0], 0.5, "carries on from where the old sound was");
+        assert!(
+            played[..Chimes::FADE]
+                .windows(2)
+                .all(|pair| pair[1] < pair[0])
+        );
+        assert!(
+            played[Chimes::FADE - 1] < 0.01,
+            "and fades out under the new one"
+        );
+        assert_eq!(played[Chimes::FADE..Chimes::FADE * 2], [0.3; Chimes::FADE]);
+        assert_eq!(played[Chimes::FADE * 2..], [0.2, 0.2]);
     }
 
     #[test]

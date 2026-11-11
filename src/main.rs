@@ -263,6 +263,9 @@ struct ServerSession {
     /// The channel you asked to join, to tell that apart from being moved.
     expected_channel: Option<u64>,
     quiet_channel_change: bool,
+    /// You were just kicked out of your channel, which has its own sound: the change of channel
+    /// that follows isn't heard as being moved as well.
+    kicked: bool,
     id: hub::SessionId,
     /// The name it's saved under, if it has one.
     name: String,
@@ -333,6 +336,7 @@ impl ServerSession {
         Self {
             expected_channel: None,
             quiet_channel_change: false,
+            kicked: false,
             log: server_log::Log::default(),
             reconnecting: false,
             catalog_seen: false,
@@ -530,6 +534,7 @@ impl SettingsPage {
 
 /// Which sound a channel change deserves. Connecting isn't a change, and neither is losing it.
 fn channel_sound(session: &mut ServerSession, next: &client::Snapshot) -> Option<sounds::Sound> {
+    let kicked = std::mem::take(&mut session.kicked);
     let before = session.state.current.as_ref().map(|channel| channel.id);
     let after = next.current.as_ref().map(|channel| channel.id);
     let (Some(before), Some(after)) = (before, after) else {
@@ -539,7 +544,7 @@ fn channel_sound(session: &mut ServerSession, next: &client::Snapshot) -> Option
         return None;
     }
     let expected = session.expected_channel.take();
-    if std::mem::take(&mut session.quiet_channel_change) {
+    if std::mem::take(&mut session.quiet_channel_change) || kicked {
         return None;
     }
     Some(if expected == Some(after) {
@@ -637,10 +642,15 @@ fn log_activity(log: &mut server_log::Log, activity: &client::Activity) {
     log.add(tone, name, action);
 }
 
-/// Who went live or stopped, from the channel's list of streams.
-fn log_stream_changes(session: &mut ServerSession, catalog: &[streaming::StreamInfo]) {
+/// Who else in your channel went live or stopped, from its list of streams: logged, and
+/// returned as the sounds for it.
+fn stream_changes(
+    session: &mut ServerSession,
+    catalog: &[streaming::StreamInfo],
+) -> Vec<sounds::Sound> {
+    const STARTED: &str = "started streaming";
     if !std::mem::replace(&mut session.catalog_seen, true) {
-        return;
+        return Vec::new();
     }
     let member = |publisher: u16| {
         let members = session.state.current_members();
@@ -653,7 +663,7 @@ fn log_stream_changes(session: &mut ServerSession, catalog: &[streaming::StreamI
     let changes: Vec<_> = catalog
         .iter()
         .filter(|stream| !before.iter().any(|old| old.id == stream.id))
-        .map(|stream| (stream.publisher, "started streaming"))
+        .map(|stream| (stream.publisher, STARTED))
         .chain(
             before
                 .iter()
@@ -670,9 +680,17 @@ fn log_stream_changes(session: &mut ServerSession, catalog: &[streaming::StreamI
             })
         })
         .collect();
-    for (name, action) in changes {
-        session.log.add(server_log::Tone::Stream, name, action);
-    }
+    changes
+        .into_iter()
+        .map(|(name, action)| {
+            session.log.add(server_log::Tone::Stream, name, action);
+            if action == STARTED {
+                sounds::Sound::PersonStreamStarted
+            } else {
+                sounds::Sound::PersonStreamStopped
+            }
+        })
+        .collect()
 }
 
 /// Your share going live or ending, then one sound for each viewer who arrived or left.
@@ -782,8 +800,9 @@ enum Message {
     ToggleUserMute(u16),
     SoundCues(bool),
     SoundVolume(u8),
-    SoundSource(sounds::Sound, sounds::Source),
-    SoundPack(sounds::Source),
+    SoundPack(sounds::Pack),
+    SoundGroup(sounds::Group, bool),
+    SoundOn(sounds::Sound, bool),
     LogSearch(bool),
     LogQuery(String),
     LogPerson(Option<String>),
@@ -1308,26 +1327,34 @@ impl App {
         }
     }
 
-    /// Plays an event's sound, if sounds are on and that one isn't turned off.
+    /// Plays an event's sound, if sounds are on and that one isn't turned off. It waits for a
+    /// sound already playing, unless it answers something you just did.
     fn play_sound(&mut self, sound: sounds::Sound) {
-        if self.sound_cues && self.sounds.source(sound) != sounds::Source::Off {
+        if self.sound_cues && self.sounds.plays(sound) {
             #[cfg(test)]
             self.played_sounds.push(sound);
-            self.preview_sound(sound);
+            self.send_sound(sound, sound.urgent());
         }
     }
 
-    /// Plays the chosen sound at the chosen volume.
+    /// Plays the sound now, for hearing it in Settings, whether or not it is switched on.
     fn preview_sound(&self, sound: sounds::Sound) {
-        let mut samples = match (self.sounds.source(sound), self.sound_bank.get(sound)) {
-            (sounds::Source::Off, _) => return,
-            (sounds::Source::Soft, _) => audio::soft_samples(sound.soft()),
-            (sounds::Source::TeamSpeak, Some(samples)) => samples.to_vec(),
-            _ => audio::cue_samples(sound.cue()),
-        };
-        let gain = f32::from(self.sounds.volume_percent) / 100.0;
+        self.send_sound(sound, true);
+    }
+
+    /// Hands the sound, from the chosen pack, to the output at the chosen volume.
+    fn send_sound(&self, sound: sounds::Sound, urgent: bool) {
+        let gain = self.sounds.gain();
+        if gain == 0.0 {
+            return;
+        }
+        let mut samples = sounds::samples(self.sounds.pack, sound, &self.sound_bank);
         samples.iter_mut().for_each(|sample| *sample *= gain);
-        self.hub.play(samples);
+        self.hub.play(audio::Chime {
+            id: sound as u16,
+            urgent,
+            samples,
+        });
     }
 
     /// Takes one picture of each screen for its tile and of the chosen source, unless they
@@ -3478,18 +3505,19 @@ impl App {
                 }
             }
             Message::SoundVolume(percent) => {
-                self.sounds.volume_percent = percent.min(100);
+                self.sounds.volume = percent.min(100);
                 self.sounds_unsaved = true;
             }
-            Message::SoundSource(sound, source) => {
-                self.sounds.set_source(sound, source);
+            Message::SoundPack(pack) => {
+                self.sounds.pack = pack;
                 self.save_sounds();
-                self.preview_sound(sound);
             }
-            Message::SoundPack(source) => {
-                for sound in sounds::Sound::ALL {
-                    self.sounds.set_source(sound, source);
-                }
+            Message::SoundGroup(group, on) => {
+                self.sounds.set_group(group, on);
+                self.save_sounds();
+            }
+            Message::SoundOn(sound, on) => {
+                self.sounds.set_sound(sound, on);
                 self.save_sounds();
             }
             Message::LogSearch(open) => {
@@ -3551,6 +3579,8 @@ impl App {
                     return Task::Exit;
                 }
                 self.closing = true;
+                // Quitting doesn't wait for a sound to finish.
+                self.hub.hush();
                 if let Some(handle) = &self.handle {
                     // The window goes at once, so closing feels instant; each server is told
                     // goodbye behind it. Should one not answer, the app quits anyway.
@@ -3599,6 +3629,8 @@ impl App {
                 for activity in &activities {
                     sounds_due.extend(activity_sound(activity));
                     log_activity(&mut session.log, activity);
+                    session.kicked |= activity.is_self
+                        && matches!(activity.kind, client::ActivityKind::KickedFromChannel);
                 }
             }
             client::Event::Status(status) => {
@@ -3800,7 +3832,7 @@ impl App {
                 }
                 sounds_due.extend(share_sounds);
                 if let streaming::Event::Catalog(catalog) = &event {
-                    log_stream_changes(session, catalog);
+                    sounds_due.extend(stream_changes(session, catalog));
                 }
                 // A streamer's stream starts at the volume saved for them.
                 if let streaming::Event::State { stream, .. } = &event
@@ -5495,12 +5527,25 @@ mod tests {
         expected.sort();
         assert_eq!(played, expected);
 
-        let _ = app.update(Message::SoundSource(MicOff, sounds::Source::Off));
+        let _ = app.update(Message::SoundOn(MicOff, false));
         app.server_mut().muted = false;
         let _ = app.update(Message::Mute);
         assert!(app.played_sounds.is_empty(), "this sound is off");
-        let _ = app.update(Message::SoundCues(false));
         let _ = app.update(Message::Mute);
+        assert_eq!(
+            app.played_sounds,
+            [MicOn],
+            "the others in its group still play"
+        );
+        let _ = app.update(Message::SoundGroup(sounds::Group::Controls, false));
+        let _ = app.update(Message::Deafen);
+        assert_eq!(app.played_sounds, [MicOn], "its whole group is off");
+        let _ = app.update(Message::SoundGroup(sounds::Group::Controls, true));
+        let _ = app.update(Message::Deafen);
+        assert_eq!(app.played_sounds.len(), 2, "and back on");
+        app.played_sounds.clear();
+        let _ = app.update(Message::SoundCues(false));
+        let _ = app.update(Message::Deafen);
         assert!(app.played_sounds.is_empty(), "all sounds are off");
     }
 
@@ -5536,6 +5581,78 @@ mod tests {
         app.server_mut().quiet_channel_change = true;
         arrive(&mut app, Some(home));
         assert!(app.played_sounds.is_empty(), "returning after an update");
+    }
+
+    #[test]
+    fn being_kicked_from_your_channel_is_not_heard_as_a_move_as_well() {
+        use sounds::Sound::{KickedFromChannel, MovedChannel};
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let home = app.server().state.current.clone().unwrap();
+        let channels = app.server().state.channels.clone();
+        let other = channels.iter().find(|c| c.id != home.id).unwrap().clone();
+        let arrive = |app: &mut App, channel: client::Channel| {
+            let mut state = app.server().state.clone();
+            state.current = Some(channel);
+            let _ = app.update(Message::Backend(id, client::Event::State(state)));
+        };
+        let kicked = client::Activity {
+            kind: client::ActivityKind::KickedFromChannel,
+            name: "Jan".into(),
+            channel: other.name.clone(),
+            is_self: true,
+            entered_yours: false,
+            left_yours: true,
+        };
+        let _ = app.update(Message::Backend(id, client::Event::Activity(vec![kicked])));
+        arrive(&mut app, other);
+        assert_eq!(app.played_sounds, [KickedFromChannel]);
+        arrive(&mut app, home);
+        assert_eq!(
+            app.played_sounds,
+            [KickedFromChannel, MovedChannel],
+            "the next move is heard again"
+        );
+    }
+
+    #[test]
+    fn someone_else_going_live_or_stopping_has_a_sound() {
+        use sounds::Sound::{PersonStreamStarted, PersonStreamStopped};
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let stream = |publisher: u16| streaming::StreamInfo {
+            id: format!("stream-{publisher}"),
+            publisher,
+            name: "Screen".into(),
+            viewers: 0,
+            has_audio: true,
+            server_relayed: false,
+        };
+        let list = |app: &mut App, streams: Vec<streaming::StreamInfo>| {
+            let event = streaming::Event::Catalog(streams);
+            let _ = app.update(Message::Backend(id, client::Event::Streaming(event)));
+            std::mem::take(&mut app.played_sounds)
+        };
+        assert!(
+            list(&mut app, vec![stream(2)]).is_empty(),
+            "already live when you arrived"
+        );
+        assert_eq!(
+            list(&mut app, vec![stream(2), stream(3)]),
+            [PersonStreamStarted]
+        );
+        assert!(list(&mut app, vec![stream(2), stream(3)]).is_empty());
+        assert_eq!(list(&mut app, vec![stream(3)]), [PersonStreamStopped]);
+        assert!(
+            list(&mut app, vec![stream(3), stream(1)]).is_empty(),
+            "your own stream has its own sounds"
+        );
+        let _ = app.update(Message::SoundOn(PersonStreamStarted, false));
+        assert!(list(&mut app, vec![stream(1), stream(2), stream(3)]).is_empty());
+        assert_eq!(
+            list(&mut app, vec![stream(1), stream(2)]),
+            [PersonStreamStopped]
+        );
     }
 
     #[test]
@@ -5945,10 +6062,7 @@ mod tests {
     #[test]
     fn teamspeak_sounds_are_available_without_loading_settings_or_an_install() {
         let (mut app, _commands) = session_fixture();
-        let _ = app.update(Message::SoundSource(
-            sounds::Sound::Poke,
-            sounds::Source::TeamSpeak,
-        ));
+        let _ = app.update(Message::SoundPack(sounds::Pack::TeamSpeak));
         app.sound_bank = sounds::Bank::with(sounds::Sound::Poke, vec![0.5]);
         app.played_sounds.clear();
         app.play_sound(sounds::Sound::Poke);

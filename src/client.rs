@@ -1343,14 +1343,16 @@ async fn run_connection(
                         channel_polls.sync(own_channel, state.clients.values()
                             .filter(|client| client.id != state.own_client && Some(client.channel) == own_channel)
                             .map(|client| client.id));
-                        // Deliver membership first so new-channel samples cannot populate the old view.
-                        let _ = events.try_send(Event::State(snapshot(&connection)?));
+                        // What happened goes before the membership it led to, so a kick is known
+                        // by the time your change of channel arrives and isn't heard as a move too.
                         if !first_batch {
                             let happened: Vec<_> = changes.iter().filter_map(|change| activity(state, change)).collect();
                             if !happened.is_empty() {
                                 let _ = events.try_send(Event::Activity(happened));
                             }
                         }
+                        // Deliver membership first so new-channel samples cannot populate the old view.
+                        let _ = events.try_send(Event::State(snapshot(&connection)?));
                         for change in &changes {
                             if let BookEvent::Message { target, invoker, message } = change {
                                 let clean = |text: &str, limit: usize| text.chars().filter(|c| !c.is_control()).take(limit).collect::<String>();

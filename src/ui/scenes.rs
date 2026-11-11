@@ -58,6 +58,8 @@ pub const SCENES: &[Scene] = &[
     ("server-log-person", server_log_person),
     ("server-log-none", server_log_none),
     ("settings-sounds-no-teamspeak", settings_sounds_no_teamspeak),
+    ("settings-sounds-open", settings_sounds_open),
+    ("settings-sounds-search", settings_sounds_search),
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
     ("settings-streaming", settings_streaming),
@@ -1252,7 +1254,7 @@ fn settings_more_themes(s: &mut App) {
     s.settings_query = "mocha".into();
 }
 
-/// Searching brings the list of sounds into view.
+/// Searching brings the sounds into view: one pack for all of them, and a switch for each group.
 fn settings_sounds(s: &mut App) {
     connected(s);
     s.settings_page = Some(SettingsPage::Audio);
@@ -1334,10 +1336,23 @@ fn server_log_none(s: &mut App) {
 /// The Soft pack chosen, with the pack menu open.
 fn settings_sounds_pack(s: &mut App) {
     settings_sounds(s);
-    for sound in crate::sounds::Sound::ALL {
-        s.sounds.set_source(sound, crate::sounds::Source::Soft);
-    }
+    s.sounds.pack = crate::sounds::Pack::Soft;
     s.ui.open = Some("sound-pack");
+}
+
+/// A group opened to its sounds with one of them off, and another group switched off whole.
+fn settings_sounds_open(s: &mut App) {
+    use crate::sounds::{Group, Sound};
+    settings_sounds(s);
+    s.ui.sound_groups.insert(Group::Streams);
+    s.sounds.set_sound(Sound::ViewerLeft, false);
+    s.sounds.set_group(Group::Channel, false);
+}
+
+/// Searching for one sound finds it inside its group without opening the rest.
+fn settings_sounds_search(s: &mut App) {
+    settings_sounds(s);
+    s.settings_query = "whisper".into();
 }
 
 /// On a computer without TeamSpeak, with the pack menu open.
