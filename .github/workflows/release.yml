@@ -23,14 +23,38 @@ permissions:
 # publishing takes turns (see the publish job).
 
 jobs:
-  # The three platforms are checked on every PR before it merges (ci.yml), so a release
-  # does not repeat them. This catches what a PR cannot: a direct push, or two merges
-  # that each passed alone. Linux only, on the cache the checks save, so it is done
-  # before the slowest build.
-  test:
-    if: github.ref == 'refs/heads/main' && github.repository == 'zirkumflex-group/flexspeak'
+  # Which platforms are built and published: the ones .github/platforms.json turns on (runners
+  # and packages are in scripts/release.py). A release leaves the others out; their installs
+  # see no update until they are back.
+  platforms:
+    if: github.repository == 'zirkumflex-group/flexspeak'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+      test-os: ${{ steps.platforms.outputs.test-os }}
+      test-cache: ${{ steps.platforms.outputs.test-cache }}
+      macos: ${{ steps.platforms.outputs.macos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/platforms.json
+            scripts/
+          sparse-checkout-cone-mode: false
+      - id: platforms
+        run: python3 scripts/release.py platforms | tee -a "$GITHUB_OUTPUT"
+
+  # The platforms are checked on every PR before it merges (ci.yml), so a release does not
+  # repeat them. This catches what a PR cannot: a direct push, or two merges that each passed
+  # alone. On one platform (the first that is on, Linux when it is), from the cache the
+  # checks save, so it is done before the slowest build.
+  test:
+    needs: [platforms]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ needs.platforms.outputs.test-os }}
+    timeout-minutes: 45
     # As in ci.yml: rust-cache keys on Cargo's environment, and this job reads that cache.
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -40,15 +64,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The checks' own setup on each platform (ci.yml), or their cache isn't found.
+      - name: Windows Dev Drive
+        if: runner.os == 'Windows'
+        uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          drive-size: 20GB
+          workspace-copy: true
+          env-mapping: |
+            CARGO_HOME,{{ DEV_DRIVE }}/.cargo
+            RUSTUP_HOME,{{ DEV_DRIVE }}/.rustup
+      - name: Windows static C runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          shared-key: linux-checks
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE || '.' }}
+          shared-key: ${{ needs.platforms.outputs.test-cache }}
           # Saved by the checks on main, which also build Clippy's half of it.
           save-if: false
       - name: Linux native dependencies
+        if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libopus-dev libxkbcommon-dev libwayland-dev
       - name: Fetch Rust dependencies
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         timeout-minutes: 10
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
@@ -57,23 +98,17 @@ jobs:
           GIT_HTTP_LOW_SPEED_LIMIT: '1000'
           GIT_HTTP_LOW_SPEED_TIME: '60'
         run: cargo fetch --locked
-      - run: cargo test --locked
+      - working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
+        run: cargo test --locked
 
   # Builds run alongside the tests; nothing publishes unless both pass.
   build:
-    if: github.repository == 'zirkumflex-group/flexspeak'
+    name: Build (${{ matrix.platform }})
+    needs: [platforms]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: windows-2022
-            platform: windows-x64
-          # The Liquid Glass icon only compiles on macOS 26: Xcode 26 crashes on it under 15.
-          - runner: macos-26
-            platform: macos-arm64
-          - runner: ubuntu-24.04
-            platform: linux-x64
-    runs-on: ${{ matrix.runner }}
+      matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -154,7 +189,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [test, build]
+    needs: [platforms, test, build]
     # Only main publishes. The `release` environment admits main alone, and holds the tap's
     # deploy key, so a workflow edited on a branch can neither publish nor read the key.
     if: github.ref == 'refs/heads/main'
@@ -211,7 +246,9 @@ jobs:
           fi
           gh release edit "$tag" --draft=false --latest="$latest"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$RUNNER_TEMP/release.json"
+      # Only while macOS is on: the cask is the DMG's.
       - name: Checkout Homebrew tap
+        if: needs.platforms.outputs.macos == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: zirkumflex-group/homebrew-flexspeak
@@ -221,6 +258,7 @@ jobs:
       # If this fails, the release is already out and the app already offers it; rerun the
       # job to bring Homebrew up to date.
       - name: Update Homebrew tap
+        if: needs.platforms.outputs.macos == 'true'
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}

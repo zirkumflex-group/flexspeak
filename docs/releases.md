@@ -2,6 +2,8 @@
 
 Every push to `main` in [flexspeak](https://github.com/zirkumflex-group/flexspeak) builds a release, unless it only changes documentation. The repository and its releases are public. This Homebrew tap is private: your GitHub account needs read access to it.
 
+Not every platform is necessarily built: `.github/platforms.json` turns each of Windows, macOS and Linux on or off (see [Platforms](#platforms)). When a platform is off, new releases have no package for it, the Homebrew cask stays on the last macOS build, and installed copies on that platform see no update until it is back.
+
 ## Install on macOS
 
 Install Homebrew and GitHub CLI (`brew install gh`), then let Git reach the private tap:
@@ -60,7 +62,7 @@ Homebrew and the Arch package already install the app and are never offered this
 
 Release builds check GitHub Releases five seconds after launch and every six hours. The newest build is the release GitHub marks **latest**. The workflow sets that mark once every package is published, before it updates the Homebrew tap, and never moves it backwards. That release is an update when its `(version, build)` from `v{version}-build.{N}` is greater than the running build's, which comes from `CARGO_PKG_VERSION` and `NATIVE_VOICE_BUILD_NUMBER` at compile time. Local `cargo` builds have no build number and never update themselves.
 
-The app reads releases anonymously, which works because the repository is public. If GitHub can't be reached, the check fails quietly and Settings → Updates shows why.
+The app reads releases anonymously, which works because the repository is public. If GitHub can't be reached, the check fails quietly and Settings → Updates shows why. A release without this platform's package (its platform is turned off) is not an update, and not an error either: the app stays on its build.
 
 | Installation | Asset | Install on Restart |
 | --- | --- | --- |
@@ -75,10 +77,26 @@ With **Download updates automatically** on (the default), a found update downloa
 
 After an in-place update, Homebrew's record still names the old cask version. `brew upgrade` later reinstalls the current build, which is harmless.
 
+## Platforms
+
+`.github/platforms.json` turns each platform on or off for both PR checks and releases:
+
+```json
+{
+  "windows": true,
+  "macos": true,
+  "linux": false
+}
+```
+
+Every platform must be listed, as `true` or `false`, and at least one must be on; a typo fails the workflows instead of silently dropping a platform. The runners, caches and packages of each platform are in `PLATFORMS` in `scripts/release.py`. A platform that is off is not checked on PRs, not built, and not required by `release.py checksums`; with macOS off the Homebrew tap is left alone. Its code still exists but is no longer compiled anywhere, so it can drift: before turning it back on, run the **Checks** workflow manually with **Also check the platforms .github/platforms.json turns off** ticked, and fix what that shows in the same PR that turns it on.
+
+Turn a platform off only after a release whose app treats a missing package as "no update" has reached that platform's installs; older builds report an error on every update check instead.
+
 ## Automation
 
-- PRs run Clippy, tests and the release-script tests on Windows, macOS and Linux (formatting once, on Linux), because Windows and macOS compile code Linux never sees. A final `Checks passed` job succeeds only if all three did; it is the one status check `main` requires, so documentation-only PRs run the checks too. Dependencies are fetched first through the git CLI with a time limit. The same checks run again on `main` after every merge. Those runs do not hold up the release; they save the build caches that PRs start from (PR runs never save one), and they show a merge that only broke together with another. Old runs of the same PR are cancelled. PR code receives a read-only token and no publishing secret. Fork PR workflow execution requires owner approval.
-- Pushes to `main` build one Windows x64, one macOS arm64 and one Linux x64 release. Alongside the builds, the tests run once more on Linux, from the cache the checks saved, as a safety net for direct pushes and for two merges that each passed alone; the three platforms are not checked a second time. Each build fetches its platform's dependencies first, then builds offline. The Linux binary is packaged as both a tarball and an Arch/Omarchy package without compiling it twice. Static Opus (version and checksum in `scripts/opus.json`) is downloaded with a pinned checksum and built locally on each runner. There is no Homebrew runtime dependency.
+- PRs run Clippy, tests and the release-script tests on every platform that is on, because Windows and macOS compile code Linux never sees. Formatting is checked once, on a Linux runner that needs no system packages, whichever platforms are on. A final `Checks passed` job succeeds only if all of them did; it is the one status check `main` requires, whichever platforms are on, so documentation-only PRs run the checks too. Dependencies are fetched first through the git CLI with a time limit. The same checks run again on `main` after every merge. Those runs do not hold up the release; they save the build caches that PRs start from (PR runs never save one), and they show a merge that only broke together with another. Old runs of the same PR are cancelled. PR code receives a read-only token and no publishing secret. Fork PR workflow execution requires owner approval.
+- Pushes to `main` build a Windows x64, a macOS arm64 and a Linux x64 release, each while it is on. Alongside the builds, the tests run once more on one platform (Linux while it is on, otherwise the first one that is), from the cache the checks saved, as a safety net for direct pushes and for two merges that each passed alone; the platforms are not checked a second time. Each build fetches its platform's dependencies first, then builds offline. The Linux binary is packaged as both a tarball and an Arch/Omarchy package without compiling it twice. Static Opus (version and checksum in `scripts/opus.json`) is downloaded with a pinned checksum and built locally on each runner. There is no Homebrew runtime dependency.
 - A completed build gets a unique `v0.1.0-build.N` tag (the base version comes from `Cargo.toml`). All packages upload to a draft before it is published. Packages include SHA-256 checksums. Failed builds leave the previous Homebrew version intact.
 - The publishing job runs only on `main`, in the `release` environment, which admits `main` alone. It updates `zirkumflex-group/homebrew-flexspeak` with the `HOMEBREW_TAP_DEPLOY_KEY` deploy key, stored as a secret of that environment, so no other branch or job can read it. No generated commits are pushed into the source repository, so publishing cannot loop.
 - A push that only changes documentation releases nothing: `docs/` and Markdown files do not count, except the ones a release carries (`README.md` in every package, `CHANGELOG.md` in the app, `docs/releases.md` as the tap's README, `assets/webrtc/LICENSE.md` in the dependency notices). A Markdown file that starts to ship must be added to that list in `release.yml`; a test checks the ones `scripts/release.py` reads. A manual run always releases.
@@ -87,7 +105,7 @@ After an in-place update, Homebrew's record still names the old cask version. `b
 - Homebrew versions include the build number, so every successful push is an upgrade even while the Cargo version stays unchanged. The release becomes “latest” before the tap updates, so a tap failure never holds back in-app updates; rerun the failed job to bring Homebrew up to date.
 - Build numbers are the `Release` workflow's run number. Renaming or recreating `.github/workflows/release.yml` restarts that count at 1, which would make every new build look older than the last and collide with existing tags, so keep the file in place (or carry the count over before such a change).
 
-The `Release` workflow also supports manual dispatch. From `main` it releases; from any other branch it only builds the three packages and keeps them as workflow artifacts for seven days, for testing. GitHub Release assets remain available.
+The `Release` workflow also supports manual dispatch. From `main` it releases; from any other branch it only builds the packages of the platforms that are on and keeps them as workflow artifacts for seven days, for testing. GitHub Release assets remain available.
 
 ## Local validation
 

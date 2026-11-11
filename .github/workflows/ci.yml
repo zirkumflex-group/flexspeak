@@ -9,6 +9,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      all-platforms:
+        description: Also check the platforms .github/platforms.json turns off
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,21 +23,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Which platforms are checked: the ones .github/platforms.json turns on (runners and caches
+  # are in scripts/release.py). A manual run can check all of them, to see how far a platform
+  # that is off has drifted before turning it back on.
+  platforms:
+    name: Platforms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/platforms.json
+            scripts/
+          sparse-checkout-cone-mode: false
+      - id: platforms
+        env:
+          ALL: ${{ inputs.all-platforms && '--all' || '' }}
+        run: python3 scripts/release.py platforms $ALL | tee -a "$GITHUB_OUTPUT"
+
+  # Formatting is the same everywhere, so it is checked once, whichever platforms are on. It
+  # needs no system packages and no dependencies.
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
   check:
     # Windows and macOS compile code Linux never sees (libwebrtc, NVENC, Windows capture,
-    # the macOS app), so all three platforms lint and test before anything merges.
-    name: Format, lint, test (${{ matrix.os }})
+    # the macOS app), so every platform that ships lints and tests before anything merges.
+    name: Lint and test (${{ matrix.os }})
+    needs: [platforms]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            cache: linux-checks
-          - os: windows-2022
-            cache: windows-checks
-          # The release builds on macOS 26 too; its Xcode is the one that matters.
-          - os: macos-26
-            cache: macos-26-checks
+      matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -63,9 +98,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           components: rustfmt, clippy
-      # Formatting is the same everywhere; Linux checks it once.
-      - if: runner.os == 'Linux'
-        run: cargo fmt --check
       - name: Release script tests
         shell: bash
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
@@ -97,18 +129,19 @@ jobs:
       - working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         run: cargo test --locked
 
-  # The one status check main requires: its name stays the same whichever runners the
-  # matrix above uses.
+  # The one status check main requires: its name stays the same whichever platforms are on.
   passed:
     name: Checks passed
-    needs: [check]
+    needs: [platforms, format, check]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Every platform passed
+      - name: Every job passed
         env:
+          PLATFORMS: ${{ needs.platforms.result }}
+          FORMAT: ${{ needs.format.result }}
           RESULT: ${{ needs.check.result }}
         run: |
-          echo "Format, lint, test: $RESULT"
-          [ "$RESULT" = success ]
+          echo "Platforms: $PLATFORMS, format: $FORMAT, lint and test: $RESULT"
+          [ "$PLATFORMS" = success ] && [ "$FORMAT" = success ] && [ "$RESULT" = success ]

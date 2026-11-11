@@ -8,7 +8,9 @@
 //! `--latest=false`, and marks one "latest" only after every package and the Homebrew tap are
 //! out. That mark is the newest *complete* release and never moves backwards, so the app reads
 //! `releases/latest` rather than guessing from the list. A release is an update when its
-//! `(version, build)` is greater than the running one's.
+//! `(version, build)` is greater than the running one's and it carries this platform's package:
+//! a platform can be left out of releases (`.github/platforms.json`), and its installs then stay
+//! where they are instead of reporting an error.
 
 use std::{
     fs,
@@ -284,7 +286,8 @@ struct GitHubAsset {
     state: Option<String>,
 }
 
-/// Reads a `releases/latest` response: `Ok(None)` when it's not newer than `running`.
+/// Reads a `releases/latest` response: `Ok(None)` when it's not newer than `running`, or has no
+/// package for this platform at all.
 pub fn select(json: &str, running: Build, asset_name: &str) -> Result<Option<Release>, String> {
     let release: GitHubRelease = serde_json::from_str(json)
         .map_err(|error| format!("GitHub sent an unexpected release description: {error}"))?;
@@ -316,6 +319,10 @@ pub fn select(json: &str, running: Build, asset_name: &str) -> Result<Option<Rel
             )),
         }
     };
+    // Not built for this platform: nothing to install, and nothing wrong either.
+    if !release.assets.iter().any(|asset| asset.name == asset_name) {
+        return Ok(None);
+    }
     let asset = uploaded(asset_name)?;
     let checksums = uploaded(CHECKSUMS)?;
     let digest = match &asset.digest {
@@ -1477,9 +1484,11 @@ mod tests {
             json[flag] = true.into();
             assert_eq!(select(&json.to_string(), RUNNING, LINUX_TARBALL), Ok(None));
         }
+        // A newer release without this platform's package was not built for it: no update.
+        let other_platform =
+            release_json("v0.1.0-build.7", &[(WINDOWS_EXE, None), (CHECKSUMS, None)]);
+        assert_eq!(select(&other_platform, RUNNING, LINUX_TARBALL), Ok(None));
         // A newer release that can't be installed or verified is a (quiet) check failure.
-        let missing = release_json("v0.1.0-build.7", &[(CHECKSUMS, None)]);
-        assert!(select(&missing, RUNNING, LINUX_TARBALL).is_err());
         let unverifiable = release_json("v0.1.0-build.7", &[(LINUX_TARBALL, None)]);
         assert!(select(&unverifiable, RUNNING, LINUX_TARBALL).is_err());
         let doubled = release_json(
