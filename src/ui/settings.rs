@@ -2275,7 +2275,7 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
         "TeamSpeak's sounds appear as a pack if TeamSpeak is installed on this computer."
     } else {
         "TeamSpeak's sounds are read from TeamSpeak on this computer and played equally loud. \
-         It has none for stream viewers, so Flexspeak plays one made to match."
+         It has none for stream viewers, so they get its stream sounds a little higher."
     };
     Section::boxed("sounds", TITLE, TERMS, rows).note(group_note(t, note))
 }

@@ -897,8 +897,6 @@ pub enum Voice {
     Bell,
     Glass,
     Drop,
-    /// A plain tone that swells in, like TeamSpeak's own stream sounds.
-    Swell,
 }
 
 /// Attack and length in seconds, then each partial's frequency ratio, level and decay.
@@ -940,11 +938,6 @@ impl Voice {
                 0.006,
                 0.22,
                 [(1.0, 1.0, 14.0), (2.0, 0.1, 30.0), (3.0, 0.0, 1.0)],
-            ),
-            Self::Swell => (
-                0.05,
-                0.34,
-                [(1.0, 1.0, 8.0), (2.0, 0.05, 16.0), (3.0, 0.0, 1.0)],
             ),
         };
         Shape {
