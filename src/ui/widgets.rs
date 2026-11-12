@@ -606,11 +606,13 @@ pub fn picker(
     layer: &mut Vec<El>,
 ) -> El {
     let lookup = names.clone();
-    Select::new(key, &names)
+    let width = width.max(160.0);
+    let before = layer.len();
+    let field = Select::new(key, &names)
         .current(current)
         .placeholder(placeholder)
         .label(placeholder)
-        .width(width.max(160.0))
+        .width(width)
         .appearance(rune_kit::SelectAppearance::Field)
         .open(s.ui.open == Some(key))
         .disabled(!enabled || names.is_empty())
@@ -628,7 +630,15 @@ pub fn picker(
                 dispatch(s, tx, on_choose(index));
             }
         })
-        .build(k, layer)
+        .build(k, layer);
+    // rune-kit sizes the open list to its truncated labels; keep it as wide as the field, so a
+    // long device name reads in full rather than as "Microphone (H…".
+    if layer.len() > before
+        && let Some(menu) = layer.pop()
+    {
+        layer.push(menu.min_w(width));
+    }
+    field
 }
 
 /// A pulsing dot for short-lived work (connecting, pending, recording). The loop samples at

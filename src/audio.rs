@@ -527,7 +527,14 @@ impl AudioEngine {
         })
     }
 
+    /// Takes a new threshold or release delay without reopening the devices. Returns false
+    /// for a change of mode, which needs the engine opened again.
+    pub fn tune_transmission(&mut self, settings: crate::transmission::Settings) -> bool {
+        self.voice_gate.tune(settings)
+    }
+
     pub fn set_capture(&mut self, enabled: bool) -> Result<()> {
+
         if self.capture.enabled() != enabled {
             self.reset_capture(enabled)?;
         }
@@ -1081,6 +1088,65 @@ where
         },
         Some(Duration::from_secs(5)),
     )?)
+}
+
+/// Plays one sound on the output with no server connected, for hearing it in Settings. The
+/// device opens on a thread of its own, so the window never waits, and closes once it's over.
+pub fn play_alone(output: DeviceChoice, samples: Vec<f32>, volume: Arc<PlaybackVolume>) {
+    let _ = std::thread::Builder::new()
+        .name("sound-preview".into())
+        .spawn(move || {
+            if let Err(error) = play_alone_now(&output, &samples, volume) {
+                tracing::warn!(%error, "Sound preview failed");
+            }
+        });
+}
+
+fn play_alone_now(output: &DeviceChoice, samples: &[f32], volume: Arc<PlaybackVolume>) -> Result<()> {
+    let output = stand_in(output, false).context("No playback device is connected")?;
+    let device = find_device(&output, false)?;
+    let config = config(&device, false).context("No usable playback configuration")?;
+    let rate = config.sample_rate();
+    // A sound is a fraction of a second, so straight-line resampling from 48 kHz is plenty.
+    let step = RATE as f64 / f64::from(rate);
+    let frames = (samples.len() as f64 / step) as usize;
+    let queue = Arc::new(ArrayQueue::new(frames.max(1)));
+    for frame in 0..frames {
+        let at = frame as f64 * step;
+        let index = at as usize;
+        let Some(&a) = samples.get(index) else { break };
+        let b = samples.get(index + 1).copied().unwrap_or(a);
+        let value = a + (b - a) * (at - index as f64) as f32;
+        let _ = queue.push([value; 2]);
+    }
+    let errors = Arc::new(ArrayQueue::new(4));
+    let discontinuity = Arc::new(AtomicBool::new(false));
+    macro_rules! output_stream {
+        ($t:ty) => {
+            make_output::<$t>(
+                &device,
+                &config,
+                queue.clone(),
+                errors.clone(),
+                volume.clone(),
+                None,
+                discontinuity.clone(),
+            )
+        };
+    }
+    let stream = match config.sample_format() {
+        SampleFormat::F32 => output_stream!(f32),
+        SampleFormat::I16 => output_stream!(i16),
+        SampleFormat::U16 => output_stream!(u16),
+        SampleFormat::I32 => output_stream!(i32),
+        SampleFormat::F64 => output_stream!(f64),
+        format => bail!("Unsupported playback sample format: {format}"),
+    }
+    .context("Cannot open playback device")?;
+    stream.play()?;
+    // What the device still holds once the last sample has been handed to it.
+    std::thread::sleep(Duration::from_secs_f64(frames as f64 / f64::from(rate)) + Duration::from_millis(150));
+    Ok(())
 }
 
 fn make_output<T>(

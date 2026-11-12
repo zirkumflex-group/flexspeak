@@ -64,8 +64,8 @@ pub struct Voice {
     pub data: Vec<u8>,
 }
 
-/// What the first connection opens the devices with. Settings are locked while connected, so
-/// later connections can't ask for anything else.
+/// What the first connection opens the devices with. Later connections share them; a change in
+/// Settings reaches the open devices through [`AudioHub::retune`].
 #[derive(Clone)]
 pub struct Open {
     pub input: DeviceChoice,
@@ -75,6 +75,15 @@ pub struct Open {
     pub transmission: crate::transmission::Settings,
     pub ptt: Arc<AtomicBool>,
     pub surfaces: Arc<Surfaces>,
+}
+
+/// The devices and voice settings chosen in Settings, for devices that are already open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Retune {
+    pub input: DeviceChoice,
+    pub output: DeviceChoice,
+    pub processing: crate::audio_processing::Settings,
+    pub transmission: crate::transmission::Settings,
 }
 
 /// One server's end of the hub.
@@ -133,6 +142,8 @@ pub struct AudioHub {
     opening: AtomicUsize,
     /// Set as the app quits: nothing is left to play, and nothing is waited for.
     hushed: AtomicBool,
+    /// Settings chosen while the devices are open, for the hub's thread to reopen them with.
+    retune: Mutex<Option<Retune>>,
 }
 
 impl AudioHub {
@@ -158,6 +169,17 @@ impl AudioHub {
         }
     }
 
+    /// Reopens the shared devices with these choices, if any are open, without waiting for
+    /// them: the hub's thread picks the change up on its next tick.
+    pub fn retune(&self, retune: Retune) {
+        *self.retune.lock().unwrap() = Some(retune);
+    }
+
+    #[cfg(test)]
+    pub fn pending_retune(&self) -> Option<Retune> {
+        self.retune.lock().unwrap().clone()
+    }
+
     /// Stops every sound and stops waiting for one to finish. For quitting.
     pub fn hush(&self) {
         self.hushed.store(true, Ordering::Release);
@@ -178,6 +200,8 @@ impl AudioHub {
         let mut device = self.device.lock().unwrap();
         self.opening.fetch_sub(1, Ordering::AcqRel);
         if device.is_none() {
+            // Fresh devices open with the current choices, so an earlier change is spent.
+            self.retune.lock().unwrap().take();
             *device = Some(Device::open(self.clone(), open)?);
         }
         let device = device.as_mut().expect("just opened");
@@ -458,6 +482,10 @@ impl Core {
             if next + 10 * TICK < now {
                 next = now;
             }
+            let retune = self.hub.retune.lock().unwrap().take();
+            if let Some(retune) = retune {
+                self.retune(retune, now);
+            }
             if now >= self.next_attempt {
                 self.maintain(now);
             }
@@ -581,6 +609,39 @@ impl Core {
             self.backoff = RETRY;
             self.reopen(now);
         }
+    }
+
+    /// Opens the devices again with new choices from Settings; nothing happens if they match.
+    fn retune(&mut self, retune: Retune, now: Instant) {
+        let processing = retune.processing.for_session(false);
+        if retune.input == self.open.input
+            && retune.output == self.open.output
+            && processing == self.open.processing
+            && retune.transmission == self.open.transmission
+        {
+            return;
+        }
+        let same_devices = retune.input == self.open.input
+            && retune.output == self.open.output
+            && processing == self.open.processing;
+        self.open.input = retune.input;
+        self.open.output = retune.output;
+        self.open.processing = processing;
+        self.open.transmission = retune.transmission;
+        self.transmission = retune.transmission;
+        // A new threshold or delay goes to the running engine; anything else reopens it.
+        if same_devices
+            && self
+                .engine
+                .as_mut()
+                .is_some_and(|engine| engine.tune_transmission(retune.transmission))
+        {
+            return;
+        }
+        self.close();
+
+        self.backoff = RETRY;
+        self.reopen(now);
     }
 
     /// Drops the devices. The server you were talking to is owed the packet that ends an

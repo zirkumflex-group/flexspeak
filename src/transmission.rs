@@ -141,6 +141,16 @@ impl VoiceGate {
         *self = Self::new(self.settings)?;
         Ok(())
     }
+    /// Takes a new threshold or release delay as it runs. A different mode needs a new gate,
+    /// so that is refused.
+    pub fn tune(&mut self, settings: Settings) -> bool {
+        if settings.mode != self.settings.mode || settings.validate().is_err() {
+            return false;
+        }
+        self.settings = settings;
+        true
+    }
+
     pub fn active(&self) -> bool {
         self.active
     }
