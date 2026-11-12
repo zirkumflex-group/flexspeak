@@ -1264,25 +1264,15 @@ fn selection_bar(s: &App, t: &Theme) -> Option<El> {
 
 fn voice_controls(s: &App, t: &Theme) -> El {
     let enabled = s.server().connected && !s.loopback && !s.server().stopping;
-    // Deafening keeps the microphone off, but the mute button still shows and changes your own
-    // mute, which is what you get back once you undeafen.
+    // Deafening keeps the microphone off, but the mute button still changes your own mute,
+    // which is what you get back once you undeafen. The icon shows what is sent: nothing.
     let deafened_open = s.server().deafened && !s.server().muted && s.server().state.can_talk;
     let mut controls = row().w_full().gap(size::GAP);
     for (key, glyph, label, message, active, on) in [
         (
             "mute",
-            if deafened_open {
-                crate::Icon::Mic.glyph()
-            } else {
-                s.microphone_icon().glyph()
-            },
-            if s.server().muted {
-                "Unmute microphone"
-            } else if deafened_open {
-                "Mute microphone · it stays off while you're deafened"
-            } else {
-                "Mute microphone"
-            },
+            s.microphone_icon().glyph(),
+            microphone_help(s, deafened_open),
             Message::Mute,
             s.server().muted,
             enabled,
@@ -1290,11 +1280,15 @@ fn voice_controls(s: &App, t: &Theme) -> El {
         (
             "deafen",
             s.playback_icon().glyph(),
-            if s.server().deafened {
-                "Undeafen"
-            } else {
-                "Deafen"
-            },
+            with_key(
+                if s.server().deafened {
+                    "Undeafen"
+                } else {
+                    "Deafen"
+                }
+                .to_owned(),
+                &s.keybinds.toggle_deafen,
+            ),
             Message::Deafen,
             s.server().deafened,
             enabled,
@@ -1340,6 +1334,51 @@ fn voice_controls(s: &App, t: &Theme) -> El {
 /// One click to go live while other streams fill the pane, which offers the same itself when
 /// it is empty: your main screen, then the game you're playing. Plain until you are live;
 /// the live colour belongs to streams that are running.
+/// The microphone button's tooltip: why it is on or off, what a click does with its global
+/// key, and how you talk in push-to-talk or voice activation.
+fn microphone_help(s: &App, deafened_open: bool) -> String {
+    let action = if s.server().muted {
+        "Unmute microphone"
+    } else if deafened_open {
+        "Mute microphone · it stays off while you're deafened"
+    } else {
+        "Mute microphone"
+    };
+    let mut help = format!(
+        "Microphone: {}
+{}",
+        s.microphone_status(),
+        with_key(action.to_owned(), &s.keybinds.toggle_mute)
+    );
+    match s.transmission.mode {
+        crate::transmission::Mode::PushToTalk => {
+            let key = s.keybinds.push_to_talk.trim();
+            help.push_str(if key.is_empty() {
+                "
+Push-to-talk · no key set"
+            } else {
+                "
+Push-to-talk · hold "
+            });
+            help.push_str(key);
+        }
+        crate::transmission::Mode::VoiceActivation => help.push_str("
+Voice activation"),
+        crate::transmission::Mode::Continuous => {}
+    }
+    help
+}
+
+/// A control's help with the global key bound to it, as "Settings · Ctrl+," reads.
+fn with_key(mut help: String, key: &str) -> String {
+    let key = key.trim();
+    if !key.is_empty() {
+        help.push_str(" · ");
+        help.push_str(key);
+    }
+    help
+}
+
 fn quick_share(s: &App, t: &Theme) -> Option<El> {
     let sources = streams::quick_sources(s);
     if sources.is_empty() || !streams::on_stage(s) {
