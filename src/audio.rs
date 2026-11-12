@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -1169,6 +1169,57 @@ static PLAYBACK_GAPS: AtomicU64 = AtomicU64::new(0);
 
 pub fn playback_gaps() -> u64 {
     PLAYBACK_GAPS.load(Ordering::Relaxed)
+}
+
+/// What became of incoming voice since the app started, across servers and counted in packets.
+/// Loss on the network shows up here as packets filled in or dropped, not as playback gaps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VoicePlayback {
+    /// Decoded and played as received.
+    pub played: u64,
+    /// Missing when due and filled in by the decoder.
+    pub concealed: u64,
+    /// Missing when due and rebuilt from the packet after it.
+    pub recovered: u64,
+    /// Received but not played: too late, a duplicate, or the queue was full.
+    pub dropped: u64,
+    /// Talkers taken away because nothing arrived for too long.
+    pub timed_out: u64,
+    /// The most packets any talker had waiting after the last refill.
+    pub queued: usize,
+}
+
+static VOICE: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static VOICE_QUEUED: AtomicUsize = AtomicUsize::new(0);
+
+pub fn voice_playback() -> VoicePlayback {
+    let [played, concealed, recovered, dropped, timed_out] =
+        VOICE.each_ref().map(|count| count.load(Ordering::Relaxed));
+    VoicePlayback {
+        played,
+        concealed,
+        recovered,
+        dropped,
+        timed_out,
+        queued: VOICE_QUEUED.load(Ordering::Relaxed),
+    }
+}
+
+/// Adds what the jitter buffers of every server did since the last refill.
+pub fn count_voice(stats: tsclientlib::audio::VoiceStats, queued: usize) {
+    let counts = [
+        stats.played,
+        stats.concealed,
+        stats.recovered,
+        stats.dropped,
+        stats.timed_out,
+    ];
+    for (total, count) in VOICE.iter().zip(counts) {
+        if count > 0 {
+            total.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+    VOICE_QUEUED.store(queued, Ordering::Relaxed);
 }
 
 /// Keeps the output continuous when the queue runs dry. Silence cut into the middle of a wave
