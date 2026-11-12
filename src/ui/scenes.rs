@@ -5064,14 +5064,12 @@ mod tests {
             rt.find("monster-notice").is_none(),
             "no 'Legendary card added'"
         );
-        assert!(rt.find("monster-featured").is_none());
         assert!(rt.find(&format!("card-{id}")).is_none(), "not in the grid");
 
         let mut rt = runtime(monster_reveal_hit, (1100.0, 1500.0));
         settle(&mut rt);
         assert!(rt.find("reveal-face").is_some());
         assert!(rt.find("monster-notice").is_some());
-        assert!(rt.find("monster-featured").is_some());
     }
 
     #[test]
@@ -5086,7 +5084,8 @@ mod tests {
 
     #[test]
     fn a_card_can_be_opened_again_without_another_can() {
-        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        // From its flavour's page; the overview has no replay of its own.
+        let mut rt = runtime(monster_flavour, (1100.0, 1500.0));
         settle(&mut rt);
         let before = rt.state.monster.cans.len();
         click(&mut rt, "monster-replay");

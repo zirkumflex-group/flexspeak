@@ -1341,10 +1341,6 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
             format!("{error}. Fix or remove the file to add cans."),
         ));
     }
-    let face_down = tracker.hidden_can().is_some();
-    if let Some(can) = tracker.featured().filter(|_| !face_down) {
-        panel = panel.child(featured(t, can));
-    }
     panel.child(odds(s, t))
 }
 
