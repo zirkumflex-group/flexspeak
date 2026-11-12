@@ -14,7 +14,6 @@
 
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -37,7 +36,13 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 // Asset names written by scripts/release.py (scripts/test_release.py keeps them in step).
 pub const CHECKSUMS: &str = "SHA256SUMS.txt";
+/// Release files are fetched from here first (see [`mirror_base`]), then from GitHub.
+const MIRROR: &str = "https://updates.zirkumflex.io/flexspeak";
 pub const WINDOWS_EXE: &str = "Flexspeak-windows-x64.exe";
+/// What Windows installs update from: the executable deflates to well under half its size.
+pub const WINDOWS_ZIP: &str = "Flexspeak-windows-x64.zip";
+/// The executable's name inside [`WINDOWS_ZIP`].
+const WINDOWS_ZIP_EXE: &str = "Flexspeak.exe";
 pub const MACOS_DMG: &str = "Flexspeak-macos-arm64.dmg";
 pub const LINUX_PACKAGE: &str = "Flexspeak-linux-x64.pkg.tar.zst";
 pub const LINUX_TARBALL: &str = "Flexspeak-linux-x64.tar.gz";
@@ -105,7 +110,7 @@ impl Build {
 /// What this installation is, and so which asset replaces it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Package {
-    /// The standalone executable (also inside the Windows ZIP).
+    /// The standalone executable, updated from the Windows ZIP that holds it.
     WindowsExe,
     /// `Flexspeak.app`, from the DMG.
     MacApp,
@@ -118,7 +123,7 @@ pub enum Package {
 impl Package {
     pub fn asset(self) -> &'static str {
         match self {
-            Self::WindowsExe => WINDOWS_EXE,
+            Self::WindowsExe => WINDOWS_ZIP,
             Self::MacApp => MACOS_DMG,
             Self::LinuxPacman => LINUX_PACKAGE,
             Self::LinuxTarball => LINUX_TARBALL,
@@ -170,6 +175,10 @@ pub struct Asset {
     pub size: u64,
     /// GitHub's own SHA-256 of the upload, lowercase hex, when the API reports one.
     pub digest: Option<String>,
+    /// The same file on the update mirror, tried before `url`. Only the bytes come from there:
+    /// they're checked against GitHub's checksums, so a mirror can fail an update but never
+    /// change one.
+    pub mirror: Option<String>,
 }
 
 /// A newer release with a package for this installation.
@@ -345,6 +354,7 @@ pub fn select(json: &str, running: Build, asset_name: &str) -> Result<Option<Rel
             url: asset.browser_download_url.clone(),
             size: asset.size,
             digest,
+            mirror: None,
         },
         checksums_url: checksums.browser_download_url.clone(),
         notes: Box::new(notes),
@@ -755,6 +765,17 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|error| format!("Cannot start an HTTPS client: {error}"))
 }
 
+/// The mirror is a box at home: give up on it quickly when it's away, since GitHub is next.
+fn mirror_client() -> Result<reqwest::Client, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .user_agent(concat!("Flexspeak/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("Cannot start an HTTPS client: {error}"))
+}
+
 fn describe(error: reqwest::Error) -> String {
     let mut text = error.to_string();
     let mut source = std::error::Error::source(&error);
@@ -811,6 +832,8 @@ async fn check_at(
     let Some(mut release) = select(&body, running, package.asset())? else {
         return Ok(None);
     };
+    release.asset.mirror =
+        mirror_base().map(|base| format!("{base}/{}/{}", release.tag, release.asset.name));
     if let Some(notes) = missed_notes(url, running, release.build)
         .await
         .filter(|notes| !notes.is_empty())
@@ -820,6 +843,17 @@ async fn check_at(
     forget_other_downloads(cache, &release.tag);
     let staged = staged(&cache.join(&release.tag), &release, package);
     Ok(Some(Found { release, staged }))
+}
+
+/// The update mirror: releases copied to `<base>/<tag>/<asset>` by `mirror/` in this repository.
+/// `FLEXSPEAK_UPDATE_MIRROR` points elsewhere, or turns the mirror off when empty.
+fn mirror_base() -> Option<String> {
+    let base = match std::env::var("FLEXSPEAK_UPDATE_MIRROR") {
+        Ok(base) => base,
+        Err(_) => MIRROR.to_owned(),
+    };
+    let base = base.trim().trim_end_matches('/');
+    base.starts_with("https://").then(|| base.to_owned())
 }
 
 /// Where downloads wait to be installed.
@@ -849,18 +883,38 @@ const VERIFIED: &str = "verified";
 
 /// A verified, prepared download of `release` in `dir`, if one is complete and unchanged.
 fn staged(dir: &Path, release: &Release, package: Package) -> Option<PathBuf> {
-    let expected = fs::read_to_string(dir.join(VERIFIED)).ok()?;
+    let marker = fs::read_to_string(dir.join(VERIFIED)).ok()?;
+    let mut lines = marker.lines();
+    let expected = lines.next()?;
     if release
         .asset
         .digest
         .as_ref()
-        .is_some_and(|digest| *digest != expected)
+        .is_some_and(|digest| digest != expected)
     {
         return None;
     }
     let payload = payload_path(dir, package);
-    (payload.exists() && sha256_file(&dir.join(&release.asset.name)).ok()? == expected)
-        .then_some(payload)
+    if !payload.exists() || sha256_file(&dir.join(&release.asset.name)).ok()? != expected {
+        return None;
+    }
+    // An executable unpacked from the archive is checked as well.
+    match lines.next() {
+        Some(unpacked) if sha256_file(&payload).ok()? != unpacked => None,
+        _ => Some(payload),
+    }
+}
+
+/// What [`VERIFIED`] holds: the archive's digest, then an unpacked executable's.
+fn verified_marker(expected: &str, payload: &Path, package: Package) -> Result<String, String> {
+    match package {
+        Package::WindowsExe | Package::LinuxTarball => {
+            let unpacked = sha256_file(payload)
+                .map_err(|error| format!("Cannot read the unpacked update: {error}"))?;
+            Ok(format!("{expected}\n{unpacked}"))
+        }
+        Package::MacApp | Package::LinuxPacman => Ok(expected.to_owned()),
+    }
 }
 
 fn payload_path(dir: &Path, package: Package) -> PathBuf {
@@ -903,20 +957,270 @@ pub async fn download(
     on_progress: impl Fn(Progress),
 ) -> Result<PathBuf, String> {
     let dir = updates_dir()?.join(&release.tag);
-    download_into(&dir, release, package, cancel, on_progress).await
+    download_into(&dir, release, package, Ranges::DEFAULT, cancel, on_progress).await
+}
+
+/// How a download is split into parallel range requests.
+#[derive(Debug, Clone, Copy)]
+struct Ranges {
+    connections: usize,
+    part: u64,
+}
+
+impl Ranges {
+    /// GitHub's release CDN serves each connection at a few hundred KiB/s at best, far below a
+    /// typical line, so the parts come over several connections at once. Parts are small enough
+    /// that the last one doesn't trail alone for long, and a failed one is cheap to fetch again.
+    const DEFAULT: Ranges = Ranges {
+        connections: 8,
+        part: 2 * 1024 * 1024,
+    };
+    const ATTEMPTS: u32 = 3;
+}
+
+enum Failure {
+    /// The server sent the whole file instead of a range; fetch it in one piece instead.
+    NoRanges,
+    Error(String),
+}
+
+impl From<String> for Failure {
+    fn from(error: String) -> Self {
+        Self::Error(error)
+    }
+}
+
+const REPLACED: &str = "The download was replaced by a newer release.";
+
+fn write_error(error: std::io::Error) -> String {
+    format!("Cannot write the download: {error}")
+}
+
+/// Fetches `total` bytes of `url` into `file` as parts over `ranges.connections` connections,
+/// each from its own client so the parts don't share one connection. `on_progress` gets the
+/// bytes received so far.
+async fn fetch_ranges(
+    url: &str,
+    make_client: MakeClient,
+    total: u64,
+    ranges: Ranges,
+    file: &fs::File,
+    cancel: &AtomicBool,
+    on_progress: &dyn Fn(u64),
+) -> Result<(), Failure> {
+    use std::cell::Cell;
+    let next = &Cell::new(0u64);
+    let received = &Cell::new(0u64);
+    let workers = (0..ranges.connections).map(|_| async move {
+        let client = make_client()?;
+        loop {
+            let start = next.get();
+            if start >= total {
+                return Ok(());
+            }
+            let end = (start + ranges.part).min(total);
+            next.set(end);
+            let mut attempt = 1;
+            loop {
+                let mut got = 0;
+                let result = fetch_part(&client, url, start, end, file, cancel, &mut |bytes| {
+                    got += bytes;
+                    received.set(received.get() + bytes);
+                    on_progress(received.get());
+                })
+                .await;
+                match result {
+                    Ok(()) => break,
+                    Err(Failure::Error(_))
+                        if attempt < Ranges::ATTEMPTS && !cancel.load(Ordering::Relaxed) =>
+                    {
+                        // Start the part over; what it already wrote is written again.
+                        received.set(received.get() - got);
+                        attempt += 1;
+                    }
+                    Err(failure) => return Err(failure),
+                }
+            }
+        }
+    });
+    futures::future::try_join_all(workers).await.map(|_| ())
+}
+
+/// Fetches bytes `start..end` of `url` into the same place in `file`.
+async fn fetch_part(
+    client: &reqwest::Client,
+    url: &str,
+    start: u64,
+    end: u64,
+    file: &fs::File,
+    cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(u64),
+) -> Result<(), Failure> {
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={start}-{}", end - 1))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(describe)?;
+    let range = format!("bytes {start}-{}/", end - 1);
+    let matches = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with(&range));
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT || !matches {
+        return Err(Failure::NoRanges);
+    }
+    let mut offset = start;
+    while let Some(chunk) = response.chunk().await.map_err(describe)? {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Failure::Error(REPLACED.into()));
+        }
+        if offset + chunk.len() as u64 > end {
+            return Err(Failure::Error(
+                "The server sent more than was asked for.".into(),
+            ));
+        }
+        write_at(file, &chunk, offset).map_err(write_error)?;
+        offset += chunk.len() as u64;
+        on_bytes(chunk.len() as u64);
+    }
+    if offset != end {
+        return Err(Failure::Error(format!(
+            "A part of the download ended after {} of {} bytes.",
+            offset - start,
+            end - start
+        )));
+    }
+    Ok(())
+}
+
+/// Fetches all of `url` into `file` over one connection.
+async fn fetch_whole(
+    client: &reqwest::Client,
+    url: &str,
+    total: Option<u64>,
+    file: &fs::File,
+    cancel: &AtomicBool,
+    on_progress: &dyn Fn(u64, Option<u64>),
+) -> Result<(), String> {
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(describe)?;
+    let total = response.content_length().filter(|size| *size > 0).or(total);
+    let mut received = 0u64;
+    while let Some(chunk) = response.chunk().await.map_err(describe)? {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(REPLACED.into());
+        }
+        write_at(file, &chunk, received).map_err(write_error)?;
+        received += chunk.len() as u64;
+        on_progress(received, total);
+    }
+    if total.is_some_and(|total| total != received) {
+        return Err(format!(
+            "The download ended after {received} of {} bytes.",
+            total.unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
+fn write_at(file: &fs::File, mut bytes: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        #[cfg(unix)]
+        let written = std::os::unix::fs::FileExt::write_at(file, bytes, offset)?;
+        #[cfg(windows)]
+        let written = std::os::windows::fs::FileExt::seek_write(file, bytes, offset)?;
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        bytes = &bytes[written..];
+        offset += written as u64;
+    }
+    Ok(())
+}
+
+type MakeClient = fn() -> Result<reqwest::Client, String>;
+
+/// Fetches `release`'s asset from `url` into `partial` and checks it against `expected`.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_verified(
+    url: &str,
+    make_client: MakeClient,
+    partial: &Path,
+    release: &Release,
+    expected: &str,
+    ranges: Ranges,
+    cancel: &AtomicBool,
+    on_progress: &dyn Fn(Progress),
+) -> Result<(), String> {
+    let file = fs::File::create(partial)
+        .map_err(|error| format!("Cannot write {}: {error}", partial.display()))?;
+    let meter = std::cell::RefCell::new(SpeedMeter::new(Instant::now()));
+    let total = Some(release.asset.size).filter(|size| *size > 0);
+    let report = |received: u64, total: Option<u64>| {
+        if let Some(speed) = meter.borrow_mut().sample(Instant::now(), received) {
+            on_progress(Progress {
+                received,
+                total,
+                bytes_per_second: Some(speed),
+            });
+        }
+    };
+    let ranged = match total {
+        Some(total) if total > ranges.part => {
+            file.set_len(total).map_err(write_error)?;
+            match fetch_ranges(
+                url,
+                make_client,
+                total,
+                ranges,
+                &file,
+                cancel,
+                &|received| report(received, Some(total)),
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(Failure::NoRanges) => false,
+                Err(Failure::Error(error)) => return Err(error),
+            }
+        }
+        _ => false,
+    };
+    if !ranged {
+        file.set_len(0).map_err(write_error)?;
+        fetch_whole(&make_client()?, url, total, &file, cancel, &report).await?;
+    }
+    file.sync_all().map_err(write_error)?;
+    drop(file);
+    let actual =
+        sha256_file(partial).map_err(|error| format!("Cannot read the download: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "{} failed verification (SHA-256 {actual}, expected {expected}) and was discarded.",
+            release.asset.name
+        ));
+    }
+    Ok(())
 }
 
 async fn download_into(
     dir: &Path,
     release: &Release,
     package: Package,
+    ranges: Ranges,
     cancel: &AtomicBool,
     on_progress: impl Fn(Progress),
 ) -> Result<PathBuf, String> {
     let _ = fs::remove_file(dir.join(VERIFIED));
     fs::create_dir_all(dir).map_err(|error| format!("Cannot create {}: {error}", dir.display()))?;
-    let client = client()?;
-    let sums = client
+    let sums = client()?
         .get(&release.checksums_url)
         .timeout(Duration::from_secs(30))
         .send()
@@ -939,57 +1243,37 @@ async fn download_into(
         ));
     }
 
-    let mut response = client
-        .get(&release.asset.url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(describe)?;
-    let total = response
-        .content_length()
-        .or(Some(release.asset.size))
-        .filter(|size| *size > 0);
     let partial = dir.join(format!("{}.part", release.asset.name));
-    let result = async {
-        let mut file = fs::File::create(&partial)
-            .map_err(|error| format!("Cannot write {}: {error}", partial.display()))?;
-        let mut hasher = Sha256::new();
-        let mut received = 0u64;
-        let mut meter = SpeedMeter::new(Instant::now());
-        while let Some(chunk) = response.chunk().await.map_err(describe)? {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("The download was replaced by a newer release.".to_string());
+    // The mirror first, GitHub if it fails for any reason: unreachable, not synced yet, or
+    // bytes that don't match GitHub's checksums.
+    let mirror = release
+        .asset
+        .mirror
+        .as_deref()
+        .map(|url| (url, mirror_client as MakeClient));
+    let github = (release.asset.url.as_str(), client as MakeClient);
+    let mut result = Err(String::new());
+    for (url, make_client) in mirror.into_iter().chain([github]) {
+        result = fetch_verified(
+            url,
+            make_client,
+            &partial,
+            release,
+            &expected,
+            ranges,
+            cancel,
+            &on_progress,
+        )
+        .await;
+        match &result {
+            Ok(()) => break,
+            Err(error) if error == REPLACED => break,
+            Err(error) if url != github.0 => {
+                tracing::warn!("Update mirror failed, downloading from GitHub instead: {error}");
             }
-            file.write_all(&chunk)
-                .map_err(|error| format!("Cannot write the download: {error}"))?;
-            hasher.update(&chunk);
-            received += chunk.len() as u64;
-            if let Some(speed) = meter.sample(Instant::now(), received) {
-                on_progress(Progress {
-                    received,
-                    total,
-                    bytes_per_second: Some(speed),
-                });
-            }
+            Err(_) => {}
         }
-        file.sync_all()
-            .map_err(|error| format!("Cannot write the download: {error}"))?;
-        if total.is_some_and(|total| total != received) {
-            return Err(format!(
-                "The download ended after {received} of {} bytes.",
-                total.unwrap_or_default()
-            ));
-        }
-        let actual = hex(&hasher.finalize());
-        if actual != expected {
-            return Err(format!(
-                "{} failed verification (SHA-256 {actual}, expected {expected}) and was discarded.",
-                release.asset.name
-            ));
-        }
-        Ok(())
     }
-    .await;
     if let Err(error) = result {
         let _ = fs::remove_file(&partial);
         return Err(error);
@@ -997,8 +1281,11 @@ async fn download_into(
     let archive = dir.join(&release.asset.name);
     fs::rename(&partial, &archive).map_err(|error| format!("Cannot keep the download: {error}"))?;
     let payload = prepare(dir, &archive, package)?;
-    fs::write(dir.join(VERIFIED), &expected)
-        .map_err(|error| format!("Cannot record the verified download: {error}"))?;
+    fs::write(
+        dir.join(VERIFIED),
+        verified_marker(&expected, &payload, package)?,
+    )
+    .map_err(|error| format!("Cannot record the verified download: {error}"))?;
     Ok(payload)
 }
 
@@ -1018,7 +1305,8 @@ pub(crate) fn run(command: &mut Command, what: &str) -> Result<(), String> {
 fn prepare(dir: &Path, archive: &Path, package: Package) -> Result<PathBuf, String> {
     let payload = payload_path(dir, package);
     match package {
-        Package::WindowsExe | Package::LinuxPacman => {}
+        Package::LinuxPacman => {}
+        Package::WindowsExe => unzip_exe(archive, &payload)?,
         Package::MacApp => {
             let mount = dir.join("mount");
             let _ = fs::create_dir_all(&mount);
@@ -1080,6 +1368,29 @@ fn prepare(dir: &Path, archive: &Path, package: Package) -> Result<PathBuf, Stri
         }
     }
     Ok(payload)
+}
+
+/// Writes the executable from the Windows ZIP to `payload`.
+fn unzip_exe(archive: &Path, payload: &Path) -> Result<(), String> {
+    let failed = |error: &dyn std::fmt::Display| format!("Cannot unpack the update: {error}");
+    let file = fs::File::open(archive).map_err(|error| failed(&error))?;
+    let mut zip =
+        zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| failed(&error))?;
+    let mut entry = zip
+        .by_name(WINDOWS_ZIP_EXE)
+        .map_err(|_| format!("The Windows archive has no {WINDOWS_ZIP_EXE}."))?;
+    let unpacking = sibling(payload, ".unpacking");
+    let written = (|| {
+        let mut out = fs::File::create(&unpacking)?;
+        std::io::copy(&mut entry, &mut out)?;
+        out.sync_all()?;
+        fs::rename(&unpacking, payload)
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&unpacking);
+        return Err(failed(&error));
+    }
+    Ok(())
 }
 
 /// The app is intact (signature) and is Flexspeak (bundle identifier).
@@ -1311,6 +1622,7 @@ pub fn block_on<T>(future: impl Future<Output = Result<T, String>>) -> Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn notes_are_sorted_into_sections_and_combined_across_skipped_builds() {
@@ -1465,7 +1777,7 @@ mod tests {
                 Package::LinuxTarball
             ]
             .map(Package::asset),
-            [WINDOWS_EXE, MACOS_DMG, LINUX_PACKAGE, LINUX_TARBALL]
+            [WINDOWS_ZIP, MACOS_DMG, LINUX_PACKAGE, LINUX_TARBALL]
         );
     }
 
@@ -1804,40 +2116,215 @@ mod tests {
         assert_eq!(updater(true).unsupported(), None);
     }
 
-    /// Serves `routes` once each over plain HTTP on localhost.
+    /// Serves `routes` over plain HTTP on localhost, ignoring `Range`.
     fn serve(routes: Vec<(&'static str, Vec<u8>)>) -> String {
+        serve_with(routes, false, false).0
+    }
+
+    /// Serves `routes` over plain HTTP on localhost, one request per connection. With `ranges`
+    /// it answers `Range` requests with 206 and counts them; with `flaky` the first ranged
+    /// answer stops halfway.
+    fn serve_with(
+        routes: Vec<(&'static str, Vec<u8>)>,
+        ranges: bool,
+        flaky: bool,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{BufRead, BufReader};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
+        let ranged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = ranged.clone();
         std::thread::spawn(move || {
-            for stream in listener.incoming().take(routes.len().max(1)) {
+            for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
-                BufReader::new(&stream).read_line(&mut line).unwrap();
+                reader.read_line(&mut line).unwrap();
                 let path = line
                     .split_whitespace()
                     .nth(1)
                     .unwrap_or_default()
                     .to_owned();
+                let mut range = None;
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                        break;
+                    }
+                    let lower = header.to_ascii_lowercase();
+                    if let Some(value) = lower.strip_prefix("range: bytes=") {
+                        let (start, end) = value.trim().split_once('-').unwrap();
+                        range = Some((
+                            start.parse::<usize>().unwrap(),
+                            end.parse::<usize>().unwrap(),
+                        ));
+                    }
+                }
                 let body = routes
                     .iter()
                     .find(|(route, _)| *route == path)
                     .map(|(_, body)| body.clone());
-                let head = match &body {
-                    Some(body) => format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    ),
-                    None => {
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .into()
+                let (head, body) = match (body, range) {
+                    (Some(body), Some((start, end))) if ranges => {
+                        let n = counter.fetch_add(1, Ordering::Relaxed);
+                        let part = body[start..=end].to_vec();
+                        let head = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len(),
+                            part.len()
+                        );
+                        let sent = if flaky && n == 0 {
+                            part[..part.len() / 2].to_vec()
+                        } else {
+                            part
+                        };
+                        (head, sent)
                     }
+                    (Some(body), _) => (
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        ),
+                        body,
+                    ),
+                    (None, _) => (
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .into(),
+                        Vec::new(),
+                    ),
                 };
                 let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(&body.unwrap_or_default());
+                let _ = stream.write_all(&body);
             }
         });
-        address
+        (address, ranged)
+    }
+
+    /// A Windows release ZIP holding `exe`, laid out as scripts/release.py writes it.
+    fn windows_zip(exe: &[u8]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("README.md", options).unwrap();
+        zip.write_all(b"read me").unwrap();
+        zip.start_file(WINDOWS_ZIP_EXE, options).unwrap();
+        zip.write_all(exe).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn windows_release(base: &str, archive: &[u8], digest: Option<String>) -> Release {
+        Release {
+            tag: "v0.1.0-build.7".into(),
+            build: Build {
+                number: 7,
+                ..RUNNING
+            },
+            asset: Asset {
+                name: WINDOWS_ZIP.into(),
+                url: format!("{base}/zip"),
+                size: archive.len() as u64,
+                digest,
+                mirror: None,
+            },
+            checksums_url: format!("{base}/sums"),
+            notes: Box::default(),
+        }
+    }
+
+    #[test]
+    fn the_mirror_is_tried_first_and_github_takes_over_when_it_fails() {
+        let exe = b"flexspeak from the mirror".repeat(500);
+        let archive = windows_zip(&exe);
+        let sums = format!("{}  {WINDOWS_ZIP}\n", digest(&archive));
+        let mut corrupt = archive.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 1;
+        let cases = [
+            // GitHub has no /zip, so this passes only if the mirror served it.
+            ("good", Some(archive.clone()), false),
+            ("missing", None, true),
+            ("corrupt", Some(corrupt), true),
+        ];
+        for (case, on_mirror, github_has_it) in cases {
+            let mirror = serve(on_mirror.map(|body| ("/zip", body)).into_iter().collect());
+            let mut routes = vec![("/sums", sums.clone().into_bytes())];
+            if github_has_it {
+                routes.push(("/zip", archive.clone()));
+            }
+            let github = serve(routes);
+            let mut release = windows_release(&github, &archive, Some(digest(&archive)));
+            release.asset.mirror = Some(format!("{mirror}/zip"));
+            let dir = scratch("mirror");
+            let staged_path = block_on(download_into(
+                &dir,
+                &release,
+                Package::WindowsExe,
+                TEST_RANGES,
+                &AtomicBool::new(false),
+                |_| {},
+            ))
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert_eq!(fs::read(&staged_path).unwrap(), exe, "{case}");
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    /// Small parts, so a test-sized file takes several.
+    const TEST_RANGES: Ranges = Ranges {
+        connections: 3,
+        part: 4096,
+    };
+
+    #[test]
+    fn downloads_come_in_parallel_parts_retry_a_dropped_one_and_fall_back_to_one_piece() {
+        // Noise, so the ZIP doesn't deflate it below a few parts.
+        let mut state = 0x2545_f491_u32;
+        let exe: Vec<u8> = (0..40_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        let archive = windows_zip(&exe);
+        assert!(archive.len() as u64 > TEST_RANGES.part * 4, "several parts");
+        for (ranges, flaky) in [(true, false), (true, true), (false, false)] {
+            let sums = format!("{}  {WINDOWS_ZIP}\n", digest(&archive));
+            let (base, ranged) = serve_with(
+                vec![("/sums", sums.into_bytes()), ("/zip", archive.clone())],
+                ranges,
+                flaky,
+            );
+            let release = windows_release(&base, &archive, Some(digest(&archive)));
+            let dir = scratch("parts");
+            let staged_path = block_on(download_into(
+                &dir,
+                &release,
+                Package::WindowsExe,
+                TEST_RANGES,
+                &AtomicBool::new(false),
+                |_| {},
+            ))
+            .unwrap_or_else(|error| panic!("ranges {ranges}, flaky {flaky}: {error}"));
+            assert_eq!(
+                fs::read(&staged_path).unwrap(),
+                exe,
+                "ranges {ranges}, flaky {flaky}"
+            );
+            let parts = (archive.len() as u64).div_ceil(TEST_RANGES.part) as usize;
+            let expected = if !ranges {
+                0
+            } else {
+                parts + usize::from(flaky)
+            };
+            assert_eq!(
+                ranged.load(Ordering::Relaxed),
+                expected,
+                "ranges {ranges}, flaky {flaky}"
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     /// A fresh directory per call. Only digits after the name: `{:?}` of an `Instant` has
@@ -1858,26 +2345,13 @@ mod tests {
     #[test]
     fn downloads_are_verified_staged_and_found_again_after_a_restart() {
         let payload = b"#!/bin/sh\necho new flexspeak\n".repeat(4096);
-        let sums = format!("{}  {WINDOWS_EXE}\n", digest(&payload));
+        let archive = windows_zip(&payload);
+        let sums = format!("{}  {WINDOWS_ZIP}\n", digest(&archive));
         let base = serve(vec![
             ("/sums", sums.into_bytes()),
-            ("/exe", payload.clone()),
+            ("/zip", archive.clone()),
         ]);
-        let release = Release {
-            tag: "v0.1.0-build.7".into(),
-            build: Build {
-                number: 7,
-                ..RUNNING
-            },
-            asset: Asset {
-                name: WINDOWS_EXE.into(),
-                url: format!("{base}/exe"),
-                size: payload.len() as u64,
-                digest: Some(digest(&payload)),
-            },
-            checksums_url: format!("{base}/sums"),
-            notes: Box::default(),
-        };
+        let release = windows_release(&base, &archive, Some(digest(&archive)));
         let cache = scratch("verified");
         let dir = cache.join(&release.tag);
         let reports = std::cell::RefCell::new(Vec::new());
@@ -1885,16 +2359,18 @@ mod tests {
             &dir,
             &release,
             Package::WindowsExe,
+            Ranges::DEFAULT,
             &AtomicBool::new(false),
             |progress| reports.borrow_mut().push(progress),
         ))
         .unwrap();
+        assert_eq!(staged_path, dir.join(WINDOWS_EXE));
         assert_eq!(fs::read(&staged_path).unwrap(), payload);
         assert!(
             reports
                 .borrow()
                 .iter()
-                .all(|p| p.total == Some(payload.len() as u64))
+                .all(|p| p.total == Some(archive.len() as u64))
         );
         assert_eq!(
             staged(&dir, &release, Package::WindowsExe),
@@ -1923,39 +2399,27 @@ mod tests {
 
     #[test]
     fn a_corrupt_download_is_discarded() {
-        let payload = b"the real build".to_vec();
-        let sums = format!("{}  {WINDOWS_EXE}\n", digest(b"a different build"));
+        let archive = windows_zip(b"the real build");
+        let sums = format!("{}  {WINDOWS_ZIP}\n", digest(b"a different build"));
         let base = serve(vec![
             ("/sums", sums.into_bytes()),
-            ("/exe", payload.clone()),
+            ("/zip", archive.clone()),
         ]);
-        let release = Release {
-            tag: "v0.1.0-build.7".into(),
-            build: Build {
-                number: 7,
-                ..RUNNING
-            },
-            asset: Asset {
-                name: WINDOWS_EXE.into(),
-                url: format!("{base}/exe"),
-                size: payload.len() as u64,
-                digest: None,
-            },
-            checksums_url: format!("{base}/sums"),
-            notes: Box::default(),
-        };
+        let release = windows_release(&base, &archive, None);
         let dir = scratch("corrupt");
         let error = block_on(download_into(
             &dir,
             &release,
             Package::WindowsExe,
+            Ranges::DEFAULT,
             &AtomicBool::new(false),
             |_| {},
         ))
         .unwrap_err();
         assert!(error.contains("failed verification"), "{error}");
+        assert!(!dir.join(WINDOWS_ZIP).exists());
         assert!(!dir.join(WINDOWS_EXE).exists());
-        assert!(!dir.join(format!("{WINDOWS_EXE}.part")).exists());
+        assert!(!dir.join(format!("{WINDOWS_ZIP}.part")).exists());
         assert!(!dir.join(VERIFIED).exists());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1989,6 +2453,45 @@ mod tests {
         );
         assert!(!sibling(&exe, ".new").exists());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Downloads the latest real Windows update from GitHub and reports how long it took.
+    #[test]
+    #[ignore = "Downloads the latest release from GitHub"]
+    fn the_latest_github_release_downloads_and_unpacks() {
+        let cache = scratch("github");
+        let oldest = Build {
+            number: 0,
+            ..RUNNING
+        };
+        let found = block_on(check_at(
+            &format!("https://api.github.com/repos/{REPOSITORY}/releases/latest"),
+            oldest,
+            Package::WindowsExe,
+            &cache,
+        ))
+        .unwrap()
+        .expect("a release");
+        let started = Instant::now();
+        let exe = block_on(download_into(
+            &cache.join(&found.release.tag),
+            &found.release,
+            Package::WindowsExe,
+            Ranges::DEFAULT,
+            &AtomicBool::new(false),
+            |_| {},
+        ))
+        .unwrap();
+        let elapsed = started.elapsed().as_secs_f64();
+        let size = found.release.asset.size as f64;
+        println!(
+            "{} ({:.1} MB) in {elapsed:.1} s, {:.0} KiB/s; unpacked {:.1} MB",
+            found.release.asset.name,
+            size / 1e6,
+            size / 1024.0 / elapsed,
+            fs::metadata(&exe).unwrap().len() as f64 / 1e6
+        );
+        fs::remove_dir_all(cache).unwrap();
     }
 
     /// Unpacks a real release DMG and swaps it over a stand-in installation (no relaunch).

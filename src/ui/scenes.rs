@@ -3499,6 +3499,7 @@ fn with_update(s: &mut App, phase: Phase) {
             url: String::new(),
             size: 25_237_970,
             digest: None,
+            mirror: None,
         },
         checksums_url: String::new(),
         notes: Box::default(),

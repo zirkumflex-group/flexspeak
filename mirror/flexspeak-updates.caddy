@@ -1,0 +1,44 @@
+# Flexspeak update mirror. Runbook: /srv/flexspeak-updates/OPERATIONS.md
+# Static and read-only: release files copied by flexspeak-mirror.timer. The app checks every
+# file against GitHub's checksums, so this site can fail an update but never change one.
+# Cloudflare-proxied and origin-locked; the cloudflare_only snippet is in /etc/caddy/Caddyfile.
+http://updates.zirkumflex.io {
+	import security_access_log
+	route {
+		header -Server
+		import cloudflare_only
+		redir https://{host}{uri} permanent
+	}
+}
+
+updates.zirkumflex.io {
+	import security_access_log
+	route {
+		header -Server
+		import cloudflare_only
+
+		# Only published release files: no listings, no staging directories.
+		@release {
+			method GET HEAD
+			path_regexp ^/flexspeak/v[0-9]+\.[0-9]+\.[0-9]+-build\.[0-9]+/Flexspeak-[A-Za-z0-9.-]+$
+			file {
+				root /srv/flexspeak-updates/public
+			}
+		}
+		handle @release {
+			# A tag's files never change, so Cloudflare may keep them.
+			header {
+				Cache-Control "public, max-age=31536000, immutable"
+				Content-Disposition "attachment"
+				Strict-Transport-Security "max-age=31536000; includeSubDomains"
+				X-Content-Type-Options "nosniff"
+				X-Robots-Tag "noindex, nofollow"
+			}
+			root * /srv/flexspeak-updates/public
+			file_server
+		}
+
+		header Cache-Control "no-store"
+		respond "Not Found" 404
+	}
+}

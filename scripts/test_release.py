@@ -276,7 +276,7 @@ class InAppUpdaterContractTests(unittest.TestCase):
     def test_updater_asset_names_are_published_with_checksums(self):
         source = (release.ROOT / "src/updater.rs").read_text(encoding="utf-8")
         names = dict(re.findall(r'pub const ([A-Z_]+): &str = "(Flexspeak-[^"]+|SHA256SUMS\.txt)";', source))
-        self.assertEqual(set(names), {"CHECKSUMS", "WINDOWS_EXE", "MACOS_DMG", "LINUX_PACKAGE", "LINUX_TARBALL"})
+        self.assertEqual(set(names), {"CHECKSUMS", "WINDOWS_EXE", "WINDOWS_ZIP", "MACOS_DMG", "LINUX_PACKAGE", "LINUX_TARBALL"})
         self.assertEqual(names.pop("CHECKSUMS"), "SHA256SUMS.txt")
         for name in names.values():
             (self.root / name).write_bytes(name.encode())

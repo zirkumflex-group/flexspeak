@@ -42,6 +42,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", default-features = false }
 tsclientlib = { path = "vendor/tsclientlib", default-features = false, features = ["audio"] }
+# Unpacks the Windows update ZIP (less than half the size of the bare executable). The version
+# and backend webrtc-sys-build already builds.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5" }
 # For saved identities that tsclientlib cannot load back (see `recover_identity`).
 tsproto-types = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5" }
