@@ -369,6 +369,8 @@ struct ServerSession {
     expanded_client: Option<u16>,
     /// Clients heard right now, including yourself while you transmit.
     talking: BTreeSet<u16>,
+    /// Who just opened a Monster card, shown on their row for a few seconds.
+    unboxed: BTreeMap<u16, monster::Unboxed>,
     client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
     /// Each sampled peer's health as their globe shows it.
     client_health: BTreeMap<u16, usage::SteadyHealth>,
@@ -436,6 +438,7 @@ impl ServerSession {
             chat: chat::Chat::default(),
             expanded_client: None,
             talking: BTreeSet::new(),
+            unboxed: BTreeMap::new(),
             client_usage: BTreeMap::new(),
             client_health: BTreeMap::new(),
             connection_health: usage::SteadyHealth::default(),
@@ -2359,16 +2362,15 @@ impl App {
 
     fn sync_page_visibility(&self) {
         let normal = self.onboarding.is_none();
-        // Statistics covers the server view without ending its streams: your share and the
-        // ones you watch keep running and are there again on the way back.
-        self.server().streaming.visible.store(
-            normal && matches!(self.tab, Tab::Home | Tab::Statistics),
-            Ordering::Relaxed,
-        );
-        self.channel_health_visible.store(
-            normal && matches!(self.tab, Tab::Home | Tab::Statistics),
-            Ordering::Relaxed,
-        );
+        // Statistics and the Monster page cover the server view without ending its streams:
+        // your share and the ones you watch keep running and are there again on the way back.
+        let server_view = normal && matches!(self.tab, Tab::Home | Tab::Statistics | Tab::Monster);
+        self.server()
+            .streaming
+            .visible
+            .store(server_view, Ordering::Relaxed);
+        self.channel_health_visible
+            .store(server_view, Ordering::Relaxed);
     }
 
     fn apply_settings(&mut self, saved: settings::Settings) {
@@ -8143,6 +8145,9 @@ mod tests {
         assert!(app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         let _ = app.update(Message::ShowTab(Tab::Statistics));
+        assert!(app.server().streaming.visible.load(Ordering::Relaxed));
+        assert!(app.channel_health_visible.load(Ordering::Relaxed));
+        let _ = app.update(Message::ShowTab(Tab::Monster));
         assert!(app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         // Settings floats over the page, so it leaves what that page shows running.

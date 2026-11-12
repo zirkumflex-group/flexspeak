@@ -280,22 +280,22 @@ fn line(t: &Theme, entry: &Entry, layout: Layout, here: u64) -> El {
     }
     meta = meta.child(time(t, entry));
     let id = entry.id;
-    let mut line =
-        row()
-            .key(format!("chat-{}", entry.id))
-            .on_secondary_press(move |s: &mut App, point: rune::PointerPress, _: &mut Tx| {
-                s.ui.chat_line_menu = Some((id, point));
-            })
-            .role("listitem")
-            .w_full()
-            .gap(9.0)
-            .items_start()
-            .child(avatar(&entry.from, 26.0))
-            .child(col().grow(1.0).min_w(0.0).gap(1.0).child(meta).child(body(
-                t,
-                &entry.text,
-                t.text,
-            )));
+    let mut line = row()
+        .key(format!("chat-{}", entry.id))
+        .on_secondary_press(move |s: &mut App, point: rune::PointerPress, _: &mut Tx| {
+            s.ui.chat_line_menu = Some((id, point));
+        })
+        .role("listitem")
+        .w_full()
+        .gap(9.0)
+        .items_start()
+        .child(avatar(&entry.from, 26.0))
+        .child(col().grow(1.0).min_w(0.0).gap(1.0).child(meta).child(
+            match crate::monster::Unboxed::parse(&entry.text) {
+                Some(unboxed) => super::monster::unboxed_card(t, &unboxed),
+                None => body(t, &entry.text, t.text),
+            },
+        ));
     // In the feed a private line sits on a tint, so it can't pass for channel talk.
     if layout == Layout::Feed && entry.scope.is_private() {
         line = line

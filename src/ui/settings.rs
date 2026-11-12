@@ -539,7 +539,7 @@ fn wip_section(s: &App, t: &Theme, k: &Kit) -> Section {
                 form_row(
                     t,
                     "Secret Page",
-                    Some("Unfinished, and not linked from anywhere else."),
+                    Some("Unfinished. The can beside the app's name opens it too."),
                     button(
                         t,
                         "open-secret",

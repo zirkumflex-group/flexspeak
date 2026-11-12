@@ -174,6 +174,51 @@ fn migrate_scanned(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// A card someone opened, as their channel hears it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unboxed {
+    pub rarity: Rarity,
+    pub flavour: String,
+    pub number: u32,
+}
+
+/// What opening a card says in the channel. Plain text, so TeamSpeak's own clients read it
+/// too; Flexspeak turns it back into a card with [`Unboxed::parse`].
+const ANNOUNCE: &str = "\u{1F96B} opened ";
+
+impl Unboxed {
+    pub fn announcement(&self) -> String {
+        let article = if self.rarity == Rarity::Uncommon {
+            "an"
+        } else {
+            "a"
+        };
+        format!(
+            "{ANNOUNCE}{article} {} {} (#{})",
+            self.rarity.name(),
+            self.flavour,
+            self.number
+        )
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix(ANNOUNCE)?;
+        let rest = rest
+            .strip_prefix("an ")
+            .or_else(|| rest.strip_prefix("a "))?;
+        let (name, rest) = rest.split_once(' ')?;
+        let rarity = Rarity::ALL
+            .into_iter()
+            .find(|rarity| rarity.name() == name)?;
+        let (flavour, number) = rest.strip_suffix(')')?.rsplit_once(" (#")?;
+        Some(Self {
+            rarity,
+            flavour: flavour.to_owned(),
+            number: number.parse().ok()?,
+        })
+    }
+}
+
 /// The collection's secret roll key, made the first time it's needed.
 fn roll_key(connection: &Connection) -> Result<[u8; 32]> {
     let saved: Option<Vec<u8>> = connection
@@ -1164,5 +1209,22 @@ mod tests {
         assert_eq!(Section::Flavour(3).parent(), Some(Section::Flavours));
         assert_eq!(Section::Flavours.parent(), Some(Section::Overview));
         assert_eq!(Section::Overview.parent(), None);
+    }
+
+    #[test]
+    fn an_opened_card_reads_back_from_its_channel_line() {
+        for rarity in Rarity::ALL {
+            let unboxed = Unboxed {
+                rarity,
+                flavour: "Ultra Fiesta Mango".into(),
+                number: 487,
+            };
+            assert_eq!(Unboxed::parse(&unboxed.announcement()), Some(unboxed));
+        }
+        assert_eq!(Unboxed::parse("opened a Legendary Ultra Gold (#1)"), None);
+        assert_eq!(
+            Unboxed::parse("\u{1F96B} opened a Shiny Ultra Gold (#1)"),
+            None
+        );
     }
 }

@@ -411,6 +411,12 @@ pub static FLEXSPEAK: Icon = Icon {
     view: 24.0,
     body: r#"<path d="M9.88 3.36 L14.94 3.36 L23.00 16.32 L17.95 16.32 Z" fill="currentColor" fill-opacity="0.6"/><path d="M1.00 20.64 L6.54 20.64 L14.94 3.36 L9.39 3.36 Z" fill="currentColor"/>"#,
 };
+// A drink can in Lucide's style, drawn here since Lucide has none: the way in to the Monster page.
+pub static CAN: Icon = Icon {
+    name: "flexspeak-can",
+    view: 24.0,
+    body: r#"<path d="M8 2h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 2 6 5.5v13L8 22h8l2-3.5v-13L16 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 8.5h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 13.5c0-1 .9-1.5 2-1.5s2 .5 2 1.5-.9 1.5-2 1.5-2-.5-2-1.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
 pub static BAN: Icon = Icon {
     name: "lucide-ban",
     view: 24.0,
