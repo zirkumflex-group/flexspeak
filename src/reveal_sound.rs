@@ -168,6 +168,35 @@ pub fn render(rarity: Rarity) -> Vec<f32> {
     mix.finish()
 }
 
+/// The short sound of someone else opening a card: the can cracking, then the rarity's payoff
+/// from the reveal, quieter than your own.
+pub fn chime(rarity: Rarity) -> Vec<f32> {
+    let mut mix = Mix::default();
+    mix.crack(0, 0.07);
+    match rarity {
+        Rarity::Common => mix.run(60, Voice::Felt, &[72, 76], 90, 0.08),
+        Rarity::Uncommon => mix.run(60, Voice::Felt, &[72, 76, 79], 80, 0.09),
+        Rarity::Rare => {
+            mix.run(60, Voice::Bell, &[72, 79, 84], 75, 0.10);
+            mix.note(285, Voice::Glass, 88, 0.0, 0.08);
+        }
+        Rarity::Mythic => {
+            mix.run(60, Voice::Bell, &[72, 76, 79, 84, 88], 70, 0.11);
+            mix.note(60, Voice::Hum, 48, 0.0, 0.10);
+        }
+        Rarity::Legendary => {
+            mix.thud(0, 0.18);
+            mix.run(60, Voice::Bell, &[72, 79, 84, 88, 91, 96], 65, 0.12);
+            mix.run(860, Voice::Hum, &[60, 67], 200, 0.07);
+        }
+    }
+    let mut samples = mix.finish();
+    for sample in &mut samples {
+        *sample *= 0.7;
+    }
+    samples
+}
+
 /// Sound that's playing. Dropping this fades it out.
 pub struct Playing {
     stop: Arc<AtomicBool>,
@@ -182,6 +211,15 @@ impl Drop for Playing {
 /// Starts a reveal's sound on the chosen output, on its own thread so the window never waits for
 /// the audio device.
 pub fn play(rarity: Rarity, output: Option<DeviceChoice>, volume_percent: u8) -> Playing {
+    play_score(render(rarity), output, volume_percent)
+}
+
+/// Starts someone else's card [`chime`].
+pub fn play_chime(rarity: Rarity, output: Option<DeviceChoice>, volume_percent: u8) -> Playing {
+    play_score(chime(rarity), output, volume_percent)
+}
+
+fn play_score(score: Vec<f32>, output: Option<DeviceChoice>, volume_percent: u8) -> Playing {
     let stop = Arc::new(AtomicBool::new(false));
     // A test run shouldn't make noise.
     if !cfg!(test) {
@@ -189,7 +227,7 @@ pub fn play(rarity: Rarity, output: Option<DeviceChoice>, volume_percent: u8) ->
         let spawned = std::thread::Builder::new()
             .name("card reveal sound".into())
             .spawn(move || {
-                if let Err(error) = run(rarity, output, volume_percent, flag) {
+                if let Err(error) = run(&score, output, volume_percent, flag) {
                     tracing::warn!("can't play the card reveal: {error:#}");
                 }
             });
@@ -201,7 +239,7 @@ pub fn play(rarity: Rarity, output: Option<DeviceChoice>, volume_percent: u8) ->
 }
 
 fn run(
-    rarity: Rarity,
+    score: &[f32],
     output: Option<DeviceChoice>,
     volume_percent: u8,
     stop: Arc<AtomicBool>,
@@ -215,7 +253,7 @@ fn run(
     let config = device.default_output_config()?;
     let rate = config.sample_rate() as usize;
     let gain = f32::from(volume_percent.min(100)) / 100.0;
-    let samples = Arc::new(resample(&render(rarity), rate, gain));
+    let samples = Arc::new(resample(score, rate, gain));
     let position = Arc::new(AtomicUsize::new(0));
     let channels = usize::from(config.channels());
     let stream_config = config.config();
@@ -346,6 +384,23 @@ mod tests {
             assert!(
                 seconds < settled as f32 / 1000.0 + 2.5,
                 "{rarity:?} rings for {seconds} s"
+            );
+        }
+    }
+
+    #[test]
+    fn someone_elses_card_is_a_short_quieter_chime() {
+        for rarity in Rarity::ALL {
+            let chime = chime(rarity);
+            let seconds = chime.len() as f32 / RATE as f32;
+            assert!(
+                seconds > 0.2 && seconds < 2.5,
+                "{rarity:?} chimes for {seconds} s"
+            );
+            let loudest = chime.iter().fold(0.0_f32, |max, s| max.max(s.abs()));
+            assert!(
+                loudest <= PEAK * 0.7 + f32::EPSILON,
+                "{rarity:?} peaks at {loudest}"
             );
         }
     }

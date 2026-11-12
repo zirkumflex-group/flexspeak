@@ -1509,7 +1509,7 @@ async fn run_connection(
                                     ),
                                     tsclientlib::MessageTarget::Client(_) => (crate::chat::Scope::Private(sender), from.clone()),
                                 };
-                                let _ = events.try_send(Event::Chat(crate::chat::Incoming { scope, own, from, peer, text: message.clone() }));
+                                let _ = events.try_send(Event::Chat(crate::chat::Incoming { scope, own, sender: invoker.id.0, from, peer, text: message.clone() }));
                                 continue;
                             }
                             if let BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }
