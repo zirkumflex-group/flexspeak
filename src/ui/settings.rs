@@ -129,8 +129,10 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
         SettingsPage::Chat => &icons::MESSAGE,
         SettingsPage::Streaming => &icons::MONITOR_UP,
         SettingsPage::Audio => &icons::AUDIO_LINES,
+        SettingsPage::Sounds => &icons::VOLUME_2,
         SettingsPage::Shortcuts => &icons::KEYBOARD,
         SettingsPage::Permissions => &icons::SHIELD,
+        SettingsPage::General => &icons::SETTINGS,
         SettingsPage::Updates => &icons::DOWNLOAD,
         SettingsPage::Errors => &icons::TRIANGLE_ALERT,
         SettingsPage::File => &icons::FILE_TEXT,
@@ -152,6 +154,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
         Some("Voice"),
         &[
             SettingsPage::Audio,
+            SettingsPage::Sounds,
             SettingsPage::Shortcuts,
             SettingsPage::Permissions,
         ],
@@ -159,6 +162,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
     (
         Some("App"),
         &[
+            SettingsPage::General,
             SettingsPage::Updates,
             SettingsPage::Errors,
             SettingsPage::File,
@@ -202,8 +206,8 @@ fn sections(
                 "audio talk send",
                 transmission_rows(s, t, k, layer),
             ),
-            sound_section(s, t, k, layer),
         ],
+        SettingsPage::Sounds => vec![sound_section(s, t, k, layer)],
         SettingsPage::Shortcuts => vec![shortcut_section(s, t, k)],
         SettingsPage::Permissions => vec![permission_section(s, t)],
         SettingsPage::Updates => vec![
@@ -218,15 +222,16 @@ fn sections(
             Section::boxed(
                 "changelog",
                 "What's New",
-                "changelog changes release notes history version build earlier",
+                "changelog changes release notes version build earlier",
                 updates::changelog(s, t)
                     .into_iter()
                     .map(|row| item("", row))
                     .collect(),
             ),
         ],
+        SettingsPage::General => general_sections(s, t, k),
         SettingsPage::Errors => vec![error_log_section(s, t)],
-        SettingsPage::File => vec![file_section(s, t), setup_section(s, t)],
+        SettingsPage::File => vec![file_section(s, t)],
     }
 }
 
@@ -273,7 +278,7 @@ fn error_log_section(s: &App, t: &Theme) -> Section {
     Section::boxed(
         "error-log",
         "Error Log",
-        "errors problems failures warnings crash history log",
+        "errors problems failures warnings crash log",
         rows,
     )
     .note(group_note(
@@ -365,6 +370,14 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                 .collect();
             found[i] = !rendered.is_empty();
             any |= found[i];
+            // Results from several pages read as one list, so each page's results say whose
+            // they are.
+            if found[i] {
+                content = content.child(
+                    super::widgets::overline(t, page.title())
+                        .key(format!("results-{}", page.title())),
+                );
+            }
             content = content.children(rendered);
         }
         if !any {
@@ -732,7 +745,13 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     )
                     .help(format!("Edit {}", server.title())),
                 );
-            item(format!("server {} {}", server.name, server.address), e)
+            item(
+                format!(
+                    "server {} {} auto connect launch startup password",
+                    server.name, server.address
+                ),
+                e,
+            )
         })
         .collect();
     rows.push(item(
@@ -749,19 +768,13 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
     Section::boxed("servers", "Servers", "saved servers list bookmarks address hostname", rows)
         .note(group_note(
             t,
-            "Save as many servers as you like and connect to several at once. Changes here save straight away.",
+            "Save as many servers as you like and connect to several at once.",
         ))
 }
 
-/// A small pill beside a name: the server in use.
+/// A word beside a name in the accent colour: the server in use.
 fn badge(t: &Theme, label: &str) -> El {
-    text(label.to_owned())
-        .font(ty::CAPTION)
-        .color(t.accent)
-        .px(6.0)
-        .py(1.0)
-        .radius(radius::PILL)
-        .fill(t.accent.alpha(0.14))
+    text(label.to_owned()).font(ty::CAPTION).color(t.accent)
 }
 
 fn identity_section(s: &App, t: &Theme, k: &Kit) -> Section {
@@ -983,6 +996,17 @@ fn file_section(s: &App, t: &Theme) -> Section {
     ))
 }
 
+/// How the app sits on the desktop, then setup. The tray-icon section is where rows about the
+/// window and starting with the system belong.
+fn general_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
+    let mut sections = Vec::new();
+    if crate::tray::SUPPORTED {
+        sections.push(tray_section(s, t, k));
+    }
+    sections.push(setup_section(s, t));
+    sections
+}
+
 /// Running setup again over the saved profile; Cancel in setup keeps everything as it was.
 fn setup_section(s: &App, t: &Theme) -> Section {
     let idle = s.idle();
@@ -1102,6 +1126,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             t,
             "Pick one theme for light and one for dark. System switches between them with your computer.",
         )),
+        more_themes(s, t),
         Section::boxed(
             "motion",
             "Motion",
@@ -1128,11 +1153,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
                 ),
             )],
         ),
-        more_themes(s, t),
     ];
-    if crate::tray::SUPPORTED {
-        sections.insert(sections.len() - 1, tray_section(s, t, k));
-    }
     if let Some(current) = &s.omarchy {
         sections.insert(0, omarchy_section(s, t, k, &current.name));
     }
@@ -1929,7 +1950,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
     ]
 }
 
-/// The OS's current answer as a tinted pill, so the row reads at a glance.
+/// The OS's current answer as an icon and a word in its colour, so the row reads at a glance.
 fn status_pill(t: &Theme, status: permissions::Status) -> El {
     use permissions::Status;
     let (glyph, color) = match status {
@@ -1941,11 +1962,8 @@ fn status_pill(t: &Theme, status: permissions::Status) -> El {
     };
     row()
         .h(22.0)
-        .px(8.0)
         .gap(5.0)
         .center_y()
-        .radius(11.0)
-        .fill(color.alpha(0.14))
         .label(status.label())
         .child(rune::icon(glyph, 12.0).color(color).a11y_hidden())
         .child(

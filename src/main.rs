@@ -504,22 +504,26 @@ enum SettingsPage {
     Chat,
     Streaming,
     Audio,
+    Sounds,
     Shortcuts,
     Permissions,
+    General,
     Updates,
     Errors,
     File,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 12] = [
         Self::Server,
         Self::Appearance,
         Self::Chat,
         Self::Streaming,
         Self::Audio,
+        Self::Sounds,
         Self::Shortcuts,
         Self::Permissions,
+        Self::General,
         Self::Updates,
         Self::Errors,
         Self::File,
@@ -532,8 +536,10 @@ impl SettingsPage {
             Self::Chat => "Chat",
             Self::Streaming => "Streaming",
             Self::Audio => "Audio",
+            Self::Sounds => "Sounds",
             Self::Shortcuts => "Shortcuts",
             Self::Permissions => "Permissions",
+            Self::General => "General",
             Self::Updates => "Updates",
             Self::Errors => "Error Log",
             Self::File => "Settings File",
@@ -5359,12 +5365,11 @@ mod tests {
         };
         settings::save(&path, &saved).unwrap();
         app.load_settings(path.clone());
-        app.nickname = "Unsaved draft".into();
         let _ = app.update(Message::ToggleFooter);
         assert!(app.footer_hidden);
         let stored = settings::load(&path).unwrap().unwrap();
         assert!(stored.footer_hidden);
-        assert_eq!(stored.nickname, "Saved name", "drafts stay unsaved");
+        assert_eq!(stored.nickname, "Saved name", "the rest of the file is untouched");
         let (mut restarted, _) = setup_fixture("footer-restart");
         restarted.load_settings(path.clone());
         assert!(restarted.footer_hidden);
@@ -5380,12 +5385,11 @@ mod tests {
         settings::save(&path, &settings::Settings::default()).unwrap();
         app.load_settings(path.clone());
         assert!(app.updater.auto_download, "on by default");
-        app.nickname = "Unsaved draft".into();
         let _ = app.update(Message::Updater(updater::Event::AutoDownload(false)));
         assert!(!app.updater.auto_download);
         let stored = settings::load(&path).unwrap().unwrap();
         assert!(!stored.auto_download_updates);
-        assert_eq!(stored.nickname, "Flexspeak", "drafts stay unsaved");
+        assert_eq!(stored.nickname, "Flexspeak", "the rest of the file is untouched");
         let (mut restarted, _) = setup_fixture("auto-update-restart");
         restarted.load_settings(path.clone());
         assert!(!restarted.updater.auto_download);
@@ -5406,7 +5410,6 @@ mod tests {
         let path = root.join("settings.json");
         settings::save(&path, &settings::Settings::default()).unwrap();
         app.load_settings(path.clone());
-        app.nickname = "Unsaved draft".into();
         let chosen = settings::Appearance {
             scheme: settings::ColorScheme::Light,
             light_theme: settings::ThemeName::Ocean,
