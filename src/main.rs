@@ -2221,6 +2221,11 @@ impl App {
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
             log_pane: self.log_pane,
+            collapsed_channels: self
+                .saved
+                .as_ref()
+                .map(|saved| saved.collapsed_channels.clone())
+                .unwrap_or_default(),
             auto_download_updates: self.updater.auto_download,
             appearance: self.appearance.clone(),
             custom_themes: self.custom_themes.clone(),
@@ -2283,6 +2288,39 @@ impl App {
         self.save_preference(
             |saved| saved.footer_hidden = hidden,
             "The footer choice applies for now but was not saved",
+        );
+    }
+
+    /// Stores which channels this server's tree folds away, for the next time you connect.
+    fn save_collapsed_channels(&mut self) {
+        if self.loopback {
+            return;
+        }
+        let server = self.server();
+        let address = server.address.trim().to_owned();
+        // Channels deleted since are dropped as the set is saved.
+        let folded: BTreeSet<u64> = server
+            .collapsed_channels
+            .iter()
+            .copied()
+            .filter(|id| server.state.channels.iter().any(|channel| channel.id == *id))
+            .collect();
+        if address.is_empty()
+            || self.saved.as_ref().is_some_and(|saved| {
+                saved.collapsed_channels.get(&address).map_or(folded.is_empty(), |set| *set == folded)
+            })
+        {
+            return;
+        }
+        self.save_preference(
+            move |saved| {
+                if folded.is_empty() {
+                    saved.collapsed_channels.remove(&address);
+                } else {
+                    saved.collapsed_channels.insert(address, folded);
+                }
+            },
+            "The folded channels apply for now but were not saved",
         );
     }
 
@@ -3945,6 +3983,7 @@ impl App {
                 if !self.server_mut().collapsed_channels.remove(&id) {
                     self.server_mut().collapsed_channels.insert(id);
                 }
+                self.save_collapsed_channels();
             }
             Message::ToggleClient(id) => {
                 if self.server().connected
@@ -4113,6 +4152,12 @@ impl App {
                 }
                 session.connected = true;
                 session.detail = detail;
+                // The tree folds as you left it on this server.
+                if let Some(folded) = self.saved.as_ref().and_then(|saved| {
+                    saved.collapsed_channels.get(session.address.trim())
+                }) {
+                    session.collapsed_channels = folded.iter().copied().collect();
+                }
                 session.status = if loopback {
                     "Local microphone test — only you can hear this"
                 } else {
@@ -4166,9 +4211,6 @@ impl App {
                 }) {
                     session.clear_client_details();
                 }
-                session
-                    .collapsed_channels
-                    .retain(|id| state.channels.iter().any(|channel| channel.id == *id));
                 let present = |id: &u16| {
                     state
                         .channels

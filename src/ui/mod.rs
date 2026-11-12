@@ -456,7 +456,12 @@ fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
     };
     let chatting = matches!(message, Message::Chat(_));
     let target = chatting.then(|| s.server().chat.target.clone());
+    let place = own_place(s);
     let task = s.update(message);
+    // Arriving on a server, or being moved, brings your own row into view in a long tree.
+    if let Some((_, me)) = own_place(s).filter(|now| Some(*now) != place) {
+        tx.scroll_into_view_in("channel-scroll", format!("member-{me}"));
+    }
     // A conversation opened from elsewhere may have its tab scrolled out of the bar.
     if let Some(before) = target
         && s.server().chat.target != before
@@ -468,6 +473,13 @@ fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
     sync_tray(s);
     sync_fullscreen(s, tx);
     !invisible
+}
+
+/// The channel you are in and your own id there, once the server has said.
+fn own_place(s: &App) -> Option<(u64, u16)> {
+    let channel = s.server().state.current.as_ref()?;
+    let me = channel.members.iter().find(|member| member.is_self)?;
+    Some((channel.id, me.id))
 }
 
 /// Takes the window full screen while a stream should fill it, and back when it ends: you
