@@ -92,12 +92,18 @@ pub fn maximize_when_shown() {
 pub fn apply() {
     use std::sync::atomic::Ordering;
     use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SW_MAXIMIZE, ShowWindow};
-    if !MAXIMIZE.load(Ordering::Relaxed) {
+    if FRAME_FIXED.load(Ordering::Relaxed) && !MAXIMIZE.load(Ordering::Relaxed) {
         return;
     }
     let Some(hwnd) = window() else {
         return;
     };
+    if !FRAME_FIXED.swap(true, Ordering::Relaxed) {
+        fix_full_screen_frame(hwnd);
+    }
+    if !MAXIMIZE.load(Ordering::Relaxed) {
+        return;
+    }
     // SAFETY: `hwnd` is a live window owned by this UI thread.
     unsafe {
         if IsWindowVisible(hwnd) != 0 {
@@ -109,6 +115,49 @@ pub fn apply() {
 
 #[cfg(not(windows))]
 pub fn apply() {}
+
+#[cfg(windows)]
+static FRAME_FIXED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Full screen, the whole window is the picture. Rune's frame treats a window that was
+/// maximized before going full screen as still maximized and keeps the sizing border's band at
+/// the top, plus a pixel at each edge with an auto-hiding taskbar, so the stream sat inside
+/// empty edges. Full screen has no caption (winit drops the frame styles), and then this hands
+/// the client area the whole window rect, after the procedures below have run.
+#[cfg(windows)]
+fn fix_full_screen_frame(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongPtrW, NCCALCSIZE_PARAMS, WM_NCCALCSIZE, WS_CAPTION,
+    };
+    unsafe extern "system" fn procedure(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _: usize,
+        _: usize,
+    ) -> LRESULT {
+        // SAFETY: forwards to the next procedure; for `WM_NCCALCSIZE` with a nonzero
+        // `wparam`, `lparam` points to the `NCCALCSIZE_PARAMS` Windows documents.
+        unsafe {
+            let full_screen = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CAPTION == 0;
+            if message != WM_NCCALCSIZE || wparam == 0 || !full_screen {
+                return DefSubclassProc(hwnd, message, wparam, lparam);
+            }
+            let params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
+            let outer = params.rgrc[0];
+            DefSubclassProc(hwnd, message, wparam, lparam);
+            params.rgrc[0] = outer;
+            0
+        }
+    }
+    // SAFETY: `hwnd` is a live window owned by this UI thread, which runs its procedures.
+    unsafe {
+        SetWindowSubclass(hwnd, Some(procedure), 0x464C_5853, 0);
+    }
+}
 
 /// Flashes the taskbar button until the window comes to the front, or stops it.
 #[cfg(windows)]

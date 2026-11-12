@@ -3163,16 +3163,10 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_joins_on_a_double_click_and_offers_a_menu() {
+    fn a_channel_joins_on_a_click_and_offers_a_menu() {
         let mut rt = runtime(channel_tree, (900.0, 790.0));
         settle(&mut rt);
         let name = "channel-2/name";
-        click(&mut rt, name);
-        assert_eq!(
-            rt.state.server().expected_channel,
-            None,
-            "one click doesn't move you"
-        );
         let (x, y) = rt.find(name).unwrap();
         rt.pointer_move(x, y);
         rt.frame(1.0 / 60.0);
@@ -3186,12 +3180,17 @@ mod tests {
         });
         settle(&mut rt);
         assert!(rt.state.ui.channel_menu.is_none());
-        for _ in 0..2 {
-            rt.pointer_down(x, y);
-            rt.pointer_up(x, y);
-        }
-        settle(&mut rt);
-        assert_eq!(rt.state.server().expected_channel, Some(2));
+        assert_eq!(
+            rt.state.server().expected_channel,
+            None,
+            "the menu didn't join"
+        );
+        click(&mut rt, name);
+        assert_eq!(
+            rt.state.server().expected_channel,
+            Some(2),
+            "one click joins"
+        );
         // A spacer is a label: it never joins.
         let mut rt = runtime(channel_tree_spacers, (900.0, 790.0));
         settle(&mut rt);
