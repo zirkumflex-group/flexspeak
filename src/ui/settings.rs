@@ -136,6 +136,7 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
         SettingsPage::Updates => &icons::DOWNLOAD,
         SettingsPage::Errors => &icons::TRIANGLE_ALERT,
         SettingsPage::File => &icons::FILE_TEXT,
+        SettingsPage::Wip => &icons::FLASK,
     }
 }
 
@@ -166,6 +167,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
             SettingsPage::Updates,
             SettingsPage::Errors,
             SettingsPage::File,
+            SettingsPage::Wip,
         ],
     ),
 ];
@@ -232,6 +234,7 @@ fn sections(
         SettingsPage::General => general_sections(s, t, k),
         SettingsPage::Errors => vec![error_log_section(s, t)],
         SettingsPage::File => vec![file_section(s, t)],
+        SettingsPage::Wip => vec![wip_section(t)],
     }
 }
 
@@ -505,6 +508,32 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
     );
     layer.extend(menus);
     server_dialog(s, t, k, layer);
+}
+
+/// The way in to the secret page. Its terms leave out what the page is, so searching Settings
+/// for it finds nothing.
+fn wip_section(t: &Theme) -> Section {
+    Section::boxed(
+        "wip",
+        "Work in Progress",
+        "wip unfinished",
+        vec![item(
+            "wip secret",
+            form_row(
+                t,
+                "Secret Page",
+                Some("Unfinished, and not linked from anywhere else."),
+                button(
+                    t,
+                    "open-secret",
+                    "Open",
+                    None,
+                    Variant::Secondary,
+                    Some(Message::OpenMonster),
+                ),
+            ),
+        )],
+    )
 }
 
 fn sidebar(

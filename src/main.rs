@@ -14,6 +14,7 @@ mod hub;
 mod icons;
 mod install;
 mod memory;
+mod monster;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_audio;
 mod notify;
@@ -22,6 +23,7 @@ mod onboarding;
 mod permissions;
 mod profiler;
 mod resume;
+mod reveal_sound;
 mod secret;
 mod server_log;
 mod session_end;
@@ -274,6 +276,9 @@ struct App {
     cpu_history: usage::MetricHistory,
     ram_history: usage::MetricHistory,
     tab: Tab,
+    monster: monster::Tracker,
+    /// The card reveal's sound; dropping it fades the sound out.
+    reveal_sound: Option<reveal_sound::Playing>,
     /// The open Settings window's category; Settings floats over whichever page is showing.
     settings_page: Option<SettingsPage>,
     /// The category Settings reopens on.
@@ -529,6 +534,7 @@ struct Poke {
 enum Tab {
     Home,
     Statistics,
+    Monster,
 }
 
 /// The Add or Edit Server dialog's drafts. `index` is the server being edited; `None` adds one.
@@ -576,10 +582,11 @@ enum SettingsPage {
     Updates,
     Errors,
     File,
+    Wip,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Server,
         Self::Appearance,
         Self::Chat,
@@ -592,6 +599,7 @@ impl SettingsPage {
         Self::Updates,
         Self::Errors,
         Self::File,
+        Self::Wip,
     ];
 
     fn title(self) -> &'static str {
@@ -608,6 +616,7 @@ impl SettingsPage {
             Self::Updates => "Updates",
             Self::Errors => "Error Log",
             Self::File => "Settings File",
+            Self::Wip => "WIP",
         }
     }
 }
@@ -959,6 +968,23 @@ enum Message {
     UsageTick,
     ShowTab(Tab),
     OpenSettings(SettingsPage),
+    /// Leaves Settings for the secret page its WIP section links to.
+    OpenMonster,
+    /// Records a can of this flavour, by its place in `FLAVOURS`, drunk just now.
+    MonsterAdd(usize),
+    MonsterSearch(String),
+    MonsterRevealTick(u64),
+    MonsterRevealSkip,
+    MonsterReplay(String),
+    MonsterSelect(String),
+    MonsterRemove(String),
+    MonsterMore,
+    MonsterShow(monster::Section),
+    MonsterGate(Option<monster::Gate>),
+    MonsterRanking(monster::Ranking),
+    MonsterHidden(bool),
+    /// A sign-in field was typed in; the field itself holds the text.
+    MonsterSignInTyped,
     CloseSettings,
     SettingsSearch(String),
     RefreshStreams,
@@ -1229,6 +1255,8 @@ impl App {
             cpu_history,
             ram_history,
             tab: Tab::Home,
+            monster: monster::Tracker::default(),
+            reveal_sound: None,
             settings_page: None,
             settings_recent: SettingsPage::Server,
             settings_query: String::new(),
@@ -2233,6 +2261,41 @@ impl App {
         }
     }
 
+    /// A newly added can gets opened.
+    fn after_submit(&mut self) -> Task {
+        if !matches!(self.monster.notice, Some(monster::Notice::Added(_))) {
+            return Task::none();
+        }
+        match self.monster.selected.clone() {
+            Some(identity) => self.begin_reveal(identity),
+            None => Task::none(),
+        }
+    }
+
+    fn begin_reveal(&mut self, identity: String) -> Task {
+        let Some(reveal) = self.monster.start_reveal(identity) else {
+            return Task::none();
+        };
+        self.reveal_sound = Some(reveal_sound::play(
+            reveal.rarity,
+            self.output.clone(),
+            self.playback_volume.percent(),
+        ));
+        Self::reveal_after(reveal.id, reveal.delay())
+    }
+
+    fn reveal_after(id: u64, delay: std::time::Duration) -> Task {
+        Task::Perform(Box::new(move || {
+            std::thread::sleep(delay);
+            Message::MonsterRevealTick(id)
+        }))
+    }
+
+    fn end_reveal(&mut self) {
+        self.monster.reveal = None;
+        self.reveal_sound = None;
+    }
+
     fn sync_page_visibility(&self) {
         let normal = self.onboarding.is_none();
         // Statistics covers the server view without ending its streams: your share and the
@@ -2607,6 +2670,7 @@ impl App {
                 _ if self.settings_page.is_some() => resume::Page::Settings,
                 Tab::Home => resume::Page::Home,
                 Tab::Statistics => resume::Page::Statistics,
+                Tab::Monster => resume::Page::Home,
             },
             servers,
             self.active
@@ -3123,6 +3187,11 @@ impl App {
                 if tab != Tab::Statistics && self.server().expanded_client.is_some() {
                     self.select_client(None);
                 }
+                if tab == Tab::Monster {
+                    self.monster.open(self.settings_path.as_deref());
+                } else {
+                    self.end_reveal();
+                }
                 self.tab = tab;
                 self.chat_seen();
                 self.sync_page_visibility();
@@ -3134,6 +3203,42 @@ impl App {
                 }
             }
             Message::CloseSettings => self.close_settings(),
+            Message::OpenMonster => {
+                self.close_settings();
+                return self.update(Message::ShowTab(Tab::Monster));
+            }
+            Message::MonsterSearch(query) => self.monster.query = query,
+            Message::MonsterAdd(flavour) => {
+                // A can tapped while another is being opened waits for it to finish.
+                if self.monster.reveal.is_some() {
+                    return Task::none();
+                }
+                self.monster.add(flavour, chrono::Utc::now().timestamp());
+                return self.after_submit();
+            }
+            Message::MonsterRevealTick(id) => {
+                return match self.monster.advance_reveal(id) {
+                    Some(delay) => Self::reveal_after(id, delay),
+                    None => Task::none(),
+                };
+            }
+            Message::MonsterRevealSkip => self.end_reveal(),
+            Message::MonsterReplay(identity) => return self.begin_reveal(identity),
+            Message::MonsterSelect(code) => self.monster.selected = Some(code),
+            Message::MonsterRemove(code) => {
+                self.end_reveal();
+                self.monster.remove(&code);
+            }
+            Message::MonsterMore => self.monster.shown += monster::PAGE,
+            Message::MonsterShow(section) => self.monster.section = section,
+            Message::MonsterGate(gate) => self.monster.gate = gate,
+            Message::MonsterRanking(ranking) => self.monster.ranking = ranking,
+            Message::MonsterHidden(hidden) => self.monster.hidden = hidden,
+            Message::MonsterSignInTyped => {
+                if let Some(monster::Gate::Code { wrong, .. }) = &mut self.monster.gate {
+                    *wrong = false;
+                }
+            }
             Message::SettingsSearch(query) => {
                 if self.settings_page.is_some() {
                     self.settings_query = query;

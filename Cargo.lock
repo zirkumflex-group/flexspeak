@@ -1646,6 +1646,7 @@ dependencies = [
  "directories",
  "embed-resource",
  "futures",
+ "getrandom 0.3.4",
  "global-hotkey",
  "libc",
  "libwebrtc",
@@ -1660,6 +1661,7 @@ dependencies = [
  "resvg",
  "rubato",
  "rune",
+ "rune-fx",
  "rune-kit",
  "rusqlite",
  "rustls",
@@ -4633,6 +4635,17 @@ dependencies = [
  "xkbcommon",
  "zbus 6.2.1",
  "zeroize",
+]
+
+[[package]]
+name = "rune-fx"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=2ceefd2418b63cf33adb51ef83383c68bc0ffea5#2ceefd2418b63cf33adb51ef83383c68bc0ffea5"
+dependencies = [
+ "bytemuck",
+ "rune-motion",
+ "rune-staging",
+ "wgpu",
 ]
 
 [[package]]
