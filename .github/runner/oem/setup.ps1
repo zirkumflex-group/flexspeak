@@ -82,6 +82,12 @@ Add-MachinePath 'C:\rust\cargo\bin'
 # Build output kept between jobs (the point of this runner), outside the checkouts, which
 # actions/checkout cleans. The job hook lives here too.
 New-Item -ItemType Directory -Force 'C:\ci\target', 'C:\ci\opus' | Out-Null
+
+# Defender otherwise scans every file a build writes, which was its biggest use of the CPU.
+# The VM runs nothing but these builds and reaches nothing but the internet.
+$work = 1..$Runners | ForEach-Object { "C:\w$_" }
+Add-MpPreference -ExclusionPath (@('C:\ci', 'C:\rust', "$env:LOCALAPPDATA\Temp") + $work)
+Add-MpPreference -ExclusionProcess 'cargo.exe', 'rustc.exe', 'link.exe', 'cl.exe'
 Copy-Item -Force C:\OEM\allow-job.ps1 C:\ci\allow-job.ps1
 
 if (-not $Token) { Write-Host 'Tools installed; no -Token, so the runners were left alone.'; exit 0 }

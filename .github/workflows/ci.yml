@@ -2,8 +2,9 @@ name: Checks
 
 # No paths filter: these checks are required on main, and a filtered-out PR would never
 # report them and could not merge. They run again on main after every merge: that run is
-# the one that saves the build caches PRs start from, and it shows a merge that only
-# broke in combination with another. Releases do not wait for it (see release.yml).
+# the one that saves the build caches PRs start from on GitHub's runners. The Beelink's
+# runner has no cache to save, so its platform is left out of that run; the release's test
+# (release.yml) is what shows a merge that only broke in combination with another.
 on:
   pull_request:
   push:
@@ -42,7 +43,8 @@ jobs:
           sparse-checkout-cone-mode: false
       - id: platforms
         env:
-          ALL: ${{ inputs.all-platforms && '--all' || '' }}
+          # --hosted: after a merge, only the platforms on GitHub's runners (see the top).
+          ALL: ${{ inputs.all-platforms && '--all' || github.event_name == 'push' && '--hosted' || '' }}
           # The Beelink's Windows runner (.github/runner/README.md), named in the repo variable
           # WINDOWS_RUNNER, takes runs by the people it trusts and never a fork's pull request;
           # everything else stays on GitHub's runner. The runner's own job hook checks again.
@@ -73,6 +75,8 @@ jobs:
     # the macOS app), so every platform that ships lints and tests before anything merges.
     name: Lint and test (${{ matrix.os }})
     needs: [platforms]
+    # Empty after a merge while the Beelink's runner takes every platform that is on.
+    if: needs.platforms.outputs.matrix != '{"include":[]}'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}
@@ -158,6 +162,8 @@ jobs:
           PLATFORMS: ${{ needs.platforms.result }}
           FORMAT: ${{ needs.format.result }}
           RESULT: ${{ needs.check.result }}
+          # Nothing to lint and test (see the check job), which is not a failure.
+          EXPECTED: ${{ needs.platforms.outputs.matrix == '{"include":[]}' && 'skipped' || 'success' }}
         run: |
-          echo "Platforms: $PLATFORMS, format: $FORMAT, lint and test: $RESULT"
-          [ "$PLATFORMS" = success ] && [ "$FORMAT" = success ] && [ "$RESULT" = success ]
+          echo "Platforms: $PLATFORMS, format: $FORMAT, lint and test: $RESULT (expected $EXPECTED)"
+          [ "$PLATFORMS" = success ] && [ "$FORMAT" = success ] && [ "$RESULT" = "$EXPECTED" ]

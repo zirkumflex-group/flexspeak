@@ -108,8 +108,8 @@ def changelog(version, number, path=None):
     """Adds this build and any released build CHANGELOG.md doesn't have yet, newest first, so
     the app embeds its own notes. Rewrites the checkout's copy; nothing commits it.
 
-    Builds of several pushes run side by side, so the push before this one may have no
-    release yet (or never get one, if its build fails). This build carries those commits
+    The push before this one may have no release yet, or never get one: a newer push
+    cancels its build, and a build can fail. This build carries those commits
     all the same, so their changelog lines go into its own entry."""
     path = path or ROOT / "CHANGELOG.md"
     text = path.read_bytes().decode("utf-8")
@@ -381,21 +381,26 @@ def enabled_platforms(everything=False):
     return names
 
 
-def platform_outputs(everything=False):
+def platform_outputs(everything=False, hosted=False):
     """GitHub Actions job outputs: the matrix the checks and builds run, where the release's
     test runs, and whether Homebrew gets a cask. `FLEXSPEAK_WINDOWS_RUNNER` names the
     self-hosted runner Windows moves to; the workflows set it only for trusted runs
-    (.github/runner/README.md), and without it Windows stays on GitHub's runner."""
+    (.github/runner/README.md), and without it Windows stays on GitHub's runner. `hosted`
+    leaves the self-hosted runner's platform out of the matrix, which can then be empty:
+    the checks on main only save GitHub's caches, and that runner has none to save."""
     names = enabled_platforms(everything)
     include = [{key: PLATFORMS[name][key] for key in ("os", "platform", "cache")} for name in names]
     runner = os.environ.get("FLEXSPEAK_WINDOWS_RUNNER", "").strip()
     for entry in include:
         if entry["platform"] == "windows-x64" and runner:
             entry["os"] = runner
+    test = include[0]
+    if hosted and runner:
+        include = [entry for entry in include if entry["os"] != runner]
     return {
         "matrix": json.dumps({"include": include}, separators=(",", ":")),
-        "test-os": include[0]["os"],
-        "test-cache": include[0]["cache"],
+        "test-os": test["os"],
+        "test-cache": test["cache"],
         "macos": json.dumps("macos" in names),
     }
 
@@ -419,13 +424,14 @@ if __name__ == "__main__":
         fetch()
     elif sys.argv[1:] == ["checksums"]:
         checksums()
-    elif sys.argv[1:2] == ["platforms"] and sys.argv[2:] in ([], ["--all"]):
-        for key, value in platform_outputs(everything=sys.argv[2:] == ["--all"]).items():
+    elif sys.argv[1:2] == ["platforms"] and sys.argv[2:] in ([], ["--all"], ["--hosted"]):
+        for key, value in platform_outputs(everything=sys.argv[2:] == ["--all"],
+                                           hosted=sys.argv[2:] == ["--hosted"]).items():
             print(f"{key}={value}")
     elif len(sys.argv) == 4 and sys.argv[1] == "notes":
         notes(Path(sys.argv[2]), Path(sys.argv[3]))
     elif len(sys.argv) == 4 and sys.argv[1] == "cask":
         cask(json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")), Path(sys.argv[3]))
     else:
-        sys.exit("Usage: release.py build | fetch | checksums | platforms [--all]"
+        sys.exit("Usage: release.py build | fetch | checksums | platforms [--all | --hosted]"
                  " | notes COMMIT OUTPUT | cask RELEASE_JSON OUTPUT_RB")

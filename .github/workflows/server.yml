@@ -48,8 +48,11 @@ jobs:
       # The shared crate's own tests run with the app's, in ci.yml.
       - run: cargo test --locked
 
+  # On a pull request. On main the publish job builds and starts the image itself, so it is
+  # built once.
   image:
     name: Docker image
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -68,12 +71,12 @@ jobs:
           exit 1
 
   # Every push to main that changes the server (the paths above) publishes its image, after
-  # the checks and the test build pass. Hosts running server/deploy/compose.yaml pick up
+  # the checks pass and the image it built starts. Hosts running server/deploy/compose.yaml pick up
   # :latest by themselves; :<commit sha> stays, so a host can go back to any earlier build.
   publish:
     name: Publish image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check, image]
+    needs: [check]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -102,7 +105,17 @@ jobs:
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.description=Flexspeak Monster collection server" \
-            -t "$IMAGE:$GITHUB_SHA" -t "$IMAGE:latest" .
+            -t "$IMAGE:$GITHUB_SHA" -t "$IMAGE:latest" -t flexspeak-monster .
+      # As the image job does on a pull request: nothing is pushed unless it starts.
+      - name: Start it
+        run: |
+          docker run -d --name monster -e DEV_CODE=000000 -e PUBLIC_URL=http://localhost:8787 -p 8787:8787 flexspeak-monster
+          for attempt in $(seq 1 20); do
+            curl -fsS http://localhost:8787/health && exit 0
+            sleep 1
+          done
+          docker logs monster
+          exit 1
       # The commit's tag first, so :latest never names an image that isn't there yet.
       - name: Push
         run: |

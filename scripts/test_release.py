@@ -209,9 +209,9 @@ class PlatformSwitchTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def outputs(self, switches, everything=False):
+    def outputs(self, switches, everything=False, hosted=False):
         self.switches.write_text(json.dumps(switches), encoding="utf-8")
-        return release.platform_outputs(everything)
+        return release.platform_outputs(everything, hosted)
 
     def test_the_committed_switch_file_is_valid(self):
         with patch.object(release, "SWITCHES", release.ROOT / ".github/platforms.json"):
@@ -244,6 +244,17 @@ class PlatformSwitchTests(unittest.TestCase):
         with patch.dict(os.environ, {"FLEXSPEAK_WINDOWS_RUNNER": ""}):
             matrix = json.loads(self.outputs(switches)["matrix"])["include"]
         self.assertEqual(matrix[0]["os"], "windows-2022")
+
+    def test_the_checks_after_a_merge_leave_the_self_hosted_runner_out(self):
+        with patch.dict(os.environ, {"FLEXSPEAK_WINDOWS_RUNNER": "flexspeak-win"}):
+            both = self.outputs({"windows": True, "macos": True, "linux": False}, hosted=True)
+            alone = self.outputs({"windows": True, "macos": False, "linux": False}, hosted=True)
+        self.assertEqual([entry["os"] for entry in json.loads(both["matrix"])["include"]], ["macos-26"])
+        self.assertEqual(alone["matrix"], '{"include":[]}')
+        # Without a self-hosted runner nothing is left out.
+        with patch.dict(os.environ, {"FLEXSPEAK_WINDOWS_RUNNER": ""}):
+            hosted = self.outputs({"windows": True, "macos": False, "linux": False}, hosted=True)
+        self.assertEqual(json.loads(hosted["matrix"])["include"][0]["os"], "windows-2022")
 
     def test_a_manual_check_of_everything_ignores_the_switches(self):
         outputs = self.outputs({"windows": True, "macos": False, "linux": False}, everything=True)
@@ -293,8 +304,10 @@ class InAppUpdaterContractTests(unittest.TestCase):
     def test_publishing_takes_turns_and_never_goes_backwards(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         before, publish = workflow.split("\n  publish:\n")
-        # Builds of several pushes run side by side; only the publish job queues.
-        self.assertNotIn("concurrency:\n", before)
+        # A newer push cancels the older one's test and builds, never a publish: that queues.
+        self.assertNotIn("\nconcurrency:\n", before)
+        self.assertIn("    concurrency:\n      group: release-test\n      cancel-in-progress: true\n", before)
+        self.assertIn("      group: release-build-${{ matrix.platform }}\n      cancel-in-progress: true\n", before)
         self.assertIn("    concurrency:\n      group: release-publish\n      queue: max\n", publish)
         self.assertIn("    needs: [platforms, test, build]\n", publish)
         self.assertIn("    if: github.ref == 'refs/heads/main'\n    environment: release\n", publish)
@@ -309,7 +322,9 @@ class InAppUpdaterContractTests(unittest.TestCase):
         self.assertIn("runs-on: ${{ needs.platforms.outputs.test-os }}\n", test)
         self.assertIn("shared-key: ${{ needs.platforms.outputs.test-cache }}\n", test)
         self.assertIn("save-if: false\n", test)
-        self.assertIn("run: cargo test --locked\n", test)
+        # The checks' command, so the self-hosted runner reuses the checks' build directory.
+        self.assertIn("run: cargo test --locked -p flexspeak -p monster-core\n", test)
+        self.assertIn('target/checks" >> $env:GITHUB_ENV\n', test)
         # rust-cache keys on Cargo's environment and the workspace: the cache is only found
         # with the checks' own setup, on whichever platform the test lands.
         checks = (release.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -323,6 +338,8 @@ class InAppUpdaterContractTests(unittest.TestCase):
             self.assertIn(setup, check)
             self.assertIn(setup, test)
         self.assertIn("shared-key: ${{ matrix.cache }}\n", check)
+        self.assertIn("run: cargo test --locked -p flexspeak -p monster-core\n", check)
+        self.assertIn('target/checks" >> $env:GITHUB_ENV\n', check)
         # Both workflows build their matrix from the switch file.
         self.assertIn("matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}\n", check)
         build = workflow.split("\n  build:\n")[1].split("\n  publish:\n")[0]
@@ -344,7 +361,12 @@ class InAppUpdaterContractTests(unittest.TestCase):
         self.assertIn("\n  pull_request:\n  push:\n    branches: [main]\n", checks)
         self.assertNotIn("workflow_call", checks)
         self.assertIn("    name: Checks passed\n    needs: [platforms, format, check]\n    if: always()\n", checks)
-        self.assertIn('[ "$PLATFORMS" = success ] && [ "$FORMAT" = success ] && [ "$RESULT" = success ]', checks)
+        self.assertIn('[ "$PLATFORMS" = success ] && [ "$FORMAT" = success ] && [ "$RESULT" = "$EXPECTED" ]', checks)
+        # After a merge the self-hosted runner's platform is left out; an empty matrix skips
+        # the job, and only then does a skipped job pass.
+        self.assertIn("github.event_name == 'push' && '--hosted'", checks)
+        self.assertIn("""    if: needs.platforms.outputs.matrix != '{"include":[]}'\n""", checks)
+        self.assertIn("""EXPECTED: ${{ needs.platforms.outputs.matrix == '{"include":[]}' && 'skipped' || 'success' }}""", checks)
         source = (release.ROOT / "src/updater.rs").read_text(encoding="utf-8")
         self.assertIn('split_once("-build.")', source)
         self.assertIn("releases/latest", source)
