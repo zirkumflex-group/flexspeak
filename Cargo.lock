@@ -1650,6 +1650,7 @@ dependencies = [
  "global-hotkey",
  "libc",
  "libwebrtc",
+ "monster-core",
  "nnnoiseless",
  "objc2 0.6.5",
  "objc2-avf-audio",
@@ -2926,6 +2927,15 @@ dependencies = [
  "smallvec",
  "tagptr",
  "uuid",
+]
+
+[[package]]
+name = "monster-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -659,7 +659,7 @@ fn person_page(s: &App, t: &Theme, index: usize, today: NaiveDate, reduced: bool
         .iter()
         .position(|(n, _)| *n == index)
         .map(|position| position + 1);
-    let standing = Standing::of(&person.cans);
+    let standing = monster::standing(&person.cans);
     let mut summary = format!(
         "{} / {CARDS} cards · {} / {} flavours · {} Legendary",
         standing.cards,

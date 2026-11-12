@@ -15,159 +15,16 @@ use anyhow::{Context, Result, bail};
 use chrono::{Duration, NaiveDate};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+
+pub use monster_core::{
+    CARDS, FLAVOURS, Flavour, Ranking, Rarity, Standing, draw, flavour_by_id, flavour_or_other,
+    from_hash,
+};
 /// How many more cards the collection shows at a time. Every card is several shader layers.
 pub const PAGE: usize = 48;
 /// A standard can, for the board's totals.
 const LITRES_PER_CAN: f32 = 0.5;
 const CAFFEINE_MG_PER_CAN: u32 = 160;
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Flavour {
-    /// What the database stores; never changes once shipped.
-    pub id: &'static str,
-    pub name: &'static str,
-    pub line: &'static str,
-    /// Dark base, main colour, highlight, second colour (sRGB).
-    pub palette: [u32; 4],
-}
-
-const fn flavour(
-    id: &'static str,
-    name: &'static str,
-    line: &'static str,
-    palette: [u32; 4],
-) -> Flavour {
-    Flavour {
-        id,
-        name,
-        line,
-        palette,
-    }
-}
-
-#[rustfmt::skip]
-pub const FLAVOURS: &[Flavour] = &[
-    flavour("original", "Original", "Classic", [0x0b120a, 0x7ddc1f, 0xd4ff5c, 0x2b7a0b]),
-    flavour("lo-carb", "Lo-Carb", "Classic", [0x0a1430, 0x2e7bff, 0x8fd0ff, 0x10408c]),
-    flavour("nitro", "Nitro Super Dry", "Classic", [0x0a1e33, 0x6cc8f5, 0xf2fbff, 0x2c6fa8]),
-    flavour("the-doctor", "The Doctor", "Classic", [0x1a2600, 0xc9f02a, 0xfff46b, 0x6b9e00]),
-    flavour("ultra-white", "Ultra White", "Ultra", [0x39465a, 0xcfdae6, 0xffffff, 0x7f93aa]),
-    flavour("ultra-black", "Ultra Black", "Ultra", [0x08080b, 0x3d3d4a, 0xc9c9d6, 0xa3122a]),
-    flavour("ultra-gold", "Ultra Gold", "Ultra", [0x2e1f04, 0xeeb92e, 0xffe9a3, 0xa8740f]),
-    flavour("ultra-violet", "Ultra Violet", "Ultra", [0x1a0844, 0x8b4dff, 0xd9c2ff, 0x4a1fb8]),
-    flavour("ultra-red", "Ultra Red", "Ultra", [0x32050e, 0xff2d46, 0xffa3ad, 0x9c0f22]),
-    flavour("ultra-blue", "Ultra Blue", "Ultra", [0x061a44, 0x2f8cff, 0xa8dcff, 0x1553b8]),
-    flavour("ultra-watermelon", "Ultra Watermelon", "Ultra", [0x0f3d23, 0xff4d6d, 0xffc7d1, 0x35c978]),
-    flavour("ultra-paradise", "Ultra Paradise", "Ultra", [0x053b2c, 0x27e0a0, 0xbdffe2, 0x0b8f66]),
-    flavour("ultra-fiesta", "Ultra Fiesta Mango", "Ultra", [0x481400, 0xff8a1f, 0xffd98a, 0xff3d77]),
-    flavour("ultra-peachy-keen", "Ultra Peachy Keen", "Ultra", [0x4e1c0d, 0xff9472, 0xffe3d1, 0xf0603a]),
-    flavour("ultra-rosa", "Ultra Rosá", "Ultra", [0x4a142b, 0xff6fac, 0xffd9ea, 0xd42a73]),
-    flavour("ultra-sunrise", "Ultra Sunrise", "Ultra", [0x521200, 0xff5a1f, 0xffe08a, 0xffa12e]),
-    flavour("ultra-strawberry", "Ultra Strawberry Dreams", "Ultra", [0x4a0e2a, 0xff5c8a, 0xffc9d9, 0xb81f55]),
-    flavour("mango-loco", "Mango Loco", "Juice", [0x0b3a56, 0xffb01f, 0xffe7a0, 0x2ed1c9]),
-    flavour("pipeline-punch", "Pipeline Punch", "Juice", [0x540e37, 0xff6fa3, 0xffd0a0, 0xd81f6b]),
-    flavour("pacific-punch", "Pacific Punch", "Juice", [0x0f2a6a, 0xff4f64, 0xffc78a, 0x3fd6ff]),
-    flavour("khaotic", "Khaotic", "Juice", [0x362000, 0xff9d1f, 0xffe96e, 0xff5e00]),
-    flavour("aussie-lemonade", "Aussie Lemonade", "Juice", [0x37380a, 0xefdc2e, 0xfffbc9, 0x8bd12e]),
-    flavour("reserve-pineapple", "Reserve White Pineapple", "Reserve", [0x3a300e, 0xe8d68a, 0xfffae0, 0xb99a2e]),
-    flavour("reserve-watermelon", "Reserve Watermelon", "Reserve", [0x123b24, 0xf0556f, 0xffd5dc, 0x2a9c5e]),
-    flavour("rehab-peach", "Rehab Peach Tea", "Rehab", [0x4a2410, 0xf2a06a, 0xffe6cf, 0xb8622c]),
-    flavour("java-mean-bean", "Java Mean Bean", "Java", [0x1c1007, 0xa06a3c, 0xeed2b0, 0x5a3518]),
-    flavour("other", "Another Flavour", "Other", [0x15171c, 0x8a93a3, 0xeef1f6, 0x3a3f4b]),
-];
-
-pub fn flavour_by_id(id: &str) -> Option<(usize, &'static Flavour)> {
-    FLAVOURS.iter().enumerate().find(|(_, f)| f.id == id)
-}
-
-/// The flavour a saved can names, or the catch-all if a later build dropped it.
-fn flavour_or_other(id: &str) -> &'static Flavour {
-    flavour_by_id(id).map_or(&FLAVOURS[FLAVOURS.len() - 1], |(_, f)| f)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Rarity {
-    Common,
-    Uncommon,
-    Rare,
-    Mythic,
-    Legendary,
-}
-
-impl Rarity {
-    pub const ALL: [Self; 5] = [
-        Self::Common,
-        Self::Uncommon,
-        Self::Rare,
-        Self::Mythic,
-        Self::Legendary,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Common => "Common",
-            Self::Uncommon => "Uncommon",
-            Self::Rare => "Rare",
-            Self::Mythic => "Mythic",
-            Self::Legendary => "Legendary",
-        }
-    }
-
-    /// Chance in a thousand; together they make a thousand.
-    pub fn permille(self) -> u32 {
-        match self {
-            Self::Common => 600,
-            Self::Uncommon => 250,
-            Self::Rare => 100,
-            Self::Mythic => 40,
-            Self::Legendary => 10,
-        }
-    }
-
-    /// The rarity's badge and tally colour (sRGB).
-    pub fn color(self) -> u32 {
-        match self {
-            Self::Common => 0xa3a9b3,
-            Self::Uncommon => 0x57d38c,
-            Self::Rare => 0x4da3ff,
-            Self::Mythic => 0xc08bff,
-            Self::Legendary => 0xffb02e,
-        }
-    }
-
-    /// A roll from 0 to 999, up the table from Common.
-    fn from_roll(roll: u32) -> Self {
-        let mut ceiling = 0;
-        for rarity in Self::ALL {
-            ceiling += rarity.permille();
-            if roll < ceiling {
-                return rarity;
-            }
-        }
-        Self::Legendary
-    }
-
-    pub fn index(self) -> usize {
-        self as usize
-    }
-}
-
-/// A rarity, and the seed that varies the card's art, from the first bytes of a hash.
-fn from_hash(hash: &[u8]) -> (Rarity, u16) {
-    let dice = u64::from_be_bytes(hash[..8].try_into().unwrap_or([0; 8]));
-    let seed = u16::from_be_bytes(hash[8..10].try_into().unwrap_or([0; 2]));
-    (Rarity::from_roll((dice % 1000) as u32), seed)
-}
-
-/// A new can's luck: `key` is the collection's secret, and the rest makes every can's roll its
-/// own, two cans of a flavour added in the same second included.
-pub fn draw(key: &[u8; 32], flavour: &str, at: i64, number: i64) -> (Rarity, u16) {
-    let mut hash = Sha256::new();
-    hash.update(b"flexspeak-monster-v2:");
-    hash.update(key);
-    hash.update(format!(":{flavour}:{at}:{number}"));
-    from_hash(&hash.finalize())
-}
 
 /// The luck of a can saved by the scanning version, from its barcode and printed codes, so
 /// those cards keep the rarity they were opened with.
@@ -397,32 +254,6 @@ impl Section {
     }
 }
 
-/// What the leaderboard ranks by. Never by how many cans someone drinks: a bigger collection
-/// ranks higher, not a bigger habit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Ranking {
-    /// Different cards: each flavour at each rarity, out of `CARDS`.
-    #[default]
-    Collection,
-    Legendary,
-    Flavours,
-}
-
-/// Every flavour at every rarity: a complete collection.
-pub const CARDS: usize = FLAVOURS.len() * Rarity::ALL.len();
-
-impl Ranking {
-    pub const ALL: [Self; 3] = [Self::Collection, Self::Legendary, Self::Flavours];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Collection => "Collection",
-            Self::Legendary => "Legendary",
-            Self::Flavours => "Flavours",
-        }
-    }
-}
-
 /// Someone else who uses the page. A design preview until the server exists: only the scenes
 /// fill `Tracker::people`.
 #[derive(Debug, Clone, Default)]
@@ -433,40 +264,9 @@ pub struct Person {
     pub cans: Vec<Can>,
 }
 
-/// Where someone stands, for each way of ranking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Standing {
-    /// Different cards, out of `CARDS`.
-    pub cards: usize,
-    pub legendary: usize,
-    /// Different flavours, out of `FLAVOURS.len()`.
-    pub flavours: usize,
-}
-
-impl Standing {
-    pub fn of(cans: &[Can]) -> Self {
-        let cards: HashSet<(&str, Rarity)> = cans
-            .iter()
-            .map(|can| (can.flavour.as_str(), can.rarity()))
-            .collect();
-        let flavours: HashSet<&str> = cans.iter().map(|can| can.flavour.as_str()).collect();
-        Self {
-            cards: cards.len(),
-            legendary: cans
-                .iter()
-                .filter(|can| can.rarity() == Rarity::Legendary)
-                .count(),
-            flavours: flavours.len(),
-        }
-    }
-
-    pub fn score(self, ranking: Ranking) -> usize {
-        match ranking {
-            Ranking::Collection => self.cards,
-            Ranking::Legendary => self.legendary,
-            Ranking::Flavours => self.flavours,
-        }
-    }
+/// Where a collection stands on the leaderboard.
+pub fn standing(cans: &[Can]) -> Standing {
+    Standing::count(cans.iter().map(|can| (can.flavour.as_str(), can.rarity)))
 }
 
 /// The people on the leaderboard, best first, by their place in `people`. Ties keep the order
@@ -476,7 +276,7 @@ pub fn ranked(people: &[Person], ranking: Ranking, listed: bool) -> Vec<(usize, 
         .iter()
         .enumerate()
         .filter(|(_, person)| listed || !person.you)
-        .map(|(n, person)| (n, Standing::of(&person.cans)))
+        .map(|(n, person)| (n, standing(&person.cans)))
         .collect();
     rows.sort_by_key(|(_, standing)| std::cmp::Reverse(standing.score(ranking)));
     rows
