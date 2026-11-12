@@ -32,7 +32,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
     let watching = s.server().streaming.active();
     let mut pane = col().key("streams").w_full().h_full();
     if on_stage(s) {
-        let room = pane_size(s, cx);
+        let header = !floating_tools(s);
+        let (width, height) = pane_size(s, cx);
+        // Under the header the stage gives up its own top margin.
+        let room = (width, if header { height + STAGE_PAD } else { height });
         pane = pane.child(
             col()
                 .key("stage-area")
@@ -50,8 +53,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                         tx.live_only();
                     }
                 })
-                .child(stage(s, t, k, supported, room))
-                .children(overlays(s).then(|| stage_tools(s, t, supported, watching))),
+                .children(header.then(|| stage_header(s, t, supported, watching)))
+                .child(stage(s, t, k, supported, room, header))
+                .children((!header && overlays(s)).then(|| stage_tools(s, t, supported, watching))),
         );
     } else {
         pane = pane
@@ -64,6 +68,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                     .pb(16.0)
                     .gap(12.0)
                     .child(channel_title(s, t))
+                    .children(own_live(s, t))
                     .child(tools(s, t, supported, watching)),
             )
             .child(no_streams(s, t, supported));
@@ -166,8 +171,106 @@ pub fn quick_icon(source: &ShareSource) -> &'static rune::Icon {
     }
 }
 
-/// The toolbar floating over the streams, at the top right; each stream's own button is at its
-/// top left. The solid, frosted backing keeps the icons readable over any picture.
+/// Whether the stage's tools float over the picture: a lone stream fills the pane, and full
+/// screen shows streams alone, so neither has a header to hold them.
+fn floating_tools(s: &App) -> bool {
+    solo(s) || fullscreen(s)
+}
+
+/// What is behind a picture: black in full screen, where the monitor's own edge is black, and
+/// the stage's tone in the window, so letterbox bars don't stand out from the pane.
+fn backdrop(s: &App, t: &Theme) -> Color {
+    if fullscreen(s) {
+        Color::BLACK
+    } else {
+        t.screen
+    }
+}
+
+/// The line over several streams: the channel and how many streams run in it, your own share
+/// while you are live, and the stage's tools, which then stay off the pictures.
+fn stage_header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
+    let streams = s.server().streaming.watching.len() + unwatched(s).len();
+    let mut title = row().key("stage-title").gap(10.0).min_w(0.0);
+    if let Some(channel) = s.server().state.current.as_ref() {
+        title = title.child(
+            text(channel.name.clone())
+                .font(ty::TITLE)
+                .color(t.text)
+                .truncate_fade()
+                .min_w(0.0),
+        );
+    }
+    title = title.child(
+        text(if streams == 1 {
+            "1 stream".to_owned()
+        } else {
+            format!("{streams} streams")
+        })
+        .font(ty::SMALL)
+        .color(t.muted)
+        // On the name's baseline, not centred against its taller line.
+        .self_end()
+        .pb(2.0),
+    );
+    row()
+        .key("stage-header")
+        .w_full()
+        .h(STAGE_HEADER)
+        .pl(STAGE_PAD + 2.0)
+        .pr(STAGE_PAD)
+        .gap(16.0)
+        .center_y()
+        .child(title)
+        .children(own_live(s, t))
+        .child(el().grow(1.0))
+        .child(tools(s, t, supported, watching))
+}
+
+/// The stage header's height.
+const STAGE_HEADER: f32 = 44.0;
+
+/// Your own share, on the stage where the streams are: that you are live, and who watches.
+/// The controls for it stay beside the voice buttons.
+fn own_live(s: &App, t: &Theme) -> Option<El> {
+    let status = &s.server().streaming.sharing.status;
+    if !status.active {
+        return None;
+    }
+    let watching = match status.viewers.len() {
+        0 => "no one watching yet".to_owned(),
+        count => format!("{count} of {} watching", streaming::publishing::MAX_VIEWERS),
+    };
+    Some(share_summary(
+        s,
+        row()
+            .key("own-live")
+            .gap(6.0)
+            .center_y()
+            .child(if status.live {
+                lit_dot(t.live)
+            } else {
+                pulse(t.live)
+            })
+            .child(
+                text(if status.live {
+                    "You're live"
+                } else {
+                    "Going live"
+                })
+                .font(ty::BODY_STRONG)
+                .color(t.text),
+            )
+            .children(
+                status
+                    .live
+                    .then(|| text(format!("· {watching}")).font(ty::SMALL).color(t.muted)),
+            ),
+    ))
+}
+
+/// The toolbar floating over a lone stream, at the top right. The solid, frosted backing keeps
+/// the icons readable over any picture.
 fn stage_tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
     row()
         .key("stage-tools")
@@ -469,29 +572,54 @@ fn share_summary_text(s: &App) -> String {
     }
 }
 
+/// The same for the card beside the voice buttons, which is narrow: the source's name goes
+/// last, where a line cut short loses the least.
+fn share_card_text(s: &App) -> String {
+    let status = &s.server().streaming.sharing.status;
+    if !status.live && !status.detail.is_empty() {
+        return status.detail.clone();
+    }
+    let watching = match status.viewers.len() {
+        0 => "No one watching yet".to_owned(),
+        count => format!("{count} of {} watching", streaming::publishing::MAX_VIEWERS),
+    };
+    if status.source.is_empty() {
+        format!("{watching} · {}", status.access.label())
+    } else {
+        format!("{watching} · {} · {}", status.access.label(), status.source)
+    }
+}
+
 /// A note on the main pane, recessed into it.
 fn notice(t: &Theme) -> El {
     super::widgets::well(t).padding(size::CARD_PAD)
 }
 
 /// Your own share while it runs, for the voice panel: what it shows and who watches, requests
-/// to watch, and the way to stop. Who may watch comes last, so a narrow sidebar loses that.
+/// to watch, and the way to stop. The summary stays on one line.
 pub fn sharing_status(s: &App, t: &Theme) -> El {
     let sharing = &s.server().streaming.sharing;
     let status = &sharing.status;
     let mut tile = col()
         .key("sharing-status")
         .w_full()
-        .gap(6.0)
-        .padding(8.0)
-        .radius(radius::ROW)
-        .fill(t.live.alpha(0.08))
-        .border(1.0, t.live.alpha(0.35))
+        .gap(4.0)
+        // Room around the words; less on the buttons' side, which carry a margin of their own.
+        .pl(12.0)
+        .pr(8.0)
+        .pt(8.0)
+        .pb(10.0)
+        .mb(4.0)
+        .radius(radius::CARD)
+        // A plain well: the dot says live and Stop is the one red control, so the card needs
+        // no red of its own.
+        .fill(t.recess)
+        .border(1.0, t.hairline)
         .transition(Transition::opacity())
         .child(
             row()
                 .w_full()
-                .gap(6.0)
+                .gap(8.0)
                 .center_y()
                 .child(lit_dot(t.live))
                 .child(
@@ -502,15 +630,21 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
                         .min_w(0.0)
                         .truncate_fade(),
                 )
-                .child(share_audio_toggle(t, sharing))
-                .child(icon_button(
-                    t,
-                    "manage-share",
-                    &icons::SETTINGS,
-                    "Stream settings: Performance or Quality, audio, and who watches",
-                    Variant::Ghost,
-                    Some(Message::OpenShare),
-                ))
+                // The two quiet buttons sit together, a step apart from Stop.
+                .child(
+                    row()
+                        .gap(2.0)
+                        .center_y()
+                        .child(share_audio_toggle(t, sharing))
+                        .child(icon_button(
+                            t,
+                            "manage-share",
+                            &icons::SETTINGS,
+                            "Stream settings: Performance or Quality, audio, and who watches",
+                            Variant::Ghost,
+                            Some(Message::OpenShare),
+                        )),
+                )
                 .child(icon_button(
                     t,
                     "stop-sharing",
@@ -520,13 +654,20 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
                     Some(Message::StopSharing),
                 )),
         )
-        .child(share_summary(
-            s,
-            faint(t, share_summary_text(s)).truncate_fade(),
-        ));
-    if sharing.audio && status.audio_frames > 0 {
-        tile = tile.child(meter(t, "share-audio", status.audio_level.min(1.0), t.live));
-    }
+        // Always one line. Who watches and who may lead it, so a narrow sidebar fades out
+        // only the source's name, which the tooltip still gives.
+        .child(
+            text(share_card_text(s))
+                .font(ty::CAPTION)
+                .color(t.faint)
+                .truncate_fade()
+                .pr(4.0)
+                .help(if status.detail.is_empty() {
+                    share_summary_text(s)
+                } else {
+                    format!("{}\n{}", share_summary_text(s), status.detail)
+                }),
+        );
     for (id, name) in &status.requests {
         tile = tile.child(request_row(t, status, *id, name));
     }
@@ -632,7 +773,7 @@ fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name:
 }
 
 /// Streams watched and not yet joined: one on the stage with the rest beneath it, or a grid.
-fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El {
+fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32), header: bool) -> El {
     let watching = &s.server().streaming.watching;
     let available = unwatched(s);
     let mut area = col()
@@ -642,6 +783,9 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         .w_full()
         .padding(STAGE_PAD)
         .gap(10.0);
+    if header {
+        area = area.pt(0.0);
+    }
     if solo(s) {
         // One stream and nothing else to show: it fills the pane edge to edge, as a player does.
         let main = s
@@ -653,18 +797,25 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         return area.padding(0.0).child(tile(s, t, main, Mode::Solo, width));
     }
     let Some(main) = s.server().streaming.stage() else {
-        let columns = grid_columns(watching.len() + available.len(), space);
-        let width = cell_width(space, columns.unwrap_or(2));
+        let count = watching.len() + available.len();
+        let columns = grid_columns(count, space);
+        let rows = grid_rows(count, columns, space);
+        let widths: Vec<f32> = rows
+            .iter()
+            .zip(row_spans(&rows, columns.is_some()))
+            .flat_map(|(boxes, span)| std::iter::repeat_n(cell_width(space, span), *boxes))
+            .collect();
         let cells = watching
             .iter()
-            .map(|watch| tile(s, t, watch, Mode::Grid, width))
+            .zip(&widths)
+            .map(|(watch, width)| tile(s, t, watch, Mode::Grid, *width))
             .chain(
                 available
                     .iter()
                     .map(|stream| preview(s, t, stream, supported, Mode::Grid)),
             )
             .collect::<Vec<_>>();
-        return area.child(grid(k, cells, columns, width));
+        return area.child(grid(k, cells, &rows, columns.is_some(), space));
     };
     let others: Vec<&Watching> = watching
         .iter()
@@ -832,41 +983,97 @@ fn grid_columns(count: usize, pane: (f32, f32)) -> Option<usize> {
     (picture_width(count, best, pane) >= MIN_PICTURE_WIDTH).then_some(best)
 }
 
-/// Rows of equal boxes `cell` wide; a short last row is centred. `None` columns means a
-/// scrolling list.
-fn grid(k: &Kit, cells: Vec<El>, columns: Option<usize>, cell: f32) -> El {
-    let fitted = columns.is_some();
-    let columns = columns.unwrap_or(2);
-    let mut grid = col().key("grid").w_full().gap(GRID_GAP);
-    if fitted {
-        grid = grid.grow(1.0).min_h(0.0);
+/// How many boxes each row of the grid holds. A count that doesn't divide evenly leaves a short
+/// row. In two rows it leads and fills the width, larger than the row under it: one stream over
+/// two, two over three. In more rows that would shrink the rest too far, so it comes last, its
+/// boxes the size of the others. A scrolling list keeps pairs.
+fn grid_rows(count: usize, columns: Option<usize>, pane: (f32, f32)) -> Vec<usize> {
+    let Some(mut columns) = columns else {
+        let mut rows = vec![2; count / 2];
+        if count % 2 == 1 {
+            rows.push(1);
+        }
+        return rows;
+    };
+    // Five as two over three, where three still fit side by side, rather than three rows.
+    if count == 5
+        && columns == 2
+        && pane.0 > pane.1
+        && picture_width(count, 3, pane) >= MIN_PICTURE_WIDTH
+    {
+        columns = 3;
     }
-    let mut cells = cells.into_iter().peekable();
-    let mut index = 0;
-    while cells.peek().is_some() {
-        let boxes: Vec<El> = cells.by_ref().take(columns).collect();
-        // A short row's spacers take the missing boxes' room less the gap each adds, so its
-        // boxes come out as wide as a full row's.
-        let margin = (columns - boxes.len()) as f32 / 2.0;
-        let spacer = (margin * (cell + GRID_GAP) - GRID_GAP).max(0.0);
+    let columns = columns.clamp(1, count.max(1));
+    let mut rows = vec![columns; count / columns];
+    if !count.is_multiple_of(columns) {
+        let at = if rows.len() == 1 { 0 } else { rows.len() };
+        rows.insert(at, count % columns);
+    }
+    rows
+}
+
+/// Whether the grid's short row leads and fills the width: only fitted, in two rows.
+fn lead_row(rows: &[usize], fitted: bool) -> bool {
+    fitted && rows.len() == 2 && rows[0] < rows[1]
+}
+
+/// How many boxes wide each row of the grid is laid out as: its own count where a short row
+/// leads, and the fullest row's everywhere else, so boxes are one size.
+fn row_spans(rows: &[usize], fitted: bool) -> Vec<usize> {
+    let widest = rows.iter().copied().max().unwrap_or(1);
+    if lead_row(rows, fitted) {
+        rows.to_vec()
+    } else {
+        vec![widest; rows.len()]
+    }
+}
+
+/// The height a row of `boxes` wants: a 16:9 picture as wide as its box, over the bar.
+fn row_height(pane: (f32, f32), boxes: usize) -> f32 {
+    cell_width(pane, boxes) * 9.0 / 16.0 + TILE_BAR
+}
+
+/// The grid: `rows` boxes to a row. Fitted rows that have the height they want take exactly
+/// that and sit in the middle, so boxes hug their pictures; short of it they share the height in
+/// the same proportions. A short row that doesn't lead is centred. Unfitted, the rows scroll at
+/// one height.
+fn grid(k: &Kit, cells: Vec<El>, rows: &[usize], fitted: bool, pane: (f32, f32)) -> El {
+    let spans = row_spans(rows, fitted);
+    let mut grid = col().key("grid").w_full().gap(GRID_GAP);
+    let wanted: f32 = spans
+        .iter()
+        .map(|span| row_height(pane, *span))
+        .sum::<f32>()
+        + GRID_GAP * rows.len().saturating_sub(1) as f32;
+    let roomy = wanted <= pane.1;
+    if fitted {
+        grid = grid.grow(1.0).min_h(0.0).justify_center();
+    }
+    let mut cells = cells.into_iter();
+    for (index, (boxes, span)) in rows.iter().zip(&spans).enumerate() {
         let mut line = row()
             .key(format!("grid-row-{index}"))
             .w_full()
             .gap(GRID_GAP);
-        line = if fitted {
-            line.grow(1.0).min_h(0.0)
+        line = if fitted && roomy {
+            line.h(row_height(pane, *span))
+        } else if fitted {
+            line.grow(row_height(pane, *span)).min_h(0.0)
         } else {
             line.h(SCROLLED_ROW_HEIGHT)
         };
+        // A short row's spacers take the missing boxes' room less the gap each adds, so its
+        // boxes come out as wide as a full row's.
+        let margin = (span - boxes) as f32 / 2.0;
+        let spacer = (margin * (cell_width(pane, *span) + GRID_GAP) - GRID_GAP).max(0.0);
         if margin > 0.0 {
             line = line.child(el().w(spacer).min_w(0.0));
         }
-        line = line.children(boxes);
+        line = line.children(cells.by_ref().take(*boxes));
         if margin > 0.0 {
             line = line.child(el().w(spacer).min_w(0.0));
         }
         grid = grid.child(line);
-        index += 1;
     }
     if fitted {
         grid
@@ -1027,7 +1234,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .fill(Color::BLACK)
+        .fill(backdrop(s, t))
         .center();
     video = match &watch.frame {
         Some(frame) => video.child(
@@ -1065,13 +1272,15 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
                 .w_full()
                 .padding(if mode == Mode::Thumbnail { 6.0 } else { 10.0 })
                 // Below the toolbar that floats over the top right while the pointer is here.
-                .pt(if overlays(s) && mode != Mode::Thumbnail {
-                    TOOLS_CLEARANCE
-                } else if mode == Mode::Thumbnail {
-                    6.0
-                } else {
-                    10.0
-                })
+                .pt(
+                    if overlays(s) && floating_tools(s) && mode != Mode::Thumbnail {
+                        TOOLS_CLEARANCE
+                    } else if mode == Mode::Thumbnail {
+                        6.0
+                    } else {
+                        10.0
+                    },
+                )
                 .child(el().grow(1.0))
                 .child(trouble(t, problem, mode == Mode::Thumbnail)),
         );
@@ -1141,7 +1350,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
             .grow(1.0)
             .min_w(0.0)
             .min_h(0.0)
-            .fill(Color::BLACK)
+            .fill(backdrop(s, t))
             .transition(Transition::opacity())
             .motion(motion::SETTLE)
             .child(video)
@@ -1216,38 +1425,48 @@ fn thumbnail_label(s: &App, t: &Theme, publisher: u16, dot: El) -> El {
 fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, mode: Mode) -> El {
     let blocked = watch_blocked(s, supported, stream);
     let thumbnail = mode == Mode::Thumbnail;
+    let watch = button(
+        t,
+        &format!("watch-{}", stream.id),
+        // A thumbnail is too narrow for the reason, which stays in the tooltip.
+        if thumbnail {
+            "Watch"
+        } else {
+            blocked.unwrap_or("Watch")
+        },
+        blocked.is_none().then_some(&icons::MONITOR_PLAY),
+        if blocked.is_none() {
+            Variant::Primary
+        } else {
+            Variant::Secondary
+        },
+        blocked
+            .is_none()
+            .then(|| Message::WatchStream(stream.id.clone())),
+    )
+    .help(blocked.unwrap_or("Join this stream"));
+    // Lit from above, so the box reads as a screen waiting rather than a hole in the pane.
     let video = el()
         .key("video")
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .fill(Color::BLACK)
-        .center()
-        .child(
-            button(
-                t,
-                &format!("watch-{}", stream.id),
-                // A thumbnail is too narrow for the reason, which stays in the tooltip.
-                if thumbnail {
-                    "Watch"
-                } else {
-                    blocked.unwrap_or("Watch")
-                },
-                blocked.is_none().then_some(&icons::MONITOR_PLAY),
-                if blocked.is_none() {
-                    Variant::Primary
-                } else {
-                    Variant::Secondary
-                },
-                blocked
-                    .is_none()
-                    .then(|| Message::WatchStream(stream.id.clone())),
-            )
-            .help(blocked.unwrap_or("Join this stream")),
-        );
-    let frame = tile_frame(t, &stream.id, t.hairline, video);
+        .fill(t.screen)
+        .linear_gradient(
+            std::f32::consts::PI,
+            [
+                (0.0, Color::WHITE.alpha(0.07)),
+                (1.0, Color::WHITE.alpha(0.0)),
+            ],
+        )
+        .center();
     if thumbnail {
-        return frame.child(thumbnail_label(s, t, stream.publisher, lit_dot(t.live)));
+        return tile_frame(t, &stream.id, t.hairline, video.child(watch)).child(thumbnail_label(
+            s,
+            t,
+            stream.publisher,
+            lit_dot(t.live),
+        ));
     }
     let viewers = match stream.viewers {
         1 => "1 viewer".to_owned(),
@@ -1259,40 +1478,58 @@ fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, 
         "No audio"
     };
     let (title, subtitle) = stream_lines(s, stream);
-    frame.child(
-        row()
-            .key("controls")
-            .w_full()
-            .px(10.0)
-            .py(8.0)
-            .gap(8.0)
-            .center_y()
-            .child(lit_dot(t.live))
-            .child(
-                col()
-                    .key("stream-name")
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(1.0)
-                    .help(format!(
-                        "{} · {}",
-                        stream.name,
-                        publisher_name(s, stream.publisher)
-                    ))
-                    .child(
-                        text(title)
-                            .font(ty::BODY_STRONG)
-                            .color(t.text)
-                            .truncate_fade(),
-                    )
-                    .child(
-                        text(format!("{subtitle} · {viewers} · {audio}"))
-                            .font(ty::CAPTION)
-                            .color(t.faint)
-                            .truncate_fade(),
-                    ),
-            ),
-    )
+    let publisher = publisher_name(s, stream.publisher);
+    // Who is sharing, what, and the way in, together where the picture will be. The screen is
+    // dark on every palette, so its ink is white rather than the theme's.
+    let offer = col()
+        .key("controls")
+        .max_w(420.0)
+        .px(16.0)
+        .gap(12.0)
+        .center()
+        .child(
+            el().size(44.0, 44.0)
+                .radius(22.0)
+                .center()
+                .fill(super::home::tile_colour(&publisher))
+                .a11y_hidden()
+                .child(
+                    text(super::home::initials(&publisher))
+                        .font(ty::BODY_STRONG)
+                        .color(Color::WHITE),
+                ),
+        )
+        .child(
+            col()
+                .key("stream-name")
+                .gap(3.0)
+                .center()
+                .min_w(0.0)
+                .help(format!("{} · {publisher}", stream.name))
+                .child(
+                    row()
+                        .gap(8.0)
+                        .center_y()
+                        .min_w(0.0)
+                        .child(lit_dot(t.live))
+                        .child(
+                            text(title)
+                                .font(ty::TITLE)
+                                .color(Color::WHITE.alpha(0.94))
+                                .truncate_fade()
+                                .min_w(0.0),
+                        ),
+                )
+                .child(
+                    text(format!("{subtitle} · {viewers} · {audio}"))
+                        .font(ty::SMALL)
+                        .color(Color::WHITE.alpha(0.6))
+                        .truncate_fade()
+                        .min_w(0.0),
+                ),
+        )
+        .child(watch);
+    tile_frame(t, &stream.id, t.hairline, video.child(offer))
 }
 
 /// A stream's volume slider: up to 300%, remembered for each streamer.
@@ -1520,7 +1757,8 @@ fn trouble(t: &Theme, problem: health::Problem, compact: bool) -> El {
         .py(if compact { 4.0 } else { 5.0 })
         .min_w(0.0)
         .radius(radius::ROW)
-        .fill(Color::BLACK.alpha(0.62))
+        .fill(t.surface.alpha(0.94))
+        .border(1.0, colour.alpha(0.55))
         .help(help.clone())
         .label(help)
         .transition(Transition::opacity())
@@ -1528,8 +1766,8 @@ fn trouble(t: &Theme, problem: health::Problem, compact: bool) -> El {
     if !compact {
         badge = badge.child(
             text(problem.label())
-                .font(ty::CAPTION)
-                .color(Color::WHITE.alpha(0.9))
+                .font(ty::SMALL)
+                .color(t.text)
                 .min_w(0.0)
                 .truncate_fade(),
         );

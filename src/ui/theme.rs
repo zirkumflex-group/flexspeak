@@ -36,6 +36,10 @@ pub struct Theme {
     pub surface: Color,
     /// The stream pane: a step darker than the window, as a video player's backdrop.
     pub stage: Color,
+    /// Behind a stream's picture: its letterbox bars, and a stream not yet watched. The stage's
+    /// own tone on dark palettes, so the bars melt into the pane; a dark slate on light ones,
+    /// where a picture still wants a dark surround.
+    pub screen: Color,
     /// Rows and controls on a card, menus and selected navigation.
     pub raised: Color,
     pub hairline: Color,
@@ -57,7 +61,8 @@ pub struct Theme {
     pub fair: Color,
     pub poor: Color,
     pub unknown: Color,
-    /// Live and recording states: a warm signal colour, used sparingly.
+    /// Live and recording states. The same red as `poor`, so the window has one red: a filled
+    /// dot or a tint means live, red ink on a control means it stops or removes something.
     pub live: Color,
     /// Private messages, wherever chat shows one: never the channel's accent.
     pub private: Color,
@@ -83,9 +88,17 @@ struct Palette {
 /// sidebar stays the brightest panel.
 fn stage(canvas: Color, chrome: Color, dark: bool) -> Color {
     if dark {
-        canvas.mix(Color::BLACK, 0.42)
+        canvas.mix(Color::BLACK, 0.3)
     } else {
         chrome
+    }
+}
+
+fn screen(canvas: Color, chrome: Color, dark: bool) -> Color {
+    if dark {
+        stage(canvas, chrome, dark)
+    } else {
+        rgb(0x1b1c20)
     }
 }
 
@@ -108,7 +121,7 @@ const fn palette(name: ThemeName, dark: bool) -> Palette {
     }
     match (name, dark) {
         (ThemeName::Flexspeak, true) => p!(
-            0x1c1d20, 0x232427, 0x26272b, 0x34353a, 0xebebee, 0xa0a1a8, 0x75767e, 0x8ea8ff,
+            0x17181b, 0x232427, 0x26272b, 0x34353a, 0xebebee, 0xa0a1a8, 0x75767e, 0x8ea8ff,
             0x0b0f1c
         ),
         (ThemeName::Flexspeak, false) => p!(
@@ -116,7 +129,7 @@ const fn palette(name: ThemeName, dark: bool) -> Palette {
             0xffffff
         ),
         (ThemeName::Grove, true) => p!(
-            0x191d1b, 0x1f2421, 0x222825, 0x2f3632, 0xe8ede9, 0x9ca69f, 0x707a73, 0x62d39b,
+            0x141816, 0x1f2421, 0x222825, 0x2f3632, 0xe8ede9, 0x9ca69f, 0x707a73, 0x62d39b,
             0x07170f
         ),
         (ThemeName::Grove, false) => p!(
@@ -124,7 +137,7 @@ const fn palette(name: ThemeName, dark: bool) -> Palette {
             0xffffff
         ),
         (ThemeName::Ocean, true) => p!(
-            0x171c21, 0x1d232a, 0x20272e, 0x2c353e, 0xe6edf3, 0x9aa6b2, 0x6f7b87, 0x5cb8ec,
+            0x12171c, 0x1d232a, 0x20272e, 0x2c353e, 0xe6edf3, 0x9aa6b2, 0x6f7b87, 0x5cb8ec,
             0x06141d
         ),
         (ThemeName::Ocean, false) => p!(
@@ -132,7 +145,7 @@ const fn palette(name: ThemeName, dark: bool) -> Palette {
             0xffffff
         ),
         (ThemeName::Ember, true) => p!(
-            0x1e1b19, 0x25211e, 0x292420, 0x37302b, 0xf0e9e4, 0xaaa097, 0x7d746c, 0xf39a5e,
+            0x191614, 0x25211e, 0x292420, 0x37302b, 0xf0e9e4, 0xaaa097, 0x7d746c, 0xf39a5e,
             0x1c0d04
         ),
         (ThemeName::Ember, false) => p!(
@@ -140,7 +153,7 @@ const fn palette(name: ThemeName, dark: bool) -> Palette {
             0xffffff
         ),
         (ThemeName::Iris, true) => p!(
-            0x1b1a21, 0x222028, 0x26242d, 0x34313c, 0xece9f3, 0xa4a0b0, 0x787484, 0xb39dff,
+            0x16151c, 0x222028, 0x26242d, 0x34313c, 0xece9f3, 0xa4a0b0, 0x787484, 0xb39dff,
             0x120a24
         ),
         (ThemeName::Iris, false) => p!(
@@ -161,7 +174,7 @@ pub mod size {
     pub const FORM_LABEL: f32 = 180.0;
     /// Fields and pickers on the trailing side of a settings row.
     pub const FORM_CONTROL: f32 = 300.0;
-    pub const HEADER: f32 = 52.0;
+    pub const HEADER: f32 = 40.0;
     pub const SIDEBAR: f32 = 260.0;
     pub const CHART_MIN_WIDTH: f32 = 110.0;
 }
@@ -189,8 +202,8 @@ pub mod ty {
     use rune::TextStyle;
     pub const DISPLAY: TextStyle = TextStyle::new(22.0, 650.0).tracking(-0.3);
     pub const TITLE: TextStyle = TextStyle::new(17.0, 620.0).tracking(-0.2);
-    /// The server at the top of the sidebar: a clear step above the channels under it.
-    pub const SERVER: TextStyle = TextStyle::new(16.0, 650.0).tracking(-0.2);
+    /// The server at the root of the channel tree: one step above the channels under it.
+    pub const SERVER: TextStyle = TextStyle::new(14.0, 620.0).tracking(-0.1);
     /// A card's title.
     pub const SUBTITLE: TextStyle = TextStyle::new(14.0, 620.0).tracking(-0.1);
     pub const HEADING: TextStyle = TextStyle::new(13.0, 600.0);
@@ -218,6 +231,7 @@ impl Theme {
             chrome: rgb(p.chrome),
             surface: rgb(p.surface),
             stage: stage(rgb(p.canvas), rgb(p.chrome), dark),
+            screen: screen(rgb(p.canvas), rgb(p.chrome), dark),
             raised: rgb(p.raised),
             text: rgb(p.text),
             muted: rgb(p.muted),
@@ -238,9 +252,9 @@ impl Theme {
                 knob: Color::WHITE,
                 good: rgb(0x1c9354),
                 fair: rgb(0xb2750f),
-                poor: rgb(0xd43d55),
+                poor: rgb(0xd8413c),
                 unknown: rgb(0x6b7385),
-                live: rgb(0xe0483e),
+                live: rgb(0xd8413c),
                 private: rgb(0x8a3fd1),
                 cpu: rgb(0x0d8fa1),
                 ram: rgb(0x7655dd),
@@ -257,6 +271,7 @@ impl Theme {
             chrome: colors.chrome,
             surface: colors.surface,
             stage: stage(colors.canvas, colors.chrome, dark),
+            screen: screen(colors.canvas, colors.chrome, dark),
             raised: colors.raised,
             text: colors.text,
             muted: colors.muted,
@@ -275,10 +290,11 @@ impl Theme {
     fn dark_status() -> Self {
         Self {
             dark: true,
-            canvas: rgb(0x1c1d20),
+            canvas: rgb(0x17181b),
             chrome: rgb(0x232427),
             surface: rgb(0x26272b),
-            stage: stage(rgb(0x1c1d20), rgb(0x232427), true),
+            stage: stage(rgb(0x17181b), rgb(0x232427), true),
+            screen: screen(rgb(0x17181b), rgb(0x232427), true),
             raised: rgb(0x34353a),
             hairline: Color::WHITE.alpha(0.08),
             bevel_top: Color::WHITE.alpha(0.10),
@@ -293,9 +309,9 @@ impl Theme {
             on_accent: rgb(0x0b0f1c),
             good: rgb(0x6fdc9a),
             fair: rgb(0xf2c46b),
-            poor: rgb(0xff7a8a),
+            poor: rgb(0xff6b63),
             unknown: rgb(0x8c95ab),
-            live: rgb(0xff5a52),
+            live: rgb(0xff6b63),
             private: rgb(0xd2a8ff),
             cpu: rgb(0x46cfe0),
             ram: rgb(0xa98ff8),
@@ -313,6 +329,16 @@ impl Theme {
             Health::Fair => self.fair,
             Health::Poor => self.poor,
             Health::Unknown => self.unknown,
+        }
+    }
+
+    /// A figure in the status bar: plain while it is fine, so a healthy bar stays quiet and a
+    /// colour there means something is off.
+    pub fn reading(&self, health: Health) -> Color {
+        match health {
+            Health::Good | Health::Unknown => self.text,
+            Health::Fair => self.fair,
+            Health::Poor => self.poor,
         }
     }
 

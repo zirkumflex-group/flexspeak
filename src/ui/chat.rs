@@ -47,7 +47,8 @@ pub fn width(s: &App) -> f32 {
 fn tint(t: &Theme, scope: &Scope) -> Color {
     match scope {
         Scope::Channel | Scope::Past(_) => t.accent,
-        Scope::Server => t.fair,
+        // Neutral: amber is the connection's.
+        Scope::Server => t.muted,
         Scope::Private(_) => t.private,
     }
 }
@@ -1323,7 +1324,7 @@ fn filters(t: &Theme, head: &Head) -> El {
                 "Server",
                 Some(&icons::GLOBE),
                 selected,
-                (head.unread_server, t.fair),
+                (head.unread_server, t.muted),
                 None,
                 Action::Filter(filter),
             ),
@@ -1452,7 +1453,7 @@ fn recipient(t: &Theme, head: &Head) -> El {
     row()
         .key(List::SendTo.key())
         .w_full()
-        .h(28.0)
+        .h(26.0)
         .pl(10.0)
         .pr(6.0)
         .gap(6.0)
@@ -1490,8 +1491,8 @@ fn send_box(t: &Theme, to: El, field: El, edge: Color) -> El {
                 .fill(t.recess)
                 .border(1.0, edge)
                 .motion(motion::QUICK)
+                // One field: the recipient heads it, with no rule splitting it in two.
                 .child(to)
-                .child(el().h(1.0).w_full().fill(t.hairline).a11y_hidden())
                 .child(field),
         )
 }
@@ -1594,7 +1595,8 @@ fn composer(s: &App, t: &Theme, k: &Kit, head: &Head) -> El {
                 .grow(1.0)
                 .shrink()
                 .min_w(0.0)
-                .py(8.0)
+                .pt(4.0)
+                .pb(9.0)
                 .child(rune::auto_grow(editor, 1, 5)),
         )
         .child(side.child(icon_button(

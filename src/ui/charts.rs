@@ -153,7 +153,7 @@ pub fn inline(
                 .child(
                     text(reading.value.clone())
                         .font(ty::NUMERIC)
-                        .color(t.health(reading.health))
+                        .color(t.reading(reading.health))
                         .a11y_hidden(),
                 )
                 .child(
