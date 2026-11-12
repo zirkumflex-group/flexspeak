@@ -195,6 +195,8 @@ struct App {
     stream_volumes: BTreeMap<String, u16>,
     /// When a stream volume last changed without being saved; saved a moment after a drag.
     stream_volumes_changed: Option<Instant>,
+    /// The people whose streams you join by yourself, by identity, as saved.
+    auto_watch: BTreeSet<String>,
     sound_cues: bool,
     sounds: sounds::Settings,
     share_defaults: streaming::publishing::ShareDefaults,
@@ -797,6 +799,54 @@ fn stream_changes(
         .collect()
 }
 
+/// The streams among `streams` that can be joined without being asked: not watched yet, not
+/// relayed by the server, and within the most watched at once, counted in `watched`.
+fn auto_watchable(
+    view: &streaming::View,
+    streams: &[streaming::StreamInfo],
+    watched: &mut usize,
+) -> Vec<String> {
+    if !streaming::AVAILABLE {
+        return Vec::new();
+    }
+    streams
+        .iter()
+        .filter(|stream| !stream.server_relayed && view.watching(&stream.id).is_none())
+        .filter(|_| {
+            let room = *watched < streaming::MAX_WATCHES;
+            *watched += usize::from(room);
+            room
+        })
+        .map(|stream| stream.id.clone())
+        .collect()
+}
+
+/// The streams in a channel's new list to join by yourself: those that just appeared, or all
+/// of them in the first list of a channel, from the people picked for it.
+fn auto_watch_streams(
+    session: &ServerSession,
+    catalog: &[streaming::StreamInfo],
+    people: &BTreeSet<String>,
+) -> Vec<String> {
+    if people.is_empty() || !session.connected {
+        return Vec::new();
+    }
+    let before = &session.streaming.catalog;
+    let members = session.state.current_members();
+    let new: Vec<_> = catalog
+        .iter()
+        .filter(|stream| !session.catalog_seen || !before.iter().any(|old| old.id == stream.id))
+        .filter(|stream| {
+            members.iter().any(|member| {
+                member.id == stream.publisher && !member.is_self && people.contains(&member.uid)
+            })
+        })
+        .cloned()
+        .collect();
+    let mut watched = session.streaming.watching.len();
+    auto_watchable(&session.streaming, &new, &mut watched)
+}
+
 /// Lays a server's streams out as saved: where the others go and whether details show.
 /// Flexspeak's own TeamSpeak identity, for linking to the collection, under the nickname in
 /// use. `None` if it can't be read; the step then offers nothing to link.
@@ -954,6 +1004,8 @@ enum Message {
     CloseUserVolume,
     /// Silences or restores a person for you alone.
     ToggleUserMute(u16),
+    /// Starts or stops joining a person's streams as soon as they go live in your channel.
+    ToggleAutoWatch(u16),
     SoundCues(bool),
     SoundVolume(u8),
     SoundPack(sounds::Pack),
@@ -1245,6 +1297,7 @@ impl App {
             user_gains: client::UserGains::default(),
             stream_volumes: BTreeMap::new(),
             stream_volumes_changed: None,
+            auto_watch: BTreeSet::new(),
             sound_cues: true,
             sounds: sounds::Settings::default(),
             share_defaults: Default::default(),
@@ -2431,6 +2484,7 @@ impl App {
         self.user_audio = saved.user_audio;
         self.sync_user_gains();
         self.stream_volumes = saved.stream_volumes;
+        self.auto_watch = saved.auto_watch;
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
         self.stream_options = saved.streaming;
@@ -2486,6 +2540,7 @@ impl App {
             custom_themes: self.custom_themes.clone(),
             user_audio: self.user_audio.clone(),
             stream_volumes: self.stream_volumes.clone(),
+            auto_watch: self.auto_watch.clone(),
             sound_cues: self.sound_cues,
             sounds: self.sounds.clone(),
             share: self.share_defaults,
@@ -4759,6 +4814,37 @@ impl App {
                     self.save_user_audio();
                 }
             }
+            Message::ToggleAutoWatch(id) => {
+                if let Some(uid) = self
+                    .find_member(id)
+                    .filter(|m| !m.uid.is_empty() && !m.is_self)
+                    .map(|m| m.uid.clone())
+                {
+                    let on = !self.auto_watch.remove(&uid);
+                    if on {
+                        self.auto_watch.insert(uid);
+                    }
+                    let people = self.auto_watch.clone();
+                    self.save_preference(
+                        |saved| saved.auto_watch = people,
+                        "That applies for now but was not saved",
+                    );
+                    // Already live in your channel: turning it on joins them now.
+                    if on {
+                        let streaming = &self.server().streaming;
+                        let live: Vec<_> = streaming
+                            .catalog
+                            .iter()
+                            .filter(|stream| stream.publisher == id)
+                            .cloned()
+                            .collect();
+                        let mut watched = streaming.watching.len();
+                        for stream in auto_watchable(streaming, &live, &mut watched) {
+                            self.command(client::Command::WatchStream(stream));
+                        }
+                    }
+                }
+            }
             Message::SoundVolume(percent) => {
                 self.sounds.volume = percent.min(100);
                 self.sounds_unsaved = true;
@@ -5183,6 +5269,7 @@ impl App {
                 }
                 sounds_due.extend(share_sounds);
                 if let streaming::Event::Catalog(catalog) = &event {
+                    let auto = auto_watch_streams(session, catalog, &self.auto_watch);
                     sounds_due.extend(stream_changes(session, catalog));
                     // Back from a dropped connection: watch again whoever is still live.
                     if session.connected && !session.rewatch.is_empty() {
@@ -5202,6 +5289,11 @@ impl App {
                             })
                             .map(|stream| stream.id.clone())
                             .collect();
+                    }
+                    for stream in auto {
+                        if !rewatch_streams.contains(&stream) {
+                            rewatch_streams.push(stream);
+                        }
                     }
                 }
                 // A streamer's stream starts at the volume saved for them.
@@ -7158,6 +7250,67 @@ mod tests {
         let _ = app.update(Message::UserVolume(100));
         assert_eq!(gain(&app), None, "back to normal is forgotten");
         assert!(app.edited_settings().user_audio.is_empty());
+    }
+
+    #[test]
+    fn a_person_picked_for_it_has_their_streams_joined_as_they_go_live() {
+        let (mut app, mut commands) = session_fixture();
+        if !streaming::AVAILABLE {
+            return;
+        }
+        let id = app.active.unwrap();
+        let other = app
+            .server()
+            .state
+            .current_members()
+            .iter()
+            .find(|member| !member.is_self)
+            .unwrap()
+            .clone();
+        let stream = |publisher: u16| streaming::StreamInfo {
+            id: format!("stream-{publisher}"),
+            publisher,
+            name: "Screen".into(),
+            viewers: 0,
+            has_audio: true,
+            server_relayed: false,
+        };
+        let mut joined = |app: &mut App, streams: Vec<streaming::StreamInfo>| {
+            let event = streaming::Event::Catalog(streams);
+            let _ = app.update(Message::Backend(id, client::Event::Streaming(event)));
+            let mut joined = Vec::new();
+            while let Ok(command) = commands.try_recv() {
+                if let client::Command::WatchStream(stream) = command {
+                    joined.push(stream);
+                }
+            }
+            joined
+        };
+        let theirs = format!("stream-{}", other.id);
+        assert!(
+            joined(&mut app, vec![stream(other.id)]).is_empty(),
+            "nobody is picked at first"
+        );
+
+        // Picked while live: joined straight away, and kept for the next launch.
+        let _ = app.update(Message::ToggleAutoWatch(other.id));
+        assert_eq!(
+            joined(&mut app, vec![stream(other.id)]),
+            std::slice::from_ref(&theirs)
+        );
+        assert!(app.edited_settings().auto_watch.contains(&other.uid));
+        assert!(
+            joined(&mut app, vec![stream(other.id)]).is_empty(),
+            "a stream you left isn't joined again while it runs"
+        );
+
+        assert!(joined(&mut app, vec![]).is_empty());
+        assert_eq!(joined(&mut app, vec![stream(other.id)]), [theirs]);
+
+        let _ = app.update(Message::ToggleAutoWatch(other.id));
+        assert!(app.edited_settings().auto_watch.is_empty());
+        assert!(joined(&mut app, vec![]).is_empty());
+        assert!(joined(&mut app, vec![stream(other.id)]).is_empty());
     }
 
     #[test]

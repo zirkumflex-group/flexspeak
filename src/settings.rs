@@ -44,6 +44,9 @@ pub struct Settings {
     /// Each streamer's stream volume in percent, by identity; streams at 100% stay out.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub stream_volumes: BTreeMap<String, u16>,
+    /// The people whose streams are joined as soon as they go live in your channel, by identity.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub auto_watch: BTreeSet<String>,
     /// Whether the app plays its short event sounds at all.
     #[serde(skip_serializing_if = "is_true")]
     pub sound_cues: bool,
@@ -699,6 +702,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             user_audio: BTreeMap::new(),
             stream_volumes: BTreeMap::new(),
+            auto_watch: BTreeSet::new(),
             sound_cues: true,
             sounds: crate::sounds::Settings::default(),
             share: Default::default(),
