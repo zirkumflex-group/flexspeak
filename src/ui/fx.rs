@@ -10,10 +10,10 @@ use rune::El;
 use rune::compose::{Compositor, DeviceKey, Frame};
 use rune::render::{EffectPhase, EffectSite, KIND_EFFECT};
 use rune_fx::{
-    AuroraParams, ElectricParams, FillAnchor, FireParams, FireStyle, Fx, FxBlend, FxFrame, FxLayer,
-    FxOptions, FxRenderer, FxSlot, GlowParams, GlowStyle, GrainParams, LiquidMetalParams,
-    MeshGradientParams, MetaballParams, PulseParams, PulseStyle, Shape, ShimmerParams,
-    SparkleParams, Stops, SwirlParams, VoronoiParams, WaveParams, rgb,
+    AuroraParams, ElectricParams, FireParams, FireStyle, Fx, FxBlend, FxFrame, FxLayer, FxOptions,
+    FxRenderer, FxSlot, GlowParams, GlowStyle, GrainParams, MeshGradientParams, MetaballParams,
+    PlasticParams, PulseParams, PulseStyle, Shape, ShimmerParams, SparkleParams, Stops,
+    SwirlParams, VoronoiParams, WaveParams, rgb,
 };
 
 use crate::App;
@@ -26,8 +26,6 @@ const CARD_MARKS: u32 = 16;
 /// how each is tuned, depends on its rarity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardFx {
-    /// Light spilling out behind the card.
-    Glow,
     /// Flames around the card, behind it.
     Fire,
     /// The card's painted background, a different style for each rarity.
@@ -37,7 +35,7 @@ pub enum CardFx {
     Shimmer,
     Sparkles,
     Electric,
-    /// The card's metal frame.
+    /// The card's plastic frame, in its rarity's colour.
     Frame,
     /// The face-down card a reveal starts from.
     Back,
@@ -51,8 +49,7 @@ pub enum CardFx {
 }
 
 impl CardFx {
-    const ALL: [Self; 16] = [
-        Self::Glow,
+    const ALL: [Self; 15] = [
         Self::Fire,
         Self::Art,
         Self::Aurora,
@@ -87,13 +84,10 @@ pub fn card_layers(rarity: Rarity) -> (&'static [CardFx], &'static [CardFx]) {
     match rarity {
         Rarity::Common => (&[Art, Grain], &[]),
         Rarity::Uncommon => (&[Art, Grain], &[Shimmer, Frame]),
-        Rarity::Rare => (&[Glow, Art, Aurora, Grain], &[Shimmer, Sparkles, Frame]),
-        Rarity::Mythic => (
-            &[Glow, Art, Aurora, Grain],
-            &[Shimmer, Sparkles, Frame, Electric],
-        ),
+        Rarity::Rare => (&[Art, Aurora, Grain], &[Shimmer, Sparkles, Frame]),
+        Rarity::Mythic => (&[Art, Aurora, Grain], &[Shimmer, Sparkles, Frame, Electric]),
         Rarity::Legendary => (
-            &[Glow, Fire, Art, Aurora, Grain],
+            &[Fire, Art, Aurora, Grain],
             &[Shimmer, Sparkles, Frame, Electric],
         ),
     }
@@ -112,6 +106,24 @@ pub fn card_fx(part: CardFx, art: usize, rarity: Rarity, seed: u16, reduced: boo
 
 /// The card width the layers below are tuned at; other sizes scale from it.
 const CARD_WIDTH: f32 = 236.0;
+
+/// The card's frame: a glossy plastic rim in the colour of its rarity, which still reads as
+/// that colour when the card is small.
+fn frame(rarity: Rarity, k: f32) -> Fx {
+    let width = match rarity {
+        Rarity::Legendary => 5.0,
+        Rarity::Mythic => 4.5,
+        Rarity::Rare => 4.0,
+        _ => 3.5,
+    };
+    Fx::fill(
+        PlasticParams {
+            color: rgb(rarity.color()),
+            ..PlasticParams::glossy()
+        }
+        .border(width * k),
+    )
+}
 
 /// A layer of a card being opened. `level` is how lit it is, 1 at full and lower in the hush.
 fn reveal_layer(part: CardFx, rarity: Rarity, level: f32, shape: Shape, k: f32) -> Option<Fx> {
@@ -234,21 +246,6 @@ fn card_layer(
     let rarity = *Rarity::ALL.get(data[1] as usize)?;
     let seed = data[2] as u32;
     let fx = match part {
-        CardFx::Glow => Fx::glow(GlowParams {
-            style: if rarity == Rarity::Rare {
-                GlowStyle::Soft
-            } else {
-                GlowStyle::Aura
-            },
-            color: rgb(main),
-            core: rgb(high),
-            third: rgb(second),
-            radius: 20.0 * k,
-            intensity: if rarity == Rarity::Rare { 0.8 } else { 1.3 },
-            breathe: 0.3,
-            aura_speed: 0.2,
-            ..Default::default()
-        }),
         CardFx::Fire => Fx::fire(FireParams {
             style: FireStyle::Border,
             low: rgb(second),
@@ -339,22 +336,7 @@ fn card_layer(
                 })
             }
         }
-        CardFx::Frame => {
-            let (metal, width) = match rarity {
-                Rarity::Legendary => (LiquidMetalParams::gold(), 4.5),
-                Rarity::Mythic => (LiquidMetalParams::rose(), 3.5),
-                Rarity::Rare => (LiquidMetalParams::chrome(), 3.0),
-                _ => (LiquidMetalParams::gunmetal(), 2.5),
-            };
-            Fx::fill(
-                LiquidMetalParams {
-                    iridescence: if rarity >= Rarity::Mythic { 0.6 } else { 0.0 },
-                    anchor: FillAnchor::Element,
-                    ..metal
-                }
-                .border(width * k),
-            )
-        }
+        CardFx::Frame => frame(rarity, k),
         // Drawn by `reveal_layer` above.
         CardFx::Back
         | CardFx::RevealGlow
