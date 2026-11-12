@@ -237,6 +237,8 @@ pub struct UiState {
     pub server_name: TextEdit,
     pub server_address: TextEdit,
     pub server_password: TextEdit,
+    /// The password prompt a server's refusal opens.
+    pub prompt_password: TextEdit,
     pub poke_message: TextEdit,
     pub moderation_reason: TextEdit,
     /// The device or source picker whose list is open.
@@ -326,6 +328,7 @@ impl Default for UiState {
             server_name: TextEdit::new(""),
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
+            prompt_password: TextEdit::new("").secure(),
             poke_message: TextEdit::new(""),
             moderation_reason: TextEdit::new(""),
             open: None,
@@ -403,6 +406,11 @@ impl App {
         mirror(&mut self.ui.server_name, &editor.name);
         mirror(&mut self.ui.server_address, &editor.address);
         mirror(&mut self.ui.server_password, &editor.password);
+        let prompt = self
+            .server_password_prompt
+            .as_ref()
+            .map_or(String::new(), |prompt| prompt.password.clone());
+        mirror(&mut self.ui.prompt_password, &prompt);
         let poke = self
             .server()
             .poke

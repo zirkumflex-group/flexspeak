@@ -22,6 +22,7 @@ mod onboarding;
 mod permissions;
 mod profiler;
 mod resume;
+mod secret;
 mod server_log;
 mod session_end;
 mod settings;
@@ -239,6 +240,8 @@ struct App {
     server_passwords: HashMap<String, String>,
     /// The Add or Edit Server dialog, while it is open.
     server_editor: Option<ServerEditor>,
+    /// Asks for a server's password after the server refused the one it was given.
+    server_password_prompt: Option<ServerPasswordPrompt>,
     loopback: bool,
     closing: bool,
     level: f32,
@@ -298,6 +301,8 @@ struct ServerSession {
     log: server_log::Log,
     /// The connection dropped and is coming back.
     reconnecting: bool,
+    /// Why the connection is ending, as the client read it from the server's answer.
+    refusal: Option<client::Refusal>,
     /// The first list of streams after joining shows who was already live, not who just went live.
     catalog_seen: bool,
     /// The channel you asked to join, to tell that apart from being moved.
@@ -379,6 +384,7 @@ impl ServerSession {
             kicked: false,
             log: server_log::Log::default(),
             reconnecting: false,
+            refusal: None,
             catalog_seen: false,
             id,
             name,
@@ -524,11 +530,27 @@ struct ServerEditor {
     name: String,
     address: String,
     password: String,
+    /// Keep the password in the settings file, sealed for this user (Windows only).
+    remember: bool,
     error: Option<String>,
     /// Remove was pressed once; the second press removes the server.
     remove_armed: bool,
     /// Settings opened only to hold this dialog, from Home or the rail, and closes with it.
     alone: bool,
+    /// Saving also connects: the dialog is Add and Connect.
+    connect: bool,
+}
+
+/// The prompt for a server's password, after the server refused the one it was given.
+#[derive(Debug, Clone, Default)]
+struct ServerPasswordPrompt {
+    /// The saved server's index.
+    index: usize,
+    /// The server's name or address, for the title.
+    title: String,
+    password: String,
+    remember: bool,
+    error: Option<String>,
 }
 
 /// A category of the Settings window, in sidebar order.
@@ -857,6 +879,13 @@ enum Message {
     ServerName(String),
     ServerAddress(String),
     ServerPassword(String),
+    /// Add/Edit Server's Remember Password.
+    ServerRemember(bool),
+    /// The server password prompt's field, its Remember Password, Connect and Cancel.
+    PromptPassword(String),
+    PromptRemember(bool),
+    SubmitPromptPassword,
+    CancelPromptPassword,
     SubmitServer,
     CancelServer,
     RemoveServer,
@@ -1164,6 +1193,7 @@ impl App {
             password: String::new(),
             servers: Vec::new(),
             server_passwords: HashMap::new(),
+            server_password_prompt: None,
             server_editor: None,
             loopback: false,
             closing: false,
@@ -1770,8 +1800,8 @@ impl App {
             return;
         }
         let nickname = self.nickname.trim().to_owned();
-        if nickname.is_empty() {
-            self.nickname_error = Some("Enter a nickname.".into());
+        if let Some(problem) = onboarding::nickname_problem(&nickname) {
+            self.nickname_error = Some(problem.into());
             return;
         }
         self.nickname_error = None;
@@ -1986,21 +2016,26 @@ impl App {
             .is_some_and(|server| self.session_at(&server.address).is_some())
     }
 
-    /// Adds or updates the dialog's server and saves the list.
-    fn submit_server(&mut self) {
-        let Some(editor) = self.server_editor.clone() else {
-            return;
+    /// Adds or updates the dialog's server and saves the list. Returns the server to connect to
+    /// when the dialog was Add and Connect.
+    fn submit_server(&mut self) -> Option<usize> {
+        let editor = self.server_editor.clone()?;
+        let normalized = onboarding::normalize_address(&editor.address);
+        let address = normalized.clone().unwrap_or_default();
+        let same = |server: &settings::Server| {
+            onboarding::normalize_address(&server.address)
+                .unwrap_or_else(|_| server.address.trim().to_lowercase())
+                == address
         };
-        let address = editor.address.trim().to_owned();
-        let error = if address.is_empty() {
-            Some("Enter the server's address.")
+        let error = if let Err(error) = normalized {
+            Some(error)
         } else if editor.index.is_some_and(|index| self.server_in_use(index)) {
             Some("Disconnect before editing this server.")
         } else if self
             .servers
             .iter()
             .enumerate()
-            .any(|(i, server)| Some(i) != editor.index && server.address.trim() == address)
+            .any(|(i, server)| Some(i) != editor.index && same(server))
         {
             Some("This server is already in the list.")
         } else {
@@ -2010,8 +2045,13 @@ impl App {
             if let Some(open) = &mut self.server_editor {
                 open.error = Some(error.into());
             }
-            return;
+            return None;
         }
+        let password = if editor.remember && !editor.password.is_empty() {
+            secret::protect(&editor.password).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let server = settings::Server {
             name: editor.name.trim().into(),
             address: address.clone(),
@@ -2019,17 +2059,22 @@ impl App {
                 .index
                 .and_then(|index| self.servers.get(index))
                 .is_some_and(|server| server.auto_connect),
+            password,
         };
         let mut servers = self.servers.clone();
-        match editor.index {
+        let index = match editor.index {
             Some(index) if index < servers.len() => {
                 let old = std::mem::replace(&mut servers[index], server);
                 if old.address.trim() != address {
                     self.server_passwords.remove(old.address.trim());
                 }
+                index
             }
-            _ => servers.push(server),
-        }
+            _ => {
+                servers.push(server);
+                servers.len() - 1
+            }
+        };
         if editor.password.is_empty() {
             self.server_passwords.remove(&address);
         } else {
@@ -2037,6 +2082,26 @@ impl App {
         }
         self.set_servers(servers);
         self.close_server_editor();
+        editor.connect.then_some(index)
+    }
+
+    /// Remembers or forgets the password of the saved server at `address`, as the user chose.
+    fn remember_password(&mut self, address: &str, password: Option<&str>) {
+        let sealed = password
+            .filter(|password| !password.is_empty())
+            .and_then(secret::protect)
+            .unwrap_or_default();
+        let mut servers = self.servers.clone();
+        let Some(server) = servers
+            .iter_mut()
+            .find(|server| server.address.trim() == address.trim())
+        else {
+            return;
+        };
+        if server.password != sealed {
+            server.password = sealed;
+            self.set_servers(servers);
+        }
     }
 
     /// Closes the Add or Edit Server dialog, and Settings with it if it opened only for it.
@@ -2166,6 +2231,16 @@ impl App {
             self.address = first;
         }
         self.servers = saved.servers;
+        // Remembered passwords open for this session; the in-memory ones win.
+        for server in &self.servers {
+            if !server.password.is_empty()
+                && let Some(password) = secret::unprotect(&server.password)
+            {
+                self.server_passwords
+                    .entry(server.address.trim().to_owned())
+                    .or_insert(password);
+            }
+        }
         self.nickname = saved.nickname;
         self.playback_volume
             .set_percent(saved.playback_volume_percent);
@@ -2735,6 +2810,11 @@ impl App {
                         return Task::none();
                     }
                     self.onboarding_error = None;
+                    if step == onboarding::Step::Server
+                        && let Ok(address) = onboarding::normalize_address(&self.address)
+                    {
+                        self.address = address;
+                    }
                     if let Some(next) = step.next() {
                         self.onboarding = Some(next);
                         self.refresh_visible_permissions();
@@ -3385,12 +3465,14 @@ impl App {
                     }
                     self.address = value;
                     self.settings_message = None;
+                    self.onboarding_error = None;
                 }
             }
             Message::Nickname(value) => {
                 if self.idle() {
                     self.nickname = value;
                     self.nickname_error = None;
+                    self.onboarding_error = None;
                 }
             }
             Message::CommitNickname => self.commit_nickname(),
@@ -3474,6 +3556,7 @@ impl App {
                     }
                     self.server_editor = Some(ServerEditor {
                         alone,
+                        connect: alone,
                         ..ServerEditor::default()
                     });
                 }
@@ -3489,6 +3572,7 @@ impl App {
                             .get(server.address.trim())
                             .cloned()
                             .unwrap_or_default(),
+                        remember: !server.password.is_empty(),
                         ..ServerEditor::default()
                     });
                 }
@@ -3517,7 +3601,53 @@ impl App {
                 }
             }
             Message::AutoConnect => return self.auto_connect(),
-            Message::SubmitServer => self.submit_server(),
+            Message::ServerRemember(on) => {
+                if let Some(editor) = &mut self.server_editor {
+                    editor.remember = on;
+                }
+            }
+            Message::PromptPassword(value) => {
+                if let Some(prompt) = &mut self.server_password_prompt {
+                    prompt.password = value;
+                    prompt.error = None;
+                }
+            }
+            Message::PromptRemember(on) => {
+                if let Some(prompt) = &mut self.server_password_prompt {
+                    prompt.remember = on;
+                }
+            }
+            Message::SubmitPromptPassword => {
+                let Some(prompt) = self.server_password_prompt.take() else {
+                    return Task::none();
+                };
+                let Some(address) = self
+                    .servers
+                    .get(prompt.index)
+                    .map(|server| server.address.trim().to_owned())
+                else {
+                    return Task::none();
+                };
+                if prompt.password.is_empty() {
+                    self.server_passwords.remove(&address);
+                } else {
+                    self.server_passwords
+                        .insert(address.clone(), prompt.password.clone());
+                }
+                if secret::AVAILABLE {
+                    self.remember_password(
+                        &address,
+                        prompt.remember.then_some(prompt.password.as_str()),
+                    );
+                }
+                return self.update(Message::Connect(prompt.index));
+            }
+            Message::CancelPromptPassword => self.server_password_prompt = None,
+            Message::SubmitServer => {
+                if let Some(index) = self.submit_server() {
+                    return self.update(Message::Connect(index));
+                }
+            }
             Message::CancelServer => self.close_server_editor(),
             Message::RemoveServer => self.remove_server(),
             Message::TestAudio => {
@@ -4364,6 +4494,7 @@ impl App {
                 session.server_controls = confirmed;
                 session.controls_pending = pending;
             }
+            client::Event::Refused(refusal) => session.refusal = Some(refusal),
             client::Event::ChannelPasswordRequired(channel) => {
                 if session.can_request_join(loopback, channel) {
                     session.password_channel = Some(channel);
@@ -4421,21 +4552,54 @@ impl App {
             client::Event::Stopped(error) => {
                 // Name the server before it goes, so its alert isn't taken for the active one's.
                 // Filed under its address, so connecting there again clears it.
-                let (address, name, was_connected) = (
+                // A session that was reconnecting had been connected: that is a drop too.
+                let (address, name, was_connected, refusal, tried) = (
                     session.address.trim().to_owned(),
                     session.title().to_owned(),
-                    session.connected,
+                    session.connected || session.reconnecting,
+                    session.refusal.take(),
+                    !session.password.is_empty(),
                 );
                 self.alerts.close_server(id.0);
                 let audio_failed = matches!(error, Some((Source::Audio, _)));
+                let saved = self
+                    .servers
+                    .iter()
+                    .position(|server| server.address.trim() == address);
                 match error {
+                    // A refused password asks for the right one instead of reporting a failure.
+                    Some((Source::Connection, _))
+                        if !loopback
+                            && refusal == Some(client::Refusal::Password)
+                            && saved.is_some() =>
+                    {
+                        let index = saved.unwrap_or_default();
+                        self.server_password_prompt = Some(ServerPasswordPrompt {
+                            index,
+                            title: name,
+                            password: String::new(),
+                            remember: !self.servers[index].password.is_empty(),
+                            error: tried.then(|| "That password wasn't accepted.".into()),
+                        });
+                        self.ui.prompt_password.focused = true;
+                    }
                     Some((Source::Connection, detail)) if !loopback => {
                         let source = if was_connected {
                             Source::Dropped
                         } else {
                             Source::Connection
                         };
-                        self.alerts.raise_at(&address, Some(name), source, detail);
+                        match refusal {
+                            Some(refusal) => self.alerts.raise_refused_at(
+                                &address,
+                                Some(name),
+                                source,
+                                refusal.sentence(),
+                                &detail,
+                                !refusal.deliberate(),
+                            ),
+                            None => self.alerts.raise_at(&address, Some(name), source, detail),
+                        }
                     }
                     Some((source, detail)) => self.alerts.raise(source, detail),
                     None => {}
@@ -5186,6 +5350,10 @@ mod tests {
     }
 
     fn add_server(app: &mut App, name: &str, address: &str, password: &str) {
+        // From Settings, so the dialog is Add Server rather than Add and Connect.
+        if app.settings_page.is_none() {
+            app.open_settings(SettingsPage::Server);
+        }
         let _ = app.update(Message::AddServer);
         let _ = app.update(Message::ServerName(name.into()));
         let _ = app.update(Message::ServerAddress(address.into()));
@@ -5243,6 +5411,109 @@ mod tests {
         assert_eq!(app.servers.len(), 1);
         assert_eq!(settings::load(&path).unwrap().unwrap().servers.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_remembered_password_is_sealed_in_the_file_and_opens_at_the_next_launch() {
+        let (mut app, root) = saved_fixture("remember");
+        let path = root.join("settings.json");
+        app.open_settings(SettingsPage::Server);
+        let _ = app.update(Message::AddServer);
+        let _ = app.update(Message::ServerAddress("Two.Example:9987".into()));
+        let _ = app.update(Message::ServerPassword("two-password".into()));
+        let _ = app.update(Message::ServerRemember(true));
+        let _ = app.update(Message::SubmitServer);
+        assert_eq!(app.servers[1].address, "two.example", "saved in its plain form");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("two-password"));
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert_eq!(!stored.servers[1].password.is_empty(), secret::AVAILABLE);
+
+        let (mut again, _other) = setup_fixture("remember-again");
+        again.load_settings(path.clone());
+        assert_eq!(
+            again.server_passwords.get("two.example").map(String::as_str),
+            secret::AVAILABLE.then_some("two-password"),
+        );
+        let _ = again.update(Message::EditServer(1));
+        assert_eq!(
+            again.server_editor.as_ref().unwrap().remember,
+            secret::AVAILABLE
+        );
+        let _ = again.update(Message::ServerRemember(false));
+        let _ = again.update(Message::SubmitServer);
+        assert!(
+            settings::load(&path).unwrap().unwrap().servers[1]
+                .password
+                .is_empty(),
+            "forgetting takes it out of the file"
+        );
+        assert_eq!(
+            again.server_passwords.get("two.example").map(String::as_str),
+            secret::AVAILABLE.then_some("two-password"),
+            "but keeps it for this session"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refused_password_asks_for_one_and_other_refusals_say_why() {
+        let (mut app, root) = saved_fixture("refused");
+        app.address = "one.example".into();
+        let (id, _commands) = connection(&mut app);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Refused(client::Refusal::Password),
+        ));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Stopped(Some((Source::Connection, "invalid server password".into()))),
+        ));
+        let prompt = app.server_password_prompt.as_ref().expect("the prompt opens");
+        assert_eq!(prompt.index, 0);
+        assert!(prompt.error.is_none(), "no password was tried yet");
+        assert!(app.ui.prompt_password.focused);
+        assert!(app.alerts.current().is_none(), "no failure is reported");
+        let _ = app.update(Message::CancelPromptPassword);
+        assert!(app.server_password_prompt.is_none());
+
+        // A kick says so, and doesn't offer to go straight back.
+        let (id, _commands) = connection(&mut app);
+        app.session_mut(id).unwrap().connected = true;
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Refused(client::Refusal::Kicked),
+        ));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Stopped(Some((Source::Connection, "connection closed".into()))),
+        ));
+        let alert = app.alerts.current().unwrap();
+        assert_eq!(alert.source, Source::Dropped);
+        assert_eq!(alert.detail, client::Refusal::Kicked.sentence());
+        assert_eq!(alert.address, None, "no Reconnect");
+        assert!(
+            app.alerts.history_text().contains("connection closed"),
+            "the library's words stay in the Error Log"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_session_lost_while_reconnecting_is_reported_as_dropped() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.address = "ts.example.org".into();
+        let (id, _commands) = connection(&mut app);
+        app.session_mut(id).unwrap().connected = true;
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Status(client::CONNECTION_LOST.into()),
+        ));
+        assert!(!app.session_mut(id).unwrap().connected);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Stopped(Some((Source::Connection, "timed out".into()))),
+        ));
+        assert_eq!(app.alerts.current().unwrap().source, Source::Dropped);
     }
 
     #[test]
@@ -5594,11 +5865,11 @@ mod tests {
         assert_eq!(app.password, "temporary-test-password");
         let saved = settings::load(&path).unwrap().unwrap();
         assert_eq!(saved.nickname, "Alex");
-        assert_eq!(saved.servers, [settings::Server::new("voice.example:9987")]);
+        assert_eq!(saved.servers, [settings::Server::new("voice.example")]);
         assert_eq!(saved.chat.layout, chat::Layout::Feed);
         assert_eq!(
             app.server_passwords
-                .get("voice.example:9987")
+                .get("voice.example")
                 .map(String::as_str),
             Some("temporary-test-password"),
             "the setup password is remembered for the session"

@@ -717,10 +717,13 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     row()
                         .gap(8.0)
                         .center_y()
-                        .help(
+                        .help(if crate::secret::AVAILABLE {
+                            "Connect when Flexspeak opens. A server that needs a password \
+                             connects this way once its password is remembered."
+                        } else {
                             "Connect when Flexspeak opens. Passwords aren't saved, so a server \
-                             that needs one can't connect this way.",
-                        )
+                             that needs one can't connect this way."
+                        })
                         .child(text("Auto connect").font(ty::SMALL).color(t.muted))
                         .child({
                             let on = server.auto_connect;
@@ -734,6 +737,17 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                                 .key(format!("auto-connect-{index}"))
                         }),
                 )
+                .children(session.is_none().then(|| {
+                    button(
+                        t,
+                        &format!("connect-server-{index}"),
+                        "Connect",
+                        Some(&icons::CONNECT),
+                        Variant::Secondary,
+                        Some(Message::Connect(index)),
+                    )
+                    .help(format!("Connect to {}", server.title()))
+                }))
                 .child(
                     button(
                         t,
@@ -855,7 +869,11 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         ))
         .child(labelled_field(
             "Password",
-            Some("Optional. Kept until you quit Flexspeak; never saved."),
+            Some(if crate::secret::AVAILABLE {
+                "Optional. Kept until you quit Flexspeak, unless you remember it."
+            } else {
+                "Optional. Kept until you quit Flexspeak; never saved."
+            }),
             field(
                 k,
                 &s.ui.server_password,
@@ -865,6 +883,14 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                 Some(Message::SubmitServer),
             ),
         ));
+    if crate::secret::AVAILABLE {
+        body = body.child(super::modals::remember_password(
+            k,
+            editor.remember,
+            (!in_use).then_some(Message::ServerRemember as fn(bool) -> Message),
+            "server-remember",
+        ));
+    }
     if let Some(error) = &editor.error {
         body = body.child(super::widgets::error_text(t, error.clone()));
     } else if in_use {
@@ -912,6 +938,8 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                 "submit-server",
                 if editing.is_some() {
                     "Save"
+                } else if editor.connect {
+                    "Add and Connect"
                 } else {
                     "Add Server"
                 },

@@ -235,6 +235,35 @@ impl Alerts {
             detail,
         );
     }
+    /// Like `raise_at`, but the card shows `shown` while the Error Log keeps `logged`, the
+    /// library's own words. Without `offer_again` the card has no Try Again or Reconnect.
+    pub fn raise_refused_at(
+        &mut self,
+        address: &str,
+        server: Option<String>,
+        source: Source,
+        shown: &str,
+        logged: &str,
+        offer_again: bool,
+    ) {
+        let key = (Scope::Address(address.to_owned()), source);
+        self.insert(
+            key.clone(),
+            server,
+            offer_again.then(|| address.to_owned()),
+            shown,
+        );
+        if let Some(incident) = self.incidents.get_mut(&key) {
+            if !offer_again {
+                incident.address = None;
+            }
+            let id = incident.id;
+            if let Some(entry) = self.history.iter_mut().rev().find(|entry| entry.incident == id) {
+                entry.detail = format!("{shown} ({logged})");
+            }
+        }
+    }
+
     fn insert(
         &mut self,
         key: Key,
