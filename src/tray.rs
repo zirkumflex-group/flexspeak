@@ -83,6 +83,7 @@ pub enum Action {
     Show,
     Mute,
     Deafen,
+    Disconnect,
     Quit,
 }
 
@@ -218,6 +219,7 @@ mod native {
         icon: TrayIcon,
         mute: CheckMenuItem,
         deafen: CheckMenuItem,
+        disconnect: MenuItem,
         shown: Status,
         dark: bool,
         checked_at: Instant,
@@ -333,9 +335,11 @@ mod native {
             );
             let menu = Menu::new();
             let separator = PredefinedMenuItem::separator();
+            let disconnect =
+                MenuItem::with_id("disconnect", "Disconnect", status.connected(), None);
             let show = MenuItem::with_id("show", "Show Flexspeak", true, None);
             let quit = MenuItem::with_id("quit", "Quit Flexspeak", true, None);
-            menu.append_items(&[&mute, &deafen, &separator, &show, &quit])
+            menu.append_items(&[&mute, &deafen, &disconnect, &separator, &show, &quit])
                 .map_err(|error| error.to_string())?;
             let actions = std::sync::Arc::new(actions);
             let on_menu = actions.clone();
@@ -343,6 +347,7 @@ mod native {
                 let action = match event.id.0.as_str() {
                     "mute" => Action::Mute,
                     "deafen" => Action::Deafen,
+                    "disconnect" => Action::Disconnect,
                     "show" => Action::Show,
                     "quit" => Action::Quit,
                     _ => return,
@@ -374,6 +379,7 @@ mod native {
                 icon,
                 mute,
                 deafen,
+                disconnect,
                 shown: status,
                 dark,
                 checked_at: Instant::now(),
@@ -398,6 +404,7 @@ mod native {
             // A click ticks a check item by itself; set both to what's true every time.
             self.mute.set_enabled(status.connected());
             self.deafen.set_enabled(status.connected());
+            self.disconnect.set_enabled(status.connected());
             self.mute.set_checked(status.muted);
             self.deafen.set_checked(status.deafened);
             self.shown = status;

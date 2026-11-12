@@ -462,7 +462,8 @@ fn tray_action(handle: &rune::AppHandle<App>, action: crate::tray::Action) {
         Action::Show => return handle.open(),
         Action::Mute => Message::Mute,
         Action::Deafen => Message::Deafen,
-        Action::Quit => Message::Close,
+        Action::Disconnect => Message::TrayDisconnect,
+        Action::Quit => Message::Quit,
     };
     handle.update(move |s, tx| dispatch(s, tx, message));
 }
@@ -590,6 +591,7 @@ fn setup(s: &mut App, waker: Waker) {
 /// Sampling timers and video frame bookkeeping. True only when something visible changed.
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     crate::window_icon::apply();
+    crate::window_place::apply();
     let mut changed = false;
     let now = Instant::now();
     if now >= s.next_usage_tick {
@@ -864,6 +866,10 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     }
     rune_kit::root(base, layer)
         .hover_motion_within(rune::Spring::new(0.12, 0.0), rune::Spring::new(0.28, 0.0))
+        // Messages that arrive while another app is in front wait as unread.
+        .on_window_focus(|s: &mut App, focused, tx: &mut Tx| {
+            dispatch(s, tx, Message::WindowFocus(focused));
+        })
 }
 
 /// A one-point speck of frosted glass in the canvas colour, for the first frame only. The
@@ -880,8 +886,20 @@ fn blur_warm_up(t: &Theme) -> El {
         .child(el().size(1.0, 1.0).backdrop_blur(1.0).fill(t.canvas))
 }
 
+/// How this launch opens the window.
+pub struct Launch {
+    /// Open where the window was when it last closed; previews keep their own size.
+    pub restore_place: bool,
+    /// Start in the notification area, as Start Minimized asks at sign-in.
+    pub minimized: bool,
+}
+
+/// The window starts hidden in the tray; read once by `App::new`.
+pub static STARTED_HIDDEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Opens the window and runs until the app quits.
-pub fn run() {
+pub fn run(launch: Launch) {
     rune::prewarm_gpu();
     // Wayland app id and X11 class: desktops match it to flexspeak.desktop and its icon.
     rune::set_app_id("flexspeak");
@@ -894,6 +912,23 @@ pub fn run() {
         // Wide enough for the chat column beside the stage (`chat::MIN_DOCK_WINDOW`).
         ..AppSpec::new("Flexspeak", (1180.0, 790.0), placeholder, view)
     };
+    let saved = launch
+        .restore_place
+        .then(crate::settings::path)
+        .and_then(Result::ok)
+        .and_then(|path| crate::settings::load(&path).ok().flatten());
+    let place = saved
+        .as_ref()
+        .and_then(|saved| saved.window)
+        .filter(|place| crate::window_place::usable(place) && crate::window_place::on_screen(place));
+    if place.is_some_and(|place| place.maximized) {
+        crate::window_place::maximize_when_shown();
+    }
+    // Hidden only with a tray icon to come back from.
+    let hidden = launch.minimized
+        && crate::tray::SUPPORTED
+        && !saved.is_some_and(|saved| saved.appearance.hide_tray_icon);
+    STARTED_HIDDEN.store(hidden, std::sync::atomic::Ordering::Relaxed);
     let app = rune::App::new(spec);
     let handle = app.handle();
     app.init(move || App::new(Some(handle)))
@@ -906,6 +941,9 @@ pub fn run() {
         })
         .window_options(rune::WindowOptions {
             borderless: cfg!(windows),
+            visible: !hidden,
+            position: place.map(|place| (place.x, place.y)),
+            physical_size: place.map(|place| (place.width, place.height)),
             ..Default::default()
         })
         .compositor(fx::Effects::default())

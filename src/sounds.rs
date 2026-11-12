@@ -33,6 +33,7 @@ pub enum Sound {
     MovedChannel,
     ViewerJoined,
     ViewerLeft,
+    WatchRequested,
     PersonJoinedChannel,
     PersonLeftChannel,
     PersonConnected,
@@ -58,6 +59,7 @@ pub enum Sound {
     TalkPowerGranted,
     TalkPowerRevoked,
     WhisperReceived,
+    PrivateMessage,
     InsufficientPermissions,
     ServerGroupAssigned,
     ServerGroupRevoked,
@@ -67,7 +69,7 @@ pub enum Sound {
 }
 
 impl Sound {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 42] = [
         Self::MicOff,
         Self::MicOn,
         Self::Deafened,
@@ -92,6 +94,7 @@ impl Sound {
         Self::PersonStreamStopped,
         Self::ViewerJoined,
         Self::ViewerLeft,
+        Self::WatchRequested,
         Self::Connected,
         Self::Disconnected,
         Self::ConnectionLost,
@@ -104,6 +107,7 @@ impl Sound {
         Self::TalkPowerGranted,
         Self::TalkPowerRevoked,
         Self::WhisperReceived,
+        Self::PrivateMessage,
         Self::InsufficientPermissions,
         Self::ServerGroupAssigned,
         Self::ServerGroupRevoked,
@@ -133,11 +137,12 @@ impl Sound {
             | Self::PersonStreamStarted
             | Self::PersonStreamStopped
             | Self::ViewerJoined
-            | Self::ViewerLeft => Group::Streams,
+            | Self::ViewerLeft
+            | Self::WatchRequested => Group::Streams,
             Self::Connected | Self::Disconnected | Self::ConnectionLost | Self::Reconnected => {
                 Group::Connection
             }
-            Self::Poke | Self::WhisperReceived => Group::Messages,
+            Self::Poke | Self::WhisperReceived | Self::PrivateMessage => Group::Messages,
             Self::Kicked
             | Self::KickedFromChannel
             | Self::Banned
@@ -159,6 +164,7 @@ impl Sound {
             Self::TalkPowerGranted => Some(Self::MicOn),
             Self::TalkPowerRevoked => Some(Self::MicOff),
             Self::WhisperReceived => Some(Self::Poke),
+            Self::PrivateMessage => Some(Self::Poke),
             Self::InsufficientPermissions => Some(Self::Poke),
             Self::ServerGroupAssigned => Some(Self::Poke),
             Self::ServerGroupRevoked => Some(Self::Poke),
@@ -190,6 +196,7 @@ impl Sound {
             Self::MovedChannel => "Moved to a channel",
             Self::ViewerJoined => "Someone joined your stream",
             Self::ViewerLeft => "Someone left your stream",
+            Self::WatchRequested => "Someone asked to watch your stream",
             Self::PersonJoinedChannel => "Someone joined your channel",
             Self::PersonLeftChannel => "Someone left your channel",
             Self::Connected => "Connected",
@@ -215,6 +222,7 @@ impl Sound {
             Self::TalkPowerGranted => "You were given talk power",
             Self::TalkPowerRevoked => "Your talk power was taken away",
             Self::WhisperReceived => "Someone is whispering to you",
+            Self::PrivateMessage => "Private message while in the background",
             Self::InsufficientPermissions => "The server refused an action",
             Self::ServerGroupAssigned => "You were added to a server group",
             Self::ServerGroupRevoked => "You were removed from a server group",
@@ -235,6 +243,7 @@ impl Sound {
             Self::MovedChannel => "sound-moved",
             Self::ViewerJoined => "sound-viewer-joined",
             Self::ViewerLeft => "sound-viewer-left",
+            Self::WatchRequested => "sound-watch-request",
             Self::PersonJoinedChannel => "sound-person-joined",
             Self::PersonLeftChannel => "sound-person-left",
             Self::Connected => "sound-connected",
@@ -260,6 +269,7 @@ impl Sound {
             Self::TalkPowerGranted => "sound-talk-power-granted",
             Self::TalkPowerRevoked => "sound-talk-power-revoked",
             Self::WhisperReceived => "sound-whisper",
+            Self::PrivateMessage => "sound-private-message",
             Self::InsufficientPermissions => "sound-denied",
             Self::ServerGroupAssigned => "sound-server-group-assigned",
             Self::ServerGroupRevoked => "sound-server-group-revoked",
@@ -289,6 +299,8 @@ impl Sound {
             Self::TalkPowerGranted => Cue::MicOn,
             Self::TalkPowerRevoked => Cue::MicOff,
             Self::WhisperReceived => Cue::ViewerJoined,
+            Self::PrivateMessage => Cue::ViewerJoined,
+            Self::WatchRequested => Cue::Poke,
             Self::InsufficientPermissions => Cue::SoundOff,
             Self::ServerGroupAssigned => Cue::ViewerJoined,
             Self::ServerGroupRevoked => Cue::ViewerLeft,
@@ -323,6 +335,7 @@ impl Sound {
                 Self::PersonLeftChannel => (Voice::Drop, &[79], 0, -5.0, 0.09),
                 Self::ViewerJoined => (Voice::Glass, &[83, 88], 100, 0.0, 0.07),
                 Self::ViewerLeft => (Voice::Glass, &[88, 83], 100, 0.0, 0.07),
+                Self::WatchRequested => (Voice::Glass, &[83, 88, 88], 100, 0.0, 0.07),
                 Self::StreamStarted => (Voice::Glass, &[71, 76, 79, 83], 90, 0.0, 0.08),
                 Self::StreamStopped => (Voice::Glass, &[83, 79, 76, 71], 90, 0.0, 0.08),
                 Self::Connected => (Voice::Felt, &[60, 64, 67, 72], 120, 0.0, 0.11),
@@ -346,6 +359,7 @@ impl Sound {
                 Self::TalkPowerGranted => (Voice::Hum, &[60, 67], 130, 0.0, 0.11),
                 Self::TalkPowerRevoked => (Voice::Hum, &[67, 60], 130, 0.0, 0.11),
                 Self::WhisperReceived => (Voice::Glass, &[91], 0, -3.0, 0.07),
+                Self::PrivateMessage => (Voice::Bell, &[79, 84], 110, 0.0, 0.09),
                 Self::InsufficientPermissions => (Voice::Wood, &[45], 0, 0.0, 0.16),
                 Self::ServerGroupAssigned => (Voice::Felt, &[72, 76, 79], 100, 0.0, 0.1),
                 Self::ServerGroupRevoked => (Voice::Felt, &[79, 76, 72], 100, 0.0, 0.1),
@@ -399,7 +413,9 @@ impl Sound {
     /// This event's file in TeamSpeak's sound folder, if TeamSpeak has a sound for it.
     fn file_name(self) -> Option<&'static str> {
         Some(match self {
+            // TeamSpeak has no file for these; its pack plays Flexspeak's sound.
             Self::ViewerJoined | Self::ViewerLeft => return None,
+            Self::WatchRequested | Self::PrivateMessage => return None,
             Self::MicOff => "mic_muted.wav",
             Self::MicOn => "mic_activated.wav",
             Self::Deafened => "sound_muted.wav",
@@ -523,7 +539,7 @@ impl Group {
             Self::People => "People in your channel",
             Self::Streams => "Streams",
             Self::Connection => "Connection",
-            Self::Messages => "Pokes and whispers",
+            Self::Messages => "Pokes, whispers and private messages",
             Self::Moderation => "Kicks, bans and permissions",
         }
     }

@@ -3,6 +3,7 @@
 mod alerts;
 mod audio;
 mod audio_processing;
+mod autostart;
 mod changelog;
 mod chat;
 mod chat_store;
@@ -36,6 +37,7 @@ mod ui;
 mod updater;
 mod usage;
 mod window_icon;
+mod window_place;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -59,6 +61,8 @@ const MIN_SIZE: (f32, f32) = (760.0, 560.0);
 /// How long a closed window's servers get to acknowledge the goodbye before the app quits
 /// regardless: each session waits up to 2 s for its server, after stopping its streams.
 const QUIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+/// At most one system notification this often; the rest of a burst only flashes the taskbar.
+const TOAST_GAP: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -119,16 +123,27 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("--uninstall") => return install::uninstall(),
+        // Start with Windows, with Start Minimized: the window waits in the notification area.
+        Some(autostart::MINIMIZED) => {}
         // Rune's headless preview tooling (`--snap`, `--scene`, `--tree`, …) reads the rest.
         Some(other) if ui::is_tool_flag(other) => {}
         Some(other) => anyhow::bail!("Unknown argument '{other}'. Use --help."),
         None => {}
     }
-    if !args.iter().any(|arg| ui::is_tool_flag(arg)) {
+    // Previews and other tools run beside the real client, so only the client itself is single.
+    let tool = args.iter().any(|arg| ui::is_tool_flag(arg));
+    if !tool {
+        // A second launch brings the running window forward, from the tray too, and ends.
+        if !rune::single_instance("io.venator.flexspeak") {
+            return Ok(());
+        }
         session_end::install();
         tray::allow();
     }
-    ui::run();
+    ui::run(ui::Launch {
+        restore_place: !tool,
+        minimized: !tool && args.iter().any(|arg| arg == autostart::MINIMIZED),
+    });
     Ok(())
 }
 
@@ -189,6 +204,11 @@ struct App {
     sounds_unsaved: bool,
     #[cfg(test)]
     played_sounds: Vec<sounds::Sound>,
+    /// System notifications shown, by title.
+    #[cfg(test)]
+    shown_toasts: Vec<String>,
+    /// When the last system notification went out, so a burst shows one.
+    last_toast: Option<Instant>,
     /// `custom_themes` as written in the settings file.
     custom_themes: Vec<serde_json::Value>,
     theme_library: themes::Library,
@@ -220,6 +240,19 @@ struct App {
     /// The install dialog shows at launch until answered.
     install_prompt: bool,
     installing: bool,
+    /// The close button asked whether to hide or quit; `close_remember` is its Don't Ask Again.
+    close_prompt: bool,
+    close_remember: bool,
+    /// Disconnect asked first, because you were sharing live.
+    disconnect_prompt: bool,
+    /// The window has the system's focus; false while another app is in front or it is minimized.
+    window_focused: bool,
+    /// The window is hidden in the tray.
+    window_hidden: bool,
+    /// The window's last known place, kept from before it hid, for saving at quit.
+    window_place: Option<settings::WindowPlace>,
+    /// Start with Windows, as the Run entry says.
+    autostart: autostart::Autostart,
     /// Setup was opened from Settings over a saved profile, so it can be cancelled.
     redoing_setup: bool,
     process_monitor: usage::ProcessMonitor,
@@ -716,6 +749,27 @@ fn viewer_sounds(
     joined
         .map(|_| sounds::Sound::ViewerJoined)
         .chain(left.map(|_| sounds::Sound::ViewerLeft))
+        .chain(
+            asked_to_watch(before, event)
+                .into_iter()
+                .map(|_| sounds::Sound::WatchRequested),
+        )
+        .collect()
+}
+
+/// The names of people newly asking to watch your private share.
+fn asked_to_watch(
+    before: &streaming::publishing::Status,
+    event: &streaming::Event,
+) -> Vec<String> {
+    let streaming::Event::Publishing(after) = event else {
+        return Vec::new();
+    };
+    after
+        .requests
+        .iter()
+        .filter(|(id, _)| !before.requests.iter().any(|(old, _)| old == id))
+        .map(|(_, name)| name.clone())
         .collect()
 }
 
@@ -822,7 +876,23 @@ enum Message {
     Backend(hub::SessionId, client::Event),
     /// A background task failed before it could report anywhere else.
     Alert(Source, String),
+    /// The window's close button, or the system asking the window to close.
     Close,
+    /// Leaves every server and quits.
+    Quit,
+    /// The close dialog's answer; `None` stays as you were.
+    CloseChoice(Option<settings::CloseButton>),
+    CloseRemember(bool),
+    /// Settings: what the close button does while connected.
+    SetCloseButton(settings::CloseButton),
+    /// Settings: start with Windows, and whether in the tray.
+    SetAutostart(autostart::Autostart),
+    /// The tray's Disconnect: leaves the server on screen without asking.
+    TrayDisconnect,
+    /// The answer to Disconnect while sharing live: `true` disconnects.
+    ConfirmDisconnect(bool),
+    /// The window gained or lost the system's focus.
+    WindowFocus(bool),
     UsageTick,
     ShowTab(Tab),
     OpenSettings(SettingsPage),
@@ -928,6 +998,9 @@ impl App {
         };
         let mut app = Self::with_devices(devices, error);
         app.handle = handle;
+        app.window_hidden = ui::STARTED_HIDDEN.load(Ordering::Relaxed);
+        app.window_focused = !app.window_hidden;
+        app.autostart = autostart::current();
         app.system_dark = system_appearance::is_dark().unwrap_or(true);
         match settings::path() {
             Ok(path) => app.load_settings(path),
@@ -1043,6 +1116,9 @@ impl App {
             sounds_unsaved: false,
             #[cfg(test)]
             played_sounds: Vec::new(),
+            #[cfg(test)]
+            shown_toasts: Vec::new(),
+            last_toast: None,
             custom_themes: Vec::new(),
             theme_library: themes::Library::new(&[]),
             omarchy: None,
@@ -1066,6 +1142,13 @@ impl App {
             install_offer: None,
             install_prompt: false,
             installing: false,
+            close_prompt: false,
+            close_remember: false,
+            disconnect_prompt: false,
+            window_focused: true,
+            window_hidden: false,
+            window_place: None,
+            autostart: autostart::Autostart::default(),
             redoing_setup: false,
             process_monitor,
             process_usage,
@@ -1156,6 +1239,55 @@ impl App {
     /// No server connected or connecting, and no microphone test running.
     fn idle(&self) -> bool {
         self.sessions.is_empty()
+    }
+
+    /// What the window's close button does while connected.
+    fn close_button(&self) -> settings::CloseButton {
+        self.saved
+            .as_ref()
+            .map(|saved| saved.close_button)
+            .unwrap_or_default()
+    }
+
+    /// Whether the notification-area icon is there to bring a hidden window back.
+    fn tray_available(&self) -> bool {
+        tray::SUPPORTED && !self.appearance.hide_tray_icon
+    }
+
+    /// Hides the window and stays connected. Without a tray icon to come back from, the window
+    /// is minimized instead.
+    fn hide_window(&mut self) {
+        self.window_focused = false;
+        // Hidden, the window can't be measured; its place is kept for saving at quit.
+        if let Some(place) = window_place::current() {
+            self.window_place = Some(place);
+        }
+        let Some(handle) = &self.handle else {
+            self.window_hidden = self.tray_available();
+            return;
+        };
+        if self.tray_available() {
+            self.window_hidden = true;
+            handle.hide();
+        } else {
+            #[cfg(windows)]
+            window_icon::minimize();
+            #[cfg(not(windows))]
+            handle.minimize();
+        }
+    }
+
+    /// Remembers where the window is, for the next launch to open there.
+    fn save_window_place(&mut self) {
+        let Some(place) = window_place::current().or(self.window_place) else {
+            return;
+        };
+        if self.saved.as_ref().is_some_and(|saved| saved.window != Some(place)) {
+            self.save_preference(
+                |saved| saved.window = Some(place),
+                "The window's size and place were not saved",
+            );
+        }
     }
 
     /// Whether the window is on a server you're connected to.
@@ -1329,6 +1461,34 @@ impl App {
 
     /// Plays an event's sound, if sounds are on and that one isn't turned off. It waits for a
     /// sound already playing, unless it answers something you just did.
+    /// Asks for attention while the window is in the background: the taskbar button flashes
+    /// until it comes to the front, and `toast` shows as a system notification, one per
+    /// `TOAST_GAP` at most. Does nothing while the window is in front.
+    fn background_attention(&mut self, toast: Option<(String, String)>) {
+        if self.window_focused {
+            return;
+        }
+        window_place::flash(true);
+        let Some((title, body)) = toast else {
+            return;
+        };
+        let now = Instant::now();
+        if self
+            .last_toast
+            .is_some_and(|at| now.saturating_duration_since(at) < TOAST_GAP)
+        {
+            return;
+        }
+        self.last_toast = Some(now);
+        #[cfg(test)]
+        {
+            let _ = body;
+            self.shown_toasts.push(title);
+        }
+        #[cfg(not(test))]
+        notify::show(&title, &body);
+    }
+
     fn play_sound(&mut self, sound: sounds::Sound) {
         if self.sound_cues && self.sounds.plays(sound) {
             #[cfg(test)]
@@ -1805,10 +1965,12 @@ impl App {
 
     fn sync_page_visibility(&self) {
         let normal = self.onboarding.is_none();
-        self.server()
-            .streaming
-            .visible
-            .store(normal && self.tab == Tab::Home, Ordering::Relaxed);
+        // Statistics covers the server view without ending its streams: your share and the
+        // ones you watch keep running and are there again on the way back.
+        self.server().streaming.visible.store(
+            normal && matches!(self.tab, Tab::Home | Tab::Statistics),
+            Ordering::Relaxed,
+        );
         self.channel_health_visible.store(
             normal && matches!(self.tab, Tab::Home | Tab::Statistics),
             Ordering::Relaxed,
@@ -1910,6 +2072,8 @@ impl App {
                 .saved
                 .as_ref()
                 .is_some_and(|saved| saved.skip_install_prompt),
+            close_button: self.close_button(),
+            window: self.saved.as_ref().and_then(|saved| saved.window),
         }
     }
 
@@ -2067,7 +2231,7 @@ impl App {
                         "The update restarts without returning to this session: {error}"
                     );
                 }
-                self.update(Message::Close)
+                self.update(Message::Quit)
             }
         }
     }
@@ -2602,13 +2766,6 @@ impl App {
                 self.chat_seen();
                 self.sync_page_visibility();
                 self.refresh_visible_permissions();
-                if tab != Tab::Home {
-                    // The server page going away ends sharing and watching everywhere.
-                    for session in &self.sessions {
-                        session.streaming.sharing.stop_capture();
-                    }
-                    self.server_mut().streaming.clear_picture();
-                }
             }
             Message::OpenSettings(page) => {
                 if self.onboarding.is_none() {
@@ -3153,6 +3310,20 @@ impl App {
                 return self.start(true);
             }
             Message::Stop => {
+                // Leaving cuts a live share off for its viewers, so that asks first.
+                if self.server().streaming.sharing.status.active {
+                    self.disconnect_prompt = true;
+                } else if let Some(id) = self.active {
+                    self.stop_session(id);
+                }
+            }
+            Message::ConfirmDisconnect(leave) => {
+                self.disconnect_prompt = false;
+                if leave && let Some(id) = self.active {
+                    self.stop_session(id);
+                }
+            }
+            Message::TrayDisconnect => {
                 if let Some(id) = self.active {
                     self.stop_session(id);
                 }
@@ -3421,7 +3592,7 @@ impl App {
                     {
                         tracing::warn!("The installed copy opens without this session: {error}");
                     }
-                    return self.update(Message::Close);
+                    return self.update(Message::Quit);
                 }
                 Err(error) => {
                     self.installing = false;
@@ -3572,6 +3743,57 @@ impl App {
                 }
             }
             Message::Close => {
+                if self.idle() {
+                    return self.update(Message::Quit);
+                }
+                match self.close_button() {
+                    settings::CloseButton::Ask => {
+                        self.close_prompt = true;
+                        self.close_remember = false;
+                    }
+                    settings::CloseButton::HideToTray => self.hide_window(),
+                    settings::CloseButton::Quit => return self.update(Message::Quit),
+                }
+            }
+            Message::CloseRemember(remember) => self.close_remember = remember,
+            Message::CloseChoice(choice) => {
+                self.close_prompt = false;
+                let Some(choice) = choice else {
+                    return Task::none();
+                };
+                if self.close_remember {
+                    self.save_preference(
+                        |saved| saved.close_button = choice,
+                        "The close choice applies for now but was not saved",
+                    );
+                }
+                if choice == settings::CloseButton::HideToTray {
+                    self.hide_window();
+                } else {
+                    return self.update(Message::Quit);
+                }
+            }
+            Message::SetCloseButton(choice) => self.save_preference(
+                |saved| saved.close_button = choice,
+                "The close choice applies for now but was not saved",
+            ),
+            Message::SetAutostart(wanted) => match autostart::set(wanted) {
+                Ok(()) => self.autostart = wanted,
+                Err(error) => self.alerts.raise(
+                    Source::SettingsSave,
+                    format!("Start with Windows was not changed: {error}"),
+                ),
+            },
+            Message::WindowFocus(focused) => {
+                self.window_focused = focused;
+                if focused {
+                    self.window_hidden = false;
+                    self.chat_seen();
+                }
+            }
+            Message::Quit => {
+                self.close_prompt = false;
+                self.save_window_place();
                 if self.stream_volumes_changed.is_some() {
                     self.save_stream_volumes();
                 }
@@ -3621,6 +3843,8 @@ impl App {
         let session = &mut self.sessions[index];
         let mut sounds_due = Vec::new();
         let mut arrived = None;
+        // Shown only while the window is in the background.
+        let mut toast = None;
         // A first connection brings the server's saved conversations back.
         let restore =
             matches!(event, client::Event::Connected(_)) && session.chat.needs_restoring();
@@ -3803,14 +4027,14 @@ impl App {
             client::Event::Poked { from, key, message } => {
                 session.chat.poke(key, &from, false, &message);
                 sounds_due.push(sounds::Sound::Poke);
-                notify::show(
-                    &format!("{from} poked you"),
+                toast = Some((
+                    format!("{from} poked you"),
                     if message.is_empty() {
-                        "Open Flexspeak to reply."
+                        "Open Flexspeak to reply.".to_owned()
                     } else {
-                        &message
+                        message.clone()
                     },
-                );
+                ));
                 if session.pokes.len() >= 10 {
                     session.pokes.remove(0);
                 }
@@ -3822,6 +4046,14 @@ impl App {
             client::Event::Done(source) => self.alerts.recover_in(id.0, source),
             client::Event::Streaming(event) => {
                 let share_sounds = viewer_sounds(&session.streaming.sharing.status, &event);
+                if let Some(name) =
+                    asked_to_watch(&session.streaming.sharing.status, &event).first()
+                {
+                    toast = Some((
+                        format!("{name} asked to watch your stream"),
+                        "Open Flexspeak to let them in.".to_owned(),
+                    ));
+                }
                 for sound in &share_sounds {
                     let words = match sound {
                         sounds::Sound::StreamStarted => "started streaming",
@@ -4010,6 +4242,9 @@ impl App {
         for sound in sounds_due {
             self.play_sound(sound);
         }
+        if toast.is_some() {
+            self.background_attention(toast);
+        }
         if restore && !self.loopback {
             self.chat_restore(id);
         }
@@ -4115,6 +4350,9 @@ impl App {
     /// Whether the chat is on screen right now: docked, or peeking over the stage.
     fn chat_showing(&self, now: Instant) -> bool {
         self.live()
+            // In the background, a message waits as unread for you to come back.
+            && self.window_focused
+            && !self.window_hidden
             && self.tab == Tab::Home
             && self.onboarding.is_none()
             // Settings covers it.
@@ -4140,6 +4378,12 @@ impl App {
         let (layout, options) = (self.chat_options.layout, self.chat_options);
         let active = self.active == Some(id);
         let showing = active && self.chat_showing(now);
+        // A private message is for you alone: in the background it sounds and flashes the
+        // taskbar. Channel and server messages only wait as unread.
+        if entry.scope.is_private() && !self.window_focused {
+            self.play_sound(sounds::Sound::PrivateMessage);
+            self.background_attention(None);
+        }
         let Some(session) = self.session_mut(id) else {
             return;
         };
@@ -4974,7 +5218,7 @@ mod tests {
     #[test]
     fn quitting_waits_for_every_server_to_stop() {
         let (mut app, (first, mut a), (second, mut b)) = two_servers();
-        assert!(matches!(app.update(Message::Close), Task::None));
+        assert!(matches!(app.update(Message::Quit), Task::None));
         assert!(matches!(a.try_recv(), Ok(client::Command::Stop)));
         assert!(matches!(b.try_recv(), Ok(client::Command::Stop)));
         assert!(matches!(
@@ -5737,6 +5981,59 @@ mod tests {
     }
 
     #[test]
+    fn a_request_to_watch_sounds_and_in_the_background_flashes_and_toasts() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let publish = |app: &mut App, requests: &[u16]| {
+            let status = streaming::publishing::Status {
+                live: true,
+                requests: requests.iter().map(|r| (*r, format!("R{r}"))).collect(),
+                ..Default::default()
+            };
+            let event = streaming::Event::Publishing(status);
+            let _ = app.update(Message::Backend(id, client::Event::Streaming(event)));
+        };
+        publish(&mut app, &[]);
+        app.played_sounds.clear();
+        publish(&mut app, &[4]);
+        assert_eq!(app.played_sounds, [sounds::Sound::WatchRequested]);
+        assert!(app.shown_toasts.is_empty(), "The window is in front");
+        app.played_sounds.clear();
+        publish(&mut app, &[4]);
+        assert!(app.played_sounds.is_empty(), "Only a new request sounds");
+        let _ = app.update(Message::WindowFocus(false));
+        publish(&mut app, &[4, 5]);
+        assert_eq!(app.shown_toasts, ["R5 asked to watch your stream"]);
+    }
+
+    #[test]
+    fn pokes_toast_only_in_the_background_and_one_per_ten_seconds() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let poke = |app: &mut App| {
+            let _ = app.update(Message::Backend(
+                id,
+                client::Event::Poked {
+                    from: "Mara".into(),
+                    key: "uid-2".into(),
+                    message: "look".into(),
+                },
+            ));
+        };
+        poke(&mut app);
+        assert!(app.shown_toasts.is_empty());
+        let _ = app.update(Message::WindowFocus(false));
+        poke(&mut app);
+        poke(&mut app);
+        assert_eq!(app.shown_toasts, ["Mara poked you"]);
+        app.last_toast = app
+            .last_toast
+            .map(|at| at - TOAST_GAP - std::time::Duration::from_millis(1));
+        poke(&mut app);
+        assert_eq!(app.shown_toasts.len(), 2);
+    }
+
+    #[test]
     fn people_arriving_and_leaving_are_logged_with_their_sounds() {
         use client::{Activity, ActivityKind};
         let (mut app, _commands) = session_fixture();
@@ -6433,7 +6730,7 @@ mod tests {
         assert!(app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         let _ = app.update(Message::ShowTab(Tab::Statistics));
-        assert!(!app.server().streaming.visible.load(Ordering::Relaxed));
+        assert!(app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         // Settings floats over the page, so it leaves what that page shows running.
         let _ = app.update(Message::OpenSettings(SettingsPage::Audio));
@@ -7148,6 +7445,83 @@ mod tests {
             chat_event(chat::Scope::Server, "Lukas", "really", false),
         ));
         assert_eq!(app.server().chat.unread(&chat::Scope::Server), 1);
+    }
+
+    #[test]
+    fn messages_in_the_background_wait_unread_and_private_ones_sound() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let mara = chat::Scope::Private("uid-2".into());
+        let _ = app.update(Message::WindowFocus(false));
+        assert!(!app.chat_showing(Instant::now()));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "back", false),
+        ));
+        assert_eq!(app.server().chat.unread(&chat::Scope::Channel), 1);
+        assert!(
+            !app.played_sounds.contains(&sounds::Sound::PrivateMessage),
+            "Channel messages only wait"
+        );
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(mara.clone(), "Mara", "psst", false),
+        ));
+        assert_eq!(app.server().chat.unread(&mara), 1);
+        assert!(app.played_sounds.contains(&sounds::Sound::PrivateMessage));
+        // Back in front, the conversation on screen is read.
+        let _ = app.update(Message::WindowFocus(true));
+        assert!(app.chat_showing(Instant::now()));
+        assert_eq!(app.server().chat.unread(&chat::Scope::Channel), 0);
+        app.played_sounds.clear();
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(mara.clone(), "Mara", "again", false),
+        ));
+        assert!(app.played_sounds.is_empty(), "In front, the chat shows it");
+        // Hidden in the tray counts as the background too.
+        app.window_hidden = true;
+        assert!(!app.chat_showing(Instant::now()));
+    }
+
+    #[test]
+    fn closing_while_connected_asks_and_can_hide_and_stay() {
+        let (mut app, mut commands) = session_fixture();
+        let _ = app.update(Message::Close);
+        assert!(app.close_prompt);
+        assert!(commands.try_recv().is_err(), "Nothing ends while it asks");
+        let _ = app.update(Message::CloseChoice(None));
+        assert!(!app.close_prompt && !app.closing);
+        let _ = app.update(Message::Close);
+        let _ = app.update(Message::CloseChoice(Some(settings::CloseButton::HideToTray)));
+        assert!(!app.close_prompt && !app.closing && !app.window_focused);
+        assert!(commands.try_recv().is_err(), "Still connected");
+        let _ = app.update(Message::WindowFocus(true));
+        assert!(!app.window_hidden);
+        let _ = app.update(Message::Close);
+        let _ = app.update(Message::CloseChoice(Some(settings::CloseButton::Quit)));
+        assert!(app.closing);
+        assert!(matches!(commands.try_recv(), Ok(client::Command::Stop)));
+        let mut idle = App::with_devices(audio::Devices::default(), None);
+        assert!(matches!(idle.update(Message::Close), Task::Exit));
+    }
+
+    #[test]
+    fn disconnect_asks_first_only_while_sharing() {
+        let (mut app, mut commands) = session_fixture();
+        app.server_mut().streaming.sharing.status.active = true;
+        let _ = app.update(Message::Stop);
+        assert!(app.disconnect_prompt);
+        assert!(commands.try_recv().is_err());
+        let _ = app.update(Message::ConfirmDisconnect(false));
+        assert!(!app.disconnect_prompt && !app.server().stopping);
+        let _ = app.update(Message::Stop);
+        let _ = app.update(Message::ConfirmDisconnect(true));
+        assert!(app.server().stopping);
+        let (mut app, mut commands) = session_fixture();
+        let _ = app.update(Message::Stop);
+        assert!(!app.disconnect_prompt && app.server().stopping);
+        assert!(matches!(commands.try_recv(), Ok(client::Command::Stop)));
     }
 
     #[test]

@@ -61,12 +61,59 @@ pub struct Settings {
     /// A release running from Downloads or a disk image no longer offers to install itself.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub skip_install_prompt: bool,
+    /// What the window's close button does while a server is connected.
+    #[serde(skip_serializing_if = "CloseButton::is_default")]
+    pub close_button: CloseButton,
+    /// Where the window was and how big when it last closed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowPlace>,
     /// The server log's height under the channel list, and whether it is folded away.
     #[serde(skip_serializing_if = "LogPane::is_default")]
     pub log_pane: LogPane,
     /// Settings > Chat. Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Chat::is_default")]
     pub chat: Chat,
+}
+
+/// What the window's close button does while connected (Settings > Appearance > Window).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseButton {
+    /// A dialog offers to hide to the tray or quit.
+    #[default]
+    Ask,
+    /// The window hides and every server stays connected.
+    HideToTray,
+    /// The app disconnects and quits, as it does when nothing is connected.
+    Quit,
+}
+
+impl CloseButton {
+    pub const ALL: [Self; 3] = [Self::Ask, Self::HideToTray, Self::Quit];
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Ask => "Ask",
+            Self::HideToTray => "Hide to Tray",
+            Self::Quit => "Quit",
+        }
+    }
+}
+
+/// The window's outer position and inner size in physical pixels, and whether it was maximized.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct WindowPlace {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maximized: bool,
 }
 
 /// How text chat shows, and what happens while its column is hidden (Settings > Chat).
@@ -349,6 +396,8 @@ impl Default for Settings {
             streaming: Streaming::default(),
             custom_themes: Vec::new(),
             skip_install_prompt: false,
+            close_button: CloseButton::default(),
+            window: None,
             chat: Chat::default(),
         }
     }

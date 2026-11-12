@@ -1149,6 +1149,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
     if crate::tray::SUPPORTED {
         sections.insert(sections.len() - 1, tray_section(s, t, k));
     }
+    sections.insert(sections.len() - 1, window_section(s, t, k));
     if let Some(current) = &s.omarchy {
         sections.insert(0, omarchy_section(s, t, k, &current.name));
     }
@@ -1392,6 +1393,78 @@ fn tray_section(s: &App, t: &Theme, k: &Kit) -> Section {
                 ),
             ),
         )],
+    )
+}
+
+/// What the close button does while connected, and, on Windows, starting at sign-in.
+fn window_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    use crate::autostart::Autostart;
+    use crate::settings::CloseButton;
+    let labels = CloseButton::ALL.map(CloseButton::title);
+    let current = s.close_button();
+    let close = rune_kit::SegmentedControl::new(
+        &labels,
+        CloseButton::ALL.iter().position(|choice| *choice == current),
+    )
+    .label("Close button")
+    .fit()
+    .on_pick(|s: &mut App, index, tx| {
+        dispatch(s, tx, Message::SetCloseButton(CloseButton::ALL[index]));
+    })
+    .build(k)
+    .key("close-button");
+    let mut rows = vec![item(
+        "close button quit hide tray minimize exit x window",
+        form_row(
+            t,
+            "Close button",
+            Some("What the window’s × does while you’re connected."),
+            close,
+        ),
+    )];
+    if crate::autostart::SUPPORTED {
+        let on = s.autostart;
+        rows.push(item(
+            "start with windows sign in login startup boot autostart",
+            form_row(
+                t,
+                "Start with Windows",
+                Some("Opens Flexspeak when you sign in."),
+                switch("start-with-windows", "Start with Windows", on.enabled, true, k, |s, enabled| {
+                    Message::SetAutostart(Autostart {
+                        enabled,
+                        ..s.autostart
+                    })
+                }),
+            ),
+        ));
+        rows.push(item(
+            "start minimized tray notification area hidden startup",
+            form_row(
+                t,
+                "Start minimized",
+                Some("Waits in the notification area instead of opening the window."),
+                switch(
+                    "start-minimized",
+                    "Start minimized",
+                    on.minimized,
+                    on.enabled && s.tray_available(),
+                    k,
+                    |s, minimized| {
+                        Message::SetAutostart(Autostart {
+                            minimized,
+                            ..s.autostart
+                        })
+                    },
+                ),
+            ),
+        ));
+    }
+    Section::boxed(
+        "window",
+        "Window",
+        "window close quit tray start startup",
+        rows,
     )
 }
 

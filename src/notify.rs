@@ -1,10 +1,14 @@
-//! System notifications, for pokes that arrive while Flexspeak is behind other windows.
+//! System notifications, for pokes and watch requests that arrive while Flexspeak is behind
+//! other windows.
 //!
 //! Each platform uses what it ships with: Notification Center on macOS (an `osascript`
 //! fallback outside an app bundle), a toast through Windows PowerShell's WinRT bridge on
 //! Windows, and `notify-send` on Linux. Delivery is best effort: a missing helper or a denied
 //! permission only means no banner, never an error dialog. The text never passes through a
 //! shell; it travels as arguments or environment variables.
+
+// Tests count notifications instead of showing them.
+#![cfg_attr(test, allow(dead_code))]
 
 /// Shows `title` and `body` as a system notification without blocking the caller.
 pub fn show(title: &str, body: &str) {

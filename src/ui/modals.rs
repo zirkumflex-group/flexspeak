@@ -3,7 +3,7 @@
 //! presses the default button. Problems never open one; they go to the notice strip.
 
 use rune::{El, col, el, row, text};
-use rune_kit::{Dialog, Kit, SegmentedControl};
+use rune_kit::{Checkbox, Dialog, Kit, SegmentedControl};
 
 use super::UserVolumeTarget;
 use super::icons;
@@ -78,6 +78,128 @@ fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::inst
                 s.install_prompt = false;
             }
         })
+        .child(body)
+        .build(k, layer);
+}
+
+/// The close button while connected: hide to the tray and stay, or leave every server and quit.
+fn close_prompt(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    use crate::settings::CloseButton;
+    let servers = s.sessions.len();
+    let detail = if servers == 1 {
+        "Quitting disconnects you from the server.".to_owned()
+    } else {
+        format!("Quitting disconnects you from all {servers} servers.")
+    };
+    let mut actions = row()
+        .w_full()
+        .gap(size::GAP)
+        .center_y()
+        .child(
+            Checkbox::new(s.close_remember)
+                .label("Don’t Ask Again")
+                .on_toggle_tx(|s: &mut App, tx| {
+                    let remember = !s.close_remember;
+                    super::dispatch(s, tx, Message::CloseRemember(remember));
+                })
+                .build(k),
+        )
+        .child(el().grow(1.0))
+        .child(button(
+            t,
+            "close-cancel",
+            "Cancel",
+            None,
+            Variant::Secondary,
+            Some(Message::CloseChoice(None)),
+        ));
+    let tray = s.tray_available();
+    if tray {
+        actions = actions.child(
+            button(
+                t,
+                "close-hide",
+                "Hide to Tray",
+                None,
+                Variant::Primary,
+                Some(Message::CloseChoice(Some(CloseButton::HideToTray))),
+            )
+            .default_button(),
+        );
+    }
+    let quit = button(
+        t,
+        "close-quit",
+        "Quit",
+        None,
+        if tray {
+            Variant::Secondary
+        } else {
+            Variant::Danger
+        },
+        Some(Message::CloseChoice(Some(CloseButton::Quit))),
+    );
+    actions = actions.child(if tray { quit } else { quit.default_button() });
+    let body = col()
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(14.0)
+        .child(text(detail).font(ty::BODY).color(t.text).w_full().wrap())
+        .child(actions);
+    Dialog::new("close-prompt", "Still connected")
+        .open(true)
+        .fit()
+        .width(440.0)
+        .on_close(|s: &mut App| s.close_prompt = false)
+        .child(body)
+        .build(k, layer);
+}
+
+/// Disconnect while you share live: leaving ends the stream for everyone watching it.
+fn disconnect_prompt(t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    let body = col()
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(14.0)
+        .child(
+            text("Disconnecting ends your stream for everyone watching it.")
+                .font(ty::BODY)
+                .color(t.text)
+                .w_full()
+                .wrap(),
+        )
+        .child(
+            row()
+                .w_full()
+                .gap(size::GAP)
+                .child(el().grow(1.0))
+                .child(button(
+                    t,
+                    "disconnect-cancel",
+                    "Cancel",
+                    None,
+                    Variant::Secondary,
+                    Some(Message::ConfirmDisconnect(false)),
+                ))
+                .child(
+                    button(
+                        t,
+                        "disconnect-confirm",
+                        "Disconnect",
+                        None,
+                        Variant::Danger,
+                        Some(Message::ConfirmDisconnect(true)),
+                    )
+                    .default_button(),
+                ),
+        );
+    Dialog::new("disconnect-prompt", "Stop sharing and disconnect?")
+        .open(true)
+        .fit()
+        .width(420.0)
+        .on_close(|s: &mut App| s.disconnect_prompt = false)
         .child(body)
         .build(k, layer);
 }
@@ -476,6 +598,14 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
 }
 
 pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    if s.close_prompt {
+        close_prompt(s, t, k, layer);
+        return;
+    }
+    if s.disconnect_prompt {
+        disconnect_prompt(t, k, layer);
+        return;
+    }
     if let Some(target) = &s.ui.user_volume {
         user_volume(s, t, k, layer, target);
         return;

@@ -151,6 +151,9 @@ pub const SCENES: &[Scene] = &[
     ("watching-loud", watching_loud),
     ("sharing-live-audio", sharing_live_audio),
     ("install", install),
+    ("close-prompt", close_prompt),
+    ("close-prompt-no-tray", close_prompt_no_tray),
+    ("disconnect-sharing", disconnect_sharing),
     ("password", password),
     ("alert", alert),
     ("alert-dropped", alert_dropped),
@@ -2390,6 +2393,26 @@ fn install(s: &mut App) {
         to: "/Applications/Flexspeak.app".into(),
     });
     s.install_prompt = true;
+}
+
+/// The window's close button while connected, with the tray icon on.
+fn close_prompt(s: &mut App) {
+    connected(s);
+    s.appearance.hide_tray_icon = false;
+    s.close_prompt = true;
+}
+
+/// The same with the tray icon switched off: nowhere to hide, so Quit is the default.
+fn close_prompt_no_tray(s: &mut App) {
+    connected(s);
+    s.appearance.hide_tray_icon = true;
+    s.close_prompt = true;
+}
+
+/// Disconnect while sharing live asks first.
+fn disconnect_sharing(s: &mut App) {
+    sharing(s);
+    s.disconnect_prompt = true;
 }
 
 fn password(s: &mut App) {
