@@ -1074,9 +1074,7 @@ enum Message {
     /// Moves lit rows on through their pulse and puts out the ones that are over.
     UnboxTick,
     MonsterRevealSkip,
-    MonsterReplay(String),
     MonsterSelect(String),
-    MonsterRemove(String),
     MonsterMore,
     MonsterShow(monster::Section),
     /// A sign-in step's button, or Sign Out.
@@ -2932,11 +2930,6 @@ impl App {
                     answer(Answer::Added(result))
                 })
             }
-            Effect::Remove(id) => {
-                Task::perform(async move { server.remove_can(id).await }, move |result| {
-                    answer(Answer::Removed(id, result))
-                })
-            }
             Effect::Import(cans) => {
                 Task::perform(async move { server.import(&cans).await }, move |result| {
                     answer(Answer::Imported(result))
@@ -3806,22 +3799,7 @@ impl App {
                     return Self::unbox_tick();
                 }
             }
-            Message::MonsterReplay(identity) => {
-                // A replay is nothing new to tell anyone; a card still waiting is told now.
-                let task = self.announce_card();
-                return Task::batch([task, self.begin_reveal(identity)]);
-            }
             Message::MonsterSelect(code) => self.monster.selected = Some(code),
-            Message::MonsterRemove(code) => {
-                // Added by mistake: not something to tell the channel.
-                self.announce = None;
-                self.end_reveal();
-                if self.monster.online() {
-                    let effects = self.monster.remove_online(&code);
-                    return self.monster_effects(effects);
-                }
-                self.monster.remove(&code);
-            }
             Message::MonsterMore => self.monster.shown += monster::PAGE,
             Message::MonsterShow(section) => {
                 let effects = self.monster.show(section);
@@ -9239,29 +9217,14 @@ mod tests {
         ));
         // Your own row lights up at once, and only once is it told.
         assert!(app.server().unboxed.contains_key(&1));
-        let _ = app.update(Message::MonsterReplay(card_identity(&app)));
-        let _ = app.update(Message::MonsterRevealSkip);
-        assert!(commands.try_recv().is_err(), "A replay tells nobody");
-    }
-
-    fn card_identity(app: &App) -> String {
-        app.monster.cans.last().unwrap().identity()
     }
 
     #[test]
-    fn a_card_stays_quiet_without_a_linked_identity_or_when_removed() {
+    fn a_card_stays_quiet_without_a_linked_identity() {
         let (mut app, mut commands) = collecting(false);
         let _ = app.update(Message::MonsterAdd(0));
         let _ = app.update(Message::MonsterRevealSkip);
         assert!(commands.try_recv().is_err(), "Not linked: nothing told");
-        let (mut app, mut commands) = collecting(true);
-        let _ = app.update(Message::MonsterAdd(0));
-        let _ = app.update(Message::MonsterRemove(card_identity(&app)));
-        let _ = app.update(Message::MonsterRevealSkip);
-        assert!(
-            commands.try_recv().is_err(),
-            "Added by mistake: nothing told"
-        );
     }
 
     #[test]

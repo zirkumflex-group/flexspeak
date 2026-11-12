@@ -522,11 +522,10 @@ impl Reveal {
     }
 }
 
-/// What the last try at adding or removing a can came to.
+/// What the last try at adding a can came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     Added(Rarity),
-    Removed,
     Failed(String),
 }
 
@@ -781,27 +780,6 @@ impl Tracker {
             .as_ref()
             .filter(|reveal| !reveal.beat().face_up())
             .map(|reveal| reveal.identity.as_str())
-    }
-
-    /// Takes a can out, for one added by mistake.
-    pub fn remove(&mut self, identity: &str) {
-        let Some(index) = self.cans.iter().position(|can| can.identity() == identity) else {
-            return;
-        };
-        if let Some(db) = &self.db
-            && let Err(error) = db
-                .execute(
-                    "DELETE FROM drinks WHERE id = ?1",
-                    params![self.cans[index].id],
-                )
-                .context("Can't save monster.sqlite")
-        {
-            self.notice = Some(Notice::Failed(format!("{error:#}")));
-            return;
-        }
-        self.cans.remove(index);
-        self.selected = None;
-        self.notice = Some(Notice::Removed);
     }
 
     /// One flavour's cans, oldest first.
@@ -1127,20 +1105,6 @@ mod tests {
         t.add(0, 100);
         assert!(t.cans.is_empty());
         assert!(matches!(t.notice, Some(Notice::Failed(_))));
-    }
-
-    #[test]
-    fn a_removed_can_is_gone_for_good_and_its_number_isnt_reused() {
-        let dir = temp_dir("remove");
-        let mut t = tracker(&dir);
-        t.add(0, 100);
-        t.add(0, 200);
-        let first = t.cans[0].identity();
-        t.remove(&first);
-        assert_eq!(t.notice, Some(Notice::Removed));
-        assert_eq!(tracker(&dir).cans.len(), 1);
-        t.add(0, 300);
-        assert_ne!(t.cans.last().unwrap().identity(), first);
     }
 
     #[test]

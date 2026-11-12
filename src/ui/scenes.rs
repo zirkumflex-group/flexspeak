@@ -5083,18 +5083,6 @@ mod tests {
     }
 
     #[test]
-    fn a_card_can_be_opened_again_without_another_can() {
-        // From its flavour's page; the overview has no replay of its own.
-        let mut rt = runtime(monster_flavour, (1100.0, 1500.0));
-        settle(&mut rt);
-        let before = rt.state.monster.cans.len();
-        click(&mut rt, "monster-replay");
-        settle(&mut rt);
-        assert!(rt.state.monster.reveal.is_some());
-        assert_eq!(rt.state.monster.cans.len(), before);
-    }
-
-    #[test]
     fn the_pointer_over_a_card_is_remembered_and_forgotten_when_it_leaves() {
         use crate::monster::Rarity;
         let mut rt = runtime(monster_board, (1100.0, 1500.0));

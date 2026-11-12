@@ -11,8 +11,8 @@ use super::can3d::{self, HOVERED, REDUCED, SHOWCASE};
 use super::fx::{CardFx, card_fx, card_layers};
 use super::theme::{Theme, motion, radius, rgb, size, ty};
 use super::widgets::{
-    Variant, button, error_text, faint, field, group_note, group_title, heading, icon_button,
-    muted, scroll_page, title, well,
+    Variant, button, error_text, faint, field, group_note, group_title, heading, muted,
+    scroll_page, title, well,
 };
 use super::{icons, send};
 use crate::monster::{
@@ -1423,59 +1423,11 @@ fn notice(s: &App, t: &Theme) -> El {
                     .font(ty::SMALL)
                     .color(t.text),
             ),
-        Notice::Removed => muted(t, "Can removed").key("monster-notice"),
         Notice::Failed(error) => error_text(t, error.clone()).key("monster-notice"),
     }
 }
 
 /// Facts about the card on show, and the way to take a mistyped can back out.
-fn featured(t: &Theme, can: &Can) -> El {
-    let rarity = can.rarity();
-    row()
-        .key("monster-featured")
-        .w_full()
-        .mt(6.0)
-        .pt(10.0)
-        .border_sides([1.0, 0.0, 0.0, 0.0], t.hairline)
-        .gap(size::GAP)
-        .center_y()
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(2.0)
-                .child(
-                    row()
-                        .gap(6.0)
-                        .center_y()
-                        .child(dot(rgb(rarity.color()), 8.0))
-                        .child(
-                            text(format!("{} {}", rarity.name(), can.flavour().name))
-                                .font(ty::BODY_STRONG)
-                                .color(t.text)
-                                .truncate(),
-                        ),
-                )
-                .child(faint(t, format!("{} · {}", can.number(), when(can.at))).truncate()),
-        )
-        .child(icon_button(
-            t,
-            "monster-replay",
-            &icons::PLAY,
-            "Replay the reveal",
-            Variant::Ghost,
-            Some(Message::MonsterReplay(can.identity())),
-        ))
-        .child(icon_button(
-            t,
-            "monster-remove",
-            &icons::TRASH,
-            "Remove this can",
-            Variant::Ghost,
-            Some(Message::MonsterRemove(can.identity())),
-        ))
-}
-
 fn dot(color: Color, diameter: f32) -> El {
     el().size(diameter, diameter)
         .radius(diameter / 2.0)
@@ -1572,20 +1524,6 @@ fn stats(t: &Theme, board: &Board) -> El {
 
 fn format_date(date: NaiveDate) -> String {
     date.format("%b %-d, %Y").to_string()
-}
-
-/// When a can was drunk, as people say it: "today at 14:32", or a date and time.
-fn when(at: i64) -> String {
-    let Some(moment) = Local.timestamp_opt(at, 0).single() else {
-        return String::new();
-    };
-    let today = Local::now().date_naive();
-    let time = moment.format("%H:%M");
-    match (today - moment.date_naive()).num_days() {
-        0 => format!("today at {time}"),
-        1 => format!("yesterday at {time}"),
-        _ => format!("{} at {time}", format_date(moment.date_naive())),
-    }
 }
 
 /// A year of squares, one for each day, as on a GitHub profile: weeks run left to right,
@@ -2053,16 +1991,13 @@ fn flavour_page(s: &App, t: &Theme, index: usize, today: NaiveDate, reduced: boo
     let selected = hero.map(Can::identity);
     let selected = selected.as_deref();
 
-    let mut facts = col()
+    let facts = col()
         .key("flavour-facts")
         .grow(1.0)
         .min_w(320.0)
         .gap(14.0)
         .child(muted(t, flavour.line))
         .child(flavour_stats(t, s, &cans, &board));
-    if let Some(can) = hero {
-        facts = facts.child(featured(t, can));
-    }
 
     let mut all = col()
         .key("flavour-cards")

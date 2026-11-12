@@ -33,7 +33,6 @@ pub enum Effect {
     Link,
     Cans,
     Add(api::AddCan),
-    Remove(i64),
     Import(api::Import),
     Leaderboard(Ranking),
     Person(i64),
@@ -54,7 +53,6 @@ pub enum Answer {
     Linked(Result<api::Me, Problem>),
     Cans(Result<api::Cans, Problem>),
     Added(Result<api::Can, Problem>),
-    Removed(i64, Result<(), Problem>),
     Imported(Result<api::Imported, Problem>),
     Leaderboard(Ranking, Result<api::Leaderboard, Problem>),
     Person(i64, Result<api::Collection, Problem>),
@@ -431,13 +429,6 @@ impl Tracker {
         })]
     }
 
-    pub fn remove_online(&mut self, identity: &str) -> Vec<Effect> {
-        match self.cans.iter().find(|can| can.identity() == identity) {
-            Some(can) if self.session.is_some() => vec![Effect::Remove(can.id)],
-            _ => Vec::new(),
-        }
-    }
-
     /// Shows a part of the page, fetching what it needs from the server.
     pub fn show(&mut self, section: Section) -> Vec<Effect> {
         self.section = section;
@@ -666,25 +657,6 @@ impl Tracker {
                         Vec::new()
                     }
                 }
-            }
-            Answer::Removed(id, result) => {
-                if !signed {
-                    return Vec::new();
-                }
-                match result {
-                    // Already gone counts as gone.
-                    Ok(()) => {}
-                    Err(problem) if problem.error == problem::NOT_FOUND => {}
-                    Err(problem) if signed_out(&problem) => return self.ended(),
-                    Err(problem) => {
-                        self.notice = Some(Notice::Failed(problem.message));
-                        return Vec::new();
-                    }
-                }
-                self.cans.retain(|can| can.id != id);
-                self.selected = None;
-                self.notice = Some(Notice::Removed);
-                Vec::new()
             }
             Answer::Imported(result) => {
                 if !signed {
@@ -1179,19 +1151,6 @@ mod tests {
             step: 0,
         });
         assert!(t.add_online(0).is_empty());
-    }
-
-    #[test]
-    fn the_bin_removes_a_can_once_the_server_has() {
-        let mut t = signed_in();
-        t.cans = vec![can(3, "original", Rarity::Common).into()];
-        assert_eq!(t.remove_online("can-3"), [Effect::Remove(3)]);
-        assert_eq!(t.cans.len(), 1);
-        t.answer(Answer::Removed(3, Err(problem(problem::SERVER))));
-        assert_eq!(t.cans.len(), 1);
-        t.answer(Answer::Removed(3, Ok(())));
-        assert!(t.cans.is_empty());
-        assert_eq!(t.notice, Some(Notice::Removed));
     }
 
     #[test]
