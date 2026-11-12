@@ -1,0 +1,7 @@
+# The image is built from the repository root but needs only the server and the shared crate.
+*
+!server/
+!crates/monster-core/
+server/target/
+server/data/
+crates/monster-core/target/

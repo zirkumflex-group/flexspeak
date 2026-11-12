@@ -125,9 +125,9 @@ jobs:
           GIT_HTTP_LOW_SPEED_TIME: '60'
         run: cargo fetch --locked
       - working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked -p flexspeak -p monster-core --all-targets -- -D warnings
       - working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
-        run: cargo test --locked
+        run: cargo test --locked -p flexspeak -p monster-core
 
   # The one status check main requires: its name stays the same whichever platforms are on.
   passed:

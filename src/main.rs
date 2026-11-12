@@ -14,6 +14,8 @@ mod hub;
 mod icons;
 mod install;
 mod memory;
+mod monster;
+mod monster_api;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_audio;
 mod notify;
@@ -22,10 +24,12 @@ mod onboarding;
 mod permissions;
 mod profiler;
 mod resume;
+mod reveal_sound;
 mod secret;
 mod server_log;
 mod session_end;
 mod settings;
+mod settings_sync;
 mod shortcuts;
 mod sounds;
 mod streaming;
@@ -212,6 +216,10 @@ struct App {
     audio_unsaved: bool,
     /// Why the nickname typed in Settings wasn't kept, shown under its field.
     nickname_error: Option<String>,
+    /// The collection server address as typed in Settings › WIP; kept when the field is left.
+    monster_server_draft: String,
+    /// Why that address wasn't kept, shown under its field.
+    monster_server_error: Option<String>,
     #[cfg(test)]
     played_sounds: Vec<sounds::Sound>,
     /// System notifications shown, by title.
@@ -274,6 +282,14 @@ struct App {
     cpu_history: usage::MetricHistory,
     ram_history: usage::MetricHistory,
     tab: Tab,
+    monster: monster::Tracker,
+    /// Keeps the travelling settings the same as the collection server account's.
+    settings_sync: settings_sync::SettingsSync,
+    /// What settings sync asked of the server, for tests, which run nothing.
+    #[cfg(test)]
+    settings_sync_sent: Vec<settings_sync::Effect>,
+    /// The card reveal's sound; dropping it fades the sound out.
+    reveal_sound: Option<reveal_sound::Playing>,
     /// The open Settings window's category; Settings floats over whichever page is showing.
     settings_page: Option<SettingsPage>,
     /// The category Settings reopens on.
@@ -529,6 +545,7 @@ struct Poke {
 enum Tab {
     Home,
     Statistics,
+    Monster,
 }
 
 /// The Add or Edit Server dialog's drafts. `index` is the server being edited; `None` adds one.
@@ -576,10 +593,11 @@ enum SettingsPage {
     Updates,
     Errors,
     File,
+    Wip,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Server,
         Self::Appearance,
         Self::Chat,
@@ -592,6 +610,7 @@ impl SettingsPage {
         Self::Updates,
         Self::Errors,
         Self::File,
+        Self::Wip,
     ];
 
     fn title(self) -> &'static str {
@@ -608,6 +627,7 @@ impl SettingsPage {
             Self::Updates => "Updates",
             Self::Errors => "Error Log",
             Self::File => "Settings File",
+            Self::Wip => "WIP",
         }
     }
 }
@@ -775,6 +795,23 @@ fn stream_changes(
 }
 
 /// Lays a server's streams out as saved: where the others go and whether details show.
+/// Flexspeak's own TeamSpeak identity, for linking to the collection, under the nickname in
+/// use. `None` if it can't be read; the step then offers nothing to link.
+fn own_identity(nickname: &str) -> Option<monster::FoundIdentity> {
+    match client::load_identity() {
+        Ok(identity) => Some(monster::FoundIdentity {
+            source: monster::OWN_SOURCE,
+            name: nickname.trim().to_owned(),
+            uid: identity.key().to_pub().get_uid(),
+            linked: false,
+        }),
+        Err(error) => {
+            tracing::warn!("Flexspeak's identity can't be offered for linking: {error:#}");
+            None
+        }
+    }
+}
+
 fn apply_stream_view(streaming: &mut streaming::View, view: settings::StreamView) {
     streaming.strip = if view.beside {
         streaming::Strip::Beside
@@ -959,6 +996,36 @@ enum Message {
     UsageTick,
     ShowTab(Tab),
     OpenSettings(SettingsPage),
+    /// Leaves Settings for the secret page its WIP section links to.
+    OpenMonster,
+    /// Records a can of this flavour, by its place in `FLAVOURS`, drunk just now.
+    MonsterAdd(usize),
+    MonsterSearch(String),
+    MonsterRevealTick(u64),
+    MonsterRevealSkip,
+    MonsterReplay(String),
+    MonsterSelect(String),
+    MonsterRemove(String),
+    MonsterMore,
+    MonsterShow(monster::Section),
+    /// A sign-in step's button, or Sign Out.
+    Monster(monster::Action),
+    /// The collection server answered.
+    MonsterAnswer(monster::Answer),
+    MonsterRanking(monster::Ranking),
+    MonsterHidden(bool),
+    /// A sign-in field was typed in; the field itself holds the text.
+    MonsterSignInTyped,
+    /// The collection server address field was typed in.
+    MonsterServer(String),
+    /// Keeps the collection server address typed, as leaving the field does.
+    CommitMonsterServer,
+    /// Settings › WIP: keep settings and servers the same on every computer, or stop.
+    SettingsSync(bool),
+    /// Which copy to keep when this computer's settings and the account's first differ.
+    SettingsSyncChoice(settings_sync::Choice),
+    /// The collection server answered settings sync.
+    SettingsSyncAnswer(settings_sync::Answer),
     CloseSettings,
     SettingsSearch(String),
     RefreshStreams,
@@ -1111,6 +1178,12 @@ impl App {
         {
             app.resume = resume::take(&resume::path(path), SystemTime::now());
         }
+        // Settings sync checks the account at launch, so the session is read now rather than
+        // when the Monster page first opens.
+        if app.onboarding.is_none() && app.settings_sync.enabled && app.monster.online() {
+            app.monster.session = app.read_monster_session();
+            app.monster.session_read = true;
+        }
         app.sync_page_visibility();
         app.permissions.refresh();
         app.shortcuts = Some(shortcuts);
@@ -1185,6 +1258,8 @@ impl App {
             sounds_unsaved: false,
             audio_unsaved: false,
             nickname_error: None,
+            monster_server_draft: String::new(),
+            monster_server_error: None,
             #[cfg(test)]
             played_sounds: Vec::new(),
             #[cfg(test)]
@@ -1229,6 +1304,11 @@ impl App {
             cpu_history,
             ram_history,
             tab: Tab::Home,
+            monster: monster::Tracker::default(),
+            settings_sync: settings_sync::SettingsSync::new(true, 0),
+            #[cfg(test)]
+            settings_sync_sent: Vec::new(),
+            reveal_sound: None,
             settings_page: None,
             settings_recent: SettingsPage::Server,
             settings_query: String::new(),
@@ -1930,6 +2010,10 @@ impl App {
     fn load_settings(&mut self, path: PathBuf) {
         match settings::load(&path) {
             Ok(Some(saved)) => {
+                self.settings_sync = settings_sync::SettingsSync::new(
+                    saved.settings_sync,
+                    saved.settings_sync_version,
+                );
                 self.apply_settings(saved);
                 self.onboarding = None;
             }
@@ -2238,6 +2322,41 @@ impl App {
         }
     }
 
+    /// A newly added can gets opened.
+    fn after_submit(&mut self) -> Task {
+        if !matches!(self.monster.notice, Some(monster::Notice::Added(_))) {
+            return Task::none();
+        }
+        match self.monster.selected.clone() {
+            Some(identity) => self.begin_reveal(identity),
+            None => Task::none(),
+        }
+    }
+
+    fn begin_reveal(&mut self, identity: String) -> Task {
+        let Some(reveal) = self.monster.start_reveal(identity) else {
+            return Task::none();
+        };
+        self.reveal_sound = Some(reveal_sound::play(
+            reveal.rarity,
+            self.output.clone(),
+            self.playback_volume.percent(),
+        ));
+        Self::reveal_after(reveal.id, reveal.delay())
+    }
+
+    fn reveal_after(id: u64, delay: std::time::Duration) -> Task {
+        Task::Perform(Box::new(move || {
+            std::thread::sleep(delay);
+            Message::MonsterRevealTick(id)
+        }))
+    }
+
+    fn end_reveal(&mut self) {
+        self.monster.reveal = None;
+        self.reveal_sound = None;
+    }
+
     fn sync_page_visibility(&self) {
         let normal = self.onboarding.is_none();
         // Statistics covers the server view without ending its streams: your share and the
@@ -2329,6 +2448,12 @@ impl App {
         }
         self.theme_library = themes::Library::new(&saved.custom_themes);
         self.custom_themes = saved.custom_themes;
+        if self.monster.server != saved.monster_server {
+            self.end_reveal();
+            self.monster.set_server(saved.monster_server.clone());
+        }
+        self.monster_server_draft = saved.monster_server.unwrap_or_default();
+        self.monster_server_error = None;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -2372,6 +2497,13 @@ impl App {
                     .is_some_and(|saved| saved.skip_install_prompt),
             close_button: self.close_button(),
             window: self.saved.as_ref().and_then(|saved| saved.window),
+            monster_server: self.monster.server.clone(),
+            monster_session: self
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.monster_session.clone()),
+            settings_sync: self.settings_sync.enabled,
+            settings_sync_version: self.settings_sync.seen,
         }
     }
 
@@ -2514,6 +2646,354 @@ impl App {
 
     /// Stores one choice that applies at once in the saved settings, leaving other unsaved edits
     /// alone. Before setup has saved anything, the choice is kept for the first save.
+    /// Whether the collection server address typed differs from the one in use.
+    fn monster_server_edited(&self) -> bool {
+        monster::server_address(&self.monster_server_draft)
+            .map_or(true, |address| address != self.monster.server)
+    }
+
+    /// Keeps the collection server address typed in Settings › WIP, or says under its field why
+    /// it can't be kept. A new address starts signed out.
+    fn commit_monster_server(&mut self) {
+        let address = match monster::server_address(&self.monster_server_draft) {
+            Ok(address) => address,
+            Err(problem) => {
+                self.monster_server_error = Some(problem.into());
+                return;
+            }
+        };
+        self.monster_server_error = None;
+        if address == self.monster.server {
+            return;
+        }
+        let kept = address.clone();
+        // Another server is another account: its settings start by comparing.
+        let _ = self.settings_sync.signed_out();
+        self.save_preference(
+            |saved| {
+                saved.monster_server = kept;
+                saved.monster_session = None;
+                saved.settings_sync_version = 0;
+            },
+            "The collection server applies for now but was not saved",
+        );
+        self.forget_monster_session_file();
+        self.end_reveal();
+        self.monster.set_server(address);
+    }
+
+    /// The session kept from the last launch.
+    fn read_monster_session(&self) -> Option<String> {
+        #[cfg(windows)]
+        {
+            self.saved
+                .as_ref()?
+                .monster_session
+                .as_deref()
+                .and_then(secret::unprotect)
+        }
+        #[cfg(not(windows))]
+        {
+            monster_api::read_session(&monster_api::session_path(self.settings_path.as_deref()?))
+        }
+    }
+
+    /// Keeps the session for the next launch, or forgets it: sealed in settings.json on
+    /// Windows, in a file only this user can read elsewhere.
+    fn keep_monster_session(&mut self, session: Option<String>) {
+        #[cfg(windows)]
+        {
+            let sealed = session.as_deref().and_then(secret::protect);
+            self.save_preference(
+                |saved| saved.monster_session = sealed,
+                "You stay signed in for now, but not after a restart",
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let Some(path) = self.settings_path.as_deref().map(monster_api::session_path) else {
+                return;
+            };
+            if let Err(error) = monster_api::write_session(&path, session.as_deref()) {
+                self.alerts.raise(
+                    Source::SettingsSave,
+                    format!("Your collection session couldn't be kept: {error}"),
+                );
+            }
+        }
+    }
+
+    fn forget_monster_session_file(&mut self) {
+        #[cfg(not(windows))]
+        if let Some(path) = self.settings_path.as_deref().map(monster_api::session_path)
+            && let Err(error) = monster_api::write_session(&path, None)
+        {
+            tracing::warn!("The old collection session couldn't be removed: {error}");
+        }
+    }
+
+    /// Runs what the Monster page asked for. Tests run nothing and keep the list instead.
+    fn monster_effects(&mut self, effects: Vec<monster::Effect>) -> Task {
+        #[cfg(test)]
+        {
+            self.monster.sent.extend(effects);
+            Task::none()
+        }
+        #[cfg(not(test))]
+        {
+            let tasks: Vec<Task> = effects
+                .into_iter()
+                .map(|effect| self.monster_effect(effect))
+                .collect();
+            Task::batch(tasks)
+        }
+    }
+
+    // Built in tests too, so it keeps compiling there, though tests never run it.
+    #[cfg_attr(test, allow(dead_code))]
+    fn monster_effect(&mut self, effect: monster::Effect) -> Task {
+        use monster::{Answer, Effect};
+        let Some(base) = self.monster.server.clone() else {
+            return Task::none();
+        };
+        let server = monster_api::Server::new(&base, self.monster.session.clone());
+        let answer = |answer: Answer| Message::MonsterAnswer(answer);
+        match effect {
+            Effect::Keep(session) => {
+                self.keep_monster_session(session);
+                Task::none()
+            }
+            Effect::Browse(url) => {
+                self.open_in_browser(&url);
+                Task::none()
+            }
+            Effect::FindIdentity => {
+                let found = own_identity(&self.nickname);
+                self.monster.found(found);
+                Task::none()
+            }
+            Effect::Me => Task::perform(async move { server.me().await }, move |result| {
+                answer(Answer::Me(result))
+            }),
+            Effect::LoginStart(email) => Task::perform(
+                async move {
+                    let result = server.login_start(&email).await;
+                    (email, result)
+                },
+                move |(email, result)| answer(Answer::LoginStarted(email, result)),
+            ),
+            Effect::LoginFinish { email, code } => Task::perform(
+                async move { server.login_finish(&email, &code).await },
+                move |result| answer(Answer::LoginFinished(result)),
+            ),
+            Effect::LoginPasskey => {
+                Task::perform(async move { server.login_passkey().await }, move |result| {
+                    answer(Answer::Ticket(result))
+                })
+            }
+            Effect::Poll { ticket, generation } => Task::perform(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    server.login_poll(&ticket).await
+                },
+                move |result| answer(Answer::Polled(generation, result)),
+            ),
+            Effect::Link => Task::perform(
+                async move {
+                    let identity =
+                        client::load_identity().map_err(|error| monster_api::Problem {
+                            error: monster_api::problem::INVALID.into(),
+                            message: format!("{error:#}"),
+                            tries_left: None,
+                        })?;
+                    server.link_identity(&identity, monster::OWN_SOURCE).await
+                },
+                move |result| answer(Answer::Linked(result)),
+            ),
+            Effect::Cans => Task::perform(async move { server.cans().await }, move |result| {
+                answer(Answer::Cans(result))
+            }),
+            Effect::Add(can) => {
+                Task::perform(async move { server.add_can(&can).await }, move |result| {
+                    answer(Answer::Added(result))
+                })
+            }
+            Effect::Remove(id) => {
+                Task::perform(async move { server.remove_can(id).await }, move |result| {
+                    answer(Answer::Removed(id, result))
+                })
+            }
+            Effect::Import(cans) => {
+                Task::perform(async move { server.import(&cans).await }, move |result| {
+                    answer(Answer::Imported(result))
+                })
+            }
+            Effect::Leaderboard(ranking) => Task::perform(
+                async move { server.leaderboard(ranking).await },
+                move |result| answer(Answer::Leaderboard(ranking, result)),
+            ),
+            Effect::Person(user) => Task::perform(
+                async move { server.collection(user).await },
+                move |result| answer(Answer::Person(user, result)),
+            ),
+            Effect::Hide(hidden) => Task::perform(
+                async move {
+                    server
+                        .update_me(&monster_api::UpdateMe {
+                            hidden: Some(hidden),
+                            ..Default::default()
+                        })
+                        .await
+                },
+                move |result| answer(Answer::Hidden(hidden, result)),
+            ),
+            // Nothing waits on it: the app has forgotten the session either way.
+            Effect::SignOut(session) => Task::perform(
+                async move {
+                    let server = monster_api::Server::new(&base, Some(session));
+                    if let Err(problem) = server.sign_out().await {
+                        tracing::warn!("Signing out on the server failed: {}", problem.message);
+                    }
+                },
+                |()| Message::MonsterSignInTyped,
+            ),
+        }
+    }
+
+    /// Opens a web page in the system browser.
+    fn open_in_browser(&mut self, url: &str) {
+        // Windows is handed the address itself: `explorer` can't be trusted with the part
+        // after `#`, where the passkey page's ticket rides.
+        #[cfg(windows)]
+        let opened = permissions::shell_open(url)
+            .then_some(())
+            .ok_or_else(|| "Windows couldn't open it".to_owned());
+        #[cfg(not(windows))]
+        let opened = {
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            Command::new(opener)
+                .arg(url)
+                .spawn()
+                .map(|mut child| {
+                    // Waited on elsewhere so it can't linger as a zombie.
+                    std::thread::spawn(move || child.wait());
+                })
+                .map_err(|error| error.to_string())
+        };
+        if let Err(error) = opened {
+            self.monster.gate_problem = Some(format!("Couldn't open your browser: {error}"));
+        }
+    }
+
+    /// Runs one settings sync step with the app as it is now, then what it asked for.
+    fn with_settings_sync(
+        &mut self,
+        step: impl FnOnce(
+            &mut settings_sync::SettingsSync,
+            settings_sync::Context,
+        ) -> Vec<settings_sync::Effect>,
+    ) -> Task {
+        let mut sync = std::mem::take(&mut self.settings_sync);
+        let ctx = settings_sync::Context {
+            signed_in: self.monster.online() && self.monster.session.is_some(),
+            onboarding: self.onboarding.is_some(),
+            local: self.saved.as_ref(),
+        };
+        let effects = step(&mut sync, ctx);
+        self.settings_sync = sync;
+        let tasks: Vec<Task> = effects
+            .into_iter()
+            .map(|effect| self.settings_sync_effect(effect))
+            .collect();
+        Task::batch(tasks)
+    }
+
+    fn settings_sync_effect(&mut self, effect: settings_sync::Effect) -> Task {
+        use settings_sync::Effect;
+        match effect {
+            Effect::Apply(synced) => {
+                self.apply_synced(*synced);
+                Task::none()
+            }
+            Effect::Remember(version) => {
+                self.save_preference(
+                    |saved| saved.settings_sync_version = version,
+                    "Settings sync will compare again after a restart",
+                );
+                Task::none()
+            }
+            Effect::SessionEnded => {
+                let effects = self.monster.session_ended();
+                self.monster_effects(effects)
+            }
+            request => self.settings_sync_request(request),
+        }
+    }
+
+    /// Sends a settings sync request. Tests send nothing and keep the list instead.
+    fn settings_sync_request(&mut self, effect: settings_sync::Effect) -> Task {
+        #[cfg(test)]
+        {
+            self.settings_sync_sent.push(effect);
+            Task::none()
+        }
+        #[cfg(not(test))]
+        {
+            use settings_sync::{Answer, Effect};
+            let Some(base) = self.monster.server.clone() else {
+                return Task::none();
+            };
+            let server = monster_api::Server::new(&base, self.monster.session.clone());
+            let generation = self.settings_sync.generation();
+            match effect {
+                Effect::Fetch => {
+                    Task::perform(async move { server.settings().await }, move |result| {
+                        Message::SettingsSyncAnswer(Answer::Fetched(generation, result))
+                    })
+                }
+                Effect::Save { base, data } => Task::perform(
+                    async move { server.put_settings(base, data).await },
+                    move |result| Message::SettingsSyncAnswer(Answer::Saved(generation, result)),
+                ),
+                _ => Task::none(),
+            }
+        }
+    }
+
+    /// Takes settings fetched from the account as if they had been changed here by hand:
+    /// saved, and picked up by everything running.
+    fn apply_synced(&mut self, synced: settings::Synced) {
+        // A slider let go of a moment ago is saved first, so taking these doesn't undo it later.
+        self.flush_unsaved();
+        let Some(mut next) = self.saved.clone() else {
+            return;
+        };
+        synced.apply(&mut next);
+        if self.saved.as_ref() == Some(&next) {
+            return;
+        }
+        let result = self
+            .settings_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Settings path is unavailable"))
+            .and_then(|path| settings::save(path, &next));
+        match result {
+            Ok(()) => {
+                self.apply_settings(next);
+                self.retune_audio();
+                self.alerts.recover(Source::SettingsSave);
+            }
+            Err(error) => self.alerts.raise(
+                Source::SettingsSave,
+                format!("Settings from your account were not saved: {error:#}"),
+            ),
+        }
+    }
+
     fn save_preference(&mut self, change: impl FnOnce(&mut settings::Settings), failed: &str) {
         let Some(mut saved) = self.saved.clone() else {
             return;
@@ -2612,6 +3092,7 @@ impl App {
                 _ if self.settings_page.is_some() => resume::Page::Settings,
                 Tab::Home => resume::Page::Home,
                 Tab::Statistics => resume::Page::Statistics,
+                Tab::Monster => resume::Page::Home,
             },
             servers,
             self.active
@@ -2902,9 +3383,26 @@ impl App {
         if !self.ui.nickname.focused && self.nickname_edited() && self.nickname_error.is_none() {
             self.commit_nickname();
         }
+        if !self.ui.monster_server.focused
+            && self.monster_server_edited()
+            && self.monster_server_error.is_none()
+        {
+            self.commit_monster_server();
+        }
+        let session = self.monster.session.clone();
         let task = self.update_inner(message);
         // Whatever the message added to a conversation goes to the history on disk.
         self.chat_persist();
+        // Signing in or out of the collection server starts or stops settings sync.
+        if self.monster.session != session {
+            let now = Instant::now();
+            let sync = if self.monster.session.is_some() {
+                self.with_settings_sync(|sync, ctx| sync.signed_in(now, ctx))
+            } else {
+                self.with_settings_sync(|sync, _| sync.signed_out())
+            };
+            return Task::batch([task, sync]);
+        }
         task
     }
 
@@ -3128,10 +3626,22 @@ impl App {
                 if tab != Tab::Statistics && self.server().expanded_client.is_some() {
                     self.select_client(None);
                 }
+                let mut task = Task::none();
+                if tab == Tab::Monster {
+                    self.monster.open(self.settings_path.as_deref());
+                    let saved = (self.monster.online() && !self.monster.session_read)
+                        .then(|| self.read_monster_session())
+                        .flatten();
+                    let effects = self.monster.connect(saved);
+                    task = self.monster_effects(effects);
+                } else {
+                    self.end_reveal();
+                }
                 self.tab = tab;
                 self.chat_seen();
                 self.sync_page_visibility();
                 self.refresh_visible_permissions();
+                return task;
             }
             Message::OpenSettings(page) => {
                 if self.onboarding.is_none() {
@@ -3139,6 +3649,98 @@ impl App {
                 }
             }
             Message::CloseSettings => self.close_settings(),
+            Message::OpenMonster => {
+                self.close_settings();
+                return self.update(Message::ShowTab(Tab::Monster));
+            }
+            Message::MonsterSearch(query) => self.monster.query = query,
+            Message::MonsterAdd(flavour) => {
+                // A can tapped while another is being opened waits for it to finish.
+                if self.monster.reveal.is_some() {
+                    return Task::none();
+                }
+                if self.monster.online() {
+                    let effects = self.monster.add_online(flavour);
+                    return self.monster_effects(effects);
+                }
+                self.monster.add(flavour, chrono::Utc::now().timestamp());
+                return self.after_submit();
+            }
+            Message::MonsterRevealTick(id) => {
+                return match self.monster.advance_reveal(id) {
+                    Some(delay) => Self::reveal_after(id, delay),
+                    None => Task::none(),
+                };
+            }
+            Message::MonsterRevealSkip => self.end_reveal(),
+            Message::MonsterReplay(identity) => return self.begin_reveal(identity),
+            Message::MonsterSelect(code) => self.monster.selected = Some(code),
+            Message::MonsterRemove(code) => {
+                self.end_reveal();
+                if self.monster.online() {
+                    let effects = self.monster.remove_online(&code);
+                    return self.monster_effects(effects);
+                }
+                self.monster.remove(&code);
+            }
+            Message::MonsterMore => self.monster.shown += monster::PAGE,
+            Message::MonsterShow(section) => {
+                let effects = self.monster.show(section);
+                return self.monster_effects(effects);
+            }
+            Message::Monster(action) => {
+                let entering = matches!(action, monster::Action::SendCode(_));
+                let effects = self.monster.act(action);
+                if entering && !effects.is_empty() {
+                    self.ui.monster_login_code.replace_text("");
+                }
+                return self.monster_effects(effects);
+            }
+            Message::MonsterAnswer(answer) => {
+                let added = matches!(answer, monster::Answer::Added(Ok(_)));
+                let effects = self.monster.answer(answer);
+                let task = self.monster_effects(effects);
+                if added {
+                    return Task::batch([task, self.after_submit()]);
+                }
+                return task;
+            }
+            Message::MonsterRanking(ranking) => {
+                let effects = self.monster.rank(ranking);
+                return self.monster_effects(effects);
+            }
+            Message::MonsterHidden(hidden) => {
+                let effects = self.monster.hide(hidden);
+                return self.monster_effects(effects);
+            }
+            Message::MonsterSignInTyped => {
+                self.monster.gate_problem = None;
+                if let Some(monster::Gate::Code { wrong, resent, .. }) = &mut self.monster.gate {
+                    *wrong = false;
+                    *resent = false;
+                }
+            }
+            Message::MonsterServer(value) => {
+                self.monster_server_draft = value;
+                self.monster_server_error = None;
+            }
+            Message::CommitMonsterServer => self.commit_monster_server(),
+            Message::SettingsSync(on) => {
+                self.save_preference(
+                    |saved| saved.settings_sync = on,
+                    "The sync choice applies for now but was not saved",
+                );
+                let now = Instant::now();
+                return self.with_settings_sync(|sync, ctx| sync.set_enabled(on, now, ctx));
+            }
+            Message::SettingsSyncChoice(choice) => {
+                let now = Instant::now();
+                return self.with_settings_sync(|sync, ctx| sync.choose(choice, now, ctx));
+            }
+            Message::SettingsSyncAnswer(answer) => {
+                let now = Instant::now();
+                return self.with_settings_sync(|sync, ctx| sync.answer(now, answer, ctx));
+            }
             Message::SettingsSearch(query) => {
                 if self.settings_page.is_some() {
                     self.settings_query = query;
@@ -3558,13 +4160,15 @@ impl App {
                     upload,
                     download,
                 );
+                let sync = self.with_settings_sync(|sync, ctx| sync.tick(now, ctx));
                 if self
                     .recording
                     .as_ref()
                     .is_some_and(|r| r.started.elapsed() >= profiler::MAX_DURATION)
                 {
-                    return self.stop_trace();
+                    return Task::batch([sync, self.stop_trace()]);
                 }
+                return sync;
             }
             Message::Address(value) => {
                 if self.idle() {

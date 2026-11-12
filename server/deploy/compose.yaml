@@ -1,0 +1,77 @@
+# The Flexspeak collection server for a Linux machine with Docker. server/DEPLOY.md in the
+# Flexspeak repository says how to set it up.
+#
+#   monster     the server, from the image GitHub publishes on every change to main
+#   caddy       the only part reachable from the internet: HTTPS with automatic certificates
+#   watchtower  pulls a newly published server image within minutes and restarts the server
+#
+# Settings come from a file named .env next to this one; copy .env.example to start it.
+
+name: flexspeak-monster
+
+services:
+  monster:
+    # MONSTER_IMAGE is set only to hold the server at one build (see DEPLOY.md, "Going back
+    # to an earlier version"). Normally it follows :latest.
+    image: ${MONSTER_IMAGE:-ghcr.io/zirkumflex-group/flexspeak-monster:latest}
+    restart: unless-stopped
+    environment:
+      # Passkeys are tied to this address, so it must never change once people sign in.
+      PUBLIC_URL: https://${DOMAIN:?Set DOMAIN in .env}
+      RESEND_API_KEY: ${RESEND_API_KEY:?Set RESEND_API_KEY in .env}
+      MAIL_FROM: ${MAIL_FROM:?Set MAIL_FROM in .env}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      # The database. Keep this volume: it is every account and collection.
+      - monster-data:/data
+    # No "ports": the server is reachable only by Caddy, on the network compose makes.
+    healthcheck:
+      # The same check the image has: asks the server for /health.
+      test: ["CMD", "flexspeak-monster", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    labels:
+      # Watchtower updates only containers with this label.
+      com.centurylinklabs.watchtower.enable: "true"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      monster:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates. Keeping them avoids asking for new ones on every restart.
+      - caddy-data:/data
+      - caddy-config:/config
+
+  watchtower:
+    # A maintained continuation of containrrr/watchtower, which no longer works with
+    # current Docker versions.
+    image: nickfedor/watchtower:1
+    restart: unless-stopped
+    environment:
+      # Only containers labelled for it, so Caddy and Watchtower itself stay as they are.
+      WATCHTOWER_LABEL_ENABLE: "true"
+      # Look for a new image every 5 minutes.
+      WATCHTOWER_POLL_INTERVAL: "300"
+      # Delete the old image after an update, so the disk doesn't fill up.
+      WATCHTOWER_CLEANUP: "true"
+    volumes:
+      # Watchtower restarts containers through Docker itself.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  monster-data:
+  caddy-data:
+  caddy-config:

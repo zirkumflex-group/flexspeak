@@ -51,6 +51,69 @@ pub const SCENES: &[Scene] = &[
     ("settings-appearance", settings_appearance),
     ("settings-general", settings_general),
     ("settings-omarchy", settings_omarchy),
+    ("settings-wip", settings_wip),
+    ("settings-wip-server", settings_wip_server),
+    ("settings-sync-signed-out", settings_wip_server),
+    ("settings-sync-syncing", settings_sync_syncing),
+    ("settings-sync-up-to-date", settings_sync_up_to_date),
+    ("settings-sync-choose", settings_sync_choose),
+    ("settings-sync-offline", settings_sync_offline),
+    ("settings-sync-off", settings_sync_off),
+    ("monster-empty", monster_empty),
+    ("monster-board", monster_board),
+    ("monster-search", monster_search),
+    ("monster-search-none", monster_search_none),
+    ("monster-rarities", monster_rarities),
+    ("monster-common", monster_common),
+    ("monster-uncommon", monster_uncommon),
+    ("monster-rare", monster_rare),
+    ("monster-mythic", monster_mythic),
+    ("monster-legendary", monster_legendary),
+    ("monster-leaderboard", monster_leaderboard),
+    (
+        "monster-leaderboard-legendary",
+        monster_leaderboard_legendary,
+    ),
+    ("monster-leaderboard-hidden", monster_leaderboard_hidden),
+    ("monster-leaderboard-local", monster_leaderboard_local),
+    ("monster-person-loading", monster_person_loading),
+    ("monster-person", monster_person),
+    ("monster-signed-in", monster_signed_in),
+    ("monster-loading", monster_loading),
+    ("monster-adding", monster_adding),
+    ("monster-sign-in-email", monster_sign_in_email),
+    ("monster-sign-in-code", monster_sign_in_code),
+    ("monster-sign-in-code-wrong", monster_sign_in_code_wrong),
+    ("monster-sign-in-code-expired", monster_sign_in_code_expired),
+    ("monster-sign-in-passkey", monster_sign_in_passkey),
+    (
+        "monster-sign-in-passkey-waiting",
+        monster_sign_in_passkey_waiting,
+    ),
+    (
+        "monster-sign-in-passkey-existing",
+        monster_sign_in_passkey_existing,
+    ),
+    ("monster-sign-in-identity", monster_sign_in_identity),
+    (
+        "monster-sign-in-identity-linked",
+        monster_sign_in_identity_linked,
+    ),
+    ("monster-reveal-back", monster_reveal_back),
+    ("monster-reveal-uncommon", monster_reveal_uncommon),
+    ("monster-reveal-rare", monster_reveal_rare),
+    ("monster-reveal-mythic", monster_reveal_mythic),
+    ("monster-reveal-legendary", monster_reveal_legendary),
+    ("monster-reveal-hush", monster_reveal_hush),
+    ("monster-reveal-turn", monster_reveal_turn),
+    ("monster-reveal-hit", monster_reveal_hit),
+    ("monster-can-hover", monster_can_hover),
+    ("monster-can-lid", monster_can_lid),
+    ("monster-can-base", monster_can_base),
+    ("monster-flavours", monster_flavours),
+    ("monster-flavours-empty", monster_flavours_empty),
+    ("monster-flavour", monster_flavour),
+    ("monster-flavour-new", monster_flavour_new),
     ("settings-sounds", settings_sounds),
     ("settings-sounds-pack", settings_sounds_pack),
     ("server-log", server_log),
@@ -1332,6 +1395,574 @@ fn statistics(s: &mut App) {
             .push(at, Some(92e6 + 4e6 * (x * 0.02).sin() + x * 2e4));
     }
     s.process_usage.cpu_percent = Some(2.4);
+}
+
+fn settings_wip(s: &mut App) {
+    settings_at(s, SettingsPage::Wip);
+}
+
+/// A collection server set, and kept: the address in use is the one typed.
+fn settings_wip_server(s: &mut App) {
+    settings_wip(s);
+    use_scene_server(s);
+    s.sync_fields();
+}
+
+/// Signed in to the collection server with settings sync on and its first check out. The
+/// steps run on their own, so no request goes anywhere and nothing is saved.
+fn settings_sync_started(s: &mut App, seen: i64) -> crate::settings_sync::SettingsSync {
+    settings_wip_server(s);
+    if let Some(saved) = &mut s.saved {
+        saved.monster_server = s.monster.server.clone();
+    }
+    s.monster.session = Some("scene".into());
+    s.monster.session_read = true;
+    let mut sync = crate::settings_sync::SettingsSync::new(true, seen);
+    let _ = sync.signed_in(Instant::now(), settings_sync_context(s));
+    sync
+}
+
+fn settings_sync_context(s: &App) -> crate::settings_sync::Context<'_> {
+    crate::settings_sync::Context {
+        signed_in: true,
+        onboarding: false,
+        local: s.saved.as_ref(),
+    }
+}
+
+/// The account's copy at `version`, holding what travels from `settings`.
+fn settings_sync_copy(
+    version: i64,
+    settings: &settings::Settings,
+) -> crate::monster_api::SyncedSettings {
+    crate::monster_api::SyncedSettings {
+        version,
+        updated_at: 1_700_000_000,
+        data: serde_json::to_value(settings::Synced::from_settings(settings)).unwrap_or_default(),
+    }
+}
+
+/// The server's answer to the first check, as if it came at `at`.
+fn settings_sync_answer(
+    s: &mut App,
+    mut sync: crate::settings_sync::SettingsSync,
+    at: Instant,
+    result: Result<Option<crate::monster_api::SyncedSettings>, crate::monster_api::Problem>,
+) {
+    let answer = crate::settings_sync::Answer::Fetched(sync.generation(), result);
+    let _ = sync.answer(at, answer, settings_sync_context(s));
+    s.settings_sync = sync;
+}
+
+fn settings_sync_syncing(s: &mut App) {
+    s.settings_sync = settings_sync_started(s, 3);
+}
+
+/// The account's copy is the one this computer last saw, checked two minutes ago.
+fn settings_sync_up_to_date(s: &mut App) {
+    let sync = settings_sync_started(s, 3);
+    let copy = s.saved.as_ref().map(|saved| settings_sync_copy(3, saved));
+    let now = Instant::now();
+    let at = now.checked_sub(Duration::from_secs(125)).unwrap_or(now);
+    settings_sync_answer(s, sync, at, Ok(copy));
+}
+
+/// First contact, and the account keeps other settings: nothing changes until a choice.
+fn settings_sync_choose(s: &mut App) {
+    let sync = settings_sync_started(s, 0);
+    let theirs = settings::Settings {
+        nickname: "Sam".into(),
+        ..settings::Settings::default()
+    };
+    settings_sync_answer(
+        s,
+        sync,
+        Instant::now(),
+        Ok(Some(settings_sync_copy(6, &theirs))),
+    );
+}
+
+fn settings_sync_offline(s: &mut App) {
+    let sync = settings_sync_started(s, 3);
+    let problem = crate::monster_api::Problem {
+        error: crate::monster_api::OFFLINE.into(),
+        message: "Can't reach the collection server.".into(),
+        tries_left: None,
+    };
+    settings_sync_answer(s, sync, Instant::now(), Err(problem));
+}
+
+fn settings_sync_off(s: &mut App) {
+    settings_sync_up_to_date(s);
+    s.settings_sync.enabled = false;
+}
+
+fn monster_empty(s: &mut App) {
+    saved(s);
+    s.monster.open(None);
+    s.tab = Tab::Monster;
+}
+
+/// A year of cans on and off: weekends and the odd run of busy weeks, so the board has some
+/// shape. Rarities come from a fixed key, so they spread as the odds say.
+fn year_of_cans() -> Vec<crate::monster::Can> {
+    use crate::monster::{Can, FLAVOURS, draw};
+    let now = chrono::Utc::now().timestamp();
+    const DAY: i64 = 86_400;
+    let mut cans = Vec::new();
+    let mut state = 7u32;
+    for day in (6..364).rev() {
+        state = state.wrapping_mul(2_654_435_769).rotate_left(7) ^ day as u32;
+        let cans_today = match (state % 11, day % 7) {
+            (0..=3, _) => 0,
+            (4..=7, 0 | 1) => 3,
+            (4..=7, _) => 1,
+            (8, _) => 4,
+            _ => 2,
+        };
+        for n in 0..cans_today {
+            let flavour = (state as usize + n) % (FLAVOURS.len() - 1);
+            let id = cans.len() as i64 + 1;
+            let (rarity, seed) = draw(&[7; 32], FLAVOURS[flavour].id, day, id);
+            cans.push(Can {
+                id,
+                flavour: FLAVOURS[flavour].id.into(),
+                at: now - day * DAY,
+                rarity,
+                seed,
+            });
+        }
+    }
+    cans
+}
+
+/// The flavours of the five newest scene cans, one of each rarity, Legendary newest.
+const NEWEST: [&str; 5] = [
+    "original",
+    "ultra-violet",
+    "mango-loco",
+    "pacific-punch",
+    "ultra-gold",
+];
+
+/// The identity of the newest scene can of that rarity.
+fn can_rolling(rarity: crate::monster::Rarity) -> String {
+    format!("can-{}", year_of_cans().len() + 1 + rarity.index())
+}
+
+/// A year of cans, ending with five days in a row of one can of each rarity, so the streak is
+/// live and the grid varied.
+fn stocked(s: &mut App) {
+    use crate::monster::{Can, Rarity};
+    monster_empty(s);
+    let now = chrono::Utc::now().timestamp();
+    const DAY: i64 = 86_400;
+    let mut cans = year_of_cans();
+    for (i, (rarity, flavour)) in Rarity::ALL.into_iter().zip(NEWEST).enumerate() {
+        cans.push(Can {
+            id: cans.len() as i64 + 1,
+            flavour: flavour.into(),
+            at: now - (4 - i as i64) * DAY,
+            rarity,
+            seed: 40_000 + i as u16 * 977,
+        });
+    }
+    s.monster.cans = cans;
+}
+
+fn monster_board(s: &mut App) {
+    stocked(s);
+}
+
+/// A search narrowing the flavours down.
+fn monster_search(s: &mut App) {
+    stocked(s);
+    s.monster.query = "ultra".into();
+    s.sync_fields();
+}
+
+fn monster_search_none(s: &mut App) {
+    stocked(s);
+    s.monster.query = "lemonade".into();
+    s.sync_fields();
+}
+
+fn monster_rarities(s: &mut App) {
+    use crate::monster::Rarity;
+    stocked(s);
+    s.monster.selected = Some(can_rolling(Rarity::Mythic));
+}
+
+/// A year of someone else's cans: `busy` from 0 (now and then) to 3 (most days), and `seed`
+/// so no two people match.
+fn sample_cans(seed: u32, busy: u32) -> Vec<crate::monster::Can> {
+    use crate::monster::{Can, FLAVOURS, draw};
+    let now = chrono::Utc::now().timestamp();
+    const DAY: i64 = 86_400;
+    let mut cans = Vec::new();
+    let mut state = seed;
+    for day in (1..364).rev() {
+        state = state.wrapping_mul(2_654_435_769).rotate_left(7) ^ day as u32;
+        let cans_today = match state % 8 {
+            n if n < 5 - busy => 0,
+            7 => 2,
+            _ => 1,
+        };
+        for n in 0..cans_today {
+            // Some people stick to a few flavours, others try everything.
+            let range = 6 + (seed as usize % 4) * 5;
+            let flavour = (state as usize / 7 + n) % range.min(FLAVOURS.len() - 1);
+            let id = cans.len() as i64 + 1;
+            let (rarity, card) = draw(&[seed as u8; 32], FLAVOURS[flavour].id, day, id);
+            cans.push(Can {
+                id,
+                flavour: FLAVOURS[flavour].id.into(),
+                at: now - day * DAY,
+                rarity,
+                seed: card,
+            });
+        }
+    }
+    cans
+}
+
+/// The collection server the online scenes use. Nothing contacts it: scenes only draw.
+const SCENE_SERVER: &str = "https://collection.example.com";
+
+/// The scene server, set in Settings as it would be: the field holds what's in use.
+fn use_scene_server(s: &mut App) {
+    s.monster.server = Some(SCENE_SERVER.into());
+    s.monster_server_draft = SCENE_SERVER.into();
+}
+
+/// Signed in to the collection server as Sam, with the collection the other scenes show.
+fn signed_in(s: &mut App) {
+    stocked(s);
+    use_scene_server(s);
+    s.monster.session = Some("scene".into());
+    s.monster.session_read = true;
+    s.monster.me = Some(scene_me());
+}
+
+/// Sam's account, as the server describes it.
+fn scene_me() -> crate::monster::api::Me {
+    crate::monster::api::Me {
+        id: 1,
+        name: "Sam".into(),
+        email: SCENE_EMAIL.into(),
+        hidden: false,
+        imported: true,
+        identities: Vec::new(),
+    }
+}
+
+fn monster_signed_in(s: &mut App) {
+    signed_in(s);
+}
+
+/// Just opened with a kept session: the collection is on its way.
+fn monster_loading(s: &mut App) {
+    signed_in(s);
+    s.monster.cans.clear();
+    s.monster.loading = true;
+}
+
+/// A can on its way to the server, before its card comes back.
+fn monster_adding(s: &mut App) {
+    signed_in(s);
+    s.monster.adding = true;
+}
+
+/// The scene people's cans, by their user id: Robin is 2, Kai 3, and so on.
+fn scene_cans(user: i64) -> Vec<crate::monster::Can> {
+    let busy = [3, 2, 1, 2, 0];
+    let n = (user - 2) as u32;
+    sample_cans(11 + n * 37, busy[n as usize % busy.len()])
+}
+
+/// You and five others, ranked by the server; their standings counted from their cans.
+fn with_people(s: &mut App) {
+    use crate::monster::{Person, standing};
+    signed_in(s);
+    let mut people = vec![Person {
+        user: 1,
+        name: "Sam".into(),
+        you: true,
+        standing: standing(&s.monster.cans),
+    }];
+    for (n, name) in ["Robin", "Kai", "Noor", "Alex", "Mika"]
+        .into_iter()
+        .enumerate()
+    {
+        let user = n as i64 + 2;
+        people.push(Person {
+            user,
+            name: name.into(),
+            you: false,
+            standing: standing(&scene_cans(user)),
+        });
+    }
+    s.monster.people = people;
+}
+
+fn monster_leaderboard(s: &mut App) {
+    with_people(s);
+    s.monster.section = crate::monster::Section::Leaderboard;
+}
+
+fn monster_leaderboard_legendary(s: &mut App) {
+    monster_leaderboard(s);
+    s.monster.ranking = crate::monster::Ranking::Legendary;
+}
+
+fn monster_leaderboard_hidden(s: &mut App) {
+    monster_leaderboard(s);
+    s.monster.hidden = true;
+}
+
+/// Without a collection server, the tab says where to set one.
+fn monster_leaderboard_local(s: &mut App) {
+    stocked(s);
+    s.monster.section = crate::monster::Section::Leaderboard;
+}
+
+/// Kai's board, opened from the leaderboard, while it's on its way.
+fn monster_person_loading(s: &mut App) {
+    with_people(s);
+    s.monster.section = crate::monster::Section::Person(3);
+    s.monster.visit = Some(crate::monster::Visit {
+        user: 3,
+        name: "Kai".into(),
+        cans: None,
+        problem: None,
+    });
+}
+
+fn monster_person(s: &mut App) {
+    monster_person_loading(s);
+    if let Some(visit) = &mut s.monster.visit {
+        visit.cans = Some(scene_cans(3));
+    }
+}
+
+/// The address the sign-in scenes type in.
+const SCENE_EMAIL: &str = "sam@example.com";
+/// A TeamSpeak identity uid of the usual shape, for the sign-in scenes.
+const SCENE_UID: &str = "Zk3vQ0pT8mYw1LhNf6RdXc2Ae9s=";
+
+/// Signing in to the scene server, at this step.
+fn gated(s: &mut App, gate: crate::monster::Gate) {
+    stocked(s);
+    use_scene_server(s);
+    s.monster.session_read = true;
+    s.monster.cans.clear();
+    s.monster.gate = Some(gate);
+}
+
+fn monster_sign_in_email(s: &mut App) {
+    gated(s, crate::monster::Gate::Email);
+    s.ui.monster_email.text = SCENE_EMAIL.into();
+}
+
+fn code_step(wrong: bool, tries_left: Option<u32>) -> crate::monster::Gate {
+    crate::monster::Gate::Code {
+        email: SCENE_EMAIL.into(),
+        wrong,
+        tries_left,
+        resent: false,
+    }
+}
+
+fn monster_sign_in_code(s: &mut App) {
+    gated(s, code_step(false, None));
+    s.ui.monster_login_code.text = "482913".into();
+}
+
+/// The server's answer to a wrong code says how many tries it has left.
+fn monster_sign_in_code_wrong(s: &mut App) {
+    gated(s, code_step(true, Some(4)));
+    s.ui.monster_login_code.text = "482913".into();
+}
+
+/// A code that has run out, in the server's words.
+fn monster_sign_in_code_expired(s: &mut App) {
+    gated(s, code_step(false, None));
+    s.ui.monster_login_code.text = "482913".into();
+    s.monster.gate_problem = Some("That code has run out. Send a new one.".into());
+}
+
+fn passkey_step(create: bool, waiting: bool) -> crate::monster::Gate {
+    crate::monster::Gate::Passkey {
+        ticket: "scene-ticket".into(),
+        create,
+        waiting,
+    }
+}
+
+fn monster_sign_in_passkey(s: &mut App) {
+    gated(s, passkey_step(true, false));
+}
+
+/// The passkey page is open in the browser, and the app asks the server until it's done.
+fn monster_sign_in_passkey_waiting(s: &mut App) {
+    gated(s, passkey_step(true, true));
+}
+
+/// Signing in with a passkey made before, from the Email step's second button.
+fn monster_sign_in_passkey_existing(s: &mut App) {
+    gated(s, passkey_step(false, true));
+}
+
+/// Flexspeak's own identity, the one the last step offers.
+fn own_identity(linked: bool) -> crate::monster::FoundIdentity {
+    crate::monster::FoundIdentity {
+        source: crate::monster::OWN_SOURCE,
+        name: "Sam".into(),
+        uid: SCENE_UID.into(),
+        linked,
+    }
+}
+
+/// Signed in, at the identity step: the session is there, the page not yet.
+fn identity_step(s: &mut App, linked: bool) {
+    gated(
+        s,
+        crate::monster::Gate::Identity(vec![own_identity(linked)]),
+    );
+    s.monster.session = Some("scene".into());
+    s.monster.me = Some(scene_me());
+    s.monster.own_identity = Some(own_identity(false));
+}
+
+fn monster_sign_in_identity(s: &mut App) {
+    identity_step(s, false);
+}
+
+fn monster_sign_in_identity_linked(s: &mut App) {
+    identity_step(s, true);
+}
+
+fn monster_featuring(s: &mut App, rarity: crate::monster::Rarity) {
+    use crate::monster::Notice;
+    stocked(s);
+    s.monster.selected = Some(can_rolling(rarity));
+    s.monster.notice = Some(Notice::Added(rarity));
+}
+
+fn monster_common(s: &mut App) {
+    monster_featuring(s, crate::monster::Rarity::Common);
+}
+
+fn monster_uncommon(s: &mut App) {
+    monster_featuring(s, crate::monster::Rarity::Uncommon);
+}
+
+fn monster_rare(s: &mut App) {
+    monster_featuring(s, crate::monster::Rarity::Rare);
+}
+
+fn monster_mythic(s: &mut App) {
+    monster_featuring(s, crate::monster::Rarity::Mythic);
+}
+
+fn monster_legendary(s: &mut App) {
+    monster_featuring(s, crate::monster::Rarity::Legendary);
+}
+
+/// A Legendary being opened, stopped at one beat.
+fn revealing_at(s: &mut App, beat: crate::monster::Beat) {
+    use crate::monster::{Notice, Rarity, ladder};
+    stocked(s);
+    let Some(mut reveal) = s.monster.start_reveal(can_rolling(Rarity::Legendary)) else {
+        return;
+    };
+    reveal.step = ladder(Rarity::Legendary)
+        .iter()
+        .position(|(at, _)| *at == beat)
+        .unwrap_or(0);
+    s.monster.reveal = Some(reveal);
+    s.monster.notice = Some(Notice::Added(Rarity::Legendary));
+}
+
+fn monster_reveal_back(s: &mut App) {
+    revealing_at(s, crate::monster::Beat::Ack);
+}
+
+fn monster_reveal_uncommon(s: &mut App) {
+    use crate::monster::{Beat, Rarity};
+    revealing_at(s, Beat::Rung(Rarity::Uncommon));
+}
+
+fn monster_reveal_rare(s: &mut App) {
+    use crate::monster::{Beat, Rarity};
+    revealing_at(s, Beat::Rung(Rarity::Rare));
+}
+
+fn monster_reveal_mythic(s: &mut App) {
+    use crate::monster::{Beat, Rarity};
+    revealing_at(s, Beat::Rung(Rarity::Mythic));
+}
+
+fn monster_reveal_legendary(s: &mut App) {
+    use crate::monster::{Beat, Rarity};
+    revealing_at(s, Beat::Rung(Rarity::Legendary));
+}
+
+fn monster_reveal_hush(s: &mut App) {
+    use crate::monster::{Beat, Rarity};
+    revealing_at(s, Beat::Hush(Rarity::Legendary));
+}
+
+fn monster_reveal_turn(s: &mut App) {
+    revealing_at(s, crate::monster::Beat::Turn);
+}
+
+fn monster_reveal_hit(s: &mut App) {
+    revealing_at(s, crate::monster::Beat::Hit);
+}
+
+/// The pointer resting on the newest card in the grid.
+fn monster_can_hover(s: &mut App) {
+    use crate::monster::Rarity;
+    stocked(s);
+    s.monster.selected = Some(can_rolling(Rarity::Common));
+    s.ui.can_hover = Some(format!("card-{}", can_rolling(Rarity::Legendary)));
+}
+
+/// The large can dragged round and tipped forward, to look into its lid.
+fn monster_can_lid(s: &mut App) {
+    stocked(s);
+    s.ui.can_spin = super::can3d::Spin::posed(-0.5, 0.95);
+}
+
+/// And tipped back, to look under it.
+fn monster_can_base(s: &mut App) {
+    stocked(s);
+    s.ui.can_spin = super::can3d::Spin::posed(2.4, -0.7);
+}
+
+fn monster_flavours(s: &mut App) {
+    stocked(s);
+    s.monster.section = crate::monster::Section::Flavours;
+}
+
+fn monster_flavours_empty(s: &mut App) {
+    monster_empty(s);
+    s.monster.section = crate::monster::Section::Flavours;
+}
+
+fn monster_flavour(s: &mut App) {
+    use crate::monster::{Section, flavour_by_id};
+    stocked(s);
+    let (gold, _) = flavour_by_id("ultra-gold").unwrap();
+    s.monster.section = Section::Flavour(gold);
+}
+
+/// A flavour with no cans yet; the scene's cans leave out the catch-all.
+fn monster_flavour_new(s: &mut App) {
+    use crate::monster::{FLAVOURS, Section};
+    stocked(s);
+    s.monster.section = Section::Flavour(FLAVOURS.len() - 1);
 }
 
 fn settings_page(s: &mut App) {
@@ -3479,6 +4110,386 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn signing_in_stands_in_the_monster_pages_place_until_it_is_done() {
+        let mut rt = runtime(monster_sign_in_passkey, (1100.0, 720.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-sign-in").is_some());
+        assert!(rt.find("monster-add").is_none(), "the page shows behind it");
+        // A passkey can't be skipped.
+        assert!(rt.find("monster-enter").is_none());
+
+        let mut rt = runtime(monster_sign_in_identity, (1100.0, 720.0));
+        settle(&mut rt);
+        // Linking the identity is optional: the page opens without it.
+        click(&mut rt, "monster-enter");
+        settle(&mut rt);
+        assert!(rt.find("monster-sign-in").is_none());
+        assert!(rt.find("monster-add").is_some());
+        assert!(rt.find("monster-account").is_some(), "signed in");
+    }
+
+    #[test]
+    fn without_a_server_the_page_needs_no_account() {
+        let mut rt = runtime(monster_board, (1100.0, 900.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-sign-in").is_none());
+        assert!(rt.find("monster-account").is_none());
+        click(&mut rt, "monster-tab-leaderboard");
+        settle(&mut rt);
+        assert!(rt.find("monster-leaderboard-local").is_some());
+        assert!(
+            rt.state.monster.sent.is_empty(),
+            "nothing asked of a server"
+        );
+    }
+
+    #[test]
+    fn the_identity_is_linked_through_the_server() {
+        use crate::monster::{Answer, Effect, api};
+        let mut rt = runtime(monster_sign_in_identity, (1100.0, 900.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-link-identity-0");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.sent, [Effect::Link]);
+        assert!(
+            rt.find("monster-linked-0").is_none(),
+            "not until it answers"
+        );
+        deliver(
+            &mut rt,
+            crate::Message::MonsterAnswer(Answer::Linked(Ok(api::Me {
+                id: 1,
+                name: "Sam".into(),
+                email: SCENE_EMAIL.into(),
+                hidden: false,
+                imported: true,
+                identities: vec![api::LinkedIdentity {
+                    uid: SCENE_UID.into(),
+                    source: "Flexspeak".into(),
+                    linked_at: 1,
+                }],
+            }))),
+        );
+        settle(&mut rt);
+        assert!(rt.find("monster-linked-0").is_some());
+        click(&mut rt, "monster-enter");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.gate, None);
+    }
+
+    #[test]
+    fn a_leaderboard_row_opens_that_persons_board_and_back_returns() {
+        use crate::monster::{Answer, Effect, Ranking, Section, api};
+        let mut rt = runtime(monster_leaderboard, (1100.0, 1200.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-person-3");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.section, Section::Person(3));
+        assert_eq!(rt.state.monster.sent, [Effect::Person(3)]);
+        assert!(rt.find("monster-person-loading").is_some());
+        let cans = scene_cans(3);
+        deliver(
+            &mut rt,
+            crate::Message::MonsterAnswer(Answer::Person(
+                3,
+                Ok(api::Collection {
+                    user: 3,
+                    name: "Kai".into(),
+                    cans: cans
+                        .iter()
+                        .map(|can| api::Can {
+                            id: can.id,
+                            flavour: can.flavour.clone(),
+                            at: can.at,
+                            rarity: can.rarity,
+                            seed: can.seed,
+                            legacy: false,
+                        })
+                        .collect(),
+                }),
+            )),
+        );
+        settle(&mut rt);
+        assert!(rt.find("monster-person-loading").is_none());
+        assert!(rt.find("monster-person").is_some());
+        // Someone else's cards can't be featured or removed.
+        let selected = rt.state.monster.selected.clone();
+        let card = format!("card-{}", cans.last().unwrap().identity());
+        click(&mut rt, &card);
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.selected, selected);
+        let back = rt.state.back();
+        rt.state.update(back);
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.section, Section::Leaderboard);
+        assert_eq!(
+            rt.state.monster.sent.last(),
+            Some(&Effect::Leaderboard(Ranking::Collection)),
+            "back to a fresh leaderboard"
+        );
+    }
+
+    #[test]
+    fn changing_the_ranking_asks_the_server_again() {
+        use crate::monster::{Effect, Ranking};
+        let mut rt = runtime(monster_leaderboard, (1100.0, 1200.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-rank-legendary");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.ranking, Ranking::Legendary);
+        assert_eq!(
+            rt.state.monster.sent,
+            [Effect::Leaderboard(Ranking::Legendary)]
+        );
+    }
+
+    #[test]
+    fn the_leaderboard_never_ranks_by_cans_drunk() {
+        use crate::monster::{Can, Person, Ranking, ranked, standing};
+        let can = |flavour: &str, n: i64| Can {
+            id: n,
+            flavour: flavour.into(),
+            at: 0,
+            rarity: crate::monster::Rarity::Common,
+            seed: 0,
+        };
+        // A hundred cans of one flavour against three different flavours.
+        let heavy: Vec<Can> = (0..100).map(|n| can("original", n)).collect();
+        let varied: Vec<Can> = ["original", "ultra-gold", "mango-loco"]
+            .iter()
+            .enumerate()
+            .map(|(n, flavour)| can(flavour, n as i64))
+            .collect();
+        let people = [
+            Person {
+                user: 1,
+                name: "Heavy".into(),
+                you: false,
+                standing: standing(&heavy),
+            },
+            Person {
+                user: 2,
+                name: "Varied".into(),
+                you: false,
+                standing: standing(&varied),
+            },
+        ];
+        assert_eq!(ranked(&people, Ranking::Flavours, true)[0].user, 2);
+    }
+
+    #[test]
+    fn hiding_takes_you_off_the_leaderboard() {
+        use crate::monster::Effect;
+        let mut rt = runtime(monster_leaderboard, (1100.0, 1200.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-person-1").is_some());
+        click(&mut rt, "monster-hide-me");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.sent, [Effect::Hide(true)]);
+        assert!(rt.find("monster-person-1").is_none(), "at once");
+        assert!(rt.find("monster-show-me").is_some());
+        click(&mut rt, "monster-show-me");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.sent.last(), Some(&Effect::Hide(false)));
+        assert!(rt.find("monster-person-1").is_some());
+    }
+
+    #[test]
+    fn a_code_is_sent_only_to_something_shaped_like_an_address() {
+        use crate::monster::{Answer, Effect, Gate};
+        let mut rt = runtime(monster_sign_in_email, (1100.0, 720.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-send-code");
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.monster.sent,
+            [Effect::LoginStart(SCENE_EMAIL.into())]
+        );
+        assert_eq!(rt.state.monster.gate, Some(Gate::Email), "until it answers");
+        deliver(
+            &mut rt,
+            crate::Message::MonsterAnswer(Answer::LoginStarted(SCENE_EMAIL.into(), Ok(()))),
+        );
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.gate, Some(code_step(false, None)));
+
+        let mut rt = runtime(
+            |s| {
+                monster_sign_in_email(s);
+                s.ui.monster_email.text = "sam".into();
+            },
+            (1100.0, 720.0),
+        );
+        settle(&mut rt);
+        click(&mut rt, "monster-send-code");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.gate, Some(Gate::Email));
+        assert!(rt.state.monster.sent.is_empty());
+    }
+
+    #[test]
+    fn a_wrong_code_shows_the_tries_the_server_counts() {
+        use crate::monster::{Answer, Effect, api};
+        let mut rt = runtime(monster_sign_in_code, (1100.0, 720.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-check-code");
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.monster.sent,
+            [Effect::LoginFinish {
+                email: SCENE_EMAIL.into(),
+                code: "482913".into()
+            }]
+        );
+        deliver(
+            &mut rt,
+            crate::Message::MonsterAnswer(Answer::LoginFinished(Err(api::Problem {
+                error: api::problem::WRONG_CODE.into(),
+                message: "That code doesn't match.".into(),
+                tries_left: Some(2),
+            }))),
+        );
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.gate, Some(code_step(true, Some(2))));
+        assert!(rt.find("monster-wrong-code").is_some());
+        // Typing again clears it.
+        deliver(&mut rt, crate::Message::MonsterSignInTyped);
+        settle(&mut rt);
+        assert!(rt.find("monster-wrong-code").is_none());
+    }
+
+    #[test]
+    fn the_passkey_opens_in_the_browser_and_cancel_stops_waiting() {
+        use crate::monster::Effect;
+        let mut rt = runtime(monster_sign_in_passkey, (1100.0, 720.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-passkey");
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.monster.sent[0],
+            Effect::Browse(format!("{SCENE_SERVER}/passkey#ticket=scene-ticket"))
+        );
+        assert!(matches!(rt.state.monster.sent[1], Effect::Poll { .. }));
+        assert!(rt.find("monster-passkey-browser").is_some());
+        click(&mut rt, "monster-passkey-cancel");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.gate, Some(passkey_step(true, false)));
+    }
+
+    #[test]
+    fn a_flavour_tapped_online_opens_its_card_when_the_server_answers() {
+        use crate::monster::{Answer, Effect, Rarity, api};
+        let mut rt = runtime(monster_signed_in, (1100.0, 1500.0));
+        settle(&mut rt);
+        let before = rt.state.monster.cans.len();
+        click(&mut rt, "monster-flavour-khaotic");
+        settle(&mut rt);
+        let [Effect::Add(add)] = &rt.state.monster.sent[..] else {
+            panic!("{:?}", rt.state.monster.sent)
+        };
+        assert_eq!(add.flavour, "khaotic");
+        assert_eq!(
+            rt.state.monster.cans.len(),
+            before,
+            "nothing until it answers"
+        );
+        // While it's out, another tap waits.
+        click(&mut rt, "monster-flavour-khaotic");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.sent.len(), 1);
+        deliver(
+            &mut rt,
+            crate::Message::MonsterAnswer(Answer::Added(Ok(api::Can {
+                id: 999,
+                flavour: "khaotic".into(),
+                at: chrono::Utc::now().timestamp(),
+                rarity: Rarity::Rare,
+                seed: 5,
+                legacy: false,
+            }))),
+        );
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.cans.len(), before + 1);
+        assert!(rt.state.monster.reveal.is_some(), "it opens");
+
+        // A refusal shows the server's words and adds nothing.
+        let mut rt = runtime(monster_signed_in, (1100.0, 1500.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-flavour-khaotic");
+        settle(&mut rt);
+        deliver(
+            &mut rt,
+            crate::Message::MonsterAnswer(Answer::Added(Err(api::Problem {
+                error: api::problem::SLOW_DOWN.into(),
+                message: "Too many cans at once. Wait a minute.".into(),
+                tries_left: None,
+            }))),
+        );
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.cans.len(), before);
+        assert!(rt.find("monster-notice").is_some());
+        assert!(rt.state.monster.reveal.is_none());
+    }
+
+    #[test]
+    fn sign_out_returns_to_the_first_step() {
+        use crate::monster::{Effect, Gate};
+        let mut rt = runtime(monster_signed_in, (1100.0, 900.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-sign-out");
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.monster.sent,
+            [Effect::Keep(None), Effect::SignOut("scene".into())]
+        );
+        assert_eq!(rt.state.monster.gate, Some(Gate::Email));
+        assert!(rt.find("monster-sign-in").is_some());
+        assert!(rt.state.monster.cans.is_empty());
+    }
+
+    #[test]
+    fn the_collection_server_is_kept_when_its_field_is_left() {
+        let root =
+            std::env::temp_dir().join(format!("flexspeak-monster-server-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("settings.json");
+        let mut rt = runtime(settings_wip, (900.0, 790.0));
+        settle(&mut rt);
+        rt.state.settings_path = Some(path.clone());
+        deliver(
+            &mut rt,
+            crate::Message::MonsterServer("collection.example.com".into()),
+        );
+        deliver(&mut rt, crate::Message::CommitMonsterServer);
+        settle(&mut rt);
+        assert!(
+            rt.find("monster-server-error").is_some(),
+            "not a web address"
+        );
+        assert_eq!(rt.state.monster.server, None);
+        deliver(
+            &mut rt,
+            crate::Message::MonsterServer(format!("{SCENE_SERVER}/")),
+        );
+        deliver(&mut rt, crate::Message::CommitMonsterServer);
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.server.as_deref(), Some(SCENE_SERVER));
+        let saved = crate::settings::load(&path).unwrap().unwrap();
+        assert_eq!(saved.monster_server.as_deref(), Some(SCENE_SERVER));
+        // Emptied, the page is back on this computer only.
+        deliver(&mut rt, crate::Message::MonsterServer(String::new()));
+        deliver(&mut rt, crate::Message::CommitMonsterServer);
+        assert_eq!(rt.state.monster.server, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Hands the app a message from outside the view, as a finished task does, and redraws.
+    fn deliver(rt: &mut Runtime<App>, message: crate::Message) {
+        let _ = rt.state.update(message);
+        rt.invalidate();
+    }
+
     fn settle(rt: &mut Runtime<App>) {
         for _ in 0..30 {
             rt.frame(1.0 / 60.0);
@@ -3864,6 +4875,305 @@ mod tests {
         assert_eq!(saved.chat.layout, chat::Layout::Feed);
         assert!(!saved.chat.popups);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn choosing_the_accounts_settings_applies_them_and_sends_nothing_back() {
+        let root =
+            std::env::temp_dir().join(format!("flexspeak-settings-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("settings.json");
+        let mut rt = runtime(settings_sync_choose, (1100.0, 900.0));
+        settle(&mut rt);
+        rt.state.settings_path = Some(path.clone());
+        assert!(rt.find("settings-sync-computer").is_some());
+        click(&mut rt, "settings-sync-account");
+        settle(&mut rt);
+        assert_eq!(rt.state.nickname, "Sam");
+        assert!(rt.find("settings-sync-choice").is_none());
+        let saved = crate::settings::load(&path).unwrap().unwrap();
+        assert_eq!(saved.nickname, "Sam");
+        assert_eq!(saved.settings_sync_version, 6);
+        // The next ticks see the change it made, and send none of it back.
+        for _ in 0..4 {
+            deliver(&mut rt, crate::Message::UsageTick);
+        }
+        assert!(
+            rt.state.settings_sync_sent.is_empty(),
+            "{:?}",
+            rt.state.settings_sync_sent
+        );
+        // A check that finds the version it remembers changes nothing.
+        let current = rt.state.saved.clone().unwrap();
+        let generation = rt.state.settings_sync.generation();
+        deliver(
+            &mut rt,
+            crate::Message::SettingsSyncAnswer(crate::settings_sync::Answer::Fetched(
+                generation,
+                Ok(Some(settings_sync_copy(6, &current))),
+            )),
+        );
+        assert_eq!(rt.state.saved.as_ref(), Some(&current));
+        assert!(rt.state.settings_sync_sent.is_empty());
+        // Turned off, the choice is saved and the row says so.
+        click(&mut rt, "settings-sync");
+        settle(&mut rt);
+        assert!(!crate::settings::load(&path).unwrap().unwrap().settings_sync);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_secret_page_opens_from_the_wip_section_and_hides_from_search() {
+        let mut rt = runtime(settings_wip, (900.0, 790.0));
+        settle(&mut rt);
+        // The scene names a made-up folder, and opening the page would create a database there.
+        rt.state.settings_path = None;
+        click(&mut rt, "open-secret");
+        settle(&mut rt);
+        assert_eq!(rt.state.tab, Tab::Monster);
+        assert!(rt.state.settings_page.is_none());
+        assert!(rt.find("monster-showcase").is_some());
+
+        fn found(scene: fn(&mut App)) -> bool {
+            let mut rt = runtime(scene, (900.0, 790.0));
+            settle(&mut rt);
+            rt.find("open-secret").is_some()
+        }
+        assert!(!found(|s| {
+            settings_wip(s);
+            s.settings_query = "monster".into();
+        }));
+        assert!(found(|s| {
+            settings_wip(s);
+            s.settings_query = "wip".into();
+        }));
+    }
+
+    #[test]
+    fn tapping_a_flavour_adds_a_can_of_it_and_opens_its_card() {
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let before = rt.state.monster.cans.len();
+        click(&mut rt, "monster-flavour-khaotic");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.cans.len(), before + 1);
+        let added = rt.state.monster.cans.last().unwrap().clone();
+        assert_eq!(added.flavour, "khaotic");
+        assert!(added.at > 0, "saved with when it was drunk");
+        assert!(rt.state.monster.reveal.is_some(), "it opens");
+        // While it opens, another tap waits.
+        click(&mut rt, "monster-flavour-khaotic");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.cans.len(), before + 1);
+        // Skipped here, since a test has no timers to carry it through its beats.
+        let shown = format!("showcase-{}", added.identity());
+        click(&mut rt, &shown);
+        settle(&mut rt);
+        assert!(rt.state.monster.reveal.is_none());
+        assert!(rt.find(&format!("card-{}", added.identity())).is_some());
+
+        let other = rt.state.monster.cans[before - 1].identity();
+        click(&mut rt, &format!("card-{other}"));
+        settle(&mut rt);
+        assert!(rt.find(&format!("showcase-{other}")).is_some());
+    }
+
+    #[test]
+    fn the_most_drunk_flavours_lead_as_favourites() {
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let top = crate::monster::favourites(&rt.state.monster.cans, "")[0].0;
+        let id = crate::monster::FLAVOURS[top].id;
+        let (_, favourite_y) = rt.find(&format!("monster-flavour-{id}")).unwrap();
+        let (_, never_y) = rt.find("monster-flavour-other").unwrap();
+        assert!(favourite_y < never_y);
+
+        let mut rt = runtime(monster_empty, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(
+            rt.find("monster-flavour-original").is_some(),
+            "all flavours, nothing drunk yet"
+        );
+    }
+
+    #[test]
+    fn a_search_narrows_the_flavours_and_enter_adds_the_first() {
+        let mut rt = runtime(monster_search, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-flavour-ultra-gold").is_some());
+        assert!(rt.find("monster-flavour-original").is_none());
+        let first = crate::monster::favourites(&rt.state.monster.cans, "ultra")[0].0;
+        let before = rt.state.monster.cans.len();
+        click(&mut rt, "monster-search");
+        key(&mut rt, rune::Key::Enter, false);
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.cans.len(), before + 1);
+        assert_eq!(
+            rt.state.monster.cans.last().unwrap().flavour,
+            crate::monster::FLAVOURS[first].id
+        );
+
+        let mut rt = runtime(monster_search_none, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-flavour-original").is_none());
+    }
+
+    #[test]
+    fn nothing_on_the_page_gives_a_face_down_card_away() {
+        use crate::monster::Rarity;
+        let mut rt = runtime(monster_reveal_rare, (1100.0, 1500.0));
+        settle(&mut rt);
+        let id = can_rolling(Rarity::Legendary);
+        assert!(rt.find("reveal-back").is_some());
+        assert!(rt.find("reveal-face").is_none());
+        assert!(
+            rt.find("monster-notice").is_none(),
+            "no 'Legendary card added'"
+        );
+        assert!(rt.find("monster-featured").is_none());
+        assert!(rt.find(&format!("card-{id}")).is_none(), "not in the grid");
+
+        let mut rt = runtime(monster_reveal_hit, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("reveal-face").is_some());
+        assert!(rt.find("monster-notice").is_some());
+        assert!(rt.find("monster-featured").is_some());
+    }
+
+    #[test]
+    fn escape_finishes_a_reveal_before_leaving_the_page() {
+        let mut rt = runtime(monster_reveal_mythic, (1100.0, 1500.0));
+        settle(&mut rt);
+        key(&mut rt, rune::Key::Escape, false);
+        settle(&mut rt);
+        assert!(rt.state.monster.reveal.is_none());
+        assert_eq!(rt.state.tab, Tab::Monster);
+    }
+
+    #[test]
+    fn a_card_can_be_opened_again_without_another_can() {
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let before = rt.state.monster.cans.len();
+        click(&mut rt, "monster-replay");
+        settle(&mut rt);
+        assert!(rt.state.monster.reveal.is_some());
+        assert_eq!(rt.state.monster.cans.len(), before);
+    }
+
+    #[test]
+    fn the_pointer_over_a_card_is_remembered_and_forgotten_when_it_leaves() {
+        use crate::monster::Rarity;
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let key = format!("card-{}", can_rolling(Rarity::Mythic));
+        let (x, y) = rt.find(&key).unwrap();
+        rt.pointer_move(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.can_hover.as_deref(), Some(key.as_str()));
+        rt.pointer_move(5.0, 5.0);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.can_hover, None);
+    }
+
+    #[test]
+    fn dragging_the_large_can_spins_it_without_choosing_anything() {
+        use crate::monster::Rarity;
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let shown = format!("showcase-{}", can_rolling(Rarity::Legendary));
+        let (x, y) = rt.find(&shown).unwrap();
+        let before = format!("{:?}", rt.state.ui.can_spin);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_move(x + 80.0, y + 30.0);
+        rt.pointer_up(x + 80.0, y + 30.0);
+        settle(&mut rt);
+        assert_ne!(format!("{:?}", rt.state.ui.can_spin), before);
+        assert!(rt.find(&shown).is_some(), "the same card is still up");
+        assert!(rt.state.monster.reveal.is_none());
+    }
+
+    #[test]
+    fn back_climbs_out_of_a_flavour_one_level_at_a_time() {
+        use crate::monster::{Section, flavour_by_id};
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-tab-flavours");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.section, Section::Flavours);
+        click(&mut rt, "flavour-ultra-gold");
+        settle(&mut rt);
+        let (gold, _) = flavour_by_id("ultra-gold").unwrap();
+        assert_eq!(rt.state.monster.section, Section::Flavour(gold));
+        assert!(rt.find("variant-Legendary").is_some());
+
+        key(&mut rt, rune::Key::Escape, false);
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.section, Section::Flavours);
+        click(&mut rt, "back");
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.section, Section::Overview);
+        assert_eq!(rt.state.tab, Tab::Monster);
+        key(&mut rt, rune::Key::Escape, false);
+        settle(&mut rt);
+        assert_eq!(rt.state.tab, Tab::Home);
+    }
+
+    #[test]
+    fn a_legend_entry_opens_that_flavours_page() {
+        use crate::monster::{Section, flavour_by_id};
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let top = rt.state.monster.cans.clone();
+        let today = chrono::Local::now().date_naive();
+        let board = crate::monster::Board::new(&top, today, |_| today);
+        let id = board.by_flavour[0].0.id;
+        click(&mut rt, &format!("legend-{id}"));
+        settle(&mut rt);
+        let (index, _) = flavour_by_id(id).unwrap();
+        assert_eq!(rt.state.monster.section, Section::Flavour(index));
+    }
+
+    #[test]
+    fn a_flavour_page_counts_only_that_flavours_rarities_and_marks_the_rest_missing() {
+        let mut rt = runtime(monster_flavour_new, (1100.0, 1500.0));
+        settle(&mut rt);
+        for rarity in crate::monster::Rarity::ALL {
+            assert!(
+                rt.find(&format!("variant-{}", rarity.name())).is_none(),
+                "no card to show"
+            );
+            assert!(
+                rt.find(&format!("variant-empty-{}", rarity.name()))
+                    .is_some(),
+                "an empty slot instead"
+            );
+        }
+    }
+
+    #[test]
+    fn pressing_a_card_on_a_flavour_page_brings_it_up_there() {
+        // Tall enough that the oldest card, last in the grid, is on screen to press.
+        let mut rt = runtime(monster_flavour, (1100.0, 3200.0));
+        settle(&mut rt);
+        let (gold, _) = crate::monster::flavour_by_id("ultra-gold").unwrap();
+        let cans = rt.state.monster.cans_of(gold);
+        let oldest = cans[0].identity();
+        click(&mut rt, &format!("card-{oldest}"));
+        settle(&mut rt);
+        assert!(rt.find(&format!("showcase-{oldest}")).is_some());
+    }
+
+    #[test]
+    fn the_collection_shows_a_page_of_cards_at_a_time() {
+        let mut rt = runtime(monster_board, (900.0, 790.0));
+        settle(&mut rt);
+        let total = rt.state.monster.cans.len();
+        assert!(total > crate::monster::PAGE);
+        let oldest = rt.state.monster.cans[0].identity();
+        assert!(rt.find(&format!("card-{oldest}")).is_none());
+        assert!(rt.find("monster-more").is_some());
     }
 
     #[test]

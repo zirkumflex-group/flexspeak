@@ -972,7 +972,7 @@ pub struct SoftCue {
     pub gain: f32,
 }
 
-fn soft_note(voice: Voice, frequency: f32, glide: f32, gain: f32) -> Vec<f32> {
+pub(crate) fn soft_note(voice: Voice, frequency: f32, glide: f32, gain: f32) -> Vec<f32> {
     let shape = voice.shape();
     let length = (RATE as f32 * shape.seconds) as usize;
     let tau = std::f32::consts::TAU;

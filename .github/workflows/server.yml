@@ -1,0 +1,113 @@
+name: Collection server
+
+# The Monster collection server (server/) and the rules it shares with the app
+# (crates/monster-core). Not a required check, so it runs only when one of them changes.
+on:
+  pull_request:
+    paths:
+      - server/**
+      - crates/monster-core/**
+      - .dockerignore
+      - .github/workflows/server.yml
+  push:
+    branches: [main]
+    paths:
+      - server/**
+      - crates/monster-core/**
+      - .dockerignore
+      - .github/workflows/server.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: server
+      # --all takes in the shared crate, which the server depends on by path.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      # The shared crate's own tests run with the app's, in ci.yml.
+      - run: cargo test --locked
+
+  image:
+    name: Docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Built, never pushed: this only proves the image still builds and starts.
+      - run: docker build -f server/Dockerfile -t flexspeak-monster .
+      - run: |
+          docker run -d --name monster -e DEV_CODE=000000 -e PUBLIC_URL=http://localhost:8787 -p 8787:8787 flexspeak-monster
+          for attempt in $(seq 1 20); do
+            curl -fsS http://localhost:8787/health && exit 0
+            sleep 1
+          done
+          docker logs monster
+          exit 1
+
+  # Every push to main that changes the server (the paths above) publishes its image, after
+  # the checks and the test build pass. Hosts running server/deploy/compose.yaml pick up
+  # :latest by themselves; :<commit sha> stays, so a host can go back to any earlier build.
+  publish:
+    name: Publish image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    # One publish at a time, never cancelled, so :latest always ends on the newest commit.
+    concurrency:
+      group: server-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Registry names must be lowercase; the owner is taken from the repository, so a fork
+      # or a renamed organisation publishes under its own name.
+      - name: Name the image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/flexspeak-monster" >> "$GITHUB_ENV"
+      - name: Sign in to the registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      # The source label links the package to this repository on GitHub.
+      - name: Build
+        run: |
+          docker build -f server/Dockerfile \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.description=Flexspeak Monster collection server" \
+            -t "$IMAGE:$GITHUB_SHA" -t "$IMAGE:latest" .
+      # The commit's tag first, so :latest never names an image that isn't there yet.
+      - name: Push
+        run: |
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"
+      - name: Sign out
+        if: always()
+        run: docker logout ghcr.io

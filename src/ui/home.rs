@@ -14,7 +14,7 @@ use super::widgets::{
     Variant, body, button, card, divider, faint, heading, icon_button, meter, muted, overline,
     pulse, scroll_page, struck,
 };
-use super::{RailPeek, chat, dispatch, footer, icons, members, send, statistics, streams};
+use super::{RailPeek, chat, dispatch, footer, icons, members, monster, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -36,10 +36,17 @@ pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                 .min_w(0.0)
                 .child(statistics::view(s, cx, t, k)),
         ),
+        Tab::Monster => row().w_full().h_full().child(
+            pane(t)
+                .grow(1.0)
+                .min_w(0.0)
+                .child(monster::view(s, cx, t, k)),
+        ),
     };
     let key = match s.tab {
         Tab::Home => "page-home",
         Tab::Statistics => "page-statistics",
+        Tab::Monster => "page-monster",
     };
     col()
         .w_full()
@@ -76,9 +83,13 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
             t,
             "back",
             &icons::ARROW_LEFT,
-            "Back to server · Esc",
+            if s.tab == Tab::Monster && s.monster.section.parent().is_some() {
+                "Back · Esc"
+            } else {
+                "Back to server · Esc"
+            },
             Variant::Ghost,
-            Some(Message::ShowTab(Tab::Home)),
+            Some(s.back()),
         ));
     }
     // Connected, the sidebar names the server; the title bar just names the app, quietly,
@@ -87,6 +98,7 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
         Tab::Home if s.server().connected && !s.loopback => ("Flexspeak", t.muted),
         Tab::Home => ("Flexspeak", t.text),
         Tab::Statistics => ("Usage & Statistics", t.text),
+        Tab::Monster => (monster::header_title(s), t.text),
     };
     bar = bar
         .child(icon(&icons::FLEXSPEAK, 18.0).color(t.accent).a11y_hidden())

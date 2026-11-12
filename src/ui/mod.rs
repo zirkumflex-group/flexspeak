@@ -4,6 +4,7 @@
 //! [`send`]; [`dispatch`] runs the message, carries out the returned [`Task`] with the frame's
 //! `Tx`, and mirrors the app's text values into the fields that edit them.
 
+mod can3d;
 mod charts;
 mod chat;
 mod footer;
@@ -12,6 +13,7 @@ mod home;
 pub mod icons;
 mod members;
 mod modals;
+mod monster;
 pub mod notices;
 mod onboarding;
 mod scenes;
@@ -234,6 +236,14 @@ pub struct UiState {
     pub channel_password: TextEdit,
     pub key_capture: TextEdit,
     pub settings_search: TextEdit,
+    pub monster_search: TextEdit,
+    pub monster_email: TextEdit,
+    pub monster_login_code: TextEdit,
+    pub monster_server: TextEdit,
+    /// Where dragging has left the large can on the Monster page.
+    pub can_spin: can3d::Spin,
+    /// The card the pointer is over there, by its key, whose can leans toward it.
+    pub can_hover: Option<String>,
     pub server_name: TextEdit,
     pub server_address: TextEdit,
     pub server_password: TextEdit,
@@ -335,6 +345,12 @@ impl Default for UiState {
             channel_password: TextEdit::new("").secure(),
             key_capture: TextEdit::new(""),
             settings_search: TextEdit::new(""),
+            monster_search: TextEdit::new(""),
+            monster_email: TextEdit::new(""),
+            monster_login_code: TextEdit::new(""),
+            monster_server: TextEdit::new(""),
+            can_spin: can3d::Spin::default(),
+            can_hover: None,
             server_name: TextEdit::new(""),
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
@@ -431,6 +447,14 @@ fn mirror(edit: &mut TextEdit, value: &str) {
 }
 
 impl App {
+    /// Where the back button and Escape go from a utility page: up a level, then the server.
+    pub(crate) fn back(&self) -> Message {
+        match self.monster.section.parent() {
+            Some(section) if self.tab == Tab::Monster => Message::MonsterShow(section),
+            _ => Message::ShowTab(Tab::Home),
+        }
+    }
+
     /// Shows the app's current values in their editors. The app's strings stay authoritative,
     /// so an edit `update` rejects (a locked field while connected) is reverted here.
     pub(crate) fn sync_fields(&mut self) {
@@ -441,6 +465,8 @@ impl App {
         mirror(&mut self.ui.channel_password, &channel_password);
         mirror(&mut self.ui.key_capture, "");
         mirror(&mut self.ui.settings_search, &self.settings_query);
+        mirror(&mut self.ui.monster_search, &self.monster.query);
+        mirror(&mut self.ui.monster_server, &self.monster_server_draft);
         let log_query = self.server().log.query().to_owned();
         mirror(&mut self.ui.log_search, &log_query);
         let editor = self.server_editor.clone().unwrap_or_default();
@@ -863,6 +889,11 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         dispatch(s, tx, Message::ClearSelection);
         return true;
     }
+    // Escape finishes a card being opened before it means anything else.
+    if key.key == rune::Key::Escape && s.tab == Tab::Monster && s.monster.reveal.is_some() {
+        dispatch(s, tx, Message::MonsterRevealSkip);
+        return true;
+    }
     // Escape returns from a utility page to the server, as the back button does.
     if key.key == rune::Key::Escape
         && s.onboarding.is_none()
@@ -870,7 +901,8 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         && s.tab != Tab::Home
         && s.server().password_channel.is_none()
     {
-        dispatch(s, tx, Message::ShowTab(Tab::Home));
+        let back = s.back();
+        dispatch(s, tx, back);
         return true;
     }
     false

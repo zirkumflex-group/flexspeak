@@ -5,9 +5,11 @@ edition = "2024"
 rust-version = "1.99"
 description = "A minimal native TeamSpeak voice client"
 
+# The app and the rules it shares with the collection server. The server (`server/`) is a
+# workspace of its own, with its own lock file, so its image builds without the app.
 [workspace]
-members = ["."]
-exclude = ["vendor/tsclientlib"]
+members = [".", "crates/monster-core"]
+exclude = ["vendor/tsclientlib", "server"]
 
 [dependencies]
 anyhow = "1"
@@ -22,14 +24,18 @@ global-hotkey = "0.9"
 # Update checks and downloads. TLS through rustls on ring: no extra C toolchain on any platform.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
 rune = { git = "https://github.com/anomalyco/rune", rev = "2ceefd2418b63cf33adb51ef83383c68bc0ffea5" }
+rune-fx = { git = "https://github.com/anomalyco/rune", rev = "2ceefd2418b63cf33adb51ef83383c68bc0ffea5" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "2ceefd2418b63cf33adb51ef83383c68bc0ffea5" }
-# The video compositor needs wgpu's types; the same version and features Rune already builds.
+# The video compositor and rune-fx need wgpu's types; the same version and features Rune already builds.
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 rubato = { version = "0.16.2", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# The Monster page's card rolls; the version the tree already builds.
+getrandom = "0.3"
+monster-core = { path = "crates/monster-core" }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"

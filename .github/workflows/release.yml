@@ -14,6 +14,11 @@ on:
       - CHANGELOG.md # compiled into the app, shown under Settings → Updates
       - docs/releases.md # becomes the Homebrew tap's README
       - assets/webrtc/LICENSE.md # part of THIRD-PARTY-LICENSES.txt
+      # The collection server ships as a container, not in the app. What the app shares
+      # with it, crates/monster-core, still counts.
+      - '!server/**'
+      - '!.dockerignore'
+      - '!.github/workflows/server.yml'
   workflow_dispatch:
 
 permissions:
