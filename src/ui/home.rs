@@ -284,8 +284,13 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
         .key("saved-server")
         .max_w(560.0)
         .padding(20.0)
-        .child(content)
-        .sequence(rune::Sequence::new(ENTRANCE).delay(0.05));
+        .child(content);
+    // A snapshot is one frame: it shows the card settled, not the first frame of its fade.
+    let hero = if super::snapping() {
+        hero
+    } else {
+        hero.sequence(rune::Sequence::new(ENTRANCE).delay(0.05))
+    };
     col()
         .w_full()
         .h_full()
@@ -890,7 +895,7 @@ fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
                 .child(button(
                     t,
                     "log-clear",
-                    "Clear search",
+                    "Clear Search",
                     None,
                     Variant::Ghost,
                     Some(Message::LogClear),
@@ -960,7 +965,8 @@ fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
     if !log.searching || collapsed {
         return bar
             .child(overline(t, "Server log").ml(6.0).grow(1.0))
-            .children((s.ui.log_hover && !collapsed).then(|| {
+            // Faint until the pointer is over the log, so it can be found without hovering.
+            .children((!collapsed).then(|| {
                 icon_button(
                     t,
                     "log-search-open",
@@ -969,7 +975,8 @@ fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
                     Variant::Ghost,
                     Some(Message::LogSearch(true)),
                 )
-                .transition(Transition::opacity())
+                .opacity(if s.ui.log_hover { 1.0 } else { 0.4 })
+                .motion(motion::QUICK)
             }))
             .child(fold);
     }
@@ -988,14 +995,26 @@ fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
             let value = s.ui.log_search.text.clone();
             dispatch(s, tx, Message::LogQuery(value));
         })
-        .trailing(icon_button(
-            t,
-            "log-search-close",
-            &icons::X,
-            "Close search · Esc",
-            Variant::Ghost,
-            Some(Message::LogSearch(false)),
-        ))
+        // The X clears what's typed first; with nothing typed it closes the search.
+        .trailing(if log.query().is_empty() {
+            icon_button(
+                t,
+                "log-search-close",
+                &icons::X,
+                "Close search · Esc",
+                Variant::Ghost,
+                Some(Message::LogSearch(false)),
+            )
+        } else {
+            icon_button(
+                t,
+                "log-search-close",
+                &icons::X,
+                "Clear the search",
+                Variant::Ghost,
+                Some(Message::LogQuery(String::new())),
+            )
+        })
         .build(k);
     let person = match log.person() {
         Some(person) => {
@@ -1195,32 +1214,50 @@ fn log_row(s: &App, t: &Theme, index: usize) -> El {
     } else {
         format!("{} {}", entry.name, entry.action)
     };
-    let mut spans = Vec::new();
-    if lead > 0 {
-        spans.push(Span::new(0, entry.name.len()).bold());
-    }
     let mark = |range: std::ops::Range<usize>| {
         Span::new(range.start, range.end).bg(t.fair.alpha(0.35), 1.0)
     };
-    spans.extend(find(&entry.name, log.query()).map(mark));
-    spans.extend(
-        find(&entry.action, log.query()).map(|range| mark(range.start + lead..range.end + lead)),
+    // The name and what happened are separate, so a long name shortens before the event.
+    let mut name_spans = vec![Span::new(0, entry.name.len()).bold()];
+    name_spans.extend(find(&entry.name, log.query()).map(mark));
+    let action_spans: Vec<Span> = find(&entry.action, log.query()).map(mark).into_iter().collect();
+    // The event keeps room for about 18 characters before it shortens as well.
+    let action_room = (entry.action.chars().count() as f32 * 6.0).min(110.0);
+    let help = format!(
+        "{words}\n{}",
+        entry.at.format("%A, %-d %B %Y, %H:%M:%S")
     );
+    let line = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .center_y()
+        .children((lead > 0).then(|| {
+            rich(entry.name.clone(), name_spans)
+                .font(ty::SMALL)
+                .color(t.text)
+                .shrink()
+                .min_w(24.0)
+                .truncate_fade()
+        }))
+        .child(
+            rich(entry.action.clone(), action_spans)
+                .font(ty::SMALL)
+                .color(t.text)
+                .shrink()
+                .min_w(action_room)
+                .truncate_fade(),
+        );
     row()
         .w_full()
         .gap(8.0)
         .center_y()
         .pl(6.0)
         .pr(8.0)
+        .help(help.clone())
+        .label(help)
         .child(marker)
-        .child(
-            rich(words, spans)
-                .font(ty::SMALL)
-                .color(t.text)
-                .grow(1.0)
-                .min_w(0.0)
-                .truncate_fade(),
-        )
+        .child(line)
         .child(text(entry.time.clone()).font(ty::NUMERIC).color(t.faint))
 }
 
@@ -1692,8 +1729,8 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
     }
     if s.is_streaming(member) {
         entry = entry.child(
-            el().help("Sharing a stream")
-                .label("Sharing a stream")
+            el().help("Sharing")
+                .label("Sharing")
                 .child(icon(&icons::SCREEN_SHARE, 13.0).color(t.live)),
         );
     }

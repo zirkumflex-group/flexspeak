@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 
 use crate::{App, Message, Tab, client, shortcuts, usage};
 
-pub use chat::MIN_DOCK_WINDOW as CHAT_MIN_DOCK_WINDOW;
+pub use chat::dock_window as chat_dock_window;
 pub use streams::fullscreen_allowed;
 pub use theme::Theme;
 
@@ -944,7 +944,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         // handler would re-run layout every frame.
         .on_layout_tx(|s: &mut App, r: [f32; 4], tx: &mut Tx| {
             // The one width that changes the view: where the chat column docks or folds away.
-            let docks = |width: f32| width >= chat::MIN_DOCK_WINDOW;
+            let at = chat::dock_window(s);
+            let docks = |width: f32| width >= at;
             let crossed = docks(s.window_size.0) != docks(r[2]);
             s.window_size = (r[2], r[3]);
             if !crossed {
@@ -1059,6 +1060,34 @@ pub fn run(launch: Launch) {
 /// `AppSpec` needs an `init`; the real state comes from `App::init`, which has the handle.
 fn placeholder() -> App {
     App::with_devices(crate::audio::Devices::default(), None)
+}
+
+/// This run renders a still with `--snap`, so entrance animations start settled.
+pub fn snapping() -> bool {
+    static SNAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SNAP.get_or_init(|| std::env::args().any(|arg| arg == "--snap"))
+}
+
+/// The window size a headless run asks for with `--size WxH`, so a single frame lays out
+/// against it before any layout has reported the real size.
+pub fn requested_size() -> Option<(f32, f32)> {
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|arg| arg == "--size")?;
+    parse_size(args.get(at + 1)?)
+}
+
+fn parse_size(value: &str) -> Option<(f32, f32)> {
+    let (w, h) = value.split_once(['x', 'X'])?;
+    let size = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (size.0 > 0.0 && size.1 > 0.0).then_some(size)
+}
+
+#[cfg(test)]
+#[test]
+fn a_requested_size_is_read_as_width_by_height() {
+    assert_eq!(parse_size("760x560"), Some((760.0, 560.0)));
+    assert_eq!(parse_size("760"), None);
+    assert_eq!(parse_size("0x5"), None);
 }
 
 /// Flags handled by Rune's headless tooling rather than the app.

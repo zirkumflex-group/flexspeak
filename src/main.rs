@@ -663,18 +663,19 @@ fn log_activity(log: &mut server_log::Log, activity: &client::Activity) {
     };
     let action = match (activity.kind, activity.is_self) {
         (Switched, true) => format!("joined {}", activity.channel),
-        (Switched, false) => format!("→ {}", activity.channel),
+        // They went themselves, or someone put them there.
+        (Switched, false) => format!("joined {}", activity.channel),
         (Moved, true) => format!("were moved to {}", activity.channel),
-        (Moved, false) => format!("moved to {}", activity.channel),
+        (Moved, false) => format!("was moved to {}", activity.channel),
         (Connected, _) => "connected".to_owned(),
         (Disconnected, _) => "disconnected".to_owned(),
         (LostConnection, _) => "lost connection".to_owned(),
         (KickedFromChannel, true) => "were kicked from the channel".to_owned(),
-        (KickedFromChannel, false) => "kicked from the channel".to_owned(),
+        (KickedFromChannel, false) => "was kicked from the channel".to_owned(),
         (KickedFromServer, true) => "were kicked".to_owned(),
-        (KickedFromServer, false) => "kicked".to_owned(),
+        (KickedFromServer, false) => "was kicked".to_owned(),
         (Banned, true) => "were banned".to_owned(),
-        (Banned, false) => "banned".to_owned(),
+        (Banned, false) => "was banned".to_owned(),
         (RecordingStarted, _) => "started recording".to_owned(),
         (RecordingStopped, _) => "stopped recording".to_owned(),
         (TalkPowerGranted, _) => "got talk power".to_owned(),
@@ -698,7 +699,7 @@ fn stream_changes(
     session: &mut ServerSession,
     catalog: &[streaming::StreamInfo],
 ) -> Vec<sounds::Sound> {
-    const STARTED: &str = "started streaming";
+    const STARTED: &str = "started sharing";
     if !std::mem::replace(&mut session.catalog_seen, true) {
         return Vec::new();
     }
@@ -718,7 +719,7 @@ fn stream_changes(
             before
                 .iter()
                 .filter(|old| !catalog.iter().any(|stream| stream.id == old.id))
-                .map(|old| (old.publisher, "stopped streaming")),
+                .map(|old| (old.publisher, "stopped sharing")),
         )
         .filter_map(|(publisher, action)| {
             let person = member(publisher);
@@ -1152,7 +1153,8 @@ impl App {
             theme_library: themes::Library::new(&[]),
             omarchy: None,
             system_dark: true,
-            window_size: (1180.0, 790.0),
+            // A headless `--size` run lays its first frame out at that size.
+            window_size: ui::requested_size().unwrap_or((1180.0, 790.0)),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
             handle: None,
             ui: ui::UiState::default(),
@@ -4272,8 +4274,8 @@ impl App {
                 }
                 for sound in &share_sounds {
                     let words = match sound {
-                        sounds::Sound::StreamStarted => "started streaming",
-                        sounds::Sound::StreamStopped => "stopped streaming",
+                        sounds::Sound::StreamStarted => "started sharing",
+                        sounds::Sound::StreamStopped => "stopped sharing",
                         _ => continue,
                     };
                     session.log.add(server_log::Tone::Stream, "You", words);
@@ -4566,7 +4568,7 @@ impl App {
     /// Whether the chat column is docked beside the stage, rather than behind the window's edge.
     fn chat_docked(&self) -> bool {
         !self.chat_options.hidden
-            && self.window_size.0 >= ui::CHAT_MIN_DOCK_WINDOW
+            && self.window_size.0 >= ui::chat_dock_window(self)
             && !(self.chat_options.hide_while_watching
                 && self.server().streaming.active()
                 && !self.ui.chat_over_stream)
@@ -4849,7 +4851,7 @@ impl App {
                     self.ui.chat_input.focused = false;
                     self.ui.chat_peek = ui::RailPeek::default();
                     self.ui.chat_lists = Default::default();
-                } else if self.window_size.0 < ui::CHAT_MIN_DOCK_WINDOW {
+                } else if self.window_size.0 < ui::chat_dock_window(self) {
                     // No room to dock: hold the peek open instead, or let it go.
                     self.ui.chat_peek.toggle_pin();
                 } else {
@@ -6321,7 +6323,7 @@ mod tests {
         );
         let log = &app.server().log;
         assert_eq!(log.len(), 3);
-        assert_eq!(log.get(0).unwrap().action, "moved to Lobby");
+        assert_eq!(log.get(0).unwrap().action, "was moved to Lobby");
         assert_eq!(log.get(1).unwrap().tone, server_log::Tone::Left);
         assert_eq!(log.get(2).unwrap().action, "connected");
     }

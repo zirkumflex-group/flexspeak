@@ -21,6 +21,16 @@ use crate::{App, Message};
 
 /// The window has to be this wide to dock the column; narrower, it peeks over the stage.
 pub const MIN_DOCK_WINDOW: f32 = 1000.0;
+
+/// The window width the column docks at: `MIN_DOCK_WINDOW`, plus the server rail's width while
+/// the rail shows, so the stage keeps the same room either way.
+pub fn dock_window(s: &App) -> f32 {
+    if s.rail_sessions().count() >= 2 {
+        MIN_DOCK_WINDOW + super::home::RAIL
+    } else {
+        MIN_DOCK_WINDOW
+    }
+}
 /// The grab band along the window's right edge while the column is hidden.
 const EDGE: f32 = 12.0;
 /// Lines drawn at once; older ones are still in the history.
@@ -468,9 +478,25 @@ fn hide_button(t: &Theme) -> El {
     )
 }
 
+/// The peek's twin of the hide button: keeps the column docked beside the stage.
+fn dock_button(t: &Theme) -> El {
+    icon_button(
+        t,
+        "chat-dock",
+        &icons::PANEL_RIGHT,
+        if cfg!(target_os = "macos") {
+            "Dock chat · ⇧⌘C"
+        } else {
+            "Dock chat · Ctrl+Shift+C"
+        },
+        Variant::Ghost,
+        Some(Message::Chat(Action::Toggle)),
+    )
+}
+
 /// The bar both layouts share: what leads scrolls sideways, the hide button stays put.
-fn bar(t: &Theme, strip: El, hide: bool) -> El {
-    bar_with(t, scrolling(strip), hide, None)
+fn bar(t: &Theme, strip: El, head: &Head) -> El {
+    bar_with(t, scrolling(strip), head, None)
 }
 
 /// The key of the bar's sideways viewport.
@@ -487,8 +513,8 @@ fn scrolling(strip: El) -> El {
         .child(strip)
 }
 
-/// The bar around a prepared strip, with an optional mark before the hide button.
-fn bar_with(t: &Theme, strip: El, hide: bool, mark: Option<El>) -> El {
+/// The bar around a prepared strip, with an optional mark before the hide or dock button.
+fn bar_with(t: &Theme, strip: El, head: &Head, mark: Option<El>) -> El {
     row()
         .key("chat-bar")
         .w_full()
@@ -499,14 +525,16 @@ fn bar_with(t: &Theme, strip: El, hide: bool, mark: Option<El>) -> El {
         .center_y()
         .child(strip)
         .children(mark)
-        .children(hide.then(|| hide_button(t)))
+        .children(head.hide.then(|| hide_button(t)))
+        // The peek docks; a sample has neither.
+        .children((!head.hide && head.strip.is_some()).then(|| dock_button(t)))
 }
 
 /// Side by side: the plain wheel scrolls the tabs too, and a mark at the end counts what's
 /// unread in tabs out of sight; pressing it brings the first of them into view.
 fn side_by_side(t: &Theme, head: &Head, strip: El, tabs: &[(String, u32, bool)]) -> El {
     let Some(place) = head.strip else {
-        return bar(t, strip, head.hide);
+        return bar(t, strip, head);
     };
     let strip = strip.on_layout(|s: &mut App, rect| s.ui.chat_strip.content = rect);
     let viewport = scrolling(strip)
@@ -567,7 +595,7 @@ fn side_by_side(t: &Theme, head: &Head, strip: El, tabs: &[(String, u32, bool)])
         }
         mark
     });
-    bar_with(t, viewport, head.hide, mark)
+    bar_with(t, viewport, head, mark)
 }
 
 /// A tab that reports where it lies, so the bar knows when it is out of sight.
@@ -929,7 +957,7 @@ fn groups(t: &Theme, head: &Head) -> El {
         .h_full()
         .clip_rounded(0.0)
         .child(strip.shrink());
-    bar_with(t, strip, head.hide, None)
+    bar_with(t, strip, head, None)
 }
 
 /// The pointer came onto or left a list's tab or the list itself.
@@ -1319,7 +1347,7 @@ fn filters(t: &Theme, head: &Head) -> El {
         };
         strip = strip.child(chip);
     }
-    bar(t, strip, head.hide)
+    bar(t, strip, head)
 }
 
 /// The lines, newest at the foot, following new ones while scrolled there.
@@ -1770,9 +1798,11 @@ pub fn edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     } else {
         None
     };
-    let label = match dot {
-        Some(_) => "Show chat · new messages",
-        None => "Show chat",
+    let label = match (chat.unread_private(), dot) {
+        (1, _) => "Show chat · 1 private message".to_owned(),
+        (n @ 2.., _) => format!("Show chat · {n} private messages"),
+        (_, Some(_)) => "Show chat · new messages".to_owned(),
+        (_, None) => "Show chat".to_owned(),
     };
     let mut strip = el()
         .key("chat-edge")
@@ -1800,7 +1830,17 @@ pub fn edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                 .motion(motion::QUICK)
                 .a11y_hidden(),
         );
-        if let Some(color) = dot {
+        let private = chat.unread_private();
+        if private > 0 {
+            // A private message is for you: its count shows, not just a dot.
+            strip = strip.child(
+                el().key("chat-edge-count")
+                    .pin(None, Some(top - 22.0), Some(1.0), None)
+                    .child(badge(t, private, t.private))
+                    .transition(Transition::opacity().combined(Transition::scale(0.6)))
+                    .a11y_hidden(),
+            );
+        } else if let Some(color) = dot {
             strip = strip.child(
                 el().key("chat-edge-dot")
                     .absolute(EDGE - 11.0, top - 14.0)

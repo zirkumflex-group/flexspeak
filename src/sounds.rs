@@ -203,8 +203,8 @@ impl Sound {
             Self::Disconnected => "Disconnected",
             Self::ConnectionLost => "Connection lost",
             Self::Reconnected => "Reconnected",
-            Self::StreamStarted => "You started streaming",
-            Self::StreamStopped => "You stopped streaming",
+            Self::StreamStarted => "You started sharing",
+            Self::StreamStopped => "You stopped sharing",
             Self::Kicked => "Kicked from the server",
             Self::PersonConnected => "Someone connected to your channel",
             Self::PersonDisconnected => "Someone in your channel disconnected",
@@ -227,8 +227,8 @@ impl Sound {
             Self::ServerGroupAssigned => "You were added to a server group",
             Self::ServerGroupRevoked => "You were removed from a server group",
             Self::ChannelGroupChanged => "Your channel group changed",
-            Self::PersonStreamStarted => "Someone in your channel started streaming",
-            Self::PersonStreamStopped => "Someone in your channel stopped streaming",
+            Self::PersonStreamStarted => "Someone in your channel started sharing",
+            Self::PersonStreamStopped => "Someone in your channel stopped sharing",
         }
     }
 
