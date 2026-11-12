@@ -1606,7 +1606,9 @@ fn monster_unboxed_own(s: &mut App) {
         &card.announcement(),
         "21:10",
     );
-    s.server_mut().unboxed.insert(1, crate::monster::Lit::new(card));
+    s.server_mut()
+        .unboxed
+        .insert(1, crate::monster::Lit::new(card));
 }
 
 fn unboxed(s: &mut App, rarity: crate::monster::Rarity, flavour: &str, number: u32) {
