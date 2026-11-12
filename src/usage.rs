@@ -123,7 +123,8 @@ fn memory_detail_bytes() -> Option<u64> {
 }
 
 pub struct ProcessMonitor {
-    system: System,
+    /// `None` when the system's process information can't be opened; samples are then empty.
+    system: Option<System>,
     pid: Pid,
     primed: bool,
 }
@@ -131,16 +132,21 @@ pub struct ProcessMonitor {
 impl ProcessMonitor {
     pub fn new() -> Self {
         Self {
-            system: System::new(),
+            system: System::new()
+                .inspect_err(|error| tracing::warn!("Process usage is unavailable: {error}"))
+                .ok(),
             pid: Pid::from_u32(std::process::id()),
             primed: false,
         }
     }
 
     pub fn sample(&mut self) -> ProcessUsage {
+        let Some(system) = &mut self.system else {
+            return ProcessUsage::default();
+        };
         // Refresh only this process. Scanning all processes or Linux tasks would
         // make the usage display unnecessarily expensive.
-        self.system.refresh_processes_specifics(
+        system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[self.pid]),
             true,
             ProcessRefreshKind::nothing()
@@ -148,7 +154,7 @@ impl ProcessMonitor {
                 .with_memory()
                 .without_tasks(),
         );
-        let Some(process) = self.system.process(self.pid) else {
+        let Some(process) = system.process(self.pid) else {
             self.primed = false;
             return ProcessUsage::default();
         };
@@ -752,7 +758,8 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert!(first.memory_detail_bytes.is_some_and(|bytes| bytes > 0));
         assert!(first.cpu_percent.is_none());
-        assert_eq!(monitor.system.processes().len(), 1);
+        let system = monitor.system.as_ref().expect("process information opens");
+        assert_eq!(system.processes().len(), 1);
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL + Duration::from_millis(20));
         let second = monitor.sample();
         assert!(

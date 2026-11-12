@@ -873,9 +873,21 @@ fn payload_path(dir: &Path, package: Package) -> PathBuf {
 }
 
 fn sha256_file(path: &Path) -> std::io::Result<String> {
+    use std::io::{ErrorKind, Read};
+
+    // Streamed in chunks: the hash crates no longer implement `io::Write`, and a whole
+    // installer shouldn't sit in memory just to be hashed.
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&chunk[..read]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
     Ok(hex(&hasher.finalize()))
 }
 

@@ -7,6 +7,7 @@ pinned to that revision. Original MIT/Apache notices are included.
 Local changes:
 
 - Replace sibling path dependencies with the original pinned Git dependencies.
+- Newer support crates than upstream pins: base64 0.23 and itertools 0.15.
 - `tsproto` is the patched copy in `vendor/tsproto`, from the same revision; see its
   `FLEXSPEAK-PATCH.md`.
 - Expose TS6 stream notifications and client streaming-flag updates through

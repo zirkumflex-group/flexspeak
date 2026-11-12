@@ -21,7 +21,8 @@ use cpal::{
 };
 use crossbeam_queue::ArrayQueue;
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction, audioadapter_buffers::direct::SequentialSliceOfVecs,
 };
 use tsproto_packets::packets::CodecType;
 
@@ -258,7 +259,7 @@ fn config(device: &Device, input: bool) -> Result<SupportedStreamConfig> {
 }
 
 pub struct RateConverter {
-    resampler: Option<SincFixedIn<f32>>,
+    resampler: Option<Async<f32>>,
     pub input: Vec<Vec<f32>>,
     output: Vec<Vec<f32>>,
 }
@@ -268,18 +269,22 @@ impl RateConverter {
         let resampler = if from == to {
             None
         } else {
-            Some(SincFixedIn::new(
+            // A fixed input chunk: callers fill `input` with `frames` frames and take
+            // however many the ratio gives back. The explicit cutoff keeps the filter
+            // we have always used; rubato would otherwise pick one per filter length.
+            Some(Async::new_sinc(
                 to as f64 / from as f64,
                 1.0,
-                SincInterpolationParameters {
+                &SincInterpolationParameters {
                     sinc_len: 128,
-                    f_cutoff: 0.95,
+                    f_cutoff: Some(0.95),
                     interpolation: SincInterpolationType::Linear,
                     oversampling_factor: 128,
                     window: WindowFunction::BlackmanHarris2,
                 },
                 frames,
                 channels,
+                FixedAsync::Input,
             )?)
         };
         let output_len = resampler.as_ref().map_or(frames, |r| r.output_frames_max());
@@ -292,8 +297,11 @@ impl RateConverter {
 
     pub fn process(&mut self) -> Result<(&[Vec<f32>], usize)> {
         if let Some(resampler) = &mut self.resampler {
-            let (_, written) =
-                resampler.process_into_buffer(&self.input, &mut self.output, None)?;
+            let channels = self.input.len();
+            let input = SequentialSliceOfVecs::new(&self.input, channels, self.input[0].len())?;
+            let frames = self.output[0].len();
+            let mut output = SequentialSliceOfVecs::new_mut(&mut self.output, channels, frames)?;
+            let (_, written) = resampler.process_into_buffer(&input, &mut output, None)?;
             Ok((&self.output, written))
         } else {
             Ok((&self.input, self.input[0].len()))

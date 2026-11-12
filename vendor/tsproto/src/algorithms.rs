@@ -1,8 +1,7 @@
 //! Handle packet splitting and cryptography
 use curve25519_dalek_ng::edwards::EdwardsPoint;
-use eax::aead::consts::{U16, U8};
-use eax::{AeadInPlace, Eax, KeyInit};
-use generic_array::GenericArray;
+use eax::aead::consts::U8;
+use eax::{AeadInOut, Eax, KeyInit};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use omnom::WriteExt;
@@ -119,7 +118,7 @@ fn create_key_nonce(
 	generation_id: u32,
 	iv: &[u8; 64],
 	cache: &mut [[CachedKey; 2]; 8],
-) -> (GenericArray<u8, U16>, GenericArray<u8, U16>) {
+) -> ([u8; 16], [u8; 16]) {
 	// Check if this generation is cached
 	let cache = &mut cache[p_type.to_usize().unwrap()][if c_id.is_some() { 1 } else { 0 }];
 	if cache.generation_id != generation_id {
@@ -149,22 +148,18 @@ fn create_key_nonce(
 	(key, nonce)
 }
 
-pub fn encrypt_key_nonce(
-	packet: &mut OutPacket,
-	key: &GenericArray<u8, U16>,
-	nonce: &GenericArray<u8, U16>,
-) -> Result<()> {
+pub fn encrypt_key_nonce(packet: &mut OutPacket, key: &[u8; 16], nonce: &[u8; 16]) -> Result<()> {
 	let meta = packet.header().get_meta().to_vec();
-	let cipher = Eax::<aes::Aes128, U8>::new(key);
+	let cipher = Eax::<aes::Aes128, U8>::new(key.into());
 	let mac = cipher
-		.encrypt_in_place_detached(nonce, &meta, packet.content_mut())
+		.encrypt_inout_detached(nonce.into(), &meta, packet.content_mut().into())
 		.map_err(|_| Error::MaxLengthExceeded("encryption data"))?;
 	packet.mac().copy_from_slice(mac.as_slice());
 	Ok(())
 }
 
 pub fn encrypt_fake(packet: &mut OutPacket) -> Result<()> {
-	encrypt_key_nonce(packet, &crate::FAKE_KEY.into(), &crate::FAKE_NONCE.into())
+	encrypt_key_nonce(packet, &crate::FAKE_KEY, &crate::FAKE_NONCE)
 }
 
 pub fn encrypt(
@@ -185,18 +180,19 @@ pub fn encrypt(
 	encrypt_key_nonce(packet, &key, &nonce)
 }
 
-pub fn decrypt_key_nonce(
-	packet: &InPacket,
-	key: &GenericArray<u8, U16>,
-	nonce: &GenericArray<u8, U16>,
-) -> Result<Vec<u8>> {
+pub fn decrypt_key_nonce(packet: &InPacket, key: &[u8; 16], nonce: &[u8; 16]) -> Result<Vec<u8>> {
 	let header = packet.header();
 	let meta = header.get_meta();
 	// TODO decrypt in-place in packet
 	let mut content = packet.content().to_vec();
-	let cipher = Eax::<aes::Aes128, U8>::new(key);
+	let cipher = Eax::<aes::Aes128, U8>::new(key.into());
 	cipher
-		.decrypt_in_place_detached(nonce, meta, &mut content, header.mac().into())
+		.decrypt_inout_detached(
+			nonce.into(),
+			meta,
+			content.as_mut_slice().into(),
+			header.mac().into(),
+		)
 		.map(|()| content)
 		.map_err(|_| Error::WrongMac {
 			p_type: header.packet_type(),
@@ -206,7 +202,7 @@ pub fn decrypt_key_nonce(
 }
 
 pub fn decrypt_fake(packet: &InPacket) -> Result<Vec<u8>> {
-	decrypt_key_nonce(packet, &crate::FAKE_KEY.into(), &crate::FAKE_NONCE.into())
+	decrypt_key_nonce(packet, &crate::FAKE_KEY, &crate::FAKE_NONCE)
 }
 
 pub fn decrypt(
@@ -470,7 +466,7 @@ mod tests {
 		assert_eq!(&expected_key, &key);
 
 		key[1] ^= 2; // packet id
-		let dec = decrypt_key_nonce(&packet, &key.into(), &nonce.into()).unwrap();
+		let dec = decrypt_key_nonce(&packet, &key, &nonce).unwrap();
 
 		println!("Decrypted: {:?}", String::from_utf8_lossy(&dec));
 	}
