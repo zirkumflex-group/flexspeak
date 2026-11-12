@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Flexspeak passkey</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 16px; background: #0f1115; color: #e8eaee;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    width: 100%; max-width: 420px; padding: 28px; border-radius: 14px;
+    background: #181b21; border: 1px solid #262a33;
+  }
+  h1 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+  p { margin: 0 0 20px; color: #a9b0bc; }
+  button {
+    width: 100%; padding: 12px 16px; border: 0; border-radius: 10px; cursor: pointer;
+    background: #7ddc1f; color: #0b120a; font: inherit; font-weight: 600;
+  }
+  button:hover { background: #95ea3d; }
+  button:disabled { opacity: .5; cursor: default; }
+  button[hidden] { display: none; }
+  .error h1 { color: #ff8a8a; }
+  .done h1 { color: #9be35a; }
+</style>
+</head>
+<body>
+<main id="box">
+  <h1 id="title">Passkey</h1>
+  <p id="text">Getting ready…</p>
+  <button id="go" type="button" hidden></button>
+</main>
+<script>
+"use strict";
+(function () {
+  var box = document.getElementById("box");
+  var title = document.getElementById("title");
+  var text = document.getElementById("text");
+  var go = document.getElementById("go");
+  var ticket = new URLSearchParams(location.hash.slice(1)).get("ticket");
+  var options = null;
+
+  function show(kind, heading, words, button) {
+    box.className = kind;
+    title.textContent = heading;
+    text.textContent = words;
+    go.hidden = !button;
+    go.disabled = false;
+    if (button) go.textContent = button;
+  }
+
+  function fail(words, retry) {
+    show("error", "That didn't work", words, retry ? "Try again" : null);
+  }
+
+  function toBytes(s) {
+    s = s.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    var raw = atob(s), out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out.buffer;
+  }
+
+  function toText(buf) {
+    var bytes = new Uint8Array(buf), raw = "";
+    for (var i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i]);
+    return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  // Calls the server; a failure becomes an Error carrying the server's own words.
+  function call(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      if (res.ok) return res.status === 204 ? null : res.json();
+      return res.json().catch(function () { return {}; }).then(function (problem) {
+        var err = new Error(problem.message || "The server couldn't be reached. Try again.");
+        err.server = true;
+        err.expired = problem.error === "expired";
+        throw err;
+      });
+    }, function () {
+      var err = new Error("The server couldn't be reached. Check your connection and try again.");
+      err.server = true;
+      throw err;
+    });
+  }
+
+  function load() {
+    return call("/v1/passkeys/options", { ticket: ticket }).then(function (got) {
+      options = got;
+      if (got.mode === "create") {
+        show("", "Create a passkey",
+          "It signs you in to Flexspeak from now on, with your fingerprint, face or PIN.",
+          "Create passkey");
+      } else {
+        show("", "Sign in with your passkey",
+          "Use the passkey you made for Flexspeak earlier.", "Use passkey");
+      }
+    });
+  }
+
+  function runDialog(got) {
+    var pk = got.publicKey;
+    pk.challenge = toBytes(pk.challenge);
+    if (got.mode === "create") {
+      pk.user.id = toBytes(pk.user.id);
+      (pk.excludeCredentials || []).forEach(function (c) { c.id = toBytes(c.id); });
+      return navigator.credentials.create({ publicKey: pk }).then(function (cred) {
+        var ext = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
+        return {
+          id: cred.id,
+          rawId: toText(cred.rawId),
+          type: cred.type,
+          response: {
+            attestationObject: toText(cred.response.attestationObject),
+            clientDataJSON: toText(cred.response.clientDataJSON)
+          },
+          extensions: ext && ext.credProps ? { credProps: ext.credProps } : {}
+        };
+      });
+    }
+    (pk.allowCredentials || []).forEach(function (c) { c.id = toBytes(c.id); });
+    return navigator.credentials.get({ publicKey: pk }).then(function (cred) {
+      var r = cred.response;
+      return {
+        id: cred.id,
+        rawId: toText(cred.rawId),
+        type: cred.type,
+        response: {
+          authenticatorData: toText(r.authenticatorData),
+          clientDataJSON: toText(r.clientDataJSON),
+          signature: toText(r.signature),
+          userHandle: r.userHandle ? toText(r.userHandle) : null
+        },
+        extensions: {}
+      };
+    });
+  }
+
+  function dialogWords(err) {
+    switch (err && err.name) {
+      case "NotAllowedError": return "The passkey dialog was closed or ran out of time. Try again.";
+      case "InvalidStateError": return "This device already holds a passkey for your account. Choose another place to save it, or go back to Flexspeak.";
+      case "SecurityError": return "This page's address doesn't match the server's settings, so the browser refused. Tell whoever runs the server.";
+      case "NotSupportedError": return "This browser or device can't make that kind of passkey.";
+      default: return "The passkey dialog failed. Try again.";
+    }
+  }
+
+  go.addEventListener("click", function () {
+    go.disabled = true;
+    var mode;
+    // The server's options are good for one try, so a retry asks for fresh ones.
+    var ready = options ? Promise.resolve(options) : call("/v1/passkeys/options", { ticket: ticket });
+    options = null;
+    ready.then(function (got) {
+      mode = got.mode;
+      return runDialog(got).catch(function (err) {
+        var wrapped = new Error(dialogWords(err));
+        wrapped.dialog = true;
+        throw wrapped;
+      });
+    }).then(function (credential) {
+      return call("/v1/passkeys/finish", { ticket: ticket, credential: credential });
+    }).then(function () {
+      history.replaceState(null, "", location.pathname);
+      show("done", mode === "create" ? "Passkey saved" : "Signed in",
+        "Go back to Flexspeak. It finishes signing you in by itself; you can close this page.");
+    }).catch(function (err) {
+      fail(err.message, !err.expired);
+    });
+  });
+
+  if (!ticket) {
+    fail("This page needs the link Flexspeak opens. Start signing in from Flexspeak.", false);
+  } else if (!window.PublicKeyCredential || !navigator.credentials) {
+    fail("This browser can't use passkeys. Open the link in a current browser such as Chrome, Edge, Firefox or Safari.", false);
+  } else {
+    load().catch(function (err) { fail(err.message, !err.expired); });
+  }
+})();
+</script>
+</body>
+</html>

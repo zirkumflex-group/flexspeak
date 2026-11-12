@@ -16,8 +16,8 @@ use super::widgets::{
 };
 use super::{icons, send};
 use crate::monster::{
-    self, Beat, Board, CARDS, Can, FLAVOURS, Flavour, Gate, Notice, Ranking, Rarity, Reveal,
-    Section, Standing,
+    self, Action, Beat, Board, CARDS, Can, FLAVOURS, Flavour, Gate, Notice, Ranking, Rarity,
+    Reveal, Section, Standing,
 };
 use crate::{App, Message};
 
@@ -36,7 +36,7 @@ const LEGEND_FLAVOURS: usize = 7;
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     let reduced = cx.is_reduced_motion();
-    if let Some(gate) = &s.monster.gate {
+    if let Some(gate) = s.monster.gate.as_ref().filter(|_| s.monster.online()) {
         let content = col()
             .w_full()
             .max_w(1100.0)
@@ -55,9 +55,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
             flavour_page(s, t, index, today, reduced),
         ),
         Section::Leaderboard => ("leaderboard".to_owned(), leaderboard(s, t)),
-        Section::Person(index) => (
-            format!("person-{index}"),
-            person_page(s, t, index, today, reduced),
+        Section::Person(user) => (
+            format!("person-{user}"),
+            person_page(s, t, user, today, reduced),
         ),
     };
     let content = col()
@@ -71,7 +71,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
             (!matches!(section, Section::Leaderboard | Section::Person(_)))
                 .then(|| warm_up(reduced)),
         )
-        .child(tabs(t, section))
+        .child(tabs(s, t, section))
         .children(sections);
     // Keyed by section, so each one opens at its top.
     scroll_page(k, &format!("monster-scroll-{key}"), content)
@@ -137,21 +137,47 @@ fn gate_buttons(buttons: impl IntoIterator<Item = El>) -> El {
         .children(buttons)
 }
 
+/// The primary button of a step: its label while ready, "Sending…" while its request is out.
+fn gate_primary(
+    t: &Theme,
+    key: &str,
+    label: &str,
+    glyph: Option<&'static rune::Icon>,
+    busy: bool,
+    message: Option<Message>,
+) -> El {
+    button(
+        t,
+        key,
+        if busy { "Sending…" } else { label },
+        glyph,
+        Variant::Primary,
+        message.filter(|_| !busy),
+    )
+}
+
+/// What a wrong code leaves, in words.
+fn wrong_code(tries_left: Option<u32>) -> String {
+    match tries_left {
+        None => "That code doesn't match.".into(),
+        Some(0) => "That code doesn't match, and it can't be tried again. Send a new one.".into(),
+        Some(1) => "That code doesn't match. One try left.".into(),
+        Some(n) => format!("That code doesn't match. {n} tries left."),
+    }
+}
+
 /// Signing in, in the page's place: an email code, then a passkey, then the TeamSpeak
 /// identity if the person wants it linked.
 fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
-    let go = |gate: Gate| Some(Message::MonsterGate(Some(gate)));
-    let form = match gate {
+    let tracker = &s.monster;
+    let busy = tracker.busy;
+    let act = |action: Action| Some(Message::Monster(action));
+    let mut form = match gate {
         Gate::Email => {
             let email = s.ui.monster_email.text.trim().to_owned();
             let next = email
                 .contains('@')
-                .then(|| {
-                    go(Gate::Code {
-                        email,
-                        wrong: false,
-                    })
-                })
+                .then(|| act(Action::SendCode(email)))
                 .flatten();
             vec![
                 gate_mark(t, &icons::MAIL),
@@ -167,32 +193,44 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
                     |s: &mut App| &mut s.ui.monster_email,
                     "Email address",
                     Some(|_| Message::MonsterSignInTyped),
-                    next.clone(),
+                    next.clone().filter(|_| !busy),
                 ),
-                gate_buttons([button(
-                    t,
-                    "monster-send-code",
-                    "Send Code",
-                    Some(&icons::MAIL),
-                    Variant::Primary,
-                    next,
-                )]),
+                gate_buttons([
+                    gate_primary(
+                        t,
+                        "monster-send-code",
+                        "Send Code",
+                        Some(&icons::MAIL),
+                        busy,
+                        next,
+                    ),
+                    button(
+                        t,
+                        "monster-passkey-sign-in",
+                        "Sign In With a Passkey",
+                        Some(&icons::KEY_ROUND),
+                        Variant::Ghost,
+                        act(Action::PasskeySignIn).filter(|_| !busy),
+                    ),
+                ]),
             ]
         }
-        Gate::Code { email, wrong } => {
-            let code = s.ui.monster_login_code.text.trim();
+        Gate::Code {
+            email,
+            wrong,
+            tries_left,
+            resent,
+        } => {
+            let code = s.ui.monster_login_code.text.trim().to_owned();
             let whole = code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit());
-            let next = whole
-                .then(|| go(Gate::Passkey { waiting: false }))
-                .flatten();
+            let next = whole.then(|| act(Action::CheckCode(code))).flatten();
             let mut form = vec![
                 gate_mark(t, &icons::MAIL),
                 title(t, "Check Your Email"),
                 muted(
                     t,
                     format!(
-                        "We sent a code to {email}. Type it here, or open the link in the email \
-                         on this computer. The code works for ten minutes."
+                        "We sent a code to {email}. Type it here. The code works for ten minutes."
                     ),
                 ),
                 field(
@@ -201,28 +239,26 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
                     |s: &mut App| &mut s.ui.monster_login_code,
                     "Six-digit code",
                     Some(|_| Message::MonsterSignInTyped),
-                    next.clone(),
+                    next.clone().filter(|_| !busy),
                 ),
             ];
             if *wrong {
-                form.push(error_text(t, "That code doesn't match. Four tries left."));
+                form.push(error_text(t, wrong_code(*tries_left)).key("monster-wrong-code"));
+            } else if *resent {
+                form.push(faint(
+                    t,
+                    "We sent a new code. The one before it no longer works.",
+                ));
             }
             form.push(gate_buttons([
-                button(
-                    t,
-                    "monster-check-code",
-                    "Continue",
-                    None,
-                    Variant::Primary,
-                    next,
-                ),
+                gate_primary(t, "monster-check-code", "Continue", None, busy, next),
                 button(
                     t,
                     "monster-send-again",
                     "Send Again",
                     None,
                     Variant::Ghost,
-                    go(gate.clone()),
+                    act(Action::SendAgain).filter(|_| !busy),
                 ),
                 button(
                     t,
@@ -230,32 +266,65 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
                     "Use Another Address",
                     None,
                     Variant::Ghost,
-                    go(Gate::Email),
+                    act(Action::OtherAddress),
                 ),
             ]));
             form
         }
-        Gate::Passkey { waiting } => vec![
-            gate_mark(t, &icons::KEY_ROUND),
-            title(t, "Create a Passkey"),
-            muted(
-                t,
-                "A passkey signs you in from now on, with Touch ID, Windows Hello or your \
-                 password manager. You won't need a code again on this device.",
-            ),
-            group_note(
-                t,
-                "The passkey stays with you. We store only its public half.",
-            ),
-            gate_buttons(if *waiting {
+        Gate::Passkey {
+            create, waiting, ..
+        } => {
+            let (heading, about) = if *create {
+                (
+                    "Create a Passkey",
+                    "A passkey signs you in from now on, with Touch ID, Windows Hello or your \
+                     password manager. You won't need a code again on this device.",
+                )
+            } else {
+                (
+                    "Sign In With Your Passkey",
+                    "Use the passkey you made before, with Touch ID, Windows Hello or your \
+                     password manager. No code needed.",
+                )
+            };
+            let mut form = vec![
+                gate_mark(t, &icons::KEY_ROUND),
+                title(t, heading),
+                muted(t, about),
+            ];
+            if *waiting {
+                form.push(
+                    muted(
+                        t,
+                        "We opened a page in your browser. Finish there, and this page carries on \
+                         by itself.",
+                    )
+                    .key("monster-passkey-browser"),
+                );
+            } else {
+                form.push(group_note(
+                    t,
+                    "It opens in your browser. The passkey stays with you; we store only its \
+                     public half.",
+                ));
+            }
+            form.push(gate_buttons(if *waiting {
                 vec![
                     button(
                         t,
                         "monster-passkey",
-                        "Waiting for Your Device…",
+                        "Waiting for Your Browser…",
                         Some(&icons::KEY_ROUND),
                         Variant::Primary,
                         None,
+                    ),
+                    button(
+                        t,
+                        "monster-passkey-again",
+                        "Open Again",
+                        None,
+                        Variant::Ghost,
+                        act(Action::OpenPasskey),
                     ),
                     button(
                         t,
@@ -263,37 +332,40 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
                         "Cancel",
                         None,
                         Variant::Ghost,
-                        go(Gate::Passkey { waiting: false }),
+                        act(Action::CancelPasskey),
                     ),
                 ]
             } else {
                 vec![button(
                     t,
                     "monster-passkey",
-                    "Create Passkey",
+                    if *create {
+                        "Create Passkey"
+                    } else {
+                        "Use Passkey"
+                    },
                     Some(&icons::KEY_ROUND),
                     Variant::Primary,
-                    go(Gate::Passkey { waiting: true }),
+                    act(Action::OpenPasskey),
                 )]
-            }),
-        ],
+            }));
+            form
+        }
         Gate::Identity(found) => {
-            let linked_as = |which: Option<usize>| {
-                let mut found = found.clone();
-                for (n, identity) in found.iter_mut().enumerate() {
-                    if which.is_none_or(|which| which == n) {
-                        identity.linked = true;
-                    }
-                }
-                go(Gate::Identity(found))
-            };
             let mut list = well(t).key("monster-identities");
+            if found.is_empty() {
+                list = list.child(
+                    el().padding(12.0)
+                        .child(muted(t, "No TeamSpeak identity found on this computer.")),
+                );
+            }
             for (n, identity) in found.iter().enumerate() {
                 if n > 0 {
                     list = list.child(el().w_full().h(1.0).fill(t.hairline).a11y_hidden());
                 }
                 let state = if identity.linked {
                     row()
+                        .key(format!("monster-linked-{n}"))
                         .gap(6.0)
                         .center_y()
                         .child(icon(&icons::CHECK, 14.0).color(t.good).a11y_hidden())
@@ -302,10 +374,10 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
                     button(
                         t,
                         &format!("monster-link-identity-{n}"),
-                        "Link",
+                        if busy { "Linking…" } else { "Link" },
                         None,
                         Variant::Secondary,
-                        linked_as(Some(n)),
+                        act(Action::Link(n)).filter(|_| !busy),
                     )
                 };
                 let who = row()
@@ -333,7 +405,7 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
                             .child(state),
                     );
             }
-            let open = Some(Message::MonsterGate(None));
+            let open = act(Action::Enter);
             let unlinked = found.iter().filter(|identity| !identity.linked).count();
             let buttons = if unlinked == 0 {
                 vec![button(
@@ -360,7 +432,7 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
                         },
                         Some(&icons::LINK),
                         Variant::Primary,
-                        linked_as(None),
+                        act(Action::LinkAll).filter(|_| !busy),
                     ));
                 }
                 buttons.push(button(
@@ -379,24 +451,31 @@ fn sign_in(s: &App, t: &Theme, k: &Kit, gate: &Gate) -> El {
             };
             vec![
                 gate_mark(t, &icons::LINK),
-                title(t, "Link Your TeamSpeak Identities"),
+                title(t, "Link Your TeamSpeak Identity"),
                 muted(
                     t,
-                    "Optional. Each identity you link saves its public key to your account, so \
-                     people you share a server with can find your collection later. Private \
-                     keys never leave this computer.",
+                    "Optional. Linking saves the identity's public key to your account, so \
+                     people you share a server with can find your collection later. The \
+                     private key never leaves this computer.",
                 ),
                 muted(t, "Found on This Computer").mt(4.0),
                 list,
                 group_note(
                     t,
-                    "Identities on another computer are offered when you sign in there. You can \
-                     link or unlink them later from this page.",
+                    "Identities on another computer are offered when you sign in there.",
                 ),
                 gate_buttons(buttons),
             ]
         }
     };
+    if let Some(problem) = &tracker.gate_problem {
+        // Above the buttons, so it reads before what to do about it.
+        let at = form.len().saturating_sub(1);
+        form.insert(
+            at,
+            error_text(t, problem.clone()).key("monster-gate-problem"),
+        );
+    }
     col()
         .key("monster-sign-in")
         .w_full()
@@ -472,6 +551,32 @@ fn score_label(ranking: Ranking, standing: Standing) -> (String, &'static str) {
 /// person's board; your own opens the overview.
 fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
     let tracker = &s.monster;
+    if !tracker.online() {
+        return vec![
+            title(t, "Leaderboard"),
+            row()
+                .key("monster-leaderboard-local")
+                .w_full()
+                .gap(size::GAP)
+                .center_y()
+                .flex_wrap()
+                .child(
+                    muted(
+                        t,
+                        "The leaderboard needs a collection server. Set one in Settings › WIP.",
+                    )
+                    .grow(1.0),
+                )
+                .child(button(
+                    t,
+                    "monster-open-wip",
+                    "Open Settings",
+                    None,
+                    Variant::Secondary,
+                    Some(Message::OpenSettings(crate::SettingsPage::Wip)),
+                )),
+        ];
+    }
     let ranking = tracker.ranking;
     let mut choices = row().gap(size::GAP).flex_wrap();
     for option in Ranking::ALL {
@@ -491,18 +596,20 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
     let rows = monster::ranked(&tracker.people, ranking, !tracker.hidden);
     let mut list = well(t).key("monster-leaderboard");
     if rows.is_empty() {
-        list = list.child(
-            el().padding(16.0)
-                .child(muted(t, "Nobody shows on the leaderboard yet.")),
-        );
+        list = list.child(el().padding(16.0).child(muted(
+            t,
+            if tracker.people_loading {
+                "Loading the leaderboard…"
+            } else {
+                "Nobody shows on the leaderboard yet."
+            },
+        )));
     }
     // Ties share a place.
     let mut shown_place = 0;
     let mut last_score = None;
-    for (position, (index, standing)) in rows.iter().enumerate() {
-        let Some(person) = tracker.people.get(*index) else {
-            continue;
-        };
+    for (position, person) in rows.iter().enumerate() {
+        let standing = person.standing;
         let score = standing.score(ranking);
         if last_score != Some(score) {
             shown_place = position + 1;
@@ -511,7 +618,7 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
         if position > 0 {
             list = list.child(el().w_full().h(1.0).fill(t.hairline).a11y_hidden());
         }
-        let (value, unit) = score_label(ranking, *standing);
+        let (value, unit) = score_label(ranking, standing);
         let mut name = row().gap(6.0).center_y().child(
             text(person.name.clone())
                 .font(ty::BODY_STRONG)
@@ -533,9 +640,9 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
         let target = if person.you {
             Section::Overview
         } else {
-            Section::Person(*index)
+            Section::Person(person.user)
         };
-        let key = format!("monster-person-{index}");
+        let key = format!("monster-person-{}", person.user);
         let hovered = s.ui.can_hover.as_deref() == Some(key.as_str());
         list = list.child(
             row()
@@ -625,7 +732,7 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
                 Some(Message::MonsterHidden(true)),
             ))
     };
-    vec![
+    let mut parts = vec![
         row()
             .w_full()
             .gap(size::GAP)
@@ -637,29 +744,49 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
             t,
             match ranking {
                 Ranking::Collection => {
-                    "Different cards collected: each flavour at each rarity counts once."
+                    "Different cards collected: each flavour at each rarity counts once. Cards \
+                     moved from a computer don't count."
                 }
                 Ranking::Legendary => "Legendary cards pulled.",
                 Ranking::Flavours => "Different flavours collected.",
             },
         ),
         list,
-        privacy,
-    ]
+    ];
+    if let Some(problem) = &tracker.people_problem {
+        parts.push(error_text(t, problem.clone()).key("monster-leaderboard-problem"));
+    }
+    parts.push(privacy);
+    parts
 }
 
 /// Someone else's board and cards, as they'd see their own, without anything to change.
-fn person_page(s: &App, t: &Theme, index: usize, today: NaiveDate, reduced: bool) -> Vec<El> {
+fn person_page(s: &App, t: &Theme, user: i64, today: NaiveDate, reduced: bool) -> Vec<El> {
     let tracker = &s.monster;
-    let Some(person) = tracker.people.get(index) else {
+    let Some(visit) = tracker.visit.as_ref().filter(|visit| visit.user == user) else {
         return vec![muted(t, "This person is no longer on the leaderboard.")];
     };
-    let board = Board::new(&person.cans, today, |at| local_date(at).unwrap_or(today));
+    let person = tracker.people.iter().find(|person| person.user == user);
+    let name = if visit.name.is_empty() {
+        person.map_or("Someone", |person| person.name.as_str())
+    } else {
+        visit.name.as_str()
+    };
     let place = monster::ranked(&tracker.people, tracker.ranking, !tracker.hidden)
         .iter()
-        .position(|(n, _)| *n == index)
+        .position(|row| row.user == user)
         .map(|position| position + 1);
-    let standing = monster::standing(&person.cans);
+    // The server's count, which leaves out cards moved from a computer.
+    let standing = person.map_or_else(
+        || {
+            visit
+                .cans
+                .as_deref()
+                .map(monster::standing)
+                .unwrap_or_default()
+        },
+        |person| person.standing,
+    );
     let mut summary = format!(
         "{} / {CARDS} cards · {} / {} flavours · {} Legendary",
         standing.cards,
@@ -673,51 +800,66 @@ fn person_page(s: &App, t: &Theme, index: usize, today: NaiveDate, reduced: bool
             tracker.ranking.name().to_lowercase()
         );
     }
+    let header = row()
+        .key("monster-person")
+        .w_full()
+        .gap(14.0)
+        .center_y()
+        .child(avatar(t, name, 56.0, false))
+        .child(
+            col()
+                .grow(1.0)
+                .gap(4.0)
+                .child(title(t, name.to_owned()))
+                .child(muted(t, summary)),
+        );
+    if let Some(problem) = &visit.problem {
+        return vec![
+            header,
+            error_text(t, problem.clone()).key("monster-person-problem"),
+        ];
+    }
+    let Some(cans) = &visit.cans else {
+        return vec![
+            header,
+            well(t)
+                .key("monster-person-loading")
+                .w_full()
+                .padding(16.0)
+                .child(muted(t, format!("Loading {name}'s board…"))),
+        ];
+    };
+    let board = Board::new(cans, today, |at| local_date(at).unwrap_or(today));
     let mut collection = col()
         .key("person-collection")
         .w_full()
         .gap(10.0)
-        .child(group_title(
-            t,
-            format!("Collection · {}", person.cans.len()),
-        ));
-    collection = if person.cans.is_empty() {
+        .child(group_title(t, format!("Collection · {}", cans.len())));
+    collection = if cans.is_empty() {
         collection.child(muted(t, "No cards yet."))
     } else {
         collection
             .child(cards(
                 t,
-                person.cans.iter().rev(),
+                cans.iter().rev(),
                 tracker.shown,
                 None,
                 s.ui.can_hover.as_deref(),
                 false,
                 reduced,
             ))
-            .children(more(t, person.cans.len(), tracker.shown))
+            .children(more(t, cans.len(), tracker.shown))
     };
     vec![
-        row()
-            .key("monster-person")
-            .w_full()
-            .gap(14.0)
-            .center_y()
-            .child(avatar(t, &person.name, 56.0, false))
-            .child(
-                col()
-                    .grow(1.0)
-                    .gap(4.0)
-                    .child(title(t, person.name.clone()))
-                    .child(muted(t, summary)),
-            ),
-        profile(s, t, &format!("{}'s Board", person.name), &board, today),
+        header,
+        profile(s, t, &format!("{name}'s Board"), &board, today),
         collection,
     ]
 }
 
 /// The header's title for the part of the page on show.
 pub fn header_title(s: &App) -> &'static str {
-    if s.monster.gate.is_some() {
+    if s.monster.gate.is_some() && s.monster.online() {
         return "Monster Collection";
     }
     match s.monster.section {
@@ -728,7 +870,7 @@ pub fn header_title(s: &App) -> &'static str {
     }
 }
 
-fn tabs(t: &Theme, section: Section) -> El {
+fn tabs(s: &App, t: &Theme, section: Section) -> El {
     let tab = |key: &'static str, label: &'static str, active: bool, target: Section| {
         button(
             t,
@@ -743,7 +885,7 @@ fn tabs(t: &Theme, section: Section) -> El {
             Some(Message::MonsterShow(target)),
         )
     };
-    row()
+    let tabs = row()
         .key("monster-tabs")
         .gap(size::GAP)
         .child(tab(
@@ -763,7 +905,33 @@ fn tabs(t: &Theme, section: Section) -> El {
             "Leaderboard",
             matches!(section, Section::Leaderboard | Section::Person(_)),
             Section::Leaderboard,
-        ))
+        ));
+    let mut bar = row()
+        .w_full()
+        .gap(size::GAP)
+        .center_y()
+        .flex_wrap()
+        .child(tabs.grow(1.0));
+    // Who is signed in, and the way out.
+    if let Some(me) = &s.monster.me {
+        bar = bar.child(
+            row()
+                .key("monster-account")
+                .gap(size::GAP)
+                .center_y()
+                .child(icon(&icons::USER, 14.0).color(t.faint).a11y_hidden())
+                .child(faint(t, me.email.clone()).truncate())
+                .child(button(
+                    t,
+                    "monster-sign-out",
+                    "Sign Out",
+                    None,
+                    Variant::Ghost,
+                    Some(Message::Monster(Action::SignOut)),
+                )),
+        );
+    }
+    bar
 }
 
 fn overview(s: &App, t: &Theme, k: &Kit, today: NaiveDate, reduced: bool) -> Vec<El> {
@@ -1082,7 +1250,10 @@ fn card_label(can: &Can) -> String {
 
 fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
     let tracker = &s.monster;
-    let open = tracker.load_error.is_none() && tracker.reveal.is_none();
+    let open = tracker.load_error.is_none()
+        && tracker.reveal.is_none()
+        && !tracker.adding
+        && !tracker.loading;
     let searching = !tracker.query.trim().is_empty();
     let order = monster::favourites(&tracker.cans, &tracker.query);
     let favourite_count = if searching {
@@ -1105,6 +1276,11 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
             t,
             "Pick the flavour you just drank. It's saved with today's date and time.",
         ))
+        .children(
+            tracker
+                .loading
+                .then(|| faint(t, "Loading your collection…").key("monster-loading")),
+        )
         .child(
             el().key("monster-search").w_full().child(field(
                 k,

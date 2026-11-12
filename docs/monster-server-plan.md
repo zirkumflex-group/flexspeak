@@ -1,6 +1,14 @@
 # Monster collection: server-side plan
 
-Date: **2026-11-12**. A plan only. No server is built; the sign-in screens exist in the app as preview scenes (`monster-sign-in-*`) that contact nothing. The shape: a Rust server, one SQLite file on a volume, sign-in by email without a password, then a passkey, then optionally linking every TeamSpeak identity on the computer. A can is added by picking the flavour just drunk; nothing is scanned. A leaderboard ranks collections, and anyone on it can open another person's board. Choices marked **Assumed** were mine and can change.
+Date: **2026-11-12**. The design the server in `server/` was built from. The shape: a Rust server in a container, one SQLite file on a volume, sign-in by email without a password, then a passkey, then optionally linking TeamSpeak identities. A can is added by picking the flavour just drunk; nothing is scanned. A leaderboard ranks collections, and anyone on it can open another person's board. Choices marked **Assumed** were assumptions and can change.
+
+## Status
+
+**Built:** the server (`server/`, see its README), the rules shared with the app (`crates/monster-core`, whose `api` module is the contract and wins where this document differs), and the app's side: a Collection Server address under Settings › WIP, sign-in by email code, a passkey made on a page the server hosts while the app waits, linking Flexspeak's own identity, the collection, the one-time upload of cans kept on the computer, the leaderboard and other people's boards.
+
+**Not built yet:** the sign-in link in the email (the code only), invites, review flags and the events table, the offline queue and "unopened" cans, finding TeamSpeak 3 and 6 identities, removing a passkey or unlinking an identity from the page, the nightly backup, and a deployment. Passkeys go through the browser on every system; the system dialogs described under Passkey are not used.
+
+**Never run:** sending a real email, a passkey in a real browser, and the Windows build of the app's side.
 
 ## Why a server
 

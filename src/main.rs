@@ -15,6 +15,7 @@ mod icons;
 mod install;
 mod memory;
 mod monster;
+mod monster_api;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_audio;
 mod notify;
@@ -214,6 +215,10 @@ struct App {
     audio_unsaved: bool,
     /// Why the nickname typed in Settings wasn't kept, shown under its field.
     nickname_error: Option<String>,
+    /// The collection server address as typed in Settings › WIP; kept when the field is left.
+    monster_server_draft: String,
+    /// Why that address wasn't kept, shown under its field.
+    monster_server_error: Option<String>,
     #[cfg(test)]
     played_sounds: Vec<sounds::Sound>,
     /// System notifications shown, by title.
@@ -784,6 +789,23 @@ fn stream_changes(
 }
 
 /// Lays a server's streams out as saved: where the others go and whether details show.
+/// Flexspeak's own TeamSpeak identity, for linking to the collection, under the nickname in
+/// use. `None` if it can't be read; the step then offers nothing to link.
+fn own_identity(nickname: &str) -> Option<monster::FoundIdentity> {
+    match client::load_identity() {
+        Ok(identity) => Some(monster::FoundIdentity {
+            source: monster::OWN_SOURCE,
+            name: nickname.trim().to_owned(),
+            uid: identity.key().to_pub().get_uid(),
+            linked: false,
+        }),
+        Err(error) => {
+            tracing::warn!("Flexspeak's identity can't be offered for linking: {error:#}");
+            None
+        }
+    }
+}
+
 fn apply_stream_view(streaming: &mut streaming::View, view: settings::StreamView) {
     streaming.strip = if view.beside {
         streaming::Strip::Beside
@@ -980,11 +1002,18 @@ enum Message {
     MonsterRemove(String),
     MonsterMore,
     MonsterShow(monster::Section),
-    MonsterGate(Option<monster::Gate>),
+    /// A sign-in step's button, or Sign Out.
+    Monster(monster::Action),
+    /// The collection server answered.
+    MonsterAnswer(monster::Answer),
     MonsterRanking(monster::Ranking),
     MonsterHidden(bool),
     /// A sign-in field was typed in; the field itself holds the text.
     MonsterSignInTyped,
+    /// The collection server address field was typed in.
+    MonsterServer(String),
+    /// Keeps the collection server address typed, as leaving the field does.
+    CommitMonsterServer,
     CloseSettings,
     SettingsSearch(String),
     RefreshStreams,
@@ -1211,6 +1240,8 @@ impl App {
             sounds_unsaved: false,
             audio_unsaved: false,
             nickname_error: None,
+            monster_server_draft: String::new(),
+            monster_server_error: None,
             #[cfg(test)]
             played_sounds: Vec::new(),
             #[cfg(test)]
@@ -2387,6 +2418,12 @@ impl App {
         }
         self.theme_library = themes::Library::new(&saved.custom_themes);
         self.custom_themes = saved.custom_themes;
+        if self.monster.server != saved.monster_server {
+            self.end_reveal();
+            self.monster.set_server(saved.monster_server.clone());
+        }
+        self.monster_server_draft = saved.monster_server.unwrap_or_default();
+        self.monster_server_error = None;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -2430,6 +2467,11 @@ impl App {
                     .is_some_and(|saved| saved.skip_install_prompt),
             close_button: self.close_button(),
             window: self.saved.as_ref().and_then(|saved| saved.window),
+            monster_server: self.monster.server.clone(),
+            monster_session: self
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.monster_session.clone()),
         }
     }
 
@@ -2572,6 +2614,246 @@ impl App {
 
     /// Stores one choice that applies at once in the saved settings, leaving other unsaved edits
     /// alone. Before setup has saved anything, the choice is kept for the first save.
+    /// Whether the collection server address typed differs from the one in use.
+    fn monster_server_edited(&self) -> bool {
+        monster::server_address(&self.monster_server_draft)
+            .map_or(true, |address| address != self.monster.server)
+    }
+
+    /// Keeps the collection server address typed in Settings › WIP, or says under its field why
+    /// it can't be kept. A new address starts signed out.
+    fn commit_monster_server(&mut self) {
+        let address = match monster::server_address(&self.monster_server_draft) {
+            Ok(address) => address,
+            Err(problem) => {
+                self.monster_server_error = Some(problem.into());
+                return;
+            }
+        };
+        self.monster_server_error = None;
+        if address == self.monster.server {
+            return;
+        }
+        let kept = address.clone();
+        self.save_preference(
+            |saved| {
+                saved.monster_server = kept;
+                saved.monster_session = None;
+            },
+            "The collection server applies for now but was not saved",
+        );
+        self.forget_monster_session_file();
+        self.end_reveal();
+        self.monster.set_server(address);
+    }
+
+    /// The session kept from the last launch.
+    fn read_monster_session(&self) -> Option<String> {
+        #[cfg(windows)]
+        {
+            self.saved
+                .as_ref()?
+                .monster_session
+                .as_deref()
+                .and_then(secret::unprotect)
+        }
+        #[cfg(not(windows))]
+        {
+            monster_api::read_session(&monster_api::session_path(self.settings_path.as_deref()?))
+        }
+    }
+
+    /// Keeps the session for the next launch, or forgets it: sealed in settings.json on
+    /// Windows, in a file only this user can read elsewhere.
+    fn keep_monster_session(&mut self, session: Option<String>) {
+        #[cfg(windows)]
+        {
+            let sealed = session.as_deref().and_then(secret::protect);
+            self.save_preference(
+                |saved| saved.monster_session = sealed,
+                "You stay signed in for now, but not after a restart",
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let Some(path) = self.settings_path.as_deref().map(monster_api::session_path) else {
+                return;
+            };
+            if let Err(error) = monster_api::write_session(&path, session.as_deref()) {
+                self.alerts.raise(
+                    Source::SettingsSave,
+                    format!("Your collection session couldn't be kept: {error}"),
+                );
+            }
+        }
+    }
+
+    fn forget_monster_session_file(&mut self) {
+        #[cfg(not(windows))]
+        if let Some(path) = self.settings_path.as_deref().map(monster_api::session_path)
+            && let Err(error) = monster_api::write_session(&path, None)
+        {
+            tracing::warn!("The old collection session couldn't be removed: {error}");
+        }
+    }
+
+    /// Runs what the Monster page asked for. Tests run nothing and keep the list instead.
+    fn monster_effects(&mut self, effects: Vec<monster::Effect>) -> Task {
+        #[cfg(test)]
+        {
+            self.monster.sent.extend(effects);
+            Task::none()
+        }
+        #[cfg(not(test))]
+        {
+            let tasks: Vec<Task> = effects
+                .into_iter()
+                .map(|effect| self.monster_effect(effect))
+                .collect();
+            Task::batch(tasks)
+        }
+    }
+
+    // Built in tests too, so it keeps compiling there, though tests never run it.
+    #[cfg_attr(test, allow(dead_code))]
+    fn monster_effect(&mut self, effect: monster::Effect) -> Task {
+        use monster::{Answer, Effect};
+        let Some(base) = self.monster.server.clone() else {
+            return Task::none();
+        };
+        let server = monster_api::Server::new(&base, self.monster.session.clone());
+        let answer = |answer: Answer| Message::MonsterAnswer(answer);
+        match effect {
+            Effect::Keep(session) => {
+                self.keep_monster_session(session);
+                Task::none()
+            }
+            Effect::Browse(url) => {
+                self.open_in_browser(&url);
+                Task::none()
+            }
+            Effect::FindIdentity => {
+                let found = own_identity(&self.nickname);
+                self.monster.found(found);
+                Task::none()
+            }
+            Effect::Me => Task::perform(async move { server.me().await }, move |result| {
+                answer(Answer::Me(result))
+            }),
+            Effect::LoginStart(email) => Task::perform(
+                async move {
+                    let result = server.login_start(&email).await;
+                    (email, result)
+                },
+                move |(email, result)| answer(Answer::LoginStarted(email, result)),
+            ),
+            Effect::LoginFinish { email, code } => Task::perform(
+                async move { server.login_finish(&email, &code).await },
+                move |result| answer(Answer::LoginFinished(result)),
+            ),
+            Effect::LoginPasskey => {
+                Task::perform(async move { server.login_passkey().await }, move |result| {
+                    answer(Answer::Ticket(result))
+                })
+            }
+            Effect::Poll { ticket, generation } => Task::perform(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    server.login_poll(&ticket).await
+                },
+                move |result| answer(Answer::Polled(generation, result)),
+            ),
+            Effect::Link => Task::perform(
+                async move {
+                    let identity =
+                        client::load_identity().map_err(|error| monster_api::Problem {
+                            error: monster_api::problem::INVALID.into(),
+                            message: format!("{error:#}"),
+                            tries_left: None,
+                        })?;
+                    server.link_identity(&identity, monster::OWN_SOURCE).await
+                },
+                move |result| answer(Answer::Linked(result)),
+            ),
+            Effect::Cans => Task::perform(async move { server.cans().await }, move |result| {
+                answer(Answer::Cans(result))
+            }),
+            Effect::Add(can) => {
+                Task::perform(async move { server.add_can(&can).await }, move |result| {
+                    answer(Answer::Added(result))
+                })
+            }
+            Effect::Remove(id) => {
+                Task::perform(async move { server.remove_can(id).await }, move |result| {
+                    answer(Answer::Removed(id, result))
+                })
+            }
+            Effect::Import(cans) => {
+                Task::perform(async move { server.import(&cans).await }, move |result| {
+                    answer(Answer::Imported(result))
+                })
+            }
+            Effect::Leaderboard(ranking) => Task::perform(
+                async move { server.leaderboard(ranking).await },
+                move |result| answer(Answer::Leaderboard(ranking, result)),
+            ),
+            Effect::Person(user) => Task::perform(
+                async move { server.collection(user).await },
+                move |result| answer(Answer::Person(user, result)),
+            ),
+            Effect::Hide(hidden) => Task::perform(
+                async move {
+                    server
+                        .update_me(&monster_api::UpdateMe {
+                            hidden: Some(hidden),
+                            ..Default::default()
+                        })
+                        .await
+                },
+                move |result| answer(Answer::Hidden(hidden, result)),
+            ),
+            // Nothing waits on it: the app has forgotten the session either way.
+            Effect::SignOut(session) => Task::perform(
+                async move {
+                    let server = monster_api::Server::new(&base, Some(session));
+                    if let Err(problem) = server.sign_out().await {
+                        tracing::warn!("Signing out on the server failed: {}", problem.message);
+                    }
+                },
+                |()| Message::MonsterSignInTyped,
+            ),
+        }
+    }
+
+    /// Opens a web page in the system browser.
+    fn open_in_browser(&mut self, url: &str) {
+        // Windows is handed the address itself: `explorer` can't be trusted with the part
+        // after `#`, where the passkey page's ticket rides.
+        #[cfg(windows)]
+        let opened = permissions::shell_open(url)
+            .then_some(())
+            .ok_or_else(|| "Windows couldn't open it".to_owned());
+        #[cfg(not(windows))]
+        let opened = {
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            Command::new(opener)
+                .arg(url)
+                .spawn()
+                .map(|mut child| {
+                    // Waited on elsewhere so it can't linger as a zombie.
+                    std::thread::spawn(move || child.wait());
+                })
+                .map_err(|error| error.to_string())
+        };
+        if let Err(error) = opened {
+            self.monster.gate_problem = Some(format!("Couldn't open your browser: {error}"));
+        }
+    }
+
     fn save_preference(&mut self, change: impl FnOnce(&mut settings::Settings), failed: &str) {
         let Some(mut saved) = self.saved.clone() else {
             return;
@@ -2961,6 +3243,12 @@ impl App {
         if !self.ui.nickname.focused && self.nickname_edited() && self.nickname_error.is_none() {
             self.commit_nickname();
         }
+        if !self.ui.monster_server.focused
+            && self.monster_server_edited()
+            && self.monster_server_error.is_none()
+        {
+            self.commit_monster_server();
+        }
         let task = self.update_inner(message);
         // Whatever the message added to a conversation goes to the history on disk.
         self.chat_persist();
@@ -3187,8 +3475,14 @@ impl App {
                 if tab != Tab::Statistics && self.server().expanded_client.is_some() {
                     self.select_client(None);
                 }
+                let mut task = Task::none();
                 if tab == Tab::Monster {
                     self.monster.open(self.settings_path.as_deref());
+                    let saved = (self.monster.online() && !self.monster.session_read)
+                        .then(|| self.read_monster_session())
+                        .flatten();
+                    let effects = self.monster.connect(saved);
+                    task = self.monster_effects(effects);
                 } else {
                     self.end_reveal();
                 }
@@ -3196,6 +3490,7 @@ impl App {
                 self.chat_seen();
                 self.sync_page_visibility();
                 self.refresh_visible_permissions();
+                return task;
             }
             Message::OpenSettings(page) => {
                 if self.onboarding.is_none() {
@@ -3213,6 +3508,10 @@ impl App {
                 if self.monster.reveal.is_some() {
                     return Task::none();
                 }
+                if self.monster.online() {
+                    let effects = self.monster.add_online(flavour);
+                    return self.monster_effects(effects);
+                }
                 self.monster.add(flavour, chrono::Utc::now().timestamp());
                 return self.after_submit();
             }
@@ -3227,18 +3526,54 @@ impl App {
             Message::MonsterSelect(code) => self.monster.selected = Some(code),
             Message::MonsterRemove(code) => {
                 self.end_reveal();
+                if self.monster.online() {
+                    let effects = self.monster.remove_online(&code);
+                    return self.monster_effects(effects);
+                }
                 self.monster.remove(&code);
             }
             Message::MonsterMore => self.monster.shown += monster::PAGE,
-            Message::MonsterShow(section) => self.monster.section = section,
-            Message::MonsterGate(gate) => self.monster.gate = gate,
-            Message::MonsterRanking(ranking) => self.monster.ranking = ranking,
-            Message::MonsterHidden(hidden) => self.monster.hidden = hidden,
+            Message::MonsterShow(section) => {
+                let effects = self.monster.show(section);
+                return self.monster_effects(effects);
+            }
+            Message::Monster(action) => {
+                let entering = matches!(action, monster::Action::SendCode(_));
+                let effects = self.monster.act(action);
+                if entering && !effects.is_empty() {
+                    self.ui.monster_login_code.replace_text("");
+                }
+                return self.monster_effects(effects);
+            }
+            Message::MonsterAnswer(answer) => {
+                let added = matches!(answer, monster::Answer::Added(Ok(_)));
+                let effects = self.monster.answer(answer);
+                let task = self.monster_effects(effects);
+                if added {
+                    return Task::batch([task, self.after_submit()]);
+                }
+                return task;
+            }
+            Message::MonsterRanking(ranking) => {
+                let effects = self.monster.rank(ranking);
+                return self.monster_effects(effects);
+            }
+            Message::MonsterHidden(hidden) => {
+                let effects = self.monster.hide(hidden);
+                return self.monster_effects(effects);
+            }
             Message::MonsterSignInTyped => {
-                if let Some(monster::Gate::Code { wrong, .. }) = &mut self.monster.gate {
+                self.monster.gate_problem = None;
+                if let Some(monster::Gate::Code { wrong, resent, .. }) = &mut self.monster.gate {
                     *wrong = false;
+                    *resent = false;
                 }
             }
+            Message::MonsterServer(value) => {
+                self.monster_server_draft = value;
+                self.monster_server_error = None;
+            }
+            Message::CommitMonsterServer => self.commit_monster_server(),
             Message::SettingsSearch(query) => {
                 if self.settings_page.is_some() {
                     self.settings_query = query;

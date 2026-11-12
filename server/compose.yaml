@@ -1,0 +1,27 @@
+# An example: the server on http://localhost:8787 with its database on a named volume.
+# Run from this folder with `docker compose up --build`.
+#
+# As written it uses a fixed sign-in code and no passkeys, for trying it out. For real use,
+# remove DEV_CODE and PASSKEYS, set PUBLIC_URL to the server's public https:// address, and
+# set RESEND_API_KEY and MAIL_FROM (for example in a .env file next to this one).
+
+services:
+  monster:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: flexspeak-monster
+    ports:
+      - "8787:8787"
+    environment:
+      PUBLIC_URL: http://localhost:8787
+      DEV_CODE: "123456"
+      PASSKEYS: "off"
+      # RESEND_API_KEY: ${RESEND_API_KEY}
+      # MAIL_FROM: Flexspeak <monster@example.com>
+    volumes:
+      - monster-data:/data
+    restart: unless-stopped
+
+volumes:
+  monster-data:

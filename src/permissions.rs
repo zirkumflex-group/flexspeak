@@ -337,40 +337,12 @@ pub fn open_settings(kind: Kind) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Com::{
-            COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
-        };
-        use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
         let uri = if kind == Kind::Microphone {
             "ms-settings:privacy-microphone"
         } else {
             "ms-settings:privacy"
         };
-        let uri: Vec<_> = uri.encode_utf16().chain(Some(0)).collect();
-        let verb: Vec<_> = "open".encode_utf16().chain(Some(0)).collect();
-        // URI handlers may use COM; balance only a successful initialization on this thread.
-        let initialized = unsafe {
-            CoInitializeEx(
-                std::ptr::null(),
-                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
-            )
-        } >= 0;
-        let result = unsafe {
-            ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                uri.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                SW_SHOWNORMAL,
-            )
-        } as isize;
-        if initialized {
-            unsafe {
-                CoUninitialize();
-            }
-        }
-        anyhow::ensure!(result > 32, "Could not open Windows privacy settings");
+        anyhow::ensure!(shell_open(uri), "Could not open Windows privacy settings");
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -378,4 +350,39 @@ pub fn open_settings(kind: Kind) -> Result<()> {
         let _ = kind;
         anyhow::bail!("Open your desktop's sound/privacy settings to change microphone access.")
     }
+}
+
+/// Hands a URI to Windows to open with whatever handles it: a settings page, or a web
+/// address in the default browser, whole, with its query and fragment. Whether it opened.
+#[cfg(windows)]
+pub fn shell_open(uri: &str) -> bool {
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    };
+    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+    let uri: Vec<_> = uri.encode_utf16().chain(Some(0)).collect();
+    let verb: Vec<_> = "open".encode_utf16().chain(Some(0)).collect();
+    // URI handlers may use COM; balance only a successful initialization on this thread.
+    let initialized = unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    } >= 0;
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            uri.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if initialized {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+    result > 32
 }

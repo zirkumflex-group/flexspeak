@@ -3,6 +3,9 @@
 //! Each can's rarity is rolled once, when it's added, and saved with it, so nothing can reroll
 //! it later. The roll mixes a random key kept in the database with the flavour, the time and
 //! the can's number. The collection lives in `monster.sqlite` beside `settings.json`.
+//!
+//! With a collection server set (Settings › WIP), the server keeps the collection and rolls the
+//! cards instead, and the page needs an account; `online` decides what each answer changes.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -17,9 +20,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 pub use monster_core::{
-    CARDS, FLAVOURS, Flavour, Ranking, Rarity, Standing, draw, flavour_by_id, flavour_or_other,
-    from_hash,
+    CARDS, FLAVOURS, Flavour, Ranking, Rarity, Standing, api, draw, flavour_by_id,
+    flavour_or_other, from_hash,
 };
+pub use online::{Action, Answer, Effect, OWN_SOURCE, Visit, server_address};
+
+mod online;
 /// How many more cards the collection shows at a time. Every card is several shader layers.
 pub const PAGE: usize = 48;
 /// A standard can, for the board's totals.
@@ -51,6 +57,19 @@ pub struct Can {
     pub rarity: Rarity,
     /// Varies the card's art between cans of a flavour.
     pub seed: u16,
+}
+
+impl From<api::Can> for Can {
+    /// A can as the server keeps it. A legacy can, uploaded from a computer, shows like any other.
+    fn from(can: api::Can) -> Self {
+        Self {
+            id: can.id,
+            flavour: can.flavour,
+            at: can.at,
+            rarity: can.rarity,
+            seed: can.seed,
+        }
+    }
 }
 
 impl Can {
@@ -179,6 +198,14 @@ fn new_key() -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// The cans in `monster.sqlite`, or none if there's no such file.
+fn read_local(path: &Path) -> Result<Vec<Can>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    read_collection(&open_database(path)?)
+}
+
 fn read_collection(connection: &Connection) -> Result<Vec<Can>> {
     let mut statement =
         connection.prepare("SELECT id, flavour, at, rarity, seed FROM drinks ORDER BY id")?;
@@ -237,8 +264,8 @@ pub enum Section {
     Flavour(usize),
     /// Everyone who shows on the leaderboard.
     Leaderboard,
-    /// Someone's board, by their place in `Tracker::people`.
-    Person(usize),
+    /// Someone's board, by their account's id on the server.
+    Person(i64),
 }
 
 impl Section {
@@ -254,14 +281,28 @@ impl Section {
     }
 }
 
-/// Someone else who uses the page. A design preview until the server exists: only the scenes
-/// fill `Tracker::people`.
-#[derive(Debug, Clone, Default)]
+/// Someone on the leaderboard, as the server ranks them. Their cans aren't in the list; opening
+/// their board fetches them (`Visit`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Person {
+    /// Their account's id on the server.
+    pub user: i64,
     pub name: String,
     /// The person signed in, among the rest.
     pub you: bool,
-    pub cans: Vec<Can>,
+    /// Counted by the server from the cards it rolled.
+    pub standing: Standing,
+}
+
+impl From<api::LeaderboardRow> for Person {
+    fn from(row: api::LeaderboardRow) -> Self {
+        Self {
+            user: row.user,
+            name: row.name,
+            you: row.you,
+            standing: row.standing,
+        }
+    }
 }
 
 /// Where a collection stands on the leaderboard.
@@ -269,16 +310,16 @@ pub fn standing(cans: &[Can]) -> Standing {
     Standing::count(cans.iter().map(|can| (can.flavour.as_str(), can.rarity)))
 }
 
-/// The people on the leaderboard, best first, by their place in `people`. Ties keep the order
-/// they come in, so a tie never shuffles; whoever is hidden is left out.
-pub fn ranked(people: &[Person], ranking: Ranking, listed: bool) -> Vec<(usize, Standing)> {
-    let mut rows: Vec<(usize, Standing)> = people
+/// The people on the leaderboard, best first. The server sends them in this order already;
+/// sorting again keeps a list fetched for another ranking right until the new one arrives. Ties
+/// keep the order they come in, so a tie never shuffles. You are left out unless `listed`, so
+/// Hide Me takes effect before the server answers.
+pub fn ranked(people: &[Person], ranking: Ranking, listed: bool) -> Vec<&Person> {
+    let mut rows: Vec<&Person> = people
         .iter()
-        .enumerate()
-        .filter(|(_, person)| listed || !person.you)
-        .map(|(n, person)| (n, standing(&person.cans)))
+        .filter(|person| listed || !person.you)
         .collect();
-    rows.sort_by_key(|(_, standing)| std::cmp::Reverse(standing.score(ranking)));
+    rows.sort_by_key(|person| std::cmp::Reverse(person.standing.score(ranking)));
     rows
 }
 
@@ -379,19 +420,24 @@ pub enum Notice {
     Failed(String),
 }
 
-/// The page's state. Empty until the page first opens.
-/// A step of signing in to the page. A design preview until the server exists: only the scenes
-/// set one, and its buttons walk through the steps without contacting anything.
+/// A step of signing in to the collection server, shown in the page's place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gate {
     Email,
-    /// The code sent to `email`. `wrong` after one that didn't match.
+    /// The code sent to `email`. `wrong` after one that didn't match, with how many more tries
+    /// the server allows it; `resent` once a new code was asked for.
     Code {
         email: String,
         wrong: bool,
+        tries_left: Option<u32>,
+        resent: bool,
     },
-    /// `waiting` while the system's passkey dialog is up.
+    /// The passkey page for `ticket`. `create` when the passkey is being made, after the code;
+    /// otherwise it signs in with one made before. `waiting` while the page is open in the
+    /// browser and the app asks the server whether it's done.
     Passkey {
+        ticket: String,
+        create: bool,
         waiting: bool,
     },
     /// The TeamSpeak identities found on this computer, offered for linking.
@@ -422,12 +468,43 @@ impl Gate {
     }
 }
 
+/// The page's state. Empty until the page first opens.
 #[derive(Debug, Default)]
 pub struct Tracker {
-    /// The sign-in step in the page's place; `None` once signed in.
+    /// The collection server's address, from Settings; `None` keeps the collection in
+    /// `monster.sqlite` on this computer, with no account and no leaderboard.
+    pub server: Option<String>,
+    /// The session while signed in to the server.
+    pub session: Option<String>,
+    /// Whether the session kept from the last launch was read yet.
+    pub session_read: bool,
+    /// The account signed in, as the server last described it.
+    pub me: Option<api::Me>,
+    /// The sign-in step in the page's place; `None` once signed in, and without a server.
     pub gate: Option<Gate>,
+    /// A sign-in request is out, so its buttons wait for the answer.
+    pub busy: bool,
+    /// Why the last sign-in request failed, in the server's words.
+    pub gate_problem: Option<String>,
+    /// Which passkey poll is the current one; Cancel moves it on, so a late answer is dropped.
+    poll: u64,
+    /// Flexspeak's own TeamSpeak identity, offered at the last sign-in step.
+    pub own_identity: Option<FoundIdentity>,
+    /// The cans `monster.sqlite` holds, offered to the server once after signing in.
+    pub local: Vec<Can>,
+    local_read: bool,
+    /// The collection is on its way from the server.
+    pub loading: bool,
+    /// A new can is on its way to the server; taps wait for it.
+    pub adding: bool,
     /// Everyone on the leaderboard, the person signed in among them.
     pub people: Vec<Person>,
+    /// The leaderboard is on its way.
+    pub people_loading: bool,
+    /// Why the leaderboard, or hiding from it, failed.
+    pub people_problem: Option<String>,
+    /// The board of someone opened from the leaderboard.
+    pub visit: Option<Visit>,
     pub ranking: Ranking,
     /// Whether the person signed in shows on the leaderboard, and can be opened by others.
     pub hidden: bool,
@@ -450,13 +527,29 @@ pub struct Tracker {
     db: Option<Connection>,
     /// The roll key; made in memory when there's no database, as in previews.
     key: Option<[u8; 32]>,
+    /// What the page asked of the server, for tests, which run nothing.
+    #[cfg(test)]
+    pub sent: Vec<Effect>,
 }
 
 impl Tracker {
-    /// Reads the collection the first time the page opens.
+    /// Reads the collection the first time the page opens. With a server, only reads the cans
+    /// kept on this computer, to offer them to it once; the file isn't created or written.
     pub fn open(&mut self, settings: Option<&Path>) {
         self.shown = self.shown.max(PAGE);
         self.section = Section::Overview;
+        if self.server.is_some() {
+            if !self.local_read
+                && let Some(settings) = settings
+            {
+                self.local_read = true;
+                self.local = read_local(&path(settings)).unwrap_or_else(|error| {
+                    tracing::warn!("The cans on this computer can't be offered: {error:#}");
+                    Vec::new()
+                });
+            }
+            return;
+        }
         if self.db.is_some() {
             return;
         }

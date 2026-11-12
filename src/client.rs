@@ -642,7 +642,7 @@ pub fn identity_path() -> Result<PathBuf> {
 /// One identity file: two connections starting together must not race to create it.
 static IDENTITY_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn load_identity() -> Result<Identity> {
+pub(crate) fn load_identity() -> Result<Identity> {
     let _guard = IDENTITY_FILE.lock().unwrap();
     let path = identity_path()?;
     match fs::read_to_string(&path) {

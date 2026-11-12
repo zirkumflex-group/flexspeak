@@ -82,6 +82,14 @@ pub struct Settings {
     /// Settings > Chat. Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Chat::is_default")]
     pub chat: Chat,
+    /// The Monster collection server (Settings > WIP). Without one the page keeps its cans on
+    /// this computer only and never goes online.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monster_server: Option<String>,
+    /// The session with that server, sealed with DPAPI (`secret::protect`). Windows only:
+    /// other systems keep it in `monster-session` beside this file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monster_session: Option<String>,
 }
 
 /// What the window's close button does while connected (Settings > Appearance > Window).
@@ -432,6 +440,8 @@ impl Default for Settings {
             close_button: CloseButton::default(),
             window: None,
             chat: Chat::default(),
+            monster_server: None,
+            monster_session: None,
         }
     }
 }

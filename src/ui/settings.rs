@@ -234,7 +234,7 @@ fn sections(
         SettingsPage::General => general_sections(s, t, k),
         SettingsPage::Errors => vec![error_log_section(s, t)],
         SettingsPage::File => vec![file_section(s, t)],
-        SettingsPage::Wip => vec![wip_section(t)],
+        SettingsPage::Wip => vec![wip_section(s, t, k)],
     }
 }
 
@@ -510,29 +510,58 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
     server_dialog(s, t, k, layer);
 }
 
-/// The way in to the secret page. Its terms leave out what the page is, so searching Settings
-/// for it finds nothing.
-fn wip_section(t: &Theme) -> Section {
+/// The way in to the secret page, and the server it can keep its collection on. Its terms
+/// leave out what the page is, so searching Settings for it finds nothing.
+fn wip_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    let mut server =
+        col()
+            .w(size::FORM_CONTROL)
+            .gap(4.0)
+            .child(el().key("monster-server").w_full().child(field(
+                k,
+                &s.ui.monster_server,
+                |s| &mut s.ui.monster_server,
+                "https://collection.example.com",
+                Some(Message::MonsterServer as fn(String) -> Message),
+                Some(Message::CommitMonsterServer),
+            )));
+    if let Some(error) = &s.monster_server_error {
+        server =
+            server.child(super::widgets::error_text(t, error.clone()).key("monster-server-error"));
+    }
     Section::boxed(
         "wip",
         "Work in Progress",
         "wip unfinished",
-        vec![item(
-            "wip secret",
-            form_row(
-                t,
-                "Secret Page",
-                Some("Unfinished, and not linked from anywhere else."),
-                button(
+        vec![
+            item(
+                "wip secret",
+                form_row(
                     t,
-                    "open-secret",
-                    "Open",
-                    None,
-                    Variant::Secondary,
-                    Some(Message::OpenMonster),
+                    "Secret Page",
+                    Some("Unfinished, and not linked from anywhere else."),
+                    button(
+                        t,
+                        "open-secret",
+                        "Open",
+                        None,
+                        Variant::Secondary,
+                        Some(Message::OpenMonster),
+                    ),
                 ),
             ),
-        )],
+            item(
+                "wip server address",
+                form_row(
+                    t,
+                    "Collection Server",
+                    Some(
+                        "Where the secret page keeps its cards. Empty keeps them on this computer.",
+                    ),
+                    server,
+                ),
+            ),
+        ],
     )
 }
 
