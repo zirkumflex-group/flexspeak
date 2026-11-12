@@ -53,6 +53,21 @@ pub fn current() -> Option<WindowPlace> {
     None
 }
 
+/// Whether nobody can see the window: hidden in the notification area, or minimized. Asked of
+/// the window itself, so a way of showing it that the app never hears about still counts.
+/// False before the window exists, as in headless previews.
+#[cfg(windows)]
+pub fn unseen() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+    // SAFETY: `hwnd` is a live window owned by this UI thread.
+    window().is_some_and(|hwnd| unsafe { IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 })
+}
+
+#[cfg(not(windows))]
+pub fn unseen() -> bool {
+    false
+}
+
 /// Whether the top of a saved window still lies on a connected display, so a monitor that has
 /// gone since doesn't open it out of reach.
 #[cfg(windows)]

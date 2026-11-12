@@ -446,6 +446,61 @@ mod native {
         libwebrtc::native::yuv_helper::argb_to_i420(
             data, stride, y, sy, u, su, v, sv, width, height,
         );
+        Ok(fit(buffer, (max_width, max_height), intermediate))
+    }
+
+    /// A camera's I420 picture, copied as it is and scaled down to fit: nothing is converted,
+    /// where a round trip through BGRA cost two conversions and a little colour.
+    #[cfg(target_os = "windows")]
+    fn video_buffer_from_planes(
+        planes: &camera::Planes<'_>,
+        largest: (u32, u32),
+        intermediate: &mut Option<I420Buffer>,
+    ) -> Result<I420Buffer> {
+        let (width, height) = (planes.width, planes.height);
+        ensure!(
+            (1..=8192).contains(&width) && (1..=8192).contains(&height),
+            "Unsupported capture dimensions"
+        );
+        let mut buffer = intermediate
+            .take()
+            .filter(|buffer| {
+                use libwebrtc::video_frame::VideoBuffer;
+                buffer.width() == width && buffer.height() == height
+            })
+            .unwrap_or_else(|| I420Buffer::new(width, height));
+        let (sy, su, sv) = buffer.strides();
+        let (y, u, v) = buffer.data_mut();
+        for (n, (to, to_stride)) in [(y, sy), (u, su), (v, sv)].into_iter().enumerate() {
+            let (row, rows) = if n == 0 {
+                (width as usize, height as usize)
+            } else {
+                (width.div_ceil(2) as usize, height.div_ceil(2) as usize)
+            };
+            let (from, from_stride) = (planes.data[n], planes.strides[n] as usize);
+            let to_stride = to_stride as usize;
+            ensure!(
+                from_stride >= row
+                    && to_stride >= row
+                    && from.len() >= from_stride * (rows - 1) + row
+                    && to.len() >= to_stride * (rows - 1) + row,
+                "Invalid capture buffer"
+            );
+            for line in 0..rows {
+                to[line * to_stride..][..row].copy_from_slice(&from[line * from_stride..][..row]);
+            }
+        }
+        Ok(fit(buffer, largest, intermediate))
+    }
+
+    /// `buffer`, or a copy scaled down to fit `largest`; then `buffer` is kept for the next frame.
+    fn fit(
+        mut buffer: I420Buffer,
+        (max_width, max_height): (u32, u32),
+        intermediate: &mut Option<I420Buffer>,
+    ) -> I420Buffer {
+        use libwebrtc::video_frame::VideoBuffer;
+        let (width, height) = (buffer.width(), buffer.height());
         let scale = (f64::from(max_width) / width as f64)
             .min(f64::from(max_height) / height as f64)
             .min(1.0);
@@ -456,9 +511,66 @@ mod native {
             );
             // Only the scaled destination escapes the callback.
             *intermediate = Some(buffer);
-            Ok(scaled)
+            scaled
         } else {
-            Ok(buffer)
+            buffer
+        }
+    }
+
+    /// Where pictures arrive from a capture thread. The newest waits for the next video tick.
+    struct Sink {
+        running: Arc<AtomicBool>,
+        /// Nobody watches yet: pictures are taken only now and then.
+        idle: Arc<AtomicBool>,
+        last_conversion: Mutex<Instant>,
+        /// The largest picture, which a quality change can move while the share runs.
+        largest: Arc<std::sync::atomic::AtomicU64>,
+        intermediate: Mutex<Option<I420Buffer>>,
+        latest: Arc<Mutex<Option<I420Buffer>>>,
+        failure: Arc<Mutex<Option<String>>>,
+    }
+    impl Sink {
+        /// Whether this picture is worth any work: asked before anything is converted.
+        fn wanted(&self) -> bool {
+            if !self.running.load(Ordering::Acquire) {
+                return false;
+            }
+            if self.idle.load(Ordering::Relaxed) {
+                let mut last = self.last_conversion.lock().unwrap();
+                if last.elapsed() < IDLE_FRAME / 2 {
+                    return false;
+                }
+                *last = Instant::now();
+            }
+            true
+        }
+        fn keep(&self, picture: Result<I420Buffer>) {
+            match picture {
+                Ok(buffer) => *self.latest.lock().unwrap() = Some(buffer),
+                Err(error) => *self.failure.lock().unwrap() = Some(error.to_string()),
+            }
+        }
+        fn bgra(&self, data: &[u8], stride: u32, width: i32, height: i32) {
+            if self.wanted() {
+                self.keep(video_buffer_reusing(
+                    data,
+                    stride,
+                    width,
+                    height,
+                    unpack(self.largest.load(Ordering::Relaxed)),
+                    &mut self.intermediate.lock().unwrap(),
+                ));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        fn planes(&self, planes: &camera::Planes<'_>) {
+            if self.wanted() {
+                self.keep(video_buffer_from_planes(
+                    planes,
+                    unpack(self.largest.load(Ordering::Relaxed)),
+                    &mut self.intermediate.lock().unwrap(),
+                ));
+            }
         }
     }
 
@@ -476,6 +588,8 @@ mod native {
         queue: Arc<ArrayQueue<[f32; 2]>>,
         errors: Arc<ArrayQueue<String>>,
         converter: RateConverter,
+        /// Sound was passed over while nobody watched, so the converter's history is stale.
+        skipped: bool,
     }
     impl SystemAudio {
         /// Records `selected`. When that is the output this app plays to (`voice_output`), the
@@ -503,6 +617,7 @@ mod native {
                                 2,
                                 process_audio::RATE as usize / 100,
                             )?,
+                            skipped: false,
                         });
                     }
                     Err(error) => tracing::warn!(
@@ -548,9 +663,12 @@ mod native {
                 queue,
                 errors,
                 converter,
+                skipped: false,
             })
         }
-        fn next(&mut self) -> Result<Option<(AudioFrame<'static>, f32)>> {
+        /// The next 10 ms and its peak. With nobody to hear it (`wanted` false) the sound is
+        /// only measured for the meter, not converted: there is no frame.
+        fn next(&mut self, wanted: bool) -> Result<Option<(Option<AudioFrame<'static>>, f32)>> {
             if let Some(error) = self.errors.pop() {
                 bail!("System audio stopped: {error}");
             }
@@ -558,6 +676,18 @@ mod native {
                 return Ok(None);
             }
             let mut level = 0.0_f32;
+            if !wanted {
+                self.skipped = true;
+                for _ in 0..self.converter.input[0].len() {
+                    let frame = self.queue.pop().unwrap_or([0.0; 2]);
+                    level = level.max(frame[0].abs()).max(frame[1].abs());
+                }
+                return Ok(Some((None, level)));
+            }
+            // The first viewer's sound starts clean, not blended with what was passed over.
+            if std::mem::take(&mut self.skipped) {
+                self.converter.reset();
+            }
             for i in 0..self.converter.input[0].len() {
                 let frame = self.queue.pop().unwrap_or([0.0; 2]);
                 for (c, sample) in frame.into_iter().enumerate() {
@@ -573,12 +703,12 @@ mod native {
                 }
             }
             Ok(Some((
-                AudioFrame {
+                Some(AudioFrame {
                     data: Cow::Owned(data),
                     sample_rate: 48000,
                     num_channels: 2,
                     samples_per_channel: count as u32,
-                },
+                }),
                 level,
             )))
         }
@@ -920,44 +1050,23 @@ mod native {
         let first_interval = frame_interval(quality);
         // The largest picture, which a quality change can move while the share runs.
         let largest = Arc::new(std::sync::atomic::AtomicU64::new(pack(max_size)));
-        let capture_largest = largest.clone();
         let latest = Arc::new(Mutex::new(None));
         let failure = Arc::new(Mutex::new(None));
-        let slot = latest.clone();
-        let failed = failure.clone();
-        let running = active.clone();
-        let intermediate = Mutex::new(None);
         // Until someone watches, a camera's frames are converted only now and then.
         let idle = Arc::new(AtomicBool::new(false));
-        let unwatched = idle.clone();
-        let last_conversion = Mutex::new(
-            Instant::now()
-                .checked_sub(IDLE_FRAME)
-                .unwrap_or_else(Instant::now),
-        );
-        let receive = move |data: &[u8], stride, width, height| {
-            if !running.load(Ordering::Acquire) {
-                return;
-            }
-            if unwatched.load(Ordering::Relaxed) {
-                let mut last = last_conversion.lock().unwrap();
-                if last.elapsed() < IDLE_FRAME / 2 {
-                    return;
-                }
-                *last = Instant::now();
-            }
-            match video_buffer_reusing(
-                data,
-                stride,
-                width,
-                height,
-                unpack(capture_largest.load(Ordering::Relaxed)),
-                &mut intermediate.lock().unwrap(),
-            ) {
-                Ok(buffer) => *slot.lock().unwrap() = Some(buffer),
-                Err(error) => *failed.lock().unwrap() = Some(error.to_string()),
-            }
-        };
+        let sink = Arc::new(Sink {
+            running: active.clone(),
+            idle: idle.clone(),
+            last_conversion: Mutex::new(
+                Instant::now()
+                    .checked_sub(IDLE_FRAME)
+                    .unwrap_or_else(Instant::now),
+            ),
+            largest: largest.clone(),
+            intermediate: Mutex::new(None),
+            latest: latest.clone(),
+            failure: failure.clone(),
+        });
         let mut capture = None;
         let mut camera_capture = None;
         #[cfg(target_os = "windows")]
@@ -998,7 +1107,15 @@ mod native {
             if !active.load(Ordering::Acquire) {
                 return Ok(());
             }
-            camera_capture = Some(camera::Capture::open(id, quality, receive)?);
+            let sink = sink.clone();
+            #[cfg(target_os = "windows")]
+            let opened =
+                camera::Capture::open_planes(id, quality, move |planes| sink.planes(&planes));
+            #[cfg(not(target_os = "windows"))]
+            let opened = camera::Capture::open(id, quality, move |data, stride, width, height| {
+                sink.bgra(data, stride, width, height)
+            });
+            camera_capture = Some(opened?);
         } else if !fast_started {
             let (window, id) = match options.source.kind {
                 SourceKind::Window(id) => (true, Some(id)),
@@ -1022,7 +1139,7 @@ mod native {
                 .transpose()?;
             let failed = failure.clone();
             desktop.start_capture(selected, move |frame| match frame {
-                Ok(frame) => receive(frame.data(), frame.stride(), frame.width(), frame.height()),
+                Ok(frame) => sink.bgra(frame.data(), frame.stride(), frame.width(), frame.height()),
                 Err(CaptureError::Permanent) => {
                     *failed.lock().unwrap() = Some(
                         "Screen capture stopped. Check permission or select another window.".into(),
@@ -1194,8 +1311,8 @@ mod native {
                         ensure!(frames > 0 || last_video.elapsed() < Duration::from_secs(60),"No video frames arrived. Check capture permission and choose an available source.");
                         if let Some(capture) = &mut system_audio {
                             for _ in 0..4 {
-                                let Some((frame,peak)) = capture.next()? else { break; };
-                                if !peers.is_empty() {
+                                let Some((frame,peak)) = capture.next(!peers.is_empty())? else { break; };
+                                if let Some(frame) = frame {
                                     tokio::select! { _ = cancel.changed() => return Ok(()), result = tokio::time::timeout(Duration::from_secs(1),audio.capture_frame(&frame)) => result.context("System audio delivery stalled")?? }
                                 }
                                 level = level.max(peak); audio_frames += 1;
@@ -1288,6 +1405,64 @@ mod native {
                 performance.map(|b| (b.width(), b.height())).unwrap(),
                 (1280, 720)
             );
+        }
+
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_camera_picture_is_copied_as_it_is_past_its_row_padding() {
+            use super::super::super::camera::Planes;
+            // 5×3 with padded rows: odd sizes round the colour planes up to 3×2.
+            let plane = |row: usize, rows: usize, stride: usize, base: u8| -> Vec<u8> {
+                let mut bytes = vec![255; stride * rows];
+                for line in 0..rows {
+                    for column in 0..row {
+                        bytes[line * stride + column] = base + (line * row + column) as u8;
+                    }
+                }
+                bytes
+            };
+            let (y, u, v) = (plane(5, 3, 8, 0), plane(3, 2, 4, 100), plane(3, 2, 6, 200));
+            let planes = Planes {
+                data: [&y, &u, &v],
+                strides: [8, 4, 6],
+                width: 5,
+                height: 3,
+            };
+            let buffer = video_buffer_from_planes(&planes, HD, &mut None).unwrap();
+            assert_eq!((buffer.width(), buffer.height()), (5, 3));
+            let (sy, su, sv) = buffer.strides();
+            let (by, bu, bv) = buffer.data();
+            for (got, stride, row, rows, base) in [
+                (by, sy as usize, 5, 3, 0_u8),
+                (bu, su as usize, 3, 2, 100),
+                (bv, sv as usize, 3, 2, 200),
+            ] {
+                for line in 0..rows {
+                    let want: Vec<u8> = (0..row).map(|c| base + (line * row + c) as u8).collect();
+                    assert_eq!(&got[line * stride..][..row], want);
+                }
+            }
+            // A plane too short for its size is refused, not read past.
+            let short = Planes {
+                data: [&y[..10], &u, &v],
+                ..planes
+            };
+            assert!(video_buffer_from_planes(&short, HD, &mut None).is_err());
+            // Larger than the share allows, it is scaled down like a captured screen.
+            let big = vec![128; 1920 * 1080];
+            let chroma = vec![128; 960 * 540];
+            let scaled = video_buffer_from_planes(
+                &Planes {
+                    data: [&big, &chroma, &chroma],
+                    strides: [1920, 960, 960],
+                    width: 1920,
+                    height: 1080,
+                },
+                HD,
+                &mut None,
+            )
+            .unwrap();
+            assert_eq!((scaled.width(), scaled.height()), (1280, 720));
         }
 
         /// The codec name of the first payload type on the SDP's video line.

@@ -331,6 +331,11 @@ pub struct UiState {
     pub log_search: TextEdit,
     /// The first frame still has to build the frosted backdrop's pipelines.
     pub warm_blur: bool,
+    /// The Monster page still has to draw its speck of reveal effects once, so their shaders
+    /// are built before the first reveal. Set again when the window moves to another GPU.
+    pub warm_cards: bool,
+    /// Nobody could see the window at the last poll: hidden in the tray, or minimized.
+    pub unseen: bool,
     /// Settings → Updates lists every release, not only the latest.
     pub changelog_open: bool,
     /// The groups of sounds opened to their single sounds in Settings → Audio.
@@ -406,6 +411,8 @@ impl Default for UiState {
             log_people: false,
             log_search: TextEdit::new(""),
             warm_blur: true,
+            warm_cards: true,
+            unseen: false,
             changelog_open: false,
             sound_groups: std::collections::BTreeSet::new(),
             user_volume: None,
@@ -517,6 +524,9 @@ fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
     // Exact equality preserves the meter's accessibility value as well as its pixels.
     // Statistics consumes counters and buffer sizes even when the meter is unchanged.
     let invisible = match &message {
+        // Nothing a server says can show while the window is in the tray or minimized. The
+        // state still changes, and `poll` redraws once when the window is back.
+        Message::Backend(..) if s.ui.unseen => true,
         Message::Backend(
             id,
             crate::client::Event::Meter {
@@ -725,6 +735,15 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     crate::window_place::apply();
     let mut changed = false;
     let now = Instant::now();
+    // In the tray or minimized, nothing below can show: timers still run, so histories have no
+    // gaps, but they redraw nothing. Asked of the window once a tick, and every frame while it
+    // is away, so its return shows at once.
+    let unseen = (s.ui.unseen || now >= s.next_usage_tick) && crate::window_place::unseen();
+    let appeared = std::mem::replace(&mut s.ui.unseen, unseen) && !unseen;
+    if appeared {
+        // The quick-share buttons are checked again at once; they weren't while it was away.
+        s.ui.next_quick_check = now;
+    }
     if now >= s.next_usage_tick {
         let resources = footer::resources(s);
         let connection = s.footer_connection_status();
@@ -771,7 +790,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         dispatch(s, tx, Message::Updater(crate::updater::Event::Check));
         changed = true;
     }
-    if now >= s.ui.next_quick_check && s.live() {
+    if now >= s.ui.next_quick_check && s.live() && !unseen {
         s.ui.next_quick_check = now + QUICK_SOURCE_REFRESH;
         dispatch(s, tx, Message::RefreshQuickSources);
     }
@@ -824,7 +843,9 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     if s.server_mut().streaming.sync_frame() && s.tab == Tab::Home {
         changed = true;
     }
-    changed | s.ui.rail_peek.expired(now)
+    changed |= s.ui.rail_peek.expired(now);
+    // Back on screen, one frame shows everything that changed meanwhile.
+    (changed && !unseen) || appeared
 }
 
 fn on_close(s: &mut App, tx: &mut Tx) {

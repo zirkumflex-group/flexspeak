@@ -68,7 +68,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         .gap(20.0)
         // Nothing covers it on the leaderboard, and no reveal starts from there.
         .children(
-            (!matches!(section, Section::Leaderboard | Section::Person(_)))
+            (s.ui.warm_cards && !matches!(section, Section::Leaderboard | Section::Person(_)))
                 .then(|| warm_up(reduced)),
         )
         .child(tabs(s, t, section))
@@ -1071,7 +1071,8 @@ fn showcase(s: &App, reduced: bool) -> El {
 }
 
 /// A one-point speck of every effect a reveal uses. Shaders compile the first time they draw,
-/// and without this the first Legendary would stutter at the worst possible moment.
+/// and without this the first Legendary would stutter at the worst possible moment. Drawn once:
+/// its layers move, and left in place they kept the window drawing at the display's rate.
 fn warm_up(reduced: bool) -> El {
     // Clipped, because glow and fire reach well outside their box.
     // Placed where every section's cabinet, drawn after it, covers it.

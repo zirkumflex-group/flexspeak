@@ -1668,8 +1668,6 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
     let layout = s.chat_options.layout;
     let chat = &s.server().chat;
     let head = Head::of(s, docked);
-    let shown = chat.shown(layout);
-    let skip = shown.len().saturating_sub(SHOWN);
     let today = chrono::Local::now().date_naive();
     // Rebuilt only when a line arrives or the view changes, not with every meter reading.
     let lines = rune::memo(
@@ -1697,6 +1695,9 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
             // A line names the day wherever the day changes, and above the first line when the
             // history starts before today.
             let mut day = today;
+            // Filtered in here: the key above already says when the answer would differ.
+            let shown = chat.shown(layout);
+            let skip = shown.len().saturating_sub(SHOWN);
             let mut lines = Vec::with_capacity(shown.len() - skip);
             for entry in &shown[skip..] {
                 if entry.day != day {

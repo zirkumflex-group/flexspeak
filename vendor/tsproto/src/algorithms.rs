@@ -14,6 +14,10 @@ use crate::connection::CachedKey;
 use crate::{Error, Result};
 use tsproto_packets::packets::*;
 
+/// The longest header meta (packet id, client id, type and flags), sent by a
+/// client.
+const MAX_META_LEN: usize = tsproto_packets::C2S_HEADER_LEN - 8;
+
 pub fn must_encrypt(t: PacketType) -> bool {
 	match t {
 		PacketType::Command | PacketType::CommandLow => true,
@@ -149,10 +153,15 @@ fn create_key_nonce(
 }
 
 pub fn encrypt_key_nonce(packet: &mut OutPacket, key: &[u8; 16], nonce: &[u8; 16]) -> Result<()> {
-	let meta = packet.header().get_meta().to_vec();
+	let mut meta = [0; MAX_META_LEN];
+	let meta_len = {
+		let header_meta = packet.header().get_meta();
+		meta[..header_meta.len()].copy_from_slice(header_meta);
+		header_meta.len()
+	};
 	let cipher = Eax::<aes::Aes128, U8>::new(key.into());
 	let mac = cipher
-		.encrypt_inout_detached(nonce.into(), &meta, packet.content_mut().into())
+		.encrypt_inout_detached(nonce.into(), &meta[..meta_len], packet.content_mut().into())
 		.map_err(|_| Error::MaxLengthExceeded("encryption data"))?;
 	packet.mac().copy_from_slice(mac.as_slice());
 	Ok(())
@@ -180,38 +189,47 @@ pub fn encrypt(
 	encrypt_key_nonce(packet, &key, &nonce)
 }
 
-pub fn decrypt_key_nonce(packet: &InPacket, key: &[u8; 16], nonce: &[u8; 16]) -> Result<Vec<u8>> {
-	let header = packet.header();
-	let meta = header.get_meta();
-	// TODO decrypt in-place in packet
-	let mut content = packet.content().to_vec();
+/// Decrypt the content of the packet in `data` in place.
+///
+/// `data` must hold a whole packet of at least the header length. On a wrong
+/// MAC, `data` is left untouched, so another key can be tried on it.
+pub fn decrypt_key_nonce(
+	dir: Direction,
+	data: &mut [u8],
+	key: &[u8; 16],
+	nonce: &[u8; 16],
+) -> Result<()> {
+	let header = InHeader::new(dir, data);
+	let header_len = header.data().len();
+	let meta_len = header.get_meta().len();
+	let mut meta = [0; MAX_META_LEN];
+	meta[..meta_len].copy_from_slice(header.get_meta());
+	let mac = *header.mac();
+	let p_type = header.packet_type();
+	let packet_id = header.packet_id();
 	let cipher = Eax::<aes::Aes128, U8>::new(key.into());
 	cipher
 		.decrypt_inout_detached(
 			nonce.into(),
-			meta,
-			content.as_mut_slice().into(),
-			header.mac().into(),
+			&meta[..meta_len],
+			(&mut data[header_len..]).into(),
+			(&mac).into(),
 		)
-		.map(|()| content)
-		.map_err(|_| Error::WrongMac {
-			p_type: header.packet_type(),
-			generation_id: 0,
-			packet_id: header.packet_id(),
-		})
+		.map_err(|_| Error::WrongMac { p_type, generation_id: 0, packet_id })
 }
 
-pub fn decrypt_fake(packet: &InPacket) -> Result<Vec<u8>> {
-	decrypt_key_nonce(packet, &crate::FAKE_KEY, &crate::FAKE_NONCE)
+pub fn decrypt_fake(dir: Direction, data: &mut [u8]) -> Result<()> {
+	decrypt_key_nonce(dir, data, &crate::FAKE_KEY, &crate::FAKE_NONCE)
 }
 
 pub fn decrypt(
-	packet: &InPacket,
+	dir: Direction,
+	data: &mut [u8],
 	generation_id: u32,
 	iv: &[u8; 64],
 	cache: &mut [[CachedKey; 2]; 8],
-) -> Result<Vec<u8>> {
-	let header = packet.header();
+) -> Result<()> {
+	let header = InHeader::new(dir, data);
 	let (key, nonce) = create_key_nonce(
 		header.packet_type(),
 		header.client_id(),
@@ -220,7 +238,7 @@ pub fn decrypt(
 		iv,
 		cache,
 	);
-	decrypt_key_nonce(packet, &key, &nonce).map_err(|e| {
+	decrypt_key_nonce(dir, data, &key, &nonce).map_err(|e| {
 		if let Error::WrongMac { p_type, packet_id, .. } = e {
 			Error::WrongMac { p_type, generation_id, packet_id }
 		} else {
@@ -307,10 +325,25 @@ mod tests {
 		let mut packet = OutPacket::new_with_dir(Direction::C2S, Flags::empty(), PacketType::Ack);
 		packet.data_mut().extend_from_slice(&data);
 		encrypt_fake(&mut packet).unwrap();
-		let packet =
-			InPacket::try_new(Direction::C2S, packet.data_mut().as_slice().into()).unwrap();
-		let dec_data = decrypt_fake(&packet).unwrap();
-		assert_eq!(&data, &dec_data);
+		let mut buf = packet.data_mut().clone();
+		InPacket::try_new(Direction::C2S, &buf).unwrap();
+		decrypt_fake(Direction::C2S, &mut buf).unwrap();
+		assert_eq!(&data, InPacket::new(Direction::C2S, &buf).content());
+	}
+
+	#[test]
+	fn wrong_mac_leaves_packet_untouched() {
+		let data = (0..100).into_iter().collect::<Vec<_>>();
+		let mut packet = OutPacket::new_with_dir(Direction::C2S, Flags::empty(), PacketType::Ack);
+		packet.data_mut().extend_from_slice(&data);
+		encrypt_fake(&mut packet).unwrap();
+		let encrypted = packet.data_mut().clone();
+		let mut buf = encrypted.clone();
+		let res = decrypt_key_nonce(Direction::C2S, &mut buf, &[1; 16], &crate::FAKE_NONCE);
+		assert!(matches!(res, Err(Error::WrongMac { .. })));
+		assert_eq!(encrypted, buf);
+		decrypt_fake(Direction::C2S, &mut buf).unwrap();
+		assert_eq!(&data, InPacket::new(Direction::C2S, &buf).content());
 	}
 
 	#[test]
@@ -448,7 +481,7 @@ mod tests {
 		let keynonce = Sha256::digest(&temp);
 		let keynonce = keynonce.as_slice();
 
-		let all = utils::read_hex("2b982443ab38be6b00020000329abf64d4572e1349897b5e1e96fbc4a763a4c4ce1f64f0c1e3febd0a5f04a82ab1f2bc2344bb374fd16181beb8233b5b06944280470e9b6893290a1da0776ffcd89f3beec2ce23b9694930c09efaaea0d88a6895a08ede4d5cbfea61291fc553ac651f1e2bc1d2bd277a8bd9ab5386415579a9e56fac46d8b6b119f454bebd99179cd317dec60af205341d11f274d02bbacdd7e9773f72a426358ca1d39016dd95bde2409cd81bf99b340887e997ea982370c6790cf4d23150460820224766838ea4ec4d71dd102ede701ea0001f392623aa410dd9ab0e45874da82e29e6e370515ec30a37dd73f5a364c233ff014384beab5f1708c9f48dfba33a520f8fcdcef055789c54693c3fe72c5bfaca7cb4ca1fed77b8624660b8abc882f4b95b1284cb6dc55019c6082dd6dd146fa50383662d7298bef04ababaf1af80e15cd4c1f81326f085788e2918e00324147dce39b23db71326abc3de4b94df10f1531e9cce202bba71fa3ebeefd77b21fa3260a62e92eeee2183421d384a8c48777e2f9efbc58d4f442c5f0529c7c0e27e81b2b6b1b05eb8fa19256886248d553582dfd24c7cfab3c3f7317a5cebc6504b53fa0e86fc8c1100fc1d506fcf96caa76a7c0b6a27e577f2efdecd4070e847a559bf37d75bfdbe9e814c702426ce696d8645bc300b5f28f9e7f1ce").unwrap();
+		let mut all = utils::read_hex("2b982443ab38be6b00020000329abf64d4572e1349897b5e1e96fbc4a763a4c4ce1f64f0c1e3febd0a5f04a82ab1f2bc2344bb374fd16181beb8233b5b06944280470e9b6893290a1da0776ffcd89f3beec2ce23b9694930c09efaaea0d88a6895a08ede4d5cbfea61291fc553ac651f1e2bc1d2bd277a8bd9ab5386415579a9e56fac46d8b6b119f454bebd99179cd317dec60af205341d11f274d02bbacdd7e9773f72a426358ca1d39016dd95bde2409cd81bf99b340887e997ea982370c6790cf4d23150460820224766838ea4ec4d71dd102ede701ea0001f392623aa410dd9ab0e45874da82e29e6e370515ec30a37dd73f5a364c233ff014384beab5f1708c9f48dfba33a520f8fcdcef055789c54693c3fe72c5bfaca7cb4ca1fed77b8624660b8abc882f4b95b1284cb6dc55019c6082dd6dd146fa50383662d7298bef04ababaf1af80e15cd4c1f81326f085788e2918e00324147dce39b23db71326abc3de4b94df10f1531e9cce202bba71fa3ebeefd77b21fa3260a62e92eeee2183421d384a8c48777e2f9efbc58d4f442c5f0529c7c0e27e81b2b6b1b05eb8fa19256886248d553582dfd24c7cfab3c3f7317a5cebc6504b53fa0e86fc8c1100fc1d506fcf96caa76a7c0b6a27e577f2efdecd4070e847a559bf37d75bfdbe9e814c702426ce696d8645bc300b5f28f9e7f1ce").unwrap();
 
 		let packet = InPacket::try_new(Direction::C2S, &all).unwrap();
 		println!("Packet: {:?}", packet);
@@ -466,8 +499,9 @@ mod tests {
 		assert_eq!(&expected_key, &key);
 
 		key[1] ^= 2; // packet id
-		let dec = decrypt_key_nonce(&packet, &key, &nonce).unwrap();
+		decrypt_key_nonce(Direction::C2S, &mut all, &key, &nonce).unwrap();
+		let dec = InPacket::new(Direction::C2S, &all);
 
-		println!("Decrypted: {:?}", String::from_utf8_lossy(&dec));
+		println!("Decrypted: {:?}", String::from_utf8_lossy(dec.content()));
 	}
 }

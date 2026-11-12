@@ -23,6 +23,31 @@ unsafe extern "C" {
     fn flex_camera_stop(capture: *mut c_void);
 }
 
+#[cfg(target_os = "windows")]
+type PlanesCallback =
+    unsafe extern "C" fn(*mut c_void, *const u8, u32, *const u8, u32, *const u8, u32, u32, u32);
+#[cfg(target_os = "windows")]
+unsafe extern "C" {
+    fn flex_camera_start_planes(
+        id: *const c_char,
+        width: u32,
+        height: u32,
+        fps: u32,
+        context: *mut c_void,
+        callback: PlanesCallback,
+    ) -> *mut c_void;
+}
+
+/// A camera picture as I420, borrowed for one callback: Y, then U and V at half the size
+/// (rounded up), each with its stride.
+#[cfg(target_os = "windows")]
+pub struct Planes<'a> {
+    pub data: [&'a [u8]; 3],
+    pub strides: [u32; 3],
+    pub width: u32,
+    pub height: u32,
+}
+
 pub fn sources() -> Vec<ShareSource> {
     unsafe extern "C" fn found(context: *mut c_void, id: *const c_char, name: *const c_char) {
         // SAFETY: synchronous enumeration supplies null-terminated strings, valid in this call.
@@ -98,10 +123,17 @@ pub fn still(id: &str) -> Result<Still> {
     still.ok_or_else(|| anyhow!("The camera did not give a picture"))
 }
 
+#[cfg(target_os = "windows")]
+type PlanesHandler = Box<dyn Fn(Planes<'_>) + Send + Sync>;
+#[cfg(target_os = "windows")]
+struct PlanesContext {
+    frame: PlanesHandler,
+}
+
 pub struct Capture {
     native: NonNull<c_void>,
     // Stable address, retained until StopCapture drains the native callback queue.
-    _context: Box<Context>,
+    _context: Box<dyn std::any::Any + Send + Sync>,
 }
 impl Capture {
     pub fn open(
@@ -149,6 +181,87 @@ impl Capture {
                 height,
                 quality.fps(),
                 (&mut *context as *mut Context).cast(),
+                delivered,
+            )
+        };
+        let native = NonNull::new(pointer).ok_or_else(|| anyhow!("Could not open the selected camera. Check camera permission and whether another app is using it."))?;
+        Ok(Self {
+            native,
+            _context: context,
+        })
+    }
+
+    /// `open` for a share: the camera's I420 picture as it is, where `open` converts every
+    /// frame to BGRA, which the share would only convert straight back.
+    #[cfg(target_os = "windows")]
+    pub fn open_planes(
+        id: &str,
+        quality: Quality,
+        frame: impl Fn(Planes<'_>) + Send + Sync + 'static,
+    ) -> Result<Self> {
+        unsafe extern "C" fn delivered(
+            context: *mut c_void,
+            y: *const u8,
+            stride_y: u32,
+            u: *const u8,
+            stride_u: u32,
+            v: *const u8,
+            stride_v: u32,
+            width: u32,
+            height: u32,
+        ) {
+            let (chroma_width, chroma_height) = (width.div_ceil(2), height.div_ceil(2));
+            if y.is_null()
+                || u.is_null()
+                || v.is_null()
+                || !(1..=8192).contains(&width)
+                || !(1..=8192).contains(&height)
+                || stride_y < width
+                || stride_u < chroma_width
+                || stride_v < chroma_width
+                || stride_y.max(stride_u).max(stride_v) > 131072
+            {
+                return;
+            }
+            // A plane's last row may end at its width, short of the stride.
+            let length = |stride: u32, row: u32, rows: u32| {
+                stride as usize * (rows as usize - 1) + row as usize
+            };
+            // SAFETY: the native callback keeps the frame's buffer alive for the call, each
+            // plane holding its rows at the stride given; capture destruction drains callbacks
+            // before freeing their boxed context.
+            let context = unsafe { &*context.cast::<PlanesContext>() };
+            let data = unsafe {
+                [
+                    std::slice::from_raw_parts(y, length(stride_y, width, height)),
+                    std::slice::from_raw_parts(u, length(stride_u, chroma_width, chroma_height)),
+                    std::slice::from_raw_parts(v, length(stride_v, chroma_width, chroma_height)),
+                ]
+            };
+            // A Rust panic must never unwind into the system camera callback.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (context.frame)(Planes {
+                    data,
+                    strides: [stride_y, stride_u, stride_v],
+                    width,
+                    height,
+                });
+            }));
+        }
+        let id = CString::new(id)?;
+        let mut context = Box::new(PlanesContext {
+            frame: Box::new(frame),
+        });
+        let (width, height) = quality.max_size();
+        let (width, height) = (width.min(1920), height.min(1080));
+        // SAFETY: the boxed context stays at a stable address for the complete capture lifetime.
+        let pointer = unsafe {
+            flex_camera_start_planes(
+                id.as_ptr(),
+                width,
+                height,
+                quality.fps(),
+                (&mut *context as *mut PlanesContext).cast(),
                 delivered,
             )
         };

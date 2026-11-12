@@ -12,10 +12,14 @@ struct Can {
     // opacity, camera pitch, how far the tab is levered up (radians), how deep the mouth is
     // pushed in (mm)
     extra: vec4<f32>,
-    // zoom, whether the can is bare aluminium with no print
+    // zoom, whether the can is bare aluminium with no print, and where its cell (0, 0) is in
+    // `cells`
     more: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Can;
+// Every can's cells, traced once a frame by `trace` before the cans are drawn: a colour, and
+// whether the cell is drawn at all.
+@group(1) @binding(0) var cells: texture_2d<f32>;
 
 const POINTS = 19;
 var<private> PROFILE: array<vec2<f32>, 19> = array<vec2<f32>, 19>(
@@ -123,11 +127,12 @@ const INK = vec3<f32>(0.012, 0.012, 0.018);
 // How many cells tall the can's box is, whatever its size on screen.
 const CELLS = 72.0;
 
-@fragment fn fs(in: Vertex) -> @location(0) vec4<f32> {
+// The colour one cell traces to, with 1 in alpha; 2 for the inked outline, or 0 for a cell that
+// isn't drawn. Every pixel in a cell would trace the same ray, so it's done once for the cell.
+fn traced(cell: vec2<f32>) -> vec4<f32> {
     let mm = HEIGHT / (u.rect.w * FILL * u.more.x);
     let centre = u.rect.xy + u.rect.zw * 0.5;
     let cell_size = u.rect.w / CELLS;
-    let cell = floor((in.p - u.rect.xy) / cell_size);
     let origin = u.rect.xy + (cell + 0.5) * cell_size;
     var xy = (origin - centre) * vec2<f32>(1.0, -1.0) * mm;
     let cr = cos(u.pose.y); let sr = sin(u.pose.y);
@@ -152,8 +157,8 @@ const CELLS = 72.0;
     }
     if !hit {
         // Cells that only just miss the can are its inked outline.
-        if nearest > cell_size * mm * 0.85 { discard; }
-        return shown(INK, in.p);
+        if nearest > cell_size * mm * 0.85 { return vec4<f32>(0.0); }
+        return vec4<f32>(INK, 2.0);
     }
 
     let p = eye + ray * t;
@@ -192,5 +197,25 @@ const CELLS = 72.0;
     colour = mix(colour, vec3<f32>(1.0), step(0.95, max(dot(n, normalize(key - ray)), 0.0)) * 0.8);
     // Darker where the surface turns away, which rounds the can.
     if dot(n, -ray) < 0.2 { colour *= 0.35; }
-    return shown(colour, in.p);
+    return vec4<f32>(colour, 1.0);
+}
+
+// The trace pass: a quad over one can's cells in `cells`, set by the viewport.
+@vertex fn cover(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32(index & 1u), f32(index >> 1u));
+    return vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn trace(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+    return traced(floor(at.xy) - u.more.zw);
+}
+
+@fragment fn fs(in: Vertex) -> @location(0) vec4<f32> {
+    let cell_size = u.rect.w / CELLS;
+    let cell = floor((in.p - u.rect.xy) / cell_size);
+    // Exactly the cell's texel: `trace` left a cell's margin round each can.
+    let last = vec2<i32>(textureDimensions(cells)) - 1;
+    let texel = textureLoad(cells, clamp(vec2<i32>(cell + u.more.zw), vec2<i32>(0), last), 0);
+    if texel.a < 0.5 { discard; }
+    if texel.a > 1.5 { return shown(INK, in.p); }
+    return shown(texel.rgb, in.p);
 }
