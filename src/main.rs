@@ -305,6 +305,9 @@ struct ServerSession {
     refusal: Option<client::Refusal>,
     /// The first list of streams after joining shows who was already live, not who just went live.
     catalog_seen: bool,
+    /// Who you were watching when the connection dropped, by identity, to watch again once it
+    /// is back and they are still live.
+    rewatch: Vec<String>,
     /// The channel you asked to join, to tell that apart from being moved.
     expected_channel: Option<u64>,
     quiet_channel_change: bool,
@@ -386,6 +389,7 @@ impl ServerSession {
             reconnecting: false,
             refusal: None,
             catalog_seen: false,
+            rewatch: Vec::new(),
             id,
             name,
             address,
@@ -1490,8 +1494,15 @@ impl App {
         }
     }
 
+    /// Whether the microphone and sound can be switched: while connected, and while a dropped
+    /// connection comes back, when the change waits and applies once it's back.
+    fn controls_reachable(&self) -> bool {
+        self.live()
+            || (self.server().reconnecting && !self.loopback && !self.server().stopping)
+    }
+
     fn toggle_mute(&mut self) {
-        if self.live()
+        if self.controls_reachable()
             && let Some(id) = self.active
         {
             let value = !self.server().muted;
@@ -1505,7 +1516,7 @@ impl App {
     }
 
     fn toggle_deafen(&mut self) {
-        if self.live()
+        if self.controls_reachable()
             && let Some(id) = self.active
         {
             let value = !self.server().deafened;
@@ -4188,6 +4199,7 @@ impl App {
         let active = self.active == Some(id);
         let session = &mut self.sessions[index];
         let mut sounds_due = Vec::new();
+        let mut rewatch_streams: Vec<String> = Vec::new();
         let mut arrived = None;
         // Shown only while the window is in the background.
         let mut toast = None;
@@ -4210,6 +4222,24 @@ impl App {
                         .log
                         .add(server_log::Tone::Left, "", "Connection lost");
                     sounds_due.push(sounds::Sound::ConnectionLost);
+                }
+                if !session.streaming.watching.is_empty() {
+                    let uid = |publisher: u16| {
+                        session
+                            .state
+                            .channels
+                            .iter()
+                            .flat_map(|channel| &channel.members)
+                            .find(|member| member.id == publisher)
+                            .map(|member| member.uid.clone())
+                    };
+                    session.rewatch = session
+                        .streaming
+                        .watching
+                        .iter()
+                        .filter_map(|watch| uid(watch.stream.publisher))
+                        .filter(|uid| !uid.is_empty())
+                        .collect();
                 }
                 session.catalog_seen = false;
                 session.streaming.reset();
@@ -4411,6 +4441,25 @@ impl App {
                 sounds_due.extend(share_sounds);
                 if let streaming::Event::Catalog(catalog) = &event {
                     sounds_due.extend(stream_changes(session, catalog));
+                    // Back from a dropped connection: watch again whoever is still live.
+                    if session.connected && !session.rewatch.is_empty() {
+                        let rewatch = std::mem::take(&mut session.rewatch);
+                        let members: Vec<_> = session
+                            .state
+                            .channels
+                            .iter()
+                            .flat_map(|channel| &channel.members)
+                            .collect();
+                        rewatch_streams = catalog
+                            .iter()
+                            .filter(|stream| {
+                                members.iter().any(|member| {
+                                    member.id == stream.publisher && rewatch.contains(&member.uid)
+                                })
+                            })
+                            .map(|stream| stream.id.clone())
+                            .collect();
+                    }
                 }
                 // A streamer's stream starts at the volume saved for them.
                 if let streaming::Event::State { stream, .. } = &event
@@ -4627,6 +4676,9 @@ impl App {
                     }
                 }
             }
+        }
+        for stream in rewatch_streams {
+            self.send_to(id, client::Command::WatchStream(stream));
         }
         for sound in sounds_due {
             self.play_sound(sound);

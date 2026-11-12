@@ -135,8 +135,15 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
 
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     rail_menu(s, k, layer);
-    if !s.loopback && s.sessions.iter().any(|session| session.connected) {
-        if !s.server().connected {
+    // A server coming back from a dropped connection keeps its window: only a first connect
+    // shows the connecting pane.
+    if !s.loopback
+        && s.sessions
+            .iter()
+            .any(|session| session.connected || session.reconnecting)
+    {
+        let reconnecting = !s.server().connected && s.server().reconnecting;
+        if !s.server().connected && !reconnecting {
             return row()
                 .w_full()
                 .h_full()
@@ -154,7 +161,7 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
         if chat.is_none() {
             chat::edge(s, t, k, layer);
         }
-        return row()
+        let window = row()
             .w_full()
             .h_full()
             .children((!hidden).then(|| server_rail(s, t, k)))
@@ -173,8 +180,59 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
                     .into_iter()
                     .flatten(),
             );
+        if reconnecting {
+            return reconnecting_window(s, t, window);
+        }
+        return window;
     }
     saved_servers(s, t, k)
+}
+
+/// The server's last known channels and chat, dimmed and out of reach, under one line saying
+/// the connection is coming back.
+fn reconnecting_window(s: &App, t: &Theme, window: El) -> El {
+    let session = s.server();
+    let strip = row()
+        .key("reconnecting-strip")
+        .w_full()
+        .h(36.0)
+        .px(size::CARD_PAD)
+        .gap(8.0)
+        .center_y()
+        .fill(t.chrome)
+        .child(pulse(t.fair))
+        .child(muted(t, client::CONNECTION_LOST).grow(1.0).min_w(0.0))
+        .child(button(
+            t,
+            "cancel-reconnecting",
+            if session.stopping {
+                "Stopping…"
+            } else {
+                "Disconnect"
+            },
+            None,
+            Variant::Ghost,
+            (!session.stopping).then_some(Message::Stop),
+        ));
+    col()
+        .w_full()
+        .h_full()
+        .child(strip)
+        .child(el().w_full().h(1.0).fill(t.hairline).a11y_hidden())
+        .child(
+        el().key("reconnecting-window")
+            .grow(1.0)
+            .min_h(0.0)
+            .w_full()
+            .child(window.opacity(0.45).a11y_hidden())
+            // Takes the presses meant for what is behind it, which can't act until it's back.
+            .child(
+                el().absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .on_press(|_: &mut App| {}),
+            ),
+    )
 }
 
 /// The saved servers, each with its own Connect. Only a microphone test holds them back.
