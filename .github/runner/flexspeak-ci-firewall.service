@@ -2,7 +2,6 @@
 Description=Keep the flexspeak CI VM off the LAN and the host
 After=docker.service
 Requires=docker.service
-Before=flexspeak-ci.service
 
 [Service]
 Type=oneshot
