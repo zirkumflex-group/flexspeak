@@ -2031,8 +2031,12 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
             .grow(1.0)
             .min_w(0.0),
         );
-    if let Some(unboxed) = s.server().unboxed.get(&member.id) {
-        entry = monster::unboxed_row(t, entry, unboxed).child(monster::unboxed_chip(t, unboxed));
+    if let Some(lit) = s.server().unboxed.get(&member.id)
+        && let Some(level) = lit.glow(Instant::now() - lit.at)
+    {
+        entry = entry
+            .child(monster::unboxed_glow(t, member.id, &lit.card, level))
+            .child(monster::unboxed_chip(t, &lit.card));
     }
     // Connection health only earns a place on the row when something is wrong; your own is
     // also in the footer.

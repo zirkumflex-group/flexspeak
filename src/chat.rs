@@ -152,6 +152,8 @@ pub struct Entry {
 pub struct Incoming {
     pub scope: Scope,
     pub own: bool,
+    /// The writer's client id on the server, for their row in the channel tree.
+    pub sender: u16,
     pub from: String,
     /// The other person's name, for a private message.
     pub peer: String,
@@ -935,6 +937,7 @@ mod tests {
             peer: from.to_owned(),
             scope,
             own: false,
+            sender: 0,
             from: from.to_owned(),
             text: text.to_owned(),
         }

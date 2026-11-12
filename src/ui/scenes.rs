@@ -64,6 +64,7 @@ pub const SCENES: &[Scene] = &[
     ("monster-connected", monster_connected),
     ("monster-unboxed", monster_unboxed),
     ("monster-unboxed-rare", monster_unboxed_rare),
+    ("monster-unboxed-own", monster_unboxed_own),
     ("monster-search", monster_search),
     ("monster-search-none", monster_search_none),
     ("monster-rarities", monster_rarities),
@@ -1600,6 +1601,29 @@ fn monster_unboxed_rare(s: &mut App) {
     unboxed(s, crate::monster::Rarity::Rare, "Pacific Punch", 212);
 }
 
+/// Your own Common, told to the channel once its reveal is over: your row lights up too.
+fn monster_unboxed_own(s: &mut App) {
+    connected(s);
+    chat_talk(s);
+    let card = crate::monster::Unboxed {
+        rarity: crate::monster::Rarity::Common,
+        flavour: "Mango Loco".into(),
+        number: 488,
+    };
+    say(
+        s,
+        chat::Scope::Channel,
+        true,
+        "Jan",
+        "Lobby",
+        &card.announcement(),
+        "21:10",
+    );
+    s.server_mut()
+        .unboxed
+        .insert(1, crate::monster::Lit::new(card));
+}
+
 fn unboxed(s: &mut App, rarity: crate::monster::Rarity, flavour: &str, number: u32) {
     connected(s);
     chat_talk(s);
@@ -1617,7 +1641,9 @@ fn unboxed(s: &mut App, rarity: crate::monster::Rarity, flavour: &str, number: u
         &card.announcement(),
         "21:09",
     );
-    s.server_mut().unboxed.insert(2, card);
+    s.server_mut()
+        .unboxed
+        .insert(2, crate::monster::Lit::new(card));
 }
 
 /// Connected, the collection takes the stage beside the channels and chat.

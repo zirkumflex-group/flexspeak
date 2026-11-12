@@ -292,6 +292,12 @@ struct App {
     settings_sync_sent: Vec<settings_sync::Effect>,
     /// The card reveal's sound; dropping it fades the sound out.
     reveal_sound: Option<reveal_sound::Playing>,
+    /// The card just added, told to the channel once its reveal is over.
+    announce: Option<monster::Unboxed>,
+    /// Someone else's card chime, kept so it plays to the end.
+    unbox_sound: Option<reveal_sound::Playing>,
+    /// Whether `Message::UnboxTick` is already on its way.
+    unbox_ticking: bool,
     /// The open Settings window's category; Settings floats over whichever page is showing.
     settings_page: Option<SettingsPage>,
     /// The category Settings reopens on.
@@ -374,7 +380,7 @@ struct ServerSession {
     /// Clients heard right now, including yourself while you transmit.
     talking: BTreeSet<u16>,
     /// Who just opened a Monster card, shown on their row for a few seconds.
-    unboxed: BTreeMap<u16, monster::Unboxed>,
+    unboxed: BTreeMap<u16, monster::Lit>,
     client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
     /// Each sampled peer's health as their globe shows it.
     client_health: BTreeMap<u16, usage::SteadyHealth>,
@@ -1059,6 +1065,8 @@ enum Message {
     MonsterAdd(usize),
     MonsterSearch(String),
     MonsterRevealTick(u64),
+    /// Moves lit rows on through their pulse and puts out the ones that are over.
+    UnboxTick,
     MonsterRevealSkip,
     MonsterReplay(String),
     MonsterSelect(String),
@@ -1367,6 +1375,9 @@ impl App {
             #[cfg(test)]
             settings_sync_sent: Vec::new(),
             reveal_sound: None,
+            announce: None,
+            unbox_sound: None,
+            unbox_ticking: false,
             settings_page: None,
             settings_recent: SettingsPage::Server,
             settings_query: String::new(),
@@ -2386,10 +2397,73 @@ impl App {
         if !matches!(self.monster.notice, Some(monster::Notice::Added(_))) {
             return Task::none();
         }
-        match self.monster.selected.clone() {
-            Some(identity) => self.begin_reveal(identity),
-            None => Task::none(),
+        let Some(identity) = self.monster.selected.clone() else {
+            return Task::none();
+        };
+        self.announce = self
+            .monster
+            .cans
+            .iter()
+            .find(|can| can.identity() == identity)
+            .map(monster::Can::unboxed);
+        let task = self.begin_reveal(identity);
+        // No reveal to wait for: tell the channel now.
+        if self.monster.reveal.is_none() {
+            return Task::batch([task, self.announce_card()]);
         }
+        task
+    }
+
+    /// Tells the channel about the card just opened, once: the whole server for a Mythic or
+    /// Legendary. Only when the account has the identity you're connected with linked.
+    fn announce_card(&mut self) -> Task {
+        let Some(card) = self.announce.take() else {
+            return Task::none();
+        };
+        if !self.server().connected || self.loopback {
+            return Task::none();
+        }
+        let Some(own) = self
+            .server()
+            .state
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.members)
+            .find(|member| member.is_self)
+            .map(|member| (member.id, member.uid.clone()))
+        else {
+            return Task::none();
+        };
+        if !self.monster.linked(&own.1) {
+            return Task::none();
+        }
+        let target = if card.server_wide() {
+            client::ChatTarget::Server
+        } else {
+            client::ChatTarget::Channel
+        };
+        if !self.command(client::Command::Chat(target, card.announcement())) {
+            return Task::none();
+        }
+        self.light(own.0, card)
+    }
+
+    /// Lights a row for a card its person opened, and keeps the pulse going.
+    fn light(&mut self, client: u16, card: monster::Unboxed) -> Task {
+        self.server_mut()
+            .unboxed
+            .insert(client, monster::Lit::new(card));
+        if std::mem::replace(&mut self.unbox_ticking, true) {
+            return Task::none();
+        }
+        Self::unbox_tick()
+    }
+
+    fn unbox_tick() -> Task {
+        Task::Perform(Box::new(|| {
+            std::thread::sleep(monster::PULSE);
+            Message::UnboxTick
+        }))
     }
 
     fn begin_reveal(&mut self, identity: String) -> Task {
@@ -3727,15 +3801,48 @@ impl App {
                 return self.after_submit();
             }
             Message::MonsterRevealTick(id) => {
+                let ongoing = self
+                    .monster
+                    .reveal
+                    .as_ref()
+                    .is_some_and(|reveal| reveal.id == id);
                 return match self.monster.advance_reveal(id) {
                     Some(delay) => Self::reveal_after(id, delay),
+                    None if ongoing => self.announce_card(),
                     None => Task::none(),
                 };
             }
-            Message::MonsterRevealSkip => self.end_reveal(),
-            Message::MonsterReplay(identity) => return self.begin_reveal(identity),
+            Message::MonsterRevealSkip => {
+                self.end_reveal();
+                return self.announce_card();
+            }
+            Message::UnboxTick => {
+                let now = Instant::now();
+                let mut lit = false;
+                for session in self
+                    .sessions
+                    .iter_mut()
+                    .chain(std::iter::once(&mut self.home))
+                {
+                    session
+                        .unboxed
+                        .retain(|_, row| row.glow(now - row.at).is_some());
+                    lit |= !session.unboxed.is_empty();
+                }
+                self.unbox_ticking = lit;
+                if lit {
+                    return Self::unbox_tick();
+                }
+            }
+            Message::MonsterReplay(identity) => {
+                // A replay is nothing new to tell anyone; a card still waiting is told now.
+                let task = self.announce_card();
+                return Task::batch([task, self.begin_reveal(identity)]);
+            }
             Message::MonsterSelect(code) => self.monster.selected = Some(code),
             Message::MonsterRemove(code) => {
+                // Added by mistake: not something to tell the channel.
+                self.announce = None;
                 self.end_reveal();
                 if self.monster.online() {
                     let effects = self.monster.remove_online(&code);
@@ -5035,6 +5142,7 @@ impl App {
         let mut sounds_due = Vec::new();
         let mut rewatch_streams: Vec<String> = Vec::new();
         let mut arrived = None;
+        let mut unboxed = None;
         // Shown only while the window is in the background.
         let mut toast = None;
         let mut poke_toast = None;
@@ -5238,6 +5346,9 @@ impl App {
                     .current
                     .as_ref()
                     .map_or_else(String::new, |channel| channel.name.clone());
+                if let Some(card) = monster::Unboxed::parse(&message.text) {
+                    unboxed = Some((message.sender, message.own, card));
+                }
                 arrived = session.chat.receive(message, &channel).cloned();
             }
             client::Event::Poked { from, key, message } => {
@@ -5545,7 +5656,39 @@ impl App {
         if let Some(entry) = arrived {
             self.chat_arrived(id, entry);
         }
+        if let Some((client, own, card)) = unboxed {
+            return self.card_heard(id, client, own, card);
+        }
         Task::none()
+    }
+
+    /// Someone's card line arrived: their row lights up and, for anyone but you, the chime
+    /// plays (you heard the whole reveal already).
+    fn card_heard(
+        &mut self,
+        id: hub::SessionId,
+        client: u16,
+        own: bool,
+        card: monster::Unboxed,
+    ) -> Task {
+        let Some(session) = self.session_mut(id) else {
+            return Task::none();
+        };
+        let deafened = session.deafened;
+        session
+            .unboxed
+            .insert(client, monster::Lit::new(card.clone()));
+        if !own && !deafened && self.active == Some(id) {
+            self.unbox_sound = Some(reveal_sound::play_chime(
+                card.rarity,
+                self.output.clone(),
+                self.playback_volume.percent(),
+            ));
+        }
+        if std::mem::replace(&mut self.unbox_ticking, true) {
+            return Task::none();
+        }
+        Self::unbox_tick()
     }
 
     // ---- chat history ----
@@ -9023,10 +9166,121 @@ mod tests {
         assert_eq!(app.microphone_meter_level(), 0.0);
     }
 
+    /// Connected as "Me" (uid `ab01ff10`), with the collection on this computer.
+    fn collecting(linked: bool) -> (App, mpsc::Receiver<client::Command>) {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let (mut app, commands) = session_fixture();
+        for channel in &mut app.server_mut().state.channels {
+            for member in &mut channel.members {
+                if member.is_self {
+                    member.uid = "ab01ff10".into();
+                }
+            }
+        }
+        app.monster.open(None);
+        app.monster.me = Some(monster::api::Me {
+            id: 1,
+            name: "me".into(),
+            email: "me@example.com".into(),
+            hidden: false,
+            imported: true,
+            identities: if linked {
+                vec![monster::api::LinkedIdentity {
+                    uid: STANDARD.encode([0xab_u8, 0x01, 0xff, 0x10]),
+                    source: "Flexspeak".into(),
+                    linked_at: 0,
+                }]
+            } else {
+                Vec::new()
+            },
+        });
+        (app, commands)
+    }
+
+    #[test]
+    fn an_opened_card_is_told_after_its_reveal_where_its_rarity_reaches() {
+        let (mut app, mut commands) = collecting(true);
+        let _ = app.update(Message::MonsterAdd(0));
+        assert!(app.monster.reveal.is_some());
+        assert!(
+            commands.try_recv().is_err(),
+            "Nothing is told while the card is face down"
+        );
+        let card = app.monster.cans.last().unwrap().unboxed();
+        let _ = app.update(Message::MonsterRevealSkip);
+        let Ok(client::Command::Chat(target, text)) = commands.try_recv() else {
+            panic!("The card should have been told");
+        };
+        assert_eq!(monster::Unboxed::parse(&text), Some(card.clone()));
+        let wide = matches!(target, client::ChatTarget::Server);
+        assert_eq!(wide, card.server_wide());
+        assert!(matches!(
+            target,
+            client::ChatTarget::Server | client::ChatTarget::Channel
+        ));
+        // Your own row lights up at once, and only once is it told.
+        assert!(app.server().unboxed.contains_key(&1));
+        let _ = app.update(Message::MonsterReplay(card_identity(&app)));
+        let _ = app.update(Message::MonsterRevealSkip);
+        assert!(commands.try_recv().is_err(), "A replay tells nobody");
+    }
+
+    fn card_identity(app: &App) -> String {
+        app.monster.cans.last().unwrap().identity()
+    }
+
+    #[test]
+    fn a_card_stays_quiet_without_a_linked_identity_or_when_removed() {
+        let (mut app, mut commands) = collecting(false);
+        let _ = app.update(Message::MonsterAdd(0));
+        let _ = app.update(Message::MonsterRevealSkip);
+        assert!(commands.try_recv().is_err(), "Not linked: nothing told");
+        let (mut app, mut commands) = collecting(true);
+        let _ = app.update(Message::MonsterAdd(0));
+        let _ = app.update(Message::MonsterRemove(card_identity(&app)));
+        let _ = app.update(Message::MonsterRevealSkip);
+        assert!(
+            commands.try_recv().is_err(),
+            "Added by mistake: nothing told"
+        );
+    }
+
+    #[test]
+    fn a_card_line_lights_its_writer_until_it_is_over() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let card = monster::Unboxed {
+            rarity: monster::Rarity::Legendary,
+            flavour: "Ultra Gold".into(),
+            number: 487,
+        };
+        let line = chat::Incoming {
+            scope: chat::Scope::Server,
+            own: false,
+            sender: 2,
+            from: "Mara".into(),
+            peer: String::new(),
+            text: card.announcement(),
+        };
+        let _ = app.update(Message::Backend(id, client::Event::Chat(line)));
+        assert_eq!(
+            app.server().unboxed.get(&2).map(|lit| &lit.card),
+            Some(&card)
+        );
+        assert!(app.unbox_ticking);
+        let _ = app.update(Message::UnboxTick);
+        assert!(app.server().unboxed.contains_key(&2), "Still lit");
+        app.server_mut().unboxed.get_mut(&2).unwrap().at -= std::time::Duration::from_secs(11);
+        let _ = app.update(Message::UnboxTick);
+        assert!(app.server().unboxed.is_empty());
+        assert!(!app.unbox_ticking);
+    }
+
     fn chat_event(scope: chat::Scope, from: &str, text: &str, own: bool) -> client::Event {
         client::Event::Chat(chat::Incoming {
             scope,
             own,
+            sender: 0,
             from: from.into(),
             peer: "Mara".into(),
             text: text.into(),

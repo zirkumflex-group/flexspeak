@@ -95,6 +95,15 @@ impl Can {
         flavour_or_other(&self.flavour)
     }
 
+    /// The can as its channel hears about it.
+    pub fn unboxed(&self) -> Unboxed {
+        Unboxed {
+            rarity: self.rarity,
+            flavour: self.flavour().name.to_owned(),
+            number: u32::try_from(self.id).unwrap_or(0),
+        }
+    }
+
     /// The flavour's place in `FLAVOURS`, which the shaders read.
     pub fn flavour_index(&self) -> usize {
         flavour_by_id(&self.flavour).map_or(FLAVOURS.len() - 1, |(index, _)| index)
@@ -187,6 +196,11 @@ pub struct Unboxed {
 const ANNOUNCE: &str = "\u{1F96B} opened ";
 
 impl Unboxed {
+    /// Mythic and Legendary go to the whole server; the rest stay in the channel.
+    pub fn server_wide(&self) -> bool {
+        self.rarity >= Rarity::Mythic
+    }
+
     pub fn announcement(&self) -> String {
         let article = if self.rarity == Rarity::Uncommon {
             "an"
@@ -217,6 +231,57 @@ impl Unboxed {
             number: number.parse().ok()?,
         })
     }
+}
+
+/// Someone's row lit by the card they just opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lit {
+    pub card: Unboxed,
+    pub at: std::time::Instant,
+}
+
+/// How often a lit row's pulse changes.
+pub const PULSE: StdDuration = StdDuration::from_millis(600);
+
+impl Lit {
+    pub fn new(card: Unboxed) -> Self {
+        Self {
+            card,
+            at: std::time::Instant::now(),
+        }
+    }
+
+    /// How long the row stays lit; the rarer cards a little longer.
+    fn life(&self) -> StdDuration {
+        StdDuration::from_secs(if self.card.server_wide() { 10 } else { 7 })
+    }
+
+    /// How strongly the row glows `elapsed` after the card was opened, or `None` once it's
+    /// over. Mythic and Legendary pulse; every card fades out over its last second.
+    pub fn glow(&self, elapsed: StdDuration) -> Option<f32> {
+        let life = self.life();
+        if elapsed >= life {
+            return None;
+        }
+        if elapsed + StdDuration::from_secs(1) >= life {
+            return Some(0.0);
+        }
+        let beat = elapsed.as_millis() / PULSE.as_millis();
+        Some(if self.card.server_wide() && beat % 2 == 1 {
+            0.45
+        } else {
+            1.0
+        })
+    }
+}
+
+/// Whether a uid the collection server lists (base64, as TeamSpeak writes it) is the one a
+/// member row carries (hex of the same bytes).
+pub fn same_uid(linked: &str, member: &str) -> bool {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    STANDARD.decode(linked).is_ok_and(|bytes| {
+        !member.is_empty() && crate::client::uid_key(&bytes).eq_ignore_ascii_case(member)
+    })
 }
 
 /// The collection's secret roll key, made the first time it's needed.
@@ -671,6 +736,15 @@ impl Tracker {
     }
 
     /// Starts opening a saved card.
+    /// Whether the signed-in account has this TeamSpeak identity (a member row's uid) linked.
+    pub fn linked(&self, member_uid: &str) -> bool {
+        self.me.as_ref().is_some_and(|me| {
+            me.identities
+                .iter()
+                .any(|identity| same_uid(&identity.uid, member_uid))
+        })
+    }
+
     pub fn start_reveal(&mut self, identity: String) -> Option<Reveal> {
         let rarity = self
             .cans
@@ -1209,6 +1283,42 @@ mod tests {
         assert_eq!(Section::Flavour(3).parent(), Some(Section::Flavours));
         assert_eq!(Section::Flavours.parent(), Some(Section::Overview));
         assert_eq!(Section::Overview.parent(), None);
+    }
+
+    #[test]
+    fn rare_cards_reach_the_server_and_pulse_while_the_rest_stay_and_glow() {
+        let lit = |rarity| {
+            Lit::new(Unboxed {
+                rarity,
+                flavour: "Ultra Gold".into(),
+                number: 1,
+            })
+        };
+        let ms = StdDuration::from_millis;
+        let common = lit(Rarity::Common);
+        assert!(!common.card.server_wide());
+        assert_eq!(common.glow(ms(0)), Some(1.0));
+        assert_eq!(common.glow(ms(700)), Some(1.0));
+        assert_eq!(common.glow(ms(6_500)), Some(0.0));
+        assert_eq!(common.glow(ms(7_000)), None);
+        let legendary = lit(Rarity::Legendary);
+        assert!(legendary.card.server_wide() && lit(Rarity::Mythic).card.server_wide());
+        assert!(!lit(Rarity::Rare).card.server_wide());
+        assert_eq!(legendary.glow(ms(0)), Some(1.0));
+        assert_eq!(legendary.glow(ms(700)), Some(0.45));
+        assert_eq!(legendary.glow(ms(9_500)), Some(0.0));
+        assert_eq!(legendary.glow(ms(10_000)), None);
+    }
+
+    #[test]
+    fn a_linked_uid_matches_the_member_row_it_belongs_to() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let bytes = [0xab_u8, 0x01, 0xff, 0x10];
+        let linked = STANDARD.encode(bytes);
+        assert!(same_uid(&linked, "ab01ff10"));
+        assert!(!same_uid(&linked, "ab01ff11"));
+        assert!(!same_uid(&linked, ""));
+        assert!(!same_uid("not base64!", "ab01ff10"));
     }
 
     #[test]

@@ -242,6 +242,7 @@ mod tests {
             Incoming {
                 scope,
                 own: false,
+                sender: 0,
                 from: from.into(),
                 peer: from.into(),
                 text: text.into(),

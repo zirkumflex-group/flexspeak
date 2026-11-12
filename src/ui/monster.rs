@@ -2196,18 +2196,27 @@ fn rarity_breakdown(
         .child(cabinet().w_full().padding(16.0).child(wrap))
 }
 
-/// A row in the channel tree lit by the card its person just opened: the rarity's colour
-/// washing in from the left, and the rarity named at the end of the row.
-pub fn unboxed_row(t: &Theme, row_el: El, unboxed: &monster::Unboxed) -> El {
+/// The wash behind a row in the channel tree lit by the card its person just opened: the
+/// rarity's colour sweeping in from the left, pulsing for the rare ones, fading out at the end.
+pub fn unboxed_glow(t: &Theme, member: u16, unboxed: &monster::Unboxed, level: f32) -> El {
     let ink = rgb(unboxed.rarity.color());
-    row_el.linear_gradient(
-        90.0,
-        [
-            (0.0, ink.alpha(if t.dark { 0.30 } else { 0.22 })),
-            (0.65, ink.alpha(0.06)),
-            (1.0, ink.alpha(0.0)),
-        ],
-    )
+    el().key(format!("unboxed-glow-{member}"))
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .paint_order(-1)
+        .radius(radius::ROW)
+        .linear_gradient(
+            90.0,
+            [
+                (0.0, ink.alpha(if t.dark { 0.34 } else { 0.24 })),
+                (0.65, ink.alpha(0.07)),
+                (1.0, ink.alpha(0.0)),
+            ],
+        )
+        .opacity(level)
+        .opacity_motion(motion::SETTLE)
+        .transition(Transition::opacity().combined(Transition::offset(-40.0, 0.0)))
+        .motion(motion::SETTLE)
+        .a11y_hidden()
 }
 
 /// The card's can at the end of the row, in the rarity's colour; it names the card on hover.
