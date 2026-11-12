@@ -669,18 +669,19 @@ fn log_activity(log: &mut server_log::Log, activity: &client::Activity) {
     };
     let action = match (activity.kind, activity.is_self) {
         (Switched, true) => format!("joined {}", activity.channel),
-        (Switched, false) => format!("→ {}", activity.channel),
+        // They went themselves, or someone put them there.
+        (Switched, false) => format!("joined {}", activity.channel),
         (Moved, true) => format!("were moved to {}", activity.channel),
-        (Moved, false) => format!("moved to {}", activity.channel),
+        (Moved, false) => format!("was moved to {}", activity.channel),
         (Connected, _) => "connected".to_owned(),
         (Disconnected, _) => "disconnected".to_owned(),
         (LostConnection, _) => "lost connection".to_owned(),
         (KickedFromChannel, true) => "were kicked from the channel".to_owned(),
-        (KickedFromChannel, false) => "kicked from the channel".to_owned(),
+        (KickedFromChannel, false) => "was kicked from the channel".to_owned(),
         (KickedFromServer, true) => "were kicked".to_owned(),
-        (KickedFromServer, false) => "kicked".to_owned(),
+        (KickedFromServer, false) => "was kicked".to_owned(),
         (Banned, true) => "were banned".to_owned(),
-        (Banned, false) => "banned".to_owned(),
+        (Banned, false) => "was banned".to_owned(),
         (RecordingStarted, _) => "started recording".to_owned(),
         (RecordingStopped, _) => "stopped recording".to_owned(),
         (TalkPowerGranted, _) => "got talk power".to_owned(),
@@ -704,7 +705,7 @@ fn stream_changes(
     session: &mut ServerSession,
     catalog: &[streaming::StreamInfo],
 ) -> Vec<sounds::Sound> {
-    const STARTED: &str = "started streaming";
+    const STARTED: &str = "started sharing";
     if !std::mem::replace(&mut session.catalog_seen, true) {
         return Vec::new();
     }
@@ -724,7 +725,7 @@ fn stream_changes(
             before
                 .iter()
                 .filter(|old| !catalog.iter().any(|stream| stream.id == old.id))
-                .map(|old| (old.publisher, "stopped streaming")),
+                .map(|old| (old.publisher, "stopped sharing")),
         )
         .filter_map(|(publisher, action)| {
             let person = member(publisher);
@@ -1162,7 +1163,8 @@ impl App {
             theme_library: themes::Library::new(&[]),
             omarchy: None,
             system_dark: true,
-            window_size: (1180.0, 790.0),
+            // A headless `--size` run lays its first frame out at that size.
+            window_size: ui::requested_size().unwrap_or((1180.0, 790.0)),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
             handle: None,
             ui: ui::UiState::default(),
@@ -4351,8 +4353,8 @@ impl App {
                 }
                 for sound in &share_sounds {
                     let words = match sound {
-                        sounds::Sound::StreamStarted => "started streaming",
-                        sounds::Sound::StreamStopped => "stopped streaming",
+                        sounds::Sound::StreamStarted => "started sharing",
+                        sounds::Sound::StreamStopped => "stopped sharing",
                         _ => continue,
                     };
                     session.log.add(server_log::Tone::Stream, "You", words);
@@ -4645,7 +4647,7 @@ impl App {
     /// Whether the chat column is docked beside the stage, rather than behind the window's edge.
     fn chat_docked(&self) -> bool {
         !self.chat_options.hidden
-            && self.window_size.0 >= ui::CHAT_MIN_DOCK_WINDOW
+            && self.window_size.0 >= ui::chat_dock_window(self)
             && !(self.chat_options.hide_while_watching
                 && self.server().streaming.active()
                 && !self.ui.chat_over_stream)
@@ -4666,7 +4668,8 @@ impl App {
 
     /// Clears the unread counts of what the chat has on screen, and its pop-up.
     fn chat_seen(&mut self) {
-        if self.chat_showing(Instant::now()) {
+        // Read back, the lines below wait under the "new messages" control.
+        if self.chat_showing(Instant::now()) && !self.ui.chat_back {
             let layout = self.chat_options.layout;
             self.server_mut().chat.mark_seen(layout);
             self.ui.chat_toast = None;
@@ -4682,6 +4685,7 @@ impl App {
         let (layout, options) = (self.chat_options.layout, self.chat_options);
         let active = self.active == Some(id);
         let showing = active && self.chat_showing(now);
+        let back = self.ui.chat_back;
         // A private message is for you alone: in the background it sounds and flashes the
         // taskbar. Channel and server messages only wait as unread.
         if entry.scope.is_private() && !self.window_focused {
@@ -4691,7 +4695,7 @@ impl App {
         let Some(session) = self.session_mut(id) else {
             return;
         };
-        if showing && session.chat.shows(layout, &entry.scope) {
+        if showing && !back && session.chat.shows(layout, &entry.scope) {
             return;
         }
         session.chat.mark_unread(&entry.scope);
@@ -4717,6 +4721,24 @@ impl App {
             .iter()
             .flat_map(|channel| &channel.members)
             .find(|member| !member.is_self && client::chat_key(&member.uid, member.id) == key)
+    }
+
+    /// Who wrote a line, while they're still on the server: a private line's peer, else the
+    /// person with that name (names are unique on a server). None for your own lines.
+    pub(crate) fn chat_sender(&self, entry: &chat::Entry) -> Option<u16> {
+        if entry.own {
+            return None;
+        }
+        if let chat::Scope::Private(key) = &entry.scope {
+            return self.chat_member(key).map(|member| member.id);
+        }
+        self.server()
+            .state
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.members)
+            .find(|member| !member.is_self && member.name == entry.from)
+            .map(|member| member.id)
     }
 
     /// Shows a conversation and points the message box at it.
@@ -4770,7 +4792,10 @@ impl App {
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
-                self.server_mut().chat.draft = text[..end].to_owned();
+                let chat = &mut self.server_mut().chat;
+                // More than a character over: a paste was cut, which the box says.
+                chat.draft_cut = text.len() > chat::MAX_BYTES + 4;
+                chat.draft = text[..end].to_owned();
             }
             Action::Send => {
                 if !self.live() {
@@ -4795,8 +4820,9 @@ impl App {
                 self.begin_alert(Source::Chat);
                 if self.command(client::Command::Chat(target, text.clone())) {
                     let chat = &mut self.server_mut().chat;
-                    chat.draft.clear();
                     chat.sent(scope, &text, Instant::now());
+                    chat.draft.clear();
+                    chat.draft_cut = false;
                 }
             }
             Action::Target(scope) => {
@@ -4839,6 +4865,17 @@ impl App {
                     self.chat_reveal();
                     self.chat_seen();
                     self.ui.chat_input.focused = true;
+                }
+            }
+            Action::MessageFrom(entry) => {
+                let sender = self
+                    .server()
+                    .chat
+                    .entries()
+                    .find(|line| line.id == entry)
+                    .and_then(|line| self.chat_sender(line));
+                if let Some(id) = sender {
+                    return self.chat_action(Action::Message(id));
                 }
             }
             Action::ClosePeer(key) => {
@@ -4893,7 +4930,7 @@ impl App {
                     self.ui.chat_input.focused = false;
                     self.ui.chat_peek = ui::RailPeek::default();
                     self.ui.chat_lists = Default::default();
-                } else if self.window_size.0 < ui::CHAT_MIN_DOCK_WINDOW {
+                } else if self.window_size.0 < ui::chat_dock_window(self) {
                     // No room to dock: hold the peek open instead, or let it go.
                     self.ui.chat_peek.toggle_pin();
                 } else {
@@ -6366,7 +6403,7 @@ mod tests {
         );
         let log = &app.server().log;
         assert_eq!(log.len(), 3);
-        assert_eq!(log.get(0).unwrap().action, "moved to Lobby");
+        assert_eq!(log.get(0).unwrap().action, "was moved to Lobby");
         assert_eq!(log.get(1).unwrap().tone, server_log::Tone::Left);
         assert_eq!(log.get(2).unwrap().action, "connected");
     }

@@ -599,7 +599,12 @@ fn nav_item(t: &Theme, page: SettingsPage, active: bool, found: bool) -> El {
         .gap(10.0)
         .center_y()
         .radius(radius::CONTROL)
-        .fill(if active { t.raised } else { Color::TRANSPARENT })
+        // On light palettes `raised` is nearly `chrome`, so the selection is a darker wash.
+        .fill(match (active, t.dark) {
+            (false, _) => Color::TRANSPARENT,
+            (true, true) => t.raised,
+            (true, false) => t.wash(0.10),
+        })
         .focusable(true)
         .cursor(rune::Cursor::Pointer)
         .hover(t.wash(0.05))

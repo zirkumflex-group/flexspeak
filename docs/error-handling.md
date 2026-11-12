@@ -1,15 +1,15 @@
 # Errors and server command pacing
 
-The native Rune error dialog (rune-kit `Dialog`) replaces persistent error blocks for connection/audio failures, server command rejection, join failures, settings load/save/reload, shortcut registration, trace recording/export and streaming failures. Return presses Close and Escape dismisses it; the window behind it is inert while it is open.
+Problems show as notice cards stacked under the title bar (`src/ui/notices.rs`, fed by `src/alerts.rs`), one per source: connection and audio failures, server command rejection, join failures, settings load and save, shortcut registration, trace recording and export, and streaming failures. A card has a title, a sentence or two and at most one action. Notices never cover the window or take the keyboard; everything behind them keeps working.
 
 ## Error lifetime
 
-- Close, Enter and Escape dismiss the current incident. The same incident stays suppressed until its operation recovers or the user explicitly retries that operation.
-- There is one incident per error source, at most 15, with details bounded to 4,096 characters. Repeated reports update the incident/count instead of opening additional dialogs. Different sources wait behind the current dialog.
+- A problem that is a state (a missing device, a shortcut another app holds) stays until it recovers, which clears it on its own. A one-off failure, such as a refused poke or message, fades after a few seconds. Any card can be closed, and a closed problem stays quiet until it recovers or the user retries that operation.
+- There is one card per source. Repeated reports update it rather than adding cards; three show at once and the rest wait behind a count. Details are cut at 200 characters; the rest is in the log or the settings the card points to.
 - Recovery clears only the corresponding source. An unrelated successful command cannot clear a flood error. A failed server update cannot be presented as acknowledged.
-- Incorrect channel passwords stay inside the existing password prompt; other queued errors wait until that prompt closes.
-- Covered widgets do not receive mouse, scroll, keyboard or input-method events. Their widget state is retained, restoring the previous input focus after dismissal. The error dialog's keyboard action is Close (Enter/Escape); Tab cannot move into the covered form. Audio, protocol work and global mute/deafen shortcuts continue.
-- Missing/stale peer telemetry and unsupported-platform capabilities remain status/tooltip information, not repeated modal incidents.
+- Incorrect channel passwords stay inside the existing password prompt.
+- While Settings is open the cards sit in the bottom corner, clear of its header.
+- Missing/stale peer telemetry and unsupported-platform capabilities remain status and tooltip information, not notices.
 
 ## Audio buffer glitches
 
@@ -19,7 +19,7 @@ Input and output callbacks now exclude `Xrun` from the fatal-error queue. Repeat
 
 A regression test injects repeated glitches followed by device failures without opening audio hardware. For this fix, 59 ordinary tests and Mac/Windows cross-target Clippy with warnings denied passed. Windows hardware retesting is still required; this fix does not address the separate macOS CoreAudio initialization stall described below.
 
-Screen-sharing capture and publishing errors use their own modal source. Stopping capture does not wait for a server acknowledgement. Publishing commands use the same scheduler; a late start notification after cancellation is taken down instead of restarting capture.
+Screen-sharing capture and publishing errors use their own notice source. Stopping capture does not wait for a server acknowledgement. Publishing commands use the same scheduler; a late start notification after cancellation is taken down instead of restarting capture.
 
 ## Control commands
 

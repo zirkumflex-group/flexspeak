@@ -189,6 +189,11 @@ pub const SCENES: &[Scene] = &[
     ("chat-tabs", chat_tabs),
     ("chat-tabs-private", chat_tabs_private),
     ("chat-tabs-light", chat_tabs_light),
+    ("chat-new-messages", chat_new_messages),
+    ("chat-line-menu", chat_line_menu),
+    ("chat-composer-lines", chat_composer_lines),
+    ("chat-composer-limit", chat_composer_limit),
+    ("chat-composer-cut", chat_composer_cut),
     ("chat-feed", chat_feed),
     ("chat-feed-private", chat_feed_private),
     ("chat-feed-target", chat_feed_target),
@@ -554,6 +559,54 @@ fn chat_tabs_private(s: &mut App) {
 fn chat_tabs_light(s: &mut App) {
     chat_tabs(s);
     s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+/// Read back while three lines came in: they wait under a control that jumps to them.
+fn chat_new_messages(s: &mut App) {
+    chat_tabs(s);
+    s.ui.chat_back = true;
+    for _ in 0..3 {
+        s.server_mut().chat.mark_unread(&chat::Scope::Channel);
+    }
+}
+
+/// Right-clicking someone's line that holds a link.
+fn chat_line_menu(s: &mut App) {
+    chat_tabs(s);
+    let entry = say(
+        s,
+        chat::Scope::Channel,
+        false,
+        MARA.1,
+        "Lobby",
+        "route is on www.example.org/raid",
+        "21:10",
+    );
+    s.ui.chat_line_menu = Some((entry.id, rune::PointerPress { x: 900.0, y: 420.0 }));
+}
+
+/// A draft of three lines: the box grows with it.
+fn chat_composer_lines(s: &mut App) {
+    chat_tabs(s);
+    s.server_mut().chat.draft = "pull order:\n1. tank pulls left\n2. we burn the adds".into();
+    s.ui.chat_input.focused = true;
+    s.sync_fields();
+}
+
+/// Near the limit, the box counts the bytes left.
+fn chat_composer_limit(s: &mut App) {
+    chat_tabs(s);
+    s.server_mut().chat.draft = "notes ".repeat(160);
+    s.sync_fields();
+}
+
+/// A paste that didn't fit was cut, and the box says so.
+fn chat_composer_cut(s: &mut App) {
+    chat_tabs(s);
+    let chat = &mut s.server_mut().chat;
+    chat.draft = "log ".repeat(256);
+    chat.draft_cut = true;
+    s.sync_fields();
 }
 
 fn chat_feed(s: &mut App) {
@@ -1306,10 +1359,10 @@ fn server_log(s: &mut App) {
     let people = ["Mara", "Theo", "Ines", "Lukas", "Priya with a long name"];
     let happenings = [
         (Tone::Arrived, "connected"),
-        (Tone::Moved, "→ Raid night"),
-        (Tone::Stream, "started streaming"),
-        (Tone::Moved, "moved to Lobby"),
-        (Tone::Stream, "stopped streaming"),
+        (Tone::Moved, "joined Raid night"),
+        (Tone::Stream, "started sharing"),
+        (Tone::Moved, "was moved to Lobby"),
+        (Tone::Stream, "stopped sharing"),
         (Tone::Left, "lost connection"),
         (Tone::Arrived, "connected"),
         (Tone::Left, "disconnected"),
@@ -3676,7 +3729,8 @@ mod tests {
         let mut rt = runtime(chat_hidden_private, (1180.0, 790.0));
         let root = temp_settings(&mut rt, "chat-toast");
         settle(&mut rt);
-        assert!(rt.find("chat-toast").is_some() && rt.find("chat-edge-dot").is_some());
+        // A private message shows its count on the handle, not just a dot.
+        assert!(rt.find("chat-toast").is_some() && rt.find("chat-edge-count").is_some());
         assert!(rt.find("chat-peek").is_none());
         click(&mut rt, "chat-toast-reply");
         assert!(rt.find("chat-toast").is_none());
@@ -3783,7 +3837,7 @@ mod tests {
     fn hovering_the_server_log_offers_search_and_escape_closes_it() {
         let mut rt = runtime(server_log, (900.0, 790.0));
         settle(&mut rt);
-        assert!(rt.find("log-search-open").is_none(), "hidden at rest");
+        assert!(rt.find("log-search-open").is_some(), "faint at rest, but there");
         click(&mut rt, "server-log");
         settle(&mut rt);
         click(&mut rt, "log-search-open");

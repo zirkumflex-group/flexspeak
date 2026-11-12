@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 
 use crate::{App, Message, Tab, client, shortcuts, usage};
 
-pub use chat::MIN_DOCK_WINDOW as CHAT_MIN_DOCK_WINDOW;
+pub use chat::dock_window as chat_dock_window;
 pub use streams::fullscreen_allowed;
 pub use theme::Theme;
 
@@ -253,6 +253,12 @@ pub struct UiState {
     /// The chat column while it hides behind the right edge, as the rail does behind the left.
     pub chat_peek: RailPeek,
     pub chat_input: TextEdit,
+    /// A message line's menu is open: the line's id, and where it was right-clicked.
+    pub chat_line_menu: Option<(u64, rune::PointerPress)>,
+    /// The history is scrolled back from its newest line, so new lines stay unread.
+    pub chat_back: bool,
+    /// Where the side-by-side bar and its tabs lie, to find tabs scrolled out of sight.
+    pub chat_strip: ChatStrip,
     pub chat_toast: Option<ChatToast>,
     /// The pointer is over the pop-up, which keeps it up.
     pub chat_toast_hover: bool,
@@ -340,6 +346,9 @@ impl Default for UiState {
             rail_peek: RailPeek::default(),
             chat_peek: RailPeek::default(),
             chat_input: TextEdit::new(""),
+            chat_line_menu: None,
+            chat_back: false,
+            chat_strip: ChatStrip::default(),
             chat_toast: None,
             chat_toast_hover: false,
             chat_over_stream: false,
@@ -383,6 +392,32 @@ impl UiState {
     /// on it, or its message box is being typed in.
     pub fn chat_peek_open(&self, now: Instant) -> bool {
         self.chat_peek.open(now) || self.chat_input.focused
+    }
+}
+
+/// The side-by-side chat bar as last laid out: `[x, y, w, h]` in window points.
+#[derive(Default)]
+pub struct ChatStrip {
+    /// The scrolling viewport.
+    pub bar: [f32; 4],
+    /// The row of tabs inside it, which moves as it scrolls.
+    pub content: [f32; 4],
+    pub tabs: std::collections::HashMap<String, [f32; 4]>,
+}
+
+impl ChatStrip {
+    /// How far the tabs are scrolled, and how far they can go.
+    pub fn offset(&self) -> (f32, f32) {
+        let offset = self.bar[0] - self.content[0];
+        (offset, (self.content[2] - self.bar[2]).max(0.0))
+    }
+
+    /// Whether the tab keyed `key` is at least partly out of sight.
+    pub fn hides(&self, key: &str) -> bool {
+        let [x, _, w, _] = self.bar;
+        self.tabs
+            .get(key)
+            .is_some_and(|tab| tab[0] < x - 1.0 || tab[0] + tab[2] > x + w + 1.0)
     }
 }
 
@@ -938,7 +973,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         // handler would re-run layout every frame.
         .on_layout_tx(|s: &mut App, r: [f32; 4], tx: &mut Tx| {
             // The one width that changes the view: where the chat column docks or folds away.
-            let docks = |width: f32| width >= chat::MIN_DOCK_WINDOW;
+            let at = chat::dock_window(s);
+            let docks = |width: f32| width >= at;
             let crossed = docks(s.window_size.0) != docks(r[2]);
             s.window_size = (r[2], r[3]);
             if !crossed {
@@ -1053,6 +1089,34 @@ pub fn run(launch: Launch) {
 /// `AppSpec` needs an `init`; the real state comes from `App::init`, which has the handle.
 fn placeholder() -> App {
     App::with_devices(crate::audio::Devices::default(), None)
+}
+
+/// This run renders a still with `--snap`, so entrance animations start settled.
+pub fn snapping() -> bool {
+    static SNAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SNAP.get_or_init(|| std::env::args().any(|arg| arg == "--snap"))
+}
+
+/// The window size a headless run asks for with `--size WxH`, so a single frame lays out
+/// against it before any layout has reported the real size.
+pub fn requested_size() -> Option<(f32, f32)> {
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|arg| arg == "--size")?;
+    parse_size(args.get(at + 1)?)
+}
+
+fn parse_size(value: &str) -> Option<(f32, f32)> {
+    let (w, h) = value.split_once(['x', 'X'])?;
+    let size = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (size.0 > 0.0 && size.1 > 0.0).then_some(size)
+}
+
+#[cfg(test)]
+#[test]
+fn a_requested_size_is_read_as_width_by_height() {
+    assert_eq!(parse_size("760x560"), Some((760.0, 560.0)));
+    assert_eq!(parse_size("760"), None);
+    assert_eq!(parse_size("0x5"), None);
 }
 
 /// Flags handled by Rune's headless tooling rather than the app.

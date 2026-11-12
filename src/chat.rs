@@ -182,6 +182,8 @@ pub enum Action {
     Filter(Filter),
     /// Starts or shows the private conversation with a client.
     Message(u16),
+    /// Starts or shows the private conversation with whoever wrote a line, by its id.
+    MessageFrom(u64),
     /// Forgets a private conversation's tab; its lines come back if it is opened again.
     ClosePeer(String),
     /// Forgets a left channel's tab.
@@ -225,6 +227,8 @@ pub struct Chat {
     /// Tabs is on its All tab: every conversation together, tagged as the feed tags them.
     pub everything: bool,
     pub draft: String,
+    /// The last paste didn't fit and was cut at `MAX_BYTES`; cleared by the next edit.
+    pub draft_cut: bool,
     unread: Vec<(Scope, u32)>,
     /// Sent and not yet seen coming back, oldest first.
     sent: Vec<Sent>,
@@ -242,11 +246,12 @@ struct Sent {
     scope: Scope,
     /// As the history would show it.
     text: String,
+    /// As it was typed, to put back in the box if the server refuses it.
+    draft: String,
     at: Instant,
 }
 
 impl Chat {
-    #[cfg(test)]
     pub fn entries(&self) -> impl DoubleEndedIterator<Item = &Entry> {
         self.entries.iter()
     }
@@ -340,14 +345,20 @@ impl Chat {
         self.sent.push(Sent {
             scope,
             text: plain(text),
+            draft: self.draft.trim().to_owned(),
             at: now,
         });
     }
 
-    /// The server refused a message: the oldest one waiting isn't coming back.
+    /// The server refused a message: the oldest one waiting isn't coming back. Its text goes
+    /// back in the box unless something new is being written there.
     pub fn refused(&mut self) {
-        if !self.sent.is_empty() {
-            self.sent.remove(0);
+        if self.sent.is_empty() {
+            return;
+        }
+        let lost = self.sent.remove(0);
+        if self.draft.trim().is_empty() {
+            self.draft = lost.draft;
         }
     }
 
@@ -668,6 +679,18 @@ impl Chat {
         }
     }
 
+    /// Unread lines among what `layout` has on screen: those that came while you read back.
+    pub fn unread_shown(&self, layout: Layout) -> u32 {
+        self.unread
+            .iter()
+            .filter(|(scope, _)| match layout {
+                Layout::Tabs => self.everything || *scope == self.target,
+                Layout::Feed => self.filter.shows(scope),
+            })
+            .map(|(_, count)| count)
+            .sum()
+    }
+
     /// Clears what `layout` has on screen. True when that changed a count.
     pub fn mark_seen(&mut self, layout: Layout) -> bool {
         let before = self.unread.len();
@@ -681,12 +704,15 @@ impl Chat {
     }
 }
 
-/// Text as people read it: TeamSpeak's BBCode tags removed, their content kept. A link written
+/// Text as people read it: BBCode tags removed, their content kept, TeamSpeak's own and the
+/// common forum ones other clients send (`[quote]`, `[code]`, `[table]` …). A link written
 /// `[URL=address]label[/URL]` keeps both when they differ. Control characters other than line
 /// breaks are dropped.
 pub fn plain(text: &str) -> String {
-    const TAGS: [&str; 12] = [
+    const TAGS: [&str; 26] = [
         "b", "i", "u", "s", "url", "img", "color", "size", "center", "left", "right", "list",
+        "*", "hr", "table", "tr", "th", "td", "quote", "code", "font", "ul", "ol", "li", "sub",
+        "sup",
     ];
     let mut out = String::with_capacity(text.len().min(MAX_RECEIVED));
     // The address of an open `[URL=…]`, added after its label.
@@ -740,16 +766,28 @@ pub fn plain(text: &str) -> String {
         .to_owned()
 }
 
-/// Where the web addresses in `text` are, as byte ranges.
+/// Where the web addresses in `text` are, as byte ranges: those that start `http://` or
+/// `https://`, and bare ones that start `www.`.
 pub fn links(text: &str) -> Vec<Range<usize>> {
     let mut found = Vec::new();
     let mut from = 0;
-    while let Some(at) = ["https://", "http://"]
+    while let Some(at) = ["https://", "http://", "www."]
         .iter()
         .filter_map(|scheme| text[from..].find(scheme))
         .min()
     {
         let start = from + at;
+        let bare = text[start..].starts_with("www.");
+        // `www.` inside a word (`awww.`) or an address is no address of its own.
+        if bare
+            && text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '/' | '@' | '-'))
+        {
+            from = start + 1;
+            continue;
+        }
         let mut end = text[start..]
             .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '[' | ']'))
             .map_or(text.len(), |length| start + length);
@@ -757,12 +795,30 @@ pub fn links(text: &str) -> Vec<Range<usize>> {
         while text[start..end].ends_with(['.', ',', ';', ':', '!', '?', ')', '\'']) {
             end -= 1;
         }
-        if text[start..end].contains("://") && end - start > "https://".len() {
+        let address = &text[start..end];
+        let whole = if bare {
+            // A name after `www.` with a dot in it: `www.example.org`.
+            address["www.".len()..]
+                .split_once('.')
+                .is_some_and(|(name, rest)| !name.is_empty() && !rest.is_empty())
+        } else {
+            address.contains("://") && end - start > "https://".len()
+        };
+        if whole {
             found.push(start..end);
         }
         from = end.max(start + 1);
     }
     found
+}
+
+/// What a link found by `links` opens: a bare `www.` address over https.
+pub fn address(link: &str) -> String {
+    if link.starts_with("www.") {
+        format!("https://{link}")
+    } else {
+        link.to_owned()
+    }
 }
 
 /// A message as it is sent: trimmed, cut to what a server takes, and its web addresses wrapped
@@ -980,12 +1036,22 @@ mod tests {
         assert!(chat.receive(own("hello"), "Lobby").is_some());
         assert_eq!(chat.entries().count(), 2);
 
-        // Refused: nothing is shown.
-        let mut chat = Chat::default();
+        // Refused: nothing is shown, and the text goes back in the empty box.
+        let mut chat = Chat {
+            draft: "hi all ".into(),
+            ..Chat::default()
+        };
         chat.sent(Scope::Server, "hi all", base);
+        chat.draft.clear();
         chat.refused();
         assert!(!chat.overdue(base + Duration::from_secs(3), "Jan", "Lobby"));
         assert!(chat.is_empty_for_tests());
+        assert_eq!(chat.draft, "hi all");
+        // Something new in the box stays.
+        chat.sent(Scope::Server, "hi all", base);
+        chat.draft = "next".into();
+        chat.refused();
+        assert_eq!(chat.draft, "next");
     }
 
     #[test]
@@ -1105,6 +1171,33 @@ mod tests {
         );
         assert_eq!(plain("open [ only"), "open [ only");
         assert_eq!(plain("line\none\u{7}"), "line\none");
+        // Tags other clients send lose their brackets and keep their text.
+        assert_eq!(
+            plain("[quote]wipe at 10%[/quote][hr][code]/dps[/code]"),
+            "wipe at 10%/dps"
+        );
+        assert_eq!(
+            plain("[table][tr][td]tank[/td][td]Ines[/td][/tr][/table]"),
+            "tankInes"
+        );
+        assert_eq!(plain("[list][*]one[*]two[/list]"), "onetwo");
+    }
+
+    #[test]
+    fn bare_www_addresses_are_links() {
+        let text = "try www.example.org/raid, or awww.no and www.nodot";
+        let found: Vec<_> = links(text).into_iter().map(|range| &text[range]).collect();
+        assert_eq!(found, ["www.example.org/raid"]);
+        assert_eq!(address(found[0]), "https://www.example.org/raid");
+        assert_eq!(address("http://a.io"), "http://a.io");
+        // Inside a full address it is found once, with the scheme.
+        let text = "see https://www.example.org";
+        let found: Vec<_> = links(text).into_iter().map(|range| &text[range]).collect();
+        assert_eq!(found, ["https://www.example.org"]);
+        assert_eq!(
+            outgoing("www.example.org").unwrap(),
+            "[URL]www.example.org[/URL]"
+        );
     }
 
     #[test]
