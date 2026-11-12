@@ -295,9 +295,7 @@ fn offline(detail: String) -> Problem {
     tracing::debug!("Collection server: {detail}");
     Problem {
         error: OFFLINE.into(),
-        message: "Can't reach the collection server. Check your connection and the address in \
-                  Settings › WIP."
-            .into(),
+        message: "Can't reach the collection server. Check your connection.".into(),
         tries_left: None,
     }
 }

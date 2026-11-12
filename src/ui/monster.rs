@@ -72,6 +72,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
                 .then(|| warm_up(reduced)),
         )
         .child(tabs(s, t, section))
+        .children(sync_choice(s, t))
         .children(sections);
     // Keyed by section, so each one opens at its top.
     scroll_page(k, &format!("monster-scroll-{key}"), content)
@@ -563,18 +564,10 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
                 .child(
                     muted(
                         t,
-                        "The leaderboard needs a collection server. Set one in Settings › WIP.",
+                        "This build has no collection server, so there is no leaderboard.",
                     )
                     .grow(1.0),
-                )
-                .child(button(
-                    t,
-                    "monster-open-wip",
-                    "Open Settings",
-                    None,
-                    Variant::Secondary,
-                    Some(Message::OpenSettings(crate::SettingsPage::Wip)),
-                )),
+                ),
         ];
     }
     let ranking = tracker.ranking;
@@ -919,6 +912,7 @@ fn tabs(s: &App, t: &Theme, section: Section) -> El {
                 .key("monster-account")
                 .gap(size::GAP)
                 .center_y()
+                .children(sync_status(s).map(|line| faint(t, line).key("monster-sync-status")))
                 .child(icon(&icons::USER, 14.0).color(t.faint).a11y_hidden())
                 .child(faint(t, me.email.clone()).truncate())
                 .child(button(
@@ -932,6 +926,66 @@ fn tabs(s: &App, t: &Theme, section: Section) -> El {
         );
     }
     bar
+}
+
+/// How settings sync stands, beside the account; nothing while signed out or choosing.
+fn sync_status(s: &App) -> Option<String> {
+    use crate::settings_sync::{Status, ago};
+    let signed_in = s.monster.online() && s.monster.session.is_some();
+    Some(match s.settings_sync.status(signed_in) {
+        Status::SignedOut | Status::Choose => return None,
+        Status::Syncing => "Syncing settings…".into(),
+        Status::UpToDate(Some(at)) => format!("Settings synced {}", ago(at.elapsed())),
+        Status::UpToDate(None) => "Settings synced".into(),
+        Status::Offline => "Settings sync can't reach the server".into(),
+    })
+}
+
+/// Settings sync is on whenever you're signed in. The first time this computer and the account
+/// have different settings, nothing changes until you pick which to keep, here under the tabs.
+fn sync_choice(s: &App, t: &Theme) -> Option<El> {
+    use crate::settings_sync::{Choice, Status};
+    let signed_in = s.monster.online() && s.monster.session.is_some();
+    if s.settings_sync.status(signed_in) != Status::Choose {
+        return None;
+    }
+    Some(
+        well(t)
+            .key("settings-sync-choice")
+            .padding(size::GAP * 2.0)
+            .gap(size::GAP)
+            .child(
+                text("Your account has other settings")
+                    .font(ty::HEADING)
+                    .color(t.text),
+            )
+            .child(muted(
+                t,
+                "Your servers, nickname and preferences on this account differ from this \
+                 computer's. Nothing changes until you choose.",
+            ))
+            .child(
+                row()
+                    .gap(size::GAP)
+                    .flex_wrap()
+                    .child(button(
+                        t,
+                        "settings-sync-account",
+                        "Use My Account's Settings",
+                        None,
+                        Variant::Primary,
+                        Some(Message::SettingsSyncChoice(Choice::Account)),
+                    ))
+                    .child(button(
+                        t,
+                        "settings-sync-computer",
+                        "Keep This Computer's",
+                        None,
+                        Variant::Secondary,
+                        Some(Message::SettingsSyncChoice(Choice::ThisComputer)),
+                    )),
+            ),
+    )
 }
 
 fn overview(s: &App, t: &Theme, k: &Kit, today: NaiveDate, reduced: bool) -> Vec<El> {

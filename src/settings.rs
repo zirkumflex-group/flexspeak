@@ -85,18 +85,19 @@ pub struct Settings {
     /// Settings > Chat. Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Chat::is_default")]
     pub chat: Chat,
-    /// The Monster collection server (Settings > WIP). Without one the page keeps its cans on
-    /// this computer only and never goes online.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The collection server typed in Settings before the address was built into the app
+    /// (`FLEXSPEAK_COLLECTION_SERVER`). Read so older files still load, and so a session from
+    /// another server is dropped; never written again.
+    #[serde(skip_serializing)]
     pub monster_server: Option<String>,
     /// The session with that server, sealed with DPAPI (`secret::protect`). Windows only:
     /// other systems keep it in `monster-session` beside this file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monster_session: Option<String>,
-    /// Keeps the settings in [`Synced`] the same on every computer signed in to the collection
-    /// server (Settings > WIP). On unless turned off; it does nothing while signed out.
-    #[serde(skip_serializing_if = "is_true")]
-    pub settings_sync: bool,
+    /// The old switch for settings sync, which is now always on while signed in. Read so older
+    /// files still load; never written again.
+    #[serde(rename = "settings_sync", skip_serializing)]
+    pub retired_settings_sync: Option<bool>,
     /// The version of the account's settings this computer last saw; 0 for none. Forgotten on
     /// signing out, so the next account starts by comparing.
     #[serde(skip_serializing_if = "is_zero")]
@@ -725,7 +726,7 @@ impl Default for Settings {
             chat: Chat::default(),
             monster_server: None,
             monster_session: None,
-            settings_sync: true,
+            retired_settings_sync: None,
             settings_sync_version: 0,
         }
     }
@@ -1156,9 +1157,7 @@ mod tests {
                 fast_capture: false,
             },
             skip_install_prompt: true,
-            monster_server: Some("https://collection.example.com".into()),
             monster_session: Some("sealed".into()),
-            settings_sync: false,
             settings_sync_version: 7,
             ..Settings::default()
         };
@@ -1194,9 +1193,7 @@ mod tests {
         assert_eq!(here.collapsed_channels, before.collapsed_channels);
         assert_eq!(here.streaming, before.streaming);
         assert!(here.skip_install_prompt);
-        assert_eq!(here.monster_server, before.monster_server);
         assert_eq!(here.monster_session, before.monster_session);
-        assert!(!here.settings_sync);
         assert_eq!(here.settings_sync_version, 7);
     }
 

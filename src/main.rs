@@ -218,10 +218,6 @@ struct App {
     audio_unsaved: bool,
     /// Why the nickname typed in Settings wasn't kept, shown under its field.
     nickname_error: Option<String>,
-    /// The collection server address as typed in Settings › WIP; kept when the field is left.
-    monster_server_draft: String,
-    /// Why that address wasn't kept, shown under its field.
-    monster_server_error: Option<String>,
     #[cfg(test)]
     played_sounds: Vec<sounds::Sound>,
     /// System notifications shown, by title.
@@ -621,11 +617,10 @@ enum SettingsPage {
     Updates,
     Errors,
     File,
-    Wip,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 12] = [
         Self::Server,
         Self::Appearance,
         Self::Chat,
@@ -638,7 +633,6 @@ impl SettingsPage {
         Self::Updates,
         Self::Errors,
         Self::File,
-        Self::Wip,
     ];
 
     fn title(self) -> &'static str {
@@ -655,7 +649,6 @@ impl SettingsPage {
             Self::Updates => "Updates",
             Self::Errors => "Error Log",
             Self::File => "Settings File",
-            Self::Wip => "WIP",
         }
     }
 }
@@ -1074,8 +1067,6 @@ enum Message {
     UsageTick,
     ShowTab(Tab),
     OpenSettings(SettingsPage),
-    /// Leaves Settings for the secret page its WIP section links to.
-    OpenMonster,
     /// Records a can of this flavour, by its place in `FLAVOURS`, drunk just now.
     MonsterAdd(usize),
     MonsterSearch(String),
@@ -1096,12 +1087,6 @@ enum Message {
     MonsterHidden(bool),
     /// A sign-in field was typed in; the field itself holds the text.
     MonsterSignInTyped,
-    /// The collection server address field was typed in.
-    MonsterServer(String),
-    /// Keeps the collection server address typed, as leaving the field does.
-    CommitMonsterServer,
-    /// Settings › WIP: keep settings and servers the same on every computer, or stop.
-    SettingsSync(bool),
     /// Which copy to keep when this computer's settings and the account's first differ.
     SettingsSyncChoice(settings_sync::Choice),
     /// The collection server answered settings sync.
@@ -1218,6 +1203,7 @@ impl App {
         app.window_focused = !app.window_hidden;
         app.autostart = autostart::current();
         app.system_dark = system_appearance::is_dark().unwrap_or(true);
+        app.monster.set_server(monster::built_in_server());
         match settings::path() {
             Ok(path) => app.load_settings(path),
             Err(error) => app.alerts.raise(Source::SettingsLoad, format!("{error:#}")),
@@ -1262,7 +1248,7 @@ impl App {
         }
         // Settings sync checks the account at launch, so the session is read now rather than
         // when the Monster page first opens.
-        if app.onboarding.is_none() && app.settings_sync.enabled && app.monster.online() {
+        if app.onboarding.is_none() && app.monster.online() {
             app.monster.session = app.read_monster_session();
             app.monster.session_read = true;
         }
@@ -1341,8 +1327,6 @@ impl App {
             sounds_unsaved: false,
             audio_unsaved: false,
             nickname_error: None,
-            monster_server_draft: String::new(),
-            monster_server_error: None,
             #[cfg(test)]
             played_sounds: Vec::new(),
             #[cfg(test)]
@@ -1388,7 +1372,7 @@ impl App {
             ram_history,
             tab: Tab::Home,
             monster: monster::Tracker::default(),
-            settings_sync: settings_sync::SettingsSync::new(true, 0),
+            settings_sync: settings_sync::SettingsSync::new(0),
             #[cfg(test)]
             settings_sync_sent: Vec::new(),
             reveal_sound: None,
@@ -2095,13 +2079,29 @@ impl App {
         }
     }
 
+    /// Files from before the collection server was built in may name the one typed in Settings
+    /// then. A session with another server is no good with this one, and neither is the
+    /// settings version that account saw, so both are dropped; true when they were. The old
+    /// fields go either way, and the next save leaves them out.
+    fn retire_typed_server(&self, saved: &mut settings::Settings) -> bool {
+        saved.retired_settings_sync = None;
+        let Some(typed) = saved.monster_server.take() else {
+            return false;
+        };
+        if Some(typed.trim_end_matches('/')) == self.monster.server.as_deref() {
+            return false;
+        }
+        saved.monster_session = None;
+        saved.settings_sync_version = 0;
+        true
+    }
+
     fn load_settings(&mut self, path: PathBuf) {
+        let mut forget_session = false;
         match settings::load(&path) {
-            Ok(Some(saved)) => {
-                self.settings_sync = settings_sync::SettingsSync::new(
-                    saved.settings_sync,
-                    saved.settings_sync_version,
-                );
+            Ok(Some(mut saved)) => {
+                forget_session = self.retire_typed_server(&mut saved);
+                self.settings_sync = settings_sync::SettingsSync::new(saved.settings_sync_version);
                 self.apply_settings(saved);
                 self.onboarding = None;
             }
@@ -2112,6 +2112,9 @@ impl App {
             }
         }
         self.settings_path = Some(path);
+        if forget_session {
+            self.forget_monster_session_file();
+        }
     }
 
     /// Looks for a TeamSpeak 6 install to offer. Nothing is read until the user asks.
@@ -2602,12 +2605,6 @@ impl App {
         }
         self.theme_library = themes::Library::new(&saved.custom_themes);
         self.custom_themes = saved.custom_themes;
-        if self.monster.server != saved.monster_server {
-            self.end_reveal();
-            self.monster.set_server(saved.monster_server.clone());
-        }
-        self.monster_server_draft = saved.monster_server.unwrap_or_default();
-        self.monster_server_error = None;
     }
 
     fn edited_settings(&self) -> settings::Settings {
@@ -2652,12 +2649,12 @@ impl App {
                     .is_some_and(|saved| saved.skip_install_prompt),
             close_button: self.close_button(),
             window: self.saved.as_ref().and_then(|saved| saved.window),
-            monster_server: self.monster.server.clone(),
+            monster_server: None,
             monster_session: self
                 .saved
                 .as_ref()
                 .and_then(|saved| saved.monster_session.clone()),
-            settings_sync: self.settings_sync.enabled,
+            retired_settings_sync: None,
             settings_sync_version: self.settings_sync.seen,
         }
     }
@@ -2797,44 +2794,6 @@ impl App {
             |saved| saved.appearance = appearance,
             "The appearance choice applies for now but was not saved",
         );
-    }
-
-    /// Stores one choice that applies at once in the saved settings, leaving other unsaved edits
-    /// alone. Before setup has saved anything, the choice is kept for the first save.
-    /// Whether the collection server address typed differs from the one in use.
-    fn monster_server_edited(&self) -> bool {
-        monster::server_address(&self.monster_server_draft)
-            .map_or(true, |address| address != self.monster.server)
-    }
-
-    /// Keeps the collection server address typed in Settings › WIP, or says under its field why
-    /// it can't be kept. A new address starts signed out.
-    fn commit_monster_server(&mut self) {
-        let address = match monster::server_address(&self.monster_server_draft) {
-            Ok(address) => address,
-            Err(problem) => {
-                self.monster_server_error = Some(problem.into());
-                return;
-            }
-        };
-        self.monster_server_error = None;
-        if address == self.monster.server {
-            return;
-        }
-        let kept = address.clone();
-        // Another server is another account: its settings start by comparing.
-        let _ = self.settings_sync.signed_out();
-        self.save_preference(
-            |saved| {
-                saved.monster_server = kept;
-                saved.monster_session = None;
-                saved.settings_sync_version = 0;
-            },
-            "The collection server applies for now but was not saved",
-        );
-        self.forget_monster_session_file();
-        self.end_reveal();
-        self.monster.set_server(address);
     }
 
     /// The session kept from the last launch.
@@ -3149,6 +3108,8 @@ impl App {
         }
     }
 
+    /// Stores one choice that applies at once in the saved settings, leaving other unsaved edits
+    /// alone. Before setup has saved anything, the choice is kept for the first save.
     fn save_preference(&mut self, change: impl FnOnce(&mut settings::Settings), failed: &str) {
         let Some(mut saved) = self.saved.clone() else {
             return;
@@ -3538,12 +3499,6 @@ impl App {
         if !self.ui.nickname.focused && self.nickname_edited() && self.nickname_error.is_none() {
             self.commit_nickname();
         }
-        if !self.ui.monster_server.focused
-            && self.monster_server_edited()
-            && self.monster_server_error.is_none()
-        {
-            self.commit_monster_server();
-        }
         let session = self.monster.session.clone();
         let task = self.update_inner(message);
         // Whatever the message added to a conversation goes to the history on disk.
@@ -3804,10 +3759,6 @@ impl App {
                 }
             }
             Message::CloseSettings => self.close_settings(),
-            Message::OpenMonster => {
-                self.close_settings();
-                return self.update(Message::ShowTab(Tab::Monster));
-            }
             Message::MonsterSearch(query) => self.monster.query = query,
             Message::MonsterAdd(flavour) => {
                 // A can tapped while another is being opened waits for it to finish.
@@ -3907,19 +3858,6 @@ impl App {
                     *wrong = false;
                     *resent = false;
                 }
-            }
-            Message::MonsterServer(value) => {
-                self.monster_server_draft = value;
-                self.monster_server_error = None;
-            }
-            Message::CommitMonsterServer => self.commit_monster_server(),
-            Message::SettingsSync(on) => {
-                self.save_preference(
-                    |saved| saved.settings_sync = on,
-                    "The sync choice applies for now but was not saved",
-                );
-                let now = Instant::now();
-                return self.with_settings_sync(|sync, ctx| sync.set_enabled(on, now, ctx));
             }
             Message::SettingsSyncChoice(choice) => {
                 let now = Instant::now();
@@ -7181,6 +7119,59 @@ mod tests {
                 .auto_download_updates
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_collection_server_typed_before_it_was_built_in_is_retired() {
+        let built_in = "https://collection.zirkumflex.io";
+        // A file as older versions wrote it, with the server typed in Settings › WIP.
+        let file = |typed: &str| {
+            let mut json = serde_json::to_value(settings::Settings::default()).unwrap();
+            let fields = json.as_object_mut().unwrap();
+            fields.insert("monster_server".into(), typed.into());
+            fields.insert("monster_session".into(), "sealed".into());
+            fields.insert("settings_sync".into(), false.into());
+            fields.insert("settings_sync_version".into(), 5.into());
+            json.to_string()
+        };
+        // The same server, typed with a slash: the session and version still hold.
+        let (mut app, root) = setup_fixture("retired-server-same");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        std::fs::write(&path, file(&format!("{built_in}/"))).unwrap();
+        app.monster.set_server(Some(built_in.into()));
+        app.load_settings(path.clone());
+        let saved = app.saved.clone().unwrap();
+        assert_eq!(saved.monster_session.as_deref(), Some("sealed"));
+        assert_eq!(app.settings_sync.seen, 5);
+        assert_eq!(saved.monster_server, None);
+        let edited = app.edited_settings();
+        assert_eq!(
+            edited.monster_server, saved.monster_server,
+            "nothing looks unsaved"
+        );
+        assert_eq!(edited.retired_settings_sync, saved.retired_settings_sync);
+        assert_eq!(edited.monster_session, saved.monster_session);
+        // Another server: its session and the version that account saw are dropped.
+        let (mut other, other_root) = setup_fixture("retired-server-other");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let other_path = other_root.join("settings.json");
+        std::fs::write(&other_path, file("https://collection.example.com")).unwrap();
+        other.monster.set_server(Some(built_in.into()));
+        other.load_settings(other_path.clone());
+        assert_eq!(other.saved.as_ref().unwrap().monster_session, None);
+        assert_eq!(other.settings_sync.seen, 0);
+        // The next save leaves the old fields out.
+        let _ = other.update(Message::Appearance(settings::Appearance {
+            disable_animations: true,
+            ..settings::Appearance::default()
+        }));
+        let text = std::fs::read_to_string(&other_path).unwrap();
+        assert!(!text.contains("monster_server"), "{text}");
+        assert!(!text.contains("\"settings_sync\""), "{text}");
+        assert!(!text.contains("monster_session"), "{text}");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
     }
 
     #[test]

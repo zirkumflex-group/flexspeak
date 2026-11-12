@@ -89,8 +89,19 @@ pub struct Visit {
     pub problem: Option<String>,
 }
 
-/// The collection server address typed in Settings: `None` when empty, which keeps the page
-/// on this computer only.
+/// The collection server this build talks to, fixed when it is built from
+/// `FLEXSPEAK_COLLECTION_SERVER` (`.cargo/config.toml` sets it; the environment overrides).
+/// Empty keeps the page on this computer only.
+pub fn built_in_server() -> Option<String> {
+    let address = option_env!("FLEXSPEAK_COLLECTION_SERVER").unwrap_or_default();
+    server_address(address).unwrap_or_else(|problem| {
+        tracing::warn!("FLEXSPEAK_COLLECTION_SERVER {address:?} is not used: {problem}");
+        None
+    })
+}
+
+/// A collection server address, tidied: `None` when empty, which keeps the page on this
+/// computer only.
 pub fn server_address(typed: &str) -> Result<Option<String>, &'static str> {
     let address = typed.trim().trim_end_matches('/');
     if address.is_empty() {
