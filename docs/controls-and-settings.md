@@ -39,7 +39,7 @@ Default global shortcuts:
 
 Both use the same control handlers as the buttons and work on every page, on the active server: with more than one connected, a hint under the server name says so. They act only during a connected voice session, not during connection setup, shutdown or the local microphone test. Holding a key does not repeatedly toggle it: macOS/X11 events are filtered by press/release state; Windows registration uses `MOD_NOREPEAT`.
 
-Lucide icons accompany the CPU, RAM, server, channel, microphone, playback and volume labels. The microphone icon reflects effective transmission state, including deafen and server restrictions; the crossed-out headphones indicate deafen.
+Lucide icons accompany the CPU, RAM, server, channel, microphone, playback and volume labels. The microphone icon reflects effective transmission state, including deafen and server restrictions; the crossed-out headphones indicate deafen. The microphone button's tooltip says why it is off (muted, deafened or blocked by the server) and names the push-to-talk or voice activation mode and key; the mute and deafen tooltips end with their global keys.
 
 ## Change and save controls
 
