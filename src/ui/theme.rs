@@ -189,10 +189,14 @@ pub mod ty {
     use rune::TextStyle;
     pub const DISPLAY: TextStyle = TextStyle::new(22.0, 650.0).tracking(-0.3);
     pub const TITLE: TextStyle = TextStyle::new(17.0, 620.0).tracking(-0.2);
-    /// A card's title: the server in the sidebar.
+    /// The server at the top of the sidebar: a clear step above the channels under it.
+    pub const SERVER: TextStyle = TextStyle::new(16.0, 650.0).tracking(-0.2);
+    /// A card's title.
     pub const SUBTITLE: TextStyle = TextStyle::new(14.0, 620.0).tracking(-0.1);
     pub const HEADING: TextStyle = TextStyle::new(13.0, 600.0);
     pub const BODY: TextStyle = TextStyle::new(13.0, 400.0);
+    /// Between body and strong: a channel with people in it.
+    pub const BODY_MEDIUM: TextStyle = TextStyle::new(13.0, 500.0);
     pub const BODY_STRONG: TextStyle = TextStyle::new(13.0, 560.0);
     pub const LABEL: TextStyle = TextStyle::new(13.0, 400.0);
     pub const SMALL: TextStyle = TextStyle::new(11.5, 400.0);

@@ -867,7 +867,7 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
         )
         .child(
             text(name)
-                .font(ty::SUBTITLE)
+                .font(ty::SERVER)
                 .color(t.text)
                 .truncate_fade()
                 .grow(1.0)
@@ -903,7 +903,9 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
         .w(f32::from(s.sidebar_width))
         .padding(12.0)
         .gap(8.0)
-        .child(server)
+        // More room under the server than between the panes below it, so it heads the tree
+        // instead of reading as its first row.
+        .child(server.mb(6.0))
         // The channel list takes the free height, so the voice controls sit at the bottom. The
         // tree needs no heading: the server above it says whose channels they are.
         .child(scroll_page(
@@ -1674,6 +1676,9 @@ const CHANNEL_INDENT: f32 = 14.0;
 /// How far its members do: their icons and names line up with its subchannels', one level
 /// below the channel's own.
 const MEMBER_INDENT: f32 = 32.0;
+/// The extra space above each channel, on top of the tree's own gap, so a channel's people
+/// sit closer to it than to the channel after them.
+const CHANNEL_GAP: f32 = 6.0;
 
 fn channel_tree(s: &App, t: &Theme) -> El {
     let mut tree = col().key("channels").w_full().gap(2.0);
@@ -1730,7 +1735,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             format!("channel-{}", channel.id),
             (
                 channel,
-                (collapsed, foldable),
+                (collapsed, foldable, index == 0),
                 current,
                 member_versions,
                 t,
@@ -1776,6 +1781,15 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 } else {
                     t.text
                 };
+                // Weight says the same in a second voice: yours strongest, then one with people
+                // in it, then an empty one, so the server above stays the only heading.
+                let weight = if current {
+                    ty::HEADING
+                } else if channel.members.is_empty() {
+                    ty::BODY
+                } else {
+                    ty::BODY_MEDIUM
+                };
                 let mut name = row()
                     .key("name")
                     .role("button")
@@ -1803,7 +1817,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     )
                     .child(
                         text(channel.name.clone())
-                            .font(ty::BODY_STRONG)
+                            .font(weight)
                             .color(ink)
                             .truncate_fade()
                             .grow(1.0)
@@ -1888,6 +1902,8 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     .key(format!("channel-{}", channel.id))
                     .w_full()
                     .gap(2.0)
+                    // A step above each channel sets its people apart from the next one.
+                    .mt(if index == 0 { 0.0 } else { CHANNEL_GAP })
                     .pl(channel.depth.min(8) as f32 * CHANNEL_INDENT)
                     .child(
                         row()
@@ -2025,18 +2041,19 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
         .child(voice_icon(t, talking, mic_muted, sound_muted))
         .child(
-            text(if member.is_self {
-                format!("{} (you)", member.name)
-            } else {
-                member.name.clone()
-            })
-            // Someone talking reads in a heavier weight as well as by the ring.
-            .font(if talking { ty::BODY_STRONG } else { ty::BODY })
-            .color(t.text)
-            .truncate_fade()
-            .grow(1.0)
-            .min_w(0.0),
+            text(member.name.clone())
+                // Someone talking reads in a heavier weight as well as by the ring.
+                .font(if talking { ty::BODY_STRONG } else { ty::BODY })
+                .color(t.text)
+                .truncate_fade()
+                // Gives way to "(you)" and the badges after it when the name is long.
+                .shrink(),
         );
+    // "(you)" is a note about the name, not part of it, so it steps back.
+    if member.is_self {
+        entry = entry.child(text("(you)").font(ty::BODY).color(t.muted).a11y_hidden());
+    }
+    entry = entry.child(el().grow(1.0).a11y_hidden());
     if let Some(lit) = s.server().unboxed.get(&member.id)
         && let Some(level) = lit.glow(Instant::now() - lit.at)
     {
@@ -2136,10 +2153,12 @@ fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> E
             .label(help)
             .child(struck(t, glyph, &icons::STRIKE, 13.0).key("muted"));
     }
+    // Idle draws nothing, so the column only shows what matters: someone talking or muted. A
+    // hollow ring on every quiet person read as a checkbox.
     let (ring, fill, glow) = if talking {
         (t.good, t.good, t.good.alpha(0.55))
     } else {
-        (t.faint.alpha(0.7), t.good.alpha(0.0), t.good.alpha(0.0))
+        (t.good.alpha(0.0), t.good.alpha(0.0), t.good.alpha(0.0))
     };
     let help = if talking { "Speaking" } else { "Not speaking" };
     slot.help(help).label(help).child(
