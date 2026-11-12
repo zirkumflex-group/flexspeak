@@ -22,6 +22,8 @@
 //! | `POST /v1/cans/import` | [`Import`] | [`Imported`]; once for each account |
 //! | `GET /v1/leaderboard?by=collection` | | [`Leaderboard`], best first |
 //! | `GET /v1/users/{id}/cans` | | [`Collection`]; 404 if that person is hidden |
+//! | `GET /v1/settings` | | [`SyncedSettings`]; 404 if nothing was saved yet |
+//! | `PUT /v1/settings` | [`PutSettings`] | [`SettingsSaved`]; 409 `conflict` if another computer saved first |
 //! | `GET /health` | | 200 |
 //!
 //! # Signing in
@@ -34,6 +36,19 @@
 //!    [`LoginFinished::SignedIn`] straight away.
 //! 4. Later, `login/passkey` gives a ticket for the same page, which signs in with the
 //!    passkey alone: no email.
+//!
+//! # Keeping settings the same on every computer
+//!
+//! The server keeps one copy of an account's settings as JSON it never looks inside; only the
+//! app knows what is in it. Each save gets the next version number, from 1.
+//!
+//! - A computer remembers the last version it saw. To save, it sends that as
+//!   [`PutSettings::base`] (0 if it has seen none).
+//! - If `base` is still the server's version, the save is taken and answered with the new
+//!   version. If another computer saved in between, the answer is 409 `conflict`: the app
+//!   fetches the newer copy, takes it, and its own unsaved change is lost. Two computers
+//!   changing settings in the same moment is rare enough for that.
+//! - A computer that finds a version above the one it remembers takes that copy.
 //!
 //! # Linking a TeamSpeak identity
 //!
@@ -87,6 +102,8 @@ pub mod problem {
     pub const NOT_FOUND: &str = "not_found";
     /// 409: the identity is linked to another account, or the cans were imported before.
     pub const TAKEN: &str = "taken";
+    /// 409: another computer saved the settings first. Fetch them and start from those.
+    pub const CONFLICT: &str = "conflict";
     /// 5xx.
     pub const SERVER: &str = "server";
 }
@@ -268,6 +285,34 @@ pub struct Collection {
     pub name: String,
     /// Oldest first.
     pub cans: Vec<Can>,
+}
+
+/// The most settings an account can keep, as JSON text. Far above what the app sends.
+pub const SETTINGS_BYTES: usize = 256 * 1024;
+
+/// The account's settings as last saved from any computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncedSettings {
+    /// Counts saves, from 1.
+    pub version: i64,
+    /// Unix seconds.
+    pub updated_at: i64,
+    /// Whatever the app saved. The server keeps it as it came.
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutSettings {
+    /// The version this computer last saw; 0 if none.
+    pub base: i64,
+    /// A JSON object, at most [`SETTINGS_BYTES`] as text.
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsSaved {
+    pub version: i64,
+    pub updated_at: i64,
 }
 
 #[cfg(test)]
