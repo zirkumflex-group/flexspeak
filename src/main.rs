@@ -758,10 +758,7 @@ fn viewer_sounds(
 }
 
 /// The names of people newly asking to watch your private share.
-fn asked_to_watch(
-    before: &streaming::publishing::Status,
-    event: &streaming::Event,
-) -> Vec<String> {
+fn asked_to_watch(before: &streaming::publishing::Status, event: &streaming::Event) -> Vec<String> {
     let streaming::Event::Publishing(after) = event else {
         return Vec::new();
     };
@@ -1282,7 +1279,11 @@ impl App {
         let Some(place) = window_place::current().or(self.window_place) else {
             return;
         };
-        if self.saved.as_ref().is_some_and(|saved| saved.window != Some(place)) {
+        if self
+            .saved
+            .as_ref()
+            .is_some_and(|saved| saved.window != Some(place))
+        {
             self.save_preference(
                 |saved| saved.window = Some(place),
                 "The window's size and place were not saved",
@@ -7493,7 +7494,9 @@ mod tests {
         let _ = app.update(Message::CloseChoice(None));
         assert!(!app.close_prompt && !app.closing);
         let _ = app.update(Message::Close);
-        let _ = app.update(Message::CloseChoice(Some(settings::CloseButton::HideToTray)));
+        let _ = app.update(Message::CloseChoice(Some(
+            settings::CloseButton::HideToTray,
+        )));
         assert!(!app.close_prompt && !app.closing && !app.window_focused);
         assert!(commands.try_recv().is_err(), "Still connected");
         let _ = app.update(Message::WindowFocus(true));

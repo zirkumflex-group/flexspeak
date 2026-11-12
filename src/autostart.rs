@@ -34,8 +34,7 @@ pub fn parse(command: Option<&str>) -> Autostart {
 #[cfg(windows)]
 mod native {
     use windows_sys::Win32::System::Registry::{
-        HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW,
-        RegSetKeyValueW,
+        HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
     };
 
     const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -64,7 +63,10 @@ mod native {
         if result != 0 {
             return None;
         }
-        let length = data.iter().position(|unit| *unit == 0).unwrap_or(data.len());
+        let length = data
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(data.len());
         Some(String::from_utf16_lossy(&data[..length]))
     }
 

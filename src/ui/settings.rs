@@ -1404,7 +1404,9 @@ fn window_section(s: &App, t: &Theme, k: &Kit) -> Section {
     let current = s.close_button();
     let close = rune_kit::SegmentedControl::new(
         &labels,
-        CloseButton::ALL.iter().position(|choice| *choice == current),
+        CloseButton::ALL
+            .iter()
+            .position(|choice| *choice == current),
     )
     .label("Close button")
     .fit()
@@ -1430,12 +1432,19 @@ fn window_section(s: &App, t: &Theme, k: &Kit) -> Section {
                 t,
                 "Start with Windows",
                 Some("Opens Flexspeak when you sign in."),
-                switch("start-with-windows", "Start with Windows", on.enabled, true, k, |s, enabled| {
-                    Message::SetAutostart(Autostart {
-                        enabled,
-                        ..s.autostart
-                    })
-                }),
+                switch(
+                    "start-with-windows",
+                    "Start with Windows",
+                    on.enabled,
+                    true,
+                    k,
+                    |s, enabled| {
+                        Message::SetAutostart(Autostart {
+                            enabled,
+                            ..s.autostart
+                        })
+                    },
+                ),
             ),
         ));
         rows.push(item(

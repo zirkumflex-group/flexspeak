@@ -676,7 +676,8 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         .flatten()
         .fold(s.next_usage_tick, Instant::min);
     tx.wake_after(wake.saturating_duration_since(now));
-    if s.server_mut().streaming.sync_frame() {
+    // Under Statistics streams keep running unseen; their frames don't redraw the window.
+    if s.server_mut().streaming.sync_frame() && s.tab == Tab::Home {
         changed = true;
     }
     changed | s.ui.rail_peek.expired(now)
@@ -920,7 +921,9 @@ pub fn run(launch: Launch) {
     let place = saved
         .as_ref()
         .and_then(|saved| saved.window)
-        .filter(|place| crate::window_place::usable(place) && crate::window_place::on_screen(place));
+        .filter(|place| {
+            crate::window_place::usable(place) && crate::window_place::on_screen(place)
+        });
     if place.is_some_and(|place| place.maximized) {
         crate::window_place::maximize_when_shown();
     }
