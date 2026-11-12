@@ -34,8 +34,13 @@ const MAX_BUFFER_SIZE: usize = 48_000 / 2;
 const MAX_BUFFER_PACKETS: usize = 50;
 /// Buffer for maximal 0.5 s without playing anything.
 const MAX_BUFFER_TIME: usize = 48_000 / 2;
-/// Duplicate or remove every `step` sample when speeding-up.
+/// Play one part in `step` faster when speeding-up.
 const SPEED_CHANGE_STEPS: usize = 100;
+/// The amount of samples a new talker waits for before playing: 40 ms. A packet that
+/// arrives late then finds audio still queued, instead of a gap that has to be concealed.
+const INITIAL_BUFFER_SAMPLES: usize = 2 * USUAL_FRAME_SIZE;
+/// Speeding-up never takes the buffer below this many queued packets.
+const MIN_BUFFER_PACKETS: u8 = 1;
 /// The usual amount of samples in a frame.
 ///
 /// Use 48 kHz, 20 ms frames (50 per second) and mono data (1 channel).
@@ -131,10 +136,6 @@ pub struct AudioQueue {
 /// Handles incoming audio, has one [`AudioQueue`] per sending client.
 pub struct AudioHandler<Id: Clone + Debug + Eq + Hash + PartialEq = ClientId> {
 	queues: HashMap<Id, AudioQueue>,
-	/// Buffer this amount of samples for new queues before starting to play.
-	///
-	/// Updated when a new queue gets added.
-	avg_buffer_samples: usize,
 }
 
 impl<T: Copy + Default + Ord> SlidingWindowMinimum<T> {
@@ -241,8 +242,9 @@ impl AudioQueue {
 		}
 		let samples;
 		if packet.data().data().data().len() <= 1 {
-			// End of stream
+			// End of stream: nothing more is coming to wait for.
 			samples = 0;
+			self.buffering_samples = 0;
 		} else {
 			let opus_packet =
 				packet.data().data().data().try_into().map_err(Error::GetPacketSample)?;
@@ -443,7 +445,7 @@ impl AudioQueue {
 				if let Some(p) = self.packet_buffer.front() {
 					self.next_id = p.id;
 				}
-			} else if min > dev {
+			} else if min > dev.max(MIN_BUFFER_PACKETS) {
 				// Speed-up
 				debug!(
 					min,
@@ -462,40 +464,94 @@ impl AudioQueue {
 	}
 }
 
+/// Shortens the last `frames` of the buffer by one part in `SPEED_CHANGE_STEPS`, resampling
+/// them along a smooth curve. Dropping samples instead leaves a small step at each one.
+/// The first and last frame stay as they are, so the audio on either side still joins up.
 fn compact_catch_up(buffer: &mut Vec<f32>, start: usize, frames: usize) {
-	let removed = frames / SPEED_CHANGE_STEPS;
-	let mut write = start;
-	for frame in 0..frames {
-		if frame % SPEED_CHANGE_STEPS == 0 && frame / SPEED_CHANGE_STEPS < removed {
-			continue;
-		}
-		let read = start + frame * CHANNEL_NUM;
-		buffer.copy_within(read..read + CHANNEL_NUM, write);
-		write += CHANNEL_NUM;
+	let kept = frames - frames / SPEED_CHANGE_STEPS;
+	if kept == frames || kept < 2 {
+		return;
 	}
-	buffer.truncate(write);
+	let source = buffer[start..start + frames * CHANNEL_NUM].to_vec();
+	let at = |frame: isize, channel: usize| {
+		source[frame.clamp(0, frames as isize - 1) as usize * CHANNEL_NUM + channel]
+	};
+	let ratio = (frames - 1) as f64 / (kept - 1) as f64;
+	for out in 0..kept {
+		let position = out as f64 * ratio;
+		let index = position as isize;
+		let t = (position - index as f64) as f32;
+		for channel in 0..CHANNEL_NUM {
+			// Catmull-Rom through the four frames around the position.
+			let (a, b, c, d) = (
+				at(index - 1, channel),
+				at(index, channel),
+				at(index + 1, channel),
+				at(index + 2, channel),
+			);
+			buffer[start + out * CHANNEL_NUM + channel] = b + 0.5
+				* t * (c - a
+				+ t * (2.0 * a - 5.0 * b + 4.0 * c - d + t * (3.0 * (b - c) + d - a)));
+		}
+	}
+	buffer.truncate(start + kept * CHANNEL_NUM);
 }
 
 #[test]
-fn catch_up_keeps_the_same_samples() {
+fn catch_up_shortens_smoothly() {
 	for frames in 0..SPEED_CHANGE_STEPS * 4 {
 		for start in [0, 2, 18] {
-			let mut expected: Vec<f32> =
-				(0..start + frames * CHANNEL_NUM).map(|i| i as f32).collect();
-			let mut actual = expected.clone();
-			for i in 0..frames / SPEED_CHANGE_STEPS {
-				let i = start + i * (SPEED_CHANGE_STEPS - 1) * CHANNEL_NUM;
-				expected.drain(i..i + CHANNEL_NUM);
-			}
+			// A ramp stays a ramp, a little steeper, and what is before it is untouched.
+			let original: Vec<f32> = (0..start + frames * CHANNEL_NUM).map(|i| i as f32).collect();
+			let mut actual = original.clone();
 			compact_catch_up(&mut actual, start, frames);
-			assert_eq!(actual, expected);
+			let kept = frames - frames / SPEED_CHANGE_STEPS;
+			assert_eq!(actual.len(), start + kept * CHANNEL_NUM);
+			assert_eq!(actual[..start], original[..start]);
+			if frames == 0 {
+				continue;
+			}
+			let (first, last) = (start, start + (kept - 1) * CHANNEL_NUM);
+			assert_eq!(actual[first..first + CHANNEL_NUM], original[first..first + CHANNEL_NUM]);
+			for (actual, original) in
+				actual[last..].iter().zip(&original[original.len() - CHANNEL_NUM..])
+			{
+				assert!((actual - original).abs() < 1e-2, "{actual} against {original}");
+			}
+			let slope = (frames.max(2) - 1) as f32 / (kept.max(2) - 1) as f32 * CHANNEL_NUM as f32;
+			for pair in actual[start..].chunks(CHANNEL_NUM).collect::<Vec<_>>().windows(2) {
+				assert!((pair[1][0] - pair[0][0] - slope).abs() < 0.01 * slope + 1e-3);
+				assert!((pair[0][1] - pair[0][0] - 1.0).abs() < 1e-2);
+			}
 		}
 	}
+}
+
+#[test]
+fn catch_up_leaves_no_steps_in_a_tone() {
+	// 3 kHz at 48 kHz: neighbouring samples differ by at most 0.39. A dropped sample
+	// doubles that at one point; resampling must not.
+	let frames = USUAL_FRAME_SIZE;
+	let mut tone: Vec<f32> = (0..frames)
+		.flat_map(|i| {
+			let value = (i as f32 * std::f32::consts::TAU * 3000.0 / 48000.0).sin();
+			[value; CHANNEL_NUM]
+		})
+		.collect();
+	compact_catch_up(&mut tone, 0, frames);
+	assert_eq!(tone.len(), (frames - frames / SPEED_CHANGE_STEPS) * CHANNEL_NUM);
+	let step = tone
+		.chunks(CHANNEL_NUM)
+		.collect::<Vec<_>>()
+		.windows(2)
+		.map(|pair| (pair[1][0] - pair[0][0]).abs())
+		.fold(0.0, f32::max);
+	assert!(step < 0.41, "largest step {step}");
 }
 
 impl<Id: Clone + Debug + Eq + Hash + PartialEq> Default for AudioHandler<Id> {
 	fn default() -> Self {
-		Self { queues: Default::default(), avg_buffer_samples: 0 }
+		Self { queues: Default::default() }
 	}
 }
 
@@ -587,16 +643,7 @@ impl<Id: Clone + Debug + Eq + Hash + PartialEq> AudioHandler<Id> {
 			let _span = info_span!("audio queue", client = ?id);
 			trace!("Adding talker");
 			let mut queue = AudioQueue::new(packet)?;
-			if !self.queues.is_empty() {
-				// Update avg_buffer_samples
-				self.avg_buffer_samples = USUAL_FRAME_SIZE
-					+ self
-						.queues
-						.values()
-						.map(|q| usize::from(q.last_buffer_size_min.get_min()))
-						.sum::<usize>() / self.queues.len();
-			}
-			queue.buffering_samples = self.avg_buffer_samples;
+			queue.buffering_samples = INITIAL_BUFFER_SAMPLES;
 			self.queues.insert(id.clone(), queue);
 			Ok(Some(id))
 		}
@@ -682,6 +729,11 @@ mod test {
 					let input = InAudioBuf::try_new(Direction::S2C, packet.into_vec()).unwrap();
 					if handler.handle_packet(id, input).is_ok() != success {
 						bail!("handle_packet returned {:?} but expected {:?}", !success, success);
+					}
+					// These tests follow the order of packets, so a talker plays at once.
+					// `a_new_talker_waits_for_a_buffer` covers the wait.
+					if let Some(queue) = handler.queues.get_mut(&id) {
+						queue.buffering_samples = 0;
 					}
 				}
 				SimulateAction::ReceiveRaw(i, data) => {
@@ -896,6 +948,71 @@ mod test {
 		}
 		a.push(SimulateAction::Check(Box::new(|h| assert!(h.queues.is_empty()))));
 		simulate(a)
+	}
+
+	fn voice_packet(encoder: &Encoder, id: u16) -> InAudioBuf {
+		let mut opus_output = [0; 1275];
+		let len = encoder.encode_float(&[0.25; USUAL_FRAME_SIZE], &mut opus_output[..]).unwrap();
+		let packet = OutAudio::new(&AudioData::S2C {
+			id,
+			codec: CodecType::OpusVoice,
+			from: 0,
+			data: &opus_output[..len],
+		});
+		InAudioBuf::try_new(Direction::S2C, packet.into_vec()).unwrap()
+	}
+
+	#[test]
+	fn a_new_talker_waits_for_a_buffer() {
+		let encoder = Encoder::new(
+			audiopus::SampleRate::Hz48000,
+			audiopus::Channels::Mono,
+			audiopus::Application::Voip,
+		)
+		.unwrap();
+		let id = ClientId(0);
+		let mut handler = AudioHandler::<ClientId>::new();
+		let queued = |handler: &AudioHandler<ClientId>| handler.queues[&id].packet_buffer.len();
+		let mut buf = vec![0.0; USUAL_FRAME_SIZE * CHANNEL_NUM];
+		// Nothing plays until 40 ms more than the first packet has arrived.
+		for (packet, waiting) in [(0, 1), (1, 2)] {
+			handler.handle_packet(id, voice_packet(&encoder, packet)).unwrap();
+			handler.fill_buffer(&mut buf);
+			assert_eq!(queued(&handler), waiting);
+		}
+		handler.handle_packet(id, voice_packet(&encoder, 2)).unwrap();
+		handler.fill_buffer(&mut buf);
+		assert_eq!(queued(&handler), 2);
+	}
+
+	#[test]
+	fn the_end_of_a_short_utterance_plays_it_at_once() {
+		let encoder = Encoder::new(
+			audiopus::SampleRate::Hz48000,
+			audiopus::Channels::Mono,
+			audiopus::Application::Voip,
+		)
+		.unwrap();
+		let id = ClientId(0);
+		let mut handler = AudioHandler::<ClientId>::new();
+		let mut buf = vec![0.0; USUAL_FRAME_SIZE * CHANNEL_NUM];
+		handler.handle_packet(id, voice_packet(&encoder, 0)).unwrap();
+		handler.fill_buffer(&mut buf);
+		assert_eq!(handler.queues[&id].packet_buffer.len(), 1);
+		let end = OutAudio::new(&AudioData::S2C {
+			id: 1,
+			codec: CodecType::OpusVoice,
+			from: 0,
+			data: &[],
+		});
+		handler
+			.handle_packet(id, InAudioBuf::try_new(Direction::S2C, end.into_vec()).unwrap())
+			.unwrap();
+		handler.fill_buffer(&mut buf);
+		// The one packet has played; only the end marker is left to take the talker away.
+		assert!(handler.queues.get(&id).is_none_or(|queue| queue.packet_buffer.len() <= 1));
+		handler.fill_buffer(&mut buf);
+		assert!(handler.queues.is_empty());
 	}
 
 	#[test]

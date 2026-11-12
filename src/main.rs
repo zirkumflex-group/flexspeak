@@ -1216,7 +1216,7 @@ impl App {
             transmitting: false,
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
-            footer_hidden: true,
+            footer_hidden: false,
             log_pane: settings::LogPane::default(),
             sidebar_width: ui::SIDEBAR_WIDTH,
             appearance: settings::Appearance::default(),
@@ -1620,13 +1620,18 @@ impl App {
             return;
         }
         self.last_toast = Some(now);
+        self.show_toast(&title, &body);
+    }
+
+    /// Shows a system notification.
+    fn show_toast(&mut self, title: &str, body: &str) {
         #[cfg(test)]
         {
             let _ = body;
-            self.shown_toasts.push(title);
+            self.shown_toasts.push(title.to_owned());
         }
         #[cfg(not(test))]
-        notify::show(&title, &body);
+        notify::show(title, body);
     }
 
     fn play_sound(&mut self, sound: sounds::Sound) {
@@ -4768,6 +4773,7 @@ impl App {
         let mut arrived = None;
         // Shown only while the window is in the background.
         let mut toast = None;
+        let mut poke_toast = None;
         // A first connection brings the server's saved conversations back.
         let restore =
             matches!(event, client::Event::Connected(_)) && session.chat.needs_restoring();
@@ -4973,7 +4979,8 @@ impl App {
             client::Event::Poked { from, key, message } => {
                 session.chat.poke(key.clone(), &from, false, &message);
                 sounds_due.push(sounds::Sound::Poke);
-                toast = Some((
+                // A poke always notifies, in front or not, and never waits for an earlier one.
+                poke_toast = Some((
                     format!("{from} poked you"),
                     if message.is_empty() {
                         "Open Flexspeak to reply.".to_owned()
@@ -5255,6 +5262,12 @@ impl App {
         }
         if toast.is_some() {
             self.background_attention(toast);
+        }
+        if let Some((title, body)) = poke_toast {
+            if !self.window_focused {
+                window_place::flash(true);
+            }
+            self.show_toast(&title, &body);
         }
         if restore && !self.loopback {
             self.chat_restore(id);
@@ -6674,7 +6687,7 @@ mod tests {
     }
 
     #[test]
-    fn expanding_the_footer_saves_only_that_choice_and_survives_a_restart() {
+    fn folding_the_footer_saves_only_that_choice_and_survives_a_restart() {
         let (mut app, root) = setup_fixture("footer");
         let path = root.join("settings.json");
         let saved = settings::Settings {
@@ -6683,20 +6696,20 @@ mod tests {
         };
         settings::save(&path, &saved).unwrap();
         app.load_settings(path.clone());
-        assert!(app.footer_hidden, "the footer starts compact");
+        assert!(!app.footer_hidden, "the footer starts expanded");
         let _ = app.update(Message::ToggleFooter);
-        assert!(!app.footer_hidden);
+        assert!(app.footer_hidden);
         let stored = settings::load(&path).unwrap().unwrap();
-        assert!(!stored.footer_hidden);
+        assert!(stored.footer_hidden);
         assert_eq!(
             stored.nickname, "Saved name",
             "the rest of the file is untouched"
         );
         let (mut restarted, _) = setup_fixture("footer-restart");
         restarted.load_settings(path.clone());
-        assert!(!restarted.footer_hidden);
+        assert!(restarted.footer_hidden);
         let _ = restarted.update(Message::ToggleFooter);
-        assert!(settings::load(&path).unwrap().unwrap().footer_hidden);
+        assert!(!settings::load(&path).unwrap().unwrap().footer_hidden);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -7248,7 +7261,7 @@ mod tests {
     }
 
     #[test]
-    fn pokes_toast_only_in_the_background_and_one_per_ten_seconds() {
+    fn every_poke_notifies_in_front_or_in_the_background() {
         let (mut app, _commands) = session_fixture();
         let id = app.active.unwrap();
         let poke = |app: &mut App| {
@@ -7262,16 +7275,11 @@ mod tests {
             ));
         };
         poke(&mut app);
-        assert!(app.shown_toasts.is_empty());
+        assert_eq!(app.shown_toasts, ["Mara poked you"], "in front too");
         let _ = app.update(Message::WindowFocus(false));
         poke(&mut app);
         poke(&mut app);
-        assert_eq!(app.shown_toasts, ["Mara poked you"]);
-        app.last_toast = app
-            .last_toast
-            .map(|at| at - TOAST_GAP - std::time::Duration::from_millis(1));
-        poke(&mut app);
-        assert_eq!(app.shown_toasts.len(), 2);
+        assert_eq!(app.shown_toasts.len(), 3, "no wait between pokes");
     }
 
     #[test]

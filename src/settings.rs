@@ -29,8 +29,8 @@ pub struct Settings {
     pub input_device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_device_id: Option<String>,
-    /// The footer shows only the connection status and ping, as it does unless expanded.
-    #[serde(skip_serializing_if = "is_true")]
+    /// The footer shows only the connection status and ping; it starts expanded.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub footer_hidden: bool,
     /// New releases download in the background; installing still waits for Restart.
     #[serde(skip_serializing_if = "is_true")]
@@ -422,7 +422,7 @@ impl Default for Settings {
             keybinds: Keybinds::default(),
             input_device_id: None,
             output_device_id: None,
-            footer_hidden: true,
+            footer_hidden: false,
             log_pane: LogPane::default(),
             sidebar_width: None,
             collapsed_channels: BTreeMap::new(),

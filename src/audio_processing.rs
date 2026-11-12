@@ -174,6 +174,17 @@ impl Processor {
         Ok(())
     }
 
+    /// Drops the audio and timing held between frames and keeps the processors themselves, so
+    /// it costs nothing and what they have learned about the room and the voice stays.
+    pub fn clear(&mut self) {
+        self.capture_len = 0;
+        self.captured_at = None;
+        self.render_len = 0;
+        self.rendered_at = None;
+        self.reference = None;
+        self.started = Instant::now();
+    }
+
     pub fn echo_enabled(&self) -> bool {
         self.settings.echo_cancellation
     }
@@ -376,6 +387,14 @@ mod tests {
         assert!(output.is_empty());
         processor.capture(&[0.0], None, &mut output)?;
         assert_eq!(output, VecDeque::from([0.0; SAMPLES]));
+        // Clearing drops a part-filled frame as a rebuild does.
+        processor.capture(&[0.8; 123], None, &mut output)?;
+        processor.clear();
+        output.clear();
+        processor.capture(&[0.0; SAMPLES - 1], None, &mut output)?;
+        assert!(output.is_empty());
+        processor.capture(&[0.0], None, &mut output)?;
+        assert_eq!(output.len(), SAMPLES);
         Ok(())
     }
 
