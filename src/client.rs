@@ -494,6 +494,8 @@ pub enum Event {
         pending: bool,
     },
     ChannelPasswordRequired(u64),
+    /// Why the connection is about to stop, in plain words; `Stopped` follows.
+    Refused(Refusal),
     /// The server refused something for lack of permission.
     PermissionDenied,
     /// Someone poked you.
@@ -577,6 +579,13 @@ pub fn start(
             })();
             // Disconnected by now: count it out before telling the app, which may quit on it.
             drop(running);
+            if let Some(refusal) = result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<Refusal>())
+            {
+                let _ = events.blocking_send(Event::Refused(refusal.clone()));
+            }
             let _ = events.blocking_send(Event::Stopped(result.err().map(|error| {
                 let source = if error.downcast_ref::<AudioFailure>().is_some() {
                     Source::Audio
@@ -1131,15 +1140,77 @@ async fn close(connection: &mut Connection) {
     .await;
 }
 
-fn connection_error(error: tsclientlib::Error) -> anyhow::Error {
-    if let tsclientlib::Error::ConnectFailed { address, errors } = &error
-        && errors.is_empty()
-    {
-        return anyhow::anyhow!(
-            "Could not resolve '{address}'. Check the hostname or enter an IP address and UDP port (usually 9987)."
-        );
+/// Why a connection ended, as one plain sentence for the notice. The library's own words stay
+/// in the error chain beneath it, for the Error Log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    HostNotFound,
+    TimedOut,
+    /// The server password was missing or wrong.
+    Password,
+    Full,
+    /// Kicked from the server.
+    Kicked,
+    Banned,
+}
+
+impl Refusal {
+    pub fn sentence(&self) -> &'static str {
+        match self {
+            Self::HostNotFound => {
+                "The server's address wasn't found. Check its spelling, or enter an IP address."
+            }
+            Self::TimedOut => {
+                "The server didn't answer. Check the address and UDP port, or try again later."
+            }
+            Self::Password => "The server password is wrong.",
+            Self::Full => "The server is full. Try again when someone leaves.",
+            Self::Kicked => "You were kicked from the server.",
+            Self::Banned => "You are banned from this server.",
+        }
     }
-    error.into()
+
+    /// The server sent you away on purpose, so connecting straight back isn't offered.
+    pub fn deliberate(&self) -> bool {
+        matches!(self, Self::Kicked | Self::Banned)
+    }
+
+    /// Reads the cause out of what the library reported.
+    fn of(error: &tsclientlib::Error) -> Option<Self> {
+        use tsclientlib::{Error, TsError};
+        Some(match error {
+            Error::ConnectFailed { errors, .. } if errors.is_empty() => Self::HostNotFound,
+            Error::ConnectFailed { errors, .. } => return errors.iter().find_map(Self::of),
+            Error::ResolveAddress(_) => Self::HostNotFound,
+            Error::InitserverTimeout => Self::TimedOut,
+            Error::ConnectTs(TsError::ServerInvalidPassword) => Self::Password,
+            Error::ConnectTs(TsError::ServerMaxclientsReached) => Self::Full,
+            Error::ConnectTs(TsError::ConnectFailedBanned | TsError::BanFlooding) => Self::Banned,
+            other => {
+                let text = other.to_string().to_lowercase();
+                if text.contains("timeout") || text.contains("timed out") {
+                    Self::TimedOut
+                } else {
+                    return None;
+                }
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.sentence())
+    }
+}
+
+fn connection_error(error: tsclientlib::Error) -> anyhow::Error {
+    let refusal = Refusal::of(&error);
+    let error = anyhow::Error::from(error);
+    match refusal {
+        Some(refusal) => error.context(refusal),
+        None => error,
+    }
 }
 
 async fn run_connection(
@@ -1196,6 +1267,8 @@ async fn run_connection(
         let mut subscription: Option<(Ticket, bool)> = None;
         let mut subscribed: Option<bool> = None;
         let mut connected = false;
+        // The server kicked or banned you, which it says just before it closes the connection.
+        let mut sent_away: Option<Refusal> = None;
         let mut deadline = Instant::now();
         let mut sent = 0;
         let mut received = 0;
@@ -1399,6 +1472,11 @@ async fn run_connection(
                         // by the time your change of channel arrives and isn't heard as a move too.
                         if !first_batch {
                             let happened: Vec<_> = changes.iter().filter_map(|change| activity(state, change)).collect();
+                            sent_away = sent_away.or_else(|| happened.iter().find(|done| done.is_self).and_then(|done| match done.kind {
+                                ActivityKind::KickedFromServer => Some(Refusal::Kicked),
+                                ActivityKind::Banned => Some(Refusal::Banned),
+                                _ => None,
+                            }));
                             if !happened.is_empty() {
                                 let _ = events.try_send(Event::Activity(happened));
                             }
@@ -1569,8 +1647,15 @@ async fn run_connection(
                     StreamItem::StreamCommand { name, content } => streams.notification(&mut connection, &name, &content),
                     _ => {},
                 },
-                Step::Network(Some(Err(error))) => return Err(connection_error(error)).context("TeamSpeak connection failed"),
-                Step::Network(None) => bail!("The server closed the connection."),
+                Step::Network(Some(Err(error))) => {
+                    let error = connection_error(error);
+                    let error = match sent_away.take() { Some(refusal) => error.context(refusal), None => error };
+                    return Err(error).context("TeamSpeak connection failed");
+                },
+                Step::Network(None) => {
+                    let error = anyhow::anyhow!("The server closed the connection.");
+                    return Err(match sent_away.take() { Some(refusal) => error.context(refusal), None => error });
+                },
                 Step::Media(generation, event) => streams.media_event(&mut connection, generation, event),
                 Step::Voice(None) => {}
                 Step::Voice(Some(voice)) => {
@@ -1592,7 +1677,7 @@ async fn run_connection(
                 },
                 Step::Tick => {
                     if events.is_closed() { break; }
-                    if !connected && deadline.elapsed() > Duration::from_secs(40) { bail!("Connection timed out. Check the address, UDP port, password, and server availability."); }
+                    if !connected && deadline.elapsed() > Duration::from_secs(40) { return Err(anyhow::anyhow!("Connection timed out after 40 seconds.").context(Refusal::TimedOut)); }
                     {
                         // A device going away is reported, never a reason to disconnect.
                         let trouble = audio.trouble();

@@ -722,10 +722,13 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     row()
                         .gap(8.0)
                         .center_y()
-                        .help(
+                        .help(if crate::secret::AVAILABLE {
+                            "Connect when Flexspeak opens. A server that needs a password \
+                             connects this way once its password is remembered."
+                        } else {
                             "Connect when Flexspeak opens. Passwords aren't saved, so a server \
-                             that needs one can't connect this way.",
-                        )
+                             that needs one can't connect this way."
+                        })
                         .child(text("Auto connect").font(ty::SMALL).color(t.muted))
                         .child({
                             let on = server.auto_connect;
@@ -739,6 +742,17 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                                 .key(format!("auto-connect-{index}"))
                         }),
                 )
+                .children(session.is_none().then(|| {
+                    button(
+                        t,
+                        &format!("connect-server-{index}"),
+                        "Connect",
+                        Some(&icons::CONNECT),
+                        Variant::Secondary,
+                        Some(Message::Connect(index)),
+                    )
+                    .help(format!("Connect to {}", server.title()))
+                }))
                 .child(
                     button(
                         t,
@@ -770,11 +784,16 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
             Some(Message::AddServer),
         )]),
     ));
-    Section::boxed("servers", "Servers", "saved servers list bookmarks address hostname", rows)
-        .note(group_note(
-            t,
-            "Save as many servers as you like and connect to several at once.",
-        ))
+    Section::boxed(
+        "servers",
+        "Servers",
+        "saved servers list bookmarks address hostname",
+        rows,
+    )
+    .note(group_note(
+        t,
+        "Save as many servers as you like and connect to several at once.",
+    ))
 }
 
 /// A word beside a name in the accent colour: the server in use.
@@ -860,7 +879,11 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         ))
         .child(labelled_field(
             "Password",
-            Some("Optional. Kept until you quit Flexspeak; never saved."),
+            Some(if crate::secret::AVAILABLE {
+                "Optional. Kept until you quit Flexspeak, unless you remember it."
+            } else {
+                "Optional. Kept until you quit Flexspeak; never saved."
+            }),
             field(
                 k,
                 &s.ui.server_password,
@@ -870,6 +893,14 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                 Some(Message::SubmitServer),
             ),
         ));
+    if crate::secret::AVAILABLE {
+        body = body.child(super::modals::remember_password(
+            k,
+            editor.remember,
+            (!in_use).then_some(Message::ServerRemember as fn(bool) -> Message),
+            "server-remember",
+        ));
+    }
     if let Some(error) = &editor.error {
         body = body.child(super::widgets::error_text(t, error.clone()));
     } else if in_use {
@@ -885,7 +916,10 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
             button(
                 t,
                 "remove-server",
-                if s.server_editor.as_ref().is_some_and(|editor| editor.remove_armed) {
+                if s.server_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.remove_armed)
+                {
                     "Press Again to Remove"
                 } else {
                     "Remove"
@@ -917,6 +951,8 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                 "submit-server",
                 if editing.is_some() {
                     "Save"
+                } else if editor.connect {
+                    "Add and Connect"
                 } else {
                     "Add Server"
                 },
@@ -2532,8 +2568,15 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
     // The key itself, so push-to-talk is set up in one place.
     if settings.mode == transmission::Mode::PushToTalk && shortcuts::supported() {
         rows.push(
-            shortcut_row(s, t, k, shortcuts::Binding::PushToTalk, "Push-to-talk key", None)
-                .key("transmission-ptt-key"),
+            shortcut_row(
+                s,
+                t,
+                k,
+                shortcuts::Binding::PushToTalk,
+                "Push-to-talk key",
+                None,
+            )
+            .key("transmission-ptt-key"),
         );
     }
     match settings.mode {
@@ -2606,8 +2649,15 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
 }
 
 /// Operating-system access, with its note. Onboarding shows it too.
+/// The permission rows for setup, whose step title already says Permissions.
 pub fn permissions(s: &App, t: &Theme) -> El {
-    permission_section(s, t).render(t, "").unwrap_or_else(el)
+    let section = permission_section(s, t);
+    col()
+        .key(section.key)
+        .w_full()
+        .gap(8.0)
+        .child(group(t, section.rows.into_iter().map(|row| row.el)))
+        .children(section.note)
 }
 
 fn permission_section(s: &App, t: &Theme) -> Section {

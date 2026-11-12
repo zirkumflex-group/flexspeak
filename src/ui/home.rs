@@ -11,8 +11,8 @@ use rune_kit::{Kit, MenuItem, TextInput, context_menu};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Variant, body, button, card, divider, faint, heading, icon_button, labelled, meter, muted,
-    overline, pulse, scroll_page, struck,
+    Variant, body, button, card, divider, faint, heading, icon_button, meter, muted, overline,
+    pulse, scroll_page, struck,
 };
 use super::{RailPeek, chat, dispatch, footer, icons, members, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
@@ -135,8 +135,15 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
 
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     rail_menu(s, k, layer);
-    if !s.loopback && s.sessions.iter().any(|session| session.connected) {
-        if !s.server().connected {
+    // A server coming back from a dropped connection keeps its window: only a first connect
+    // shows the connecting pane.
+    if !s.loopback
+        && s.sessions
+            .iter()
+            .any(|session| session.connected || session.reconnecting)
+    {
+        let reconnecting = !s.server().connected && s.server().reconnecting;
+        if !s.server().connected && !reconnecting {
             return row()
                 .w_full()
                 .h_full()
@@ -154,7 +161,7 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
         if chat.is_none() {
             chat::edge(s, t, k, layer);
         }
-        return row()
+        let window = row()
             .w_full()
             .h_full()
             .children((!hidden).then(|| server_rail(s, t, k)))
@@ -173,8 +180,59 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
                     .into_iter()
                     .flatten(),
             );
+        if reconnecting {
+            return reconnecting_window(s, t, window);
+        }
+        return window;
     }
     saved_servers(s, t, k)
+}
+
+/// The server's last known channels and chat, dimmed and out of reach, under one line saying
+/// the connection is coming back.
+fn reconnecting_window(s: &App, t: &Theme, window: El) -> El {
+    let session = s.server();
+    let strip = row()
+        .key("reconnecting-strip")
+        .w_full()
+        .h(36.0)
+        .px(size::CARD_PAD)
+        .gap(8.0)
+        .center_y()
+        .fill(t.chrome)
+        .child(pulse(t.fair))
+        .child(muted(t, client::CONNECTION_LOST).grow(1.0).min_w(0.0))
+        .child(button(
+            t,
+            "cancel-reconnecting",
+            if session.stopping {
+                "Stopping…"
+            } else {
+                "Disconnect"
+            },
+            None,
+            Variant::Ghost,
+            (!session.stopping).then_some(Message::Stop),
+        ));
+    col()
+        .w_full()
+        .h_full()
+        .child(strip)
+        .child(el().w_full().h(1.0).fill(t.hairline).a11y_hidden())
+        .child(
+            el().key("reconnecting-window")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(window.opacity(0.45).a11y_hidden())
+                // Takes the presses meant for what is behind it, which can't act until it's back.
+                .child(
+                    el().absolute(0.0, 0.0)
+                        .w_full()
+                        .h_full()
+                        .on_press(|_: &mut App| {}),
+                ),
+        )
 }
 
 /// The saved servers, each with its own Connect. Only a microphone test holds them back.
@@ -202,11 +260,14 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(overline(t, "Saved servers").grow(1.0))
-                .child(labelled(
-                    &icons::USER,
-                    format!("Connect as {}", saved.nickname),
-                    t.muted,
-                ))
+                // Who you connect as: a plain caption, not a control.
+                .child(
+                    text(format!("Connect as {}", saved.nickname))
+                        .font(ty::SMALL)
+                        .color(t.muted)
+                        .truncate_fade()
+                        .min_w(0.0),
+                )
                 .child(icon_button(
                     t,
                     "add-server",
@@ -221,7 +282,8 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
         for (index, server) in s.servers.iter().enumerate() {
             let session = s.session_at(&server.address);
             if index > 0 {
-                list = list.child(divider(t).mx(8.0));
+                // Inset by the rows' own padding, so it ends where the Connect buttons do.
+                list = list.child(el().h(1.0).w_full().px(8.0).child(divider(t)));
             }
             list = list.child(server_row(t, index, server, session, busy, ready));
         }
@@ -566,20 +628,34 @@ fn rail_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(session) = s.rail_sessions().find(|session| session.id == id) else {
         return;
     };
-    let menu = context_menu("rail-menu", el(), Some(point))
+    let saved = s
+        .servers
+        .iter()
+        .position(|server| server.address.trim() == session.address.trim());
+    let mut menu = context_menu("rail-menu", el(), Some(point))
         .min_width(180.0)
         .on_close(|s: &mut App| s.ui.rail_menu = None)
-        .group_label(session.title().to_owned())
-        .item(
-            MenuItem::new("Disconnect")
-                .icon(&icons::DISCONNECT)
-                .danger(true)
-                .disabled(session.stopping)
+        .group_label(session.title().to_owned());
+    if let Some(index) = saved {
+        menu = menu.item(
+            MenuItem::new("Edit Server…")
+                .icon(&icons::PENCIL)
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     s.ui.rail_menu = None;
-                    dispatch(s, tx, Message::StopServer(id));
+                    dispatch(s, tx, Message::EditServer(index));
                 }),
         );
+    }
+    let menu = menu.item(
+        MenuItem::new("Disconnect")
+            .icon(&icons::DISCONNECT)
+            .danger(true)
+            .disabled(session.stopping)
+            .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                s.ui.rail_menu = None;
+                dispatch(s, tx, Message::StopServer(id));
+            }),
+    );
     let _ = menu.build(k, layer);
 }
 

@@ -246,6 +246,14 @@ fn stepper(t: &Theme, step: Step) -> El {
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, step: Step) -> El {
     let busy = !s.idle() || s.permissions.pending.is_some();
+    // A step with a field shows its problem right under it; the others above the buttons.
+    let fielded = matches!(step, Step::Username | Step::Server);
+    let field_error = || {
+        s.onboarding_error
+            .clone()
+            .filter(|_| fielded)
+            .map(|error| error_text(t, error).key("setup-error"))
+    };
     let fields = match step {
         Step::Username => col()
             .w_full()
@@ -256,10 +264,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
                 k,
                 &s.ui.nickname,
                 |s| &mut s.ui.nickname,
-                "Username",
+                "Nickname",
                 Some(Message::Nickname),
                 Some(Message::SetupNext),
             ))
+            .children(field_error())
             .children(ts6_name(s, t)),
         Step::Server => col()
             .w_full()
@@ -276,6 +285,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
                 Some(Message::Address),
                 Some(Message::SetupNext),
             ))
+            .children(field_error())
             .child(faint(
                 t,
                 "Server password (optional · kept only for this session)",
@@ -299,14 +309,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
             ))
             .children(ts6_audio(s, t))
             .child(settings::audio(s, cx, t, k, layer))
-            .child(muted(
-                t,
-                if s.loopback {
-                    s.server().status.as_str()
-                } else {
-                    "Stop the local test before continuing. You can also test devices later in Settings."
-                },
-            )),
+            .children(s.loopback.then(|| muted(t, s.server().status.as_str()))),
         Step::Chat => col()
             .w_full()
             .gap(14.0)
@@ -339,7 +342,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
                 .transition(Transition::opacity().combined(Transition::offset(16.0, 0.0)))
                 .child(fields),
         ));
-    if let Some(error) = &s.onboarding_error {
+    if let Some(error) = s.onboarding_error.as_ref().filter(|_| !fielded) {
         content = content.child(
             error_text(t, error.clone())
                 .key("setup-error")
@@ -360,6 +363,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>, 
                 Variant::Secondary,
                 (!busy && step.previous().is_some()).then_some(Message::SetupBack),
             ))
+            // Why Back and Continue are greyed out, beside them.
+            .children(
+                s.loopback
+                    .then(|| muted(t, "Stop the microphone test to continue.").key("setup-busy")),
+            )
             .child(el().grow(1.0))
             .children(s.redoing_setup.then(|| {
                 button(

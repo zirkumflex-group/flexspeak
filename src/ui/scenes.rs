@@ -25,6 +25,7 @@ pub const SCENES: &[Scene] = &[
     ("servers-poked", servers_poked),
     ("servers-switched", servers_switched),
     ("servers-connecting", servers_connecting),
+    ("server-reconnecting", server_reconnecting),
     ("servers-picker", servers_picker),
     ("setup-ts6-offer", setup_ts6_offer),
     ("setup-ts6-server", setup_ts6_server),
@@ -70,6 +71,7 @@ pub const SCENES: &[Scene] = &[
     ("settings-picker", settings_picker),
     ("settings-auto-connect", settings_auto_connect),
     ("server-add", server_add),
+    ("server-add-connect", server_add_connect),
     ("server-edit", server_edit),
     ("server-edit-remove", server_edit_remove),
     ("home-connecting", home_connecting),
@@ -165,8 +167,11 @@ pub const SCENES: &[Scene] = &[
     ("close-prompt-no-tray", close_prompt_no_tray),
     ("disconnect-sharing", disconnect_sharing),
     ("password", password),
+    ("server-password", server_password),
+    ("server-password-wrong", server_password_wrong),
     ("alert", alert),
     ("alert-dropped", alert_dropped),
+    ("alert-kicked", alert_kicked),
     ("alert-audio-fallback", alert_audio_fallback),
     ("alert-no-audio", alert_no_audio),
     ("alert-shortcut-taken", alert_shortcut_taken),
@@ -299,6 +304,7 @@ fn setup_ts6_server(s: &mut App) {
             "games.example.org:1234".into(),
             "friends.example.net".into(),
         ],
+        names: [("ts.zirkumflex.io".to_owned(), "Zirkumflex".to_owned())].into(),
         input,
         output,
         push_to_talk: true,
@@ -409,6 +415,15 @@ fn servers_switched(s: &mut App) {
 fn servers_connecting(s: &mut App) {
     let [.., friends] = servers(s);
     s.activate(Some(friends));
+}
+
+/// The connection dropped: the last known channels and chat stay, dimmed, under one line.
+fn server_reconnecting(s: &mut App) {
+    connected(s);
+    let session = s.server_mut();
+    session.connected = false;
+    session.reconnecting = true;
+    session.status = crate::client::CONNECTION_LOST.into();
 }
 
 fn servers_picker(s: &mut App) {
@@ -1507,6 +1522,14 @@ fn server_add(s: &mut App) {
     s.sync_fields();
 }
 
+/// Add Server from Home: saving connects too.
+fn server_add_connect(s: &mut App) {
+    home(s);
+    let _ = s.update(crate::Message::AddServer);
+    let _ = s.update(crate::Message::ServerAddress("eu.voicehub.net".into()));
+    s.sync_fields();
+}
+
 fn server_edit(s: &mut App) {
     settings_page(s);
     let _ = s.update(crate::Message::EditServer(1));
@@ -2574,6 +2597,25 @@ fn password(s: &mut App) {
     s.server_mut().password_channel = Some(3);
 }
 
+/// The server refused to let you in without its password.
+fn server_password(s: &mut App) {
+    home(s);
+    s.server_password_prompt = Some(crate::ServerPasswordPrompt {
+        index: 0,
+        title: "Zirkumflex".into(),
+        ..Default::default()
+    });
+    s.ui.prompt_password.focused = true;
+}
+
+/// The password tried was wrong: the prompt stays with a reason.
+fn server_password_wrong(s: &mut App) {
+    server_password(s);
+    if let Some(prompt) = &mut s.server_password_prompt {
+        prompt.error = Some("That password wasn't accepted.".into());
+    }
+}
+
 /// A saved server that never answered: the strip offers to try again.
 fn alert(s: &mut App) {
     home(s);
@@ -2593,6 +2635,19 @@ fn alert_dropped(s: &mut App) {
         Some("Zirkumflex".into()),
         Source::Dropped,
         "TeamSpeak connection failed: You were kicked from the server: Take a break",
+    );
+}
+
+/// Kicked: the strip says so and offers no Reconnect.
+fn alert_kicked(s: &mut App) {
+    home(s);
+    s.alerts.raise_refused_at(
+        "ts.zirkumflex.io",
+        Some("Zirkumflex".into()),
+        Source::Dropped,
+        crate::client::Refusal::Kicked.sentence(),
+        "TeamSpeak connection failed: Connection aborted",
+        false,
     );
 }
 

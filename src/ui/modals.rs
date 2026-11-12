@@ -10,7 +10,7 @@ use super::icons;
 use super::theme::{Theme, size, ty};
 use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider_with_home};
 use crate::client::Moderation;
-use crate::{App, Message, ModerationDraft, Poke};
+use crate::{App, Message, ModerationDraft, Poke, ServerPasswordPrompt};
 
 /// Offers to copy a release that runs from Downloads or a disk image to where apps live.
 fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::install::Offer) {
@@ -21,8 +21,9 @@ fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::inst
         .gap(12.0)
         .child(
             text(
-                "Flexspeak is running from a temporary place, so updates would be lost when it is \
-                 moved or deleted. Install it to keep it and its updates. Your settings stay as they are.",
+                "This copy of Flexspeak runs from outside the apps folder. Install it to keep it and \
+                 its updates in one place, or choose Don’t Ask Again to keep using a copy you put \
+                 here on purpose. Your settings stay as they are.",
             )
             .font(ty::BODY)
             .color(t.text)
@@ -77,6 +78,95 @@ fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::inst
             if !s.installing {
                 s.install_prompt = false;
             }
+        })
+        .child(body)
+        .build(k, layer);
+}
+
+/// Remember Password, for the server password prompt and the Add/Edit Server dialog. Shown only
+/// where `crate::secret` can seal passwords; `None` disables it.
+pub(super) fn remember_password(
+    k: &Kit,
+    on: bool,
+    toggle: Option<fn(bool) -> Message>,
+    key: &str,
+) -> El {
+    let mut remember = Checkbox::new(on)
+        .label("Remember Password")
+        .disabled(toggle.is_none());
+    if let Some(toggle) = toggle {
+        remember = remember.on_toggle_tx(move |s: &mut App, tx| {
+            super::dispatch(s, tx, toggle(!on));
+        });
+    }
+    remember
+        .build(k)
+        .key(key)
+        .help("Saved in the settings file, sealed so only your Windows account can read it.")
+}
+
+/// Asks for a server's password after the server refused the one it was given.
+fn server_password(
+    s: &App,
+    t: &Theme,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    prompt: &ServerPasswordPrompt,
+) {
+    let mut body = col().w_full().px(16.0).pb(16.0).gap(10.0).child(field(
+        k,
+        &s.ui.prompt_password,
+        |s| &mut s.ui.prompt_password,
+        "Server password",
+        Some(Message::PromptPassword),
+        Some(Message::SubmitPromptPassword),
+    ));
+    if let Some(error) = &prompt.error {
+        body = body.child(error_text(t, error.clone()).key("server-password-error"));
+    }
+    if crate::secret::AVAILABLE {
+        body = body.child(remember_password(
+            k,
+            prompt.remember,
+            Some(Message::PromptRemember),
+            "prompt-remember",
+        ));
+    }
+    body = body.child(
+        row()
+            .w_full()
+            .gap(size::GAP)
+            .pt(4.0)
+            .child(el().grow(1.0))
+            .child(button(
+                t,
+                "cancel-server-password",
+                "Cancel",
+                None,
+                Variant::Secondary,
+                Some(Message::CancelPromptPassword),
+            ))
+            .child(
+                button(
+                    t,
+                    "submit-server-password",
+                    "Connect",
+                    Some(&icons::CONNECT),
+                    Variant::Primary,
+                    Some(Message::SubmitPromptPassword),
+                )
+                .default_button(),
+            ),
+    );
+    Dialog::new("server-password", format!("Connect to {}", prompt.title))
+        .description("This server needs a password.")
+        .open(true)
+        .fit()
+        .width(400.0)
+        .on_close(|s: &mut App| {
+            let task = s.update(Message::CancelPromptPassword);
+            drop(task);
+            s.sync_fields();
         })
         .child(body)
         .build(k, layer);
@@ -645,6 +735,8 @@ pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         && let Some(offer) = &s.install_offer
     {
         install(s, t, k, layer, offer);
+    } else if let Some(prompt) = &s.server_password_prompt {
+        server_password(s, t, k, layer, prompt);
     } else if s.ui.server_picker {
         server_picker(s, t, k, layer);
     } else if let Some(draft) = &s.server().moderation {

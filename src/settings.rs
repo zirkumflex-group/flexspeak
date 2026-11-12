@@ -232,6 +232,10 @@ pub struct Server {
     /// Connect when Flexspeak opens.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub auto_connect: bool,
+    /// The password, when you chose to remember it, sealed by `crate::secret` (DPAPI on
+    /// Windows); empty when it isn't remembered.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub password: String,
 }
 
 impl Server {
@@ -240,6 +244,7 @@ impl Server {
             name: String::new(),
             address: address.into(),
             auto_connect: false,
+            password: String::new(),
         }
     }
 
@@ -522,6 +527,27 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remembered_password_round_trips_sealed_and_is_left_out_when_not_remembered() {
+        let plain = serde_json::to_string(&Server::new("one.example")).unwrap();
+        assert!(!plain.contains("password"), "{plain}");
+        let Some(sealed) = crate::secret::protect("server-secret") else {
+            return;
+        };
+        let server = Server {
+            password: sealed,
+            ..Server::new("one.example")
+        };
+        let json = serde_json::to_string(&server).unwrap();
+        assert!(!json.contains("server-secret"), "{json}");
+        let back: Server = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, server);
+        assert_eq!(
+            crate::secret::unprotect(&back.password).as_deref(),
+            Some("server-secret")
+        );
+    }
 
     #[test]
     fn streaming_options_round_trip_and_stay_out_of_the_file_when_off() {
