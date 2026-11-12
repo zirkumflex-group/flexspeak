@@ -1780,8 +1780,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 } else if current {
                     name = name.fill(t.accent.alpha(0.16));
                 }
-                // A double-click joins, as in TeamSpeak, so a slip of one click never moves
-                // you mid-conversation; Return joins the focused row.
+                // A click joins; Return joins the focused row.
                 let id = channel.id;
                 if joinable {
                     name = name
@@ -1789,7 +1788,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         .cursor(rune::Cursor::Pointer)
                         .hover(t.wash(0.05))
                         .press(t.wash(0.09))
-                        .on_double_press_tx(send(Message::Join(id)))
+                        .on_press_tx(send(Message::Join(id)))
                         .on_key(move |s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
                             if key.key != rune::Key::Enter {
                                 return false;
