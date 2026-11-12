@@ -6700,7 +6700,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.53"
-source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=7c68567418434d1de7e7a6a844e80843ca71cb04#7c68567418434d1de7e7a6a844e80843ca71cb04"
+source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=1f542d7bc61cb00270849632415485490f9e52e5#1f542d7bc61cb00270849632415485490f9e52e5"
 dependencies = [
  "cc",
  "cxx",
@@ -6714,7 +6714,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys-build"
 version = "0.3.21"
-source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=7c68567418434d1de7e7a6a844e80843ca71cb04#7c68567418434d1de7e7a6a844e80843ca71cb04"
+source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=1f542d7bc61cb00270849632415485490f9e52e5#1f542d7bc61cb00270849632415485490f9e52e5"
 dependencies = [
  "anyhow",
  "fs2",

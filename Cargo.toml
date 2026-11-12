@@ -97,10 +97,10 @@ webrtc-sys-build = "=0.3.21"
 
 # webrtc-sys with the NVENC hardware encoders built on Windows, from
 # zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.53 (based on webrtc-sys v0.3.53).
-# The rev is also tagged flexspeak/webrtc-sys-v0.3.53-nvenc.1 there, so it stays fetchable.
+# The rev is also tagged flexspeak/webrtc-sys-v0.3.53-nvenc.2 there, so it stays fetchable.
 [patch.crates-io]
-webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "7c68567418434d1de7e7a6a844e80843ca71cb04" }
-webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "7c68567418434d1de7e7a6a844e80843ca71cb04" }
+webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "1f542d7bc61cb00270849632415485490f9e52e5" }
+webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "1f542d7bc61cb00270849632415485490f9e52e5" }
 # cpal 0.18.2 with one change: the macOS loopback tap leaves the app's own sound out, so
 # shared system audio does not echo the call back to viewers. Windows does the same in
 # src/streaming/process_audio.rs.
