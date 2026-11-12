@@ -26,8 +26,10 @@ on:
 permissions:
   contents: read
 
-# No workflow-wide concurrency: the builds of several pushes run side by side, and only
-# publishing takes turns (see the publish job).
+# No workflow-wide concurrency, which would cancel a publish halfway. A newer push cancels
+# the older one's test and builds (their own concurrency groups), so that push is never
+# released by itself: its commits are in the next release's notes. Publishing takes turns
+# (see the publish job).
 
 jobs:
   # Which platforms are built and published: the ones .github/platforms.json turns on (runners
@@ -71,6 +73,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ needs.platforms.outputs.test-os }}
     timeout-minutes: 45
+    concurrency:
+      group: release-test
+      cancel-in-progress: true
     # As in ci.yml: rust-cache keys on Cargo's environment, and this job reads that cache.
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -103,12 +108,13 @@ jobs:
           # Saved by the checks on main, which also build Clippy's half of it.
           save-if: false
       # The self-hosted runner keeps Cargo's output between jobs instead of restoring a cache
-      # (the Dev Drive and rust-cache steps are GitHub's runner only).
+      # (the Dev Drive and rust-cache steps are GitHub's runner only). The checks' directory:
+      # the PR already built nearly all of this there, with the same settings and command.
       - name: Self-hosted build directory
         if: runner.environment == 'self-hosted'
         shell: pwsh
         run: |
-          "CARGO_TARGET_DIR=$env:FLEXSPEAK_CI_DIR/target/test" >> $env:GITHUB_ENV
+          "CARGO_TARGET_DIR=$env:FLEXSPEAK_CI_DIR/target/checks" >> $env:GITHUB_ENV
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libopus-dev libxkbcommon-dev libwayland-dev
@@ -123,7 +129,7 @@ jobs:
           GIT_HTTP_LOW_SPEED_TIME: '60'
         run: cargo fetch --locked
       - working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
-        run: cargo test --locked
+        run: cargo test --locked -p flexspeak -p monster-core
 
   # Builds run alongside the tests; nothing publishes unless both pass.
   build:
@@ -134,6 +140,9 @@ jobs:
       matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    concurrency:
+      group: release-build-${{ matrix.platform }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -30,7 +30,7 @@ code runs. To change who it trusts, edit both lists and copy the hook into the V
 ## The VM
 
 [dockur/windows](https://github.com/dockur/windows) runs it as a container with KVM:
-6 cores at a quarter of the CPU weight of anything else on the box, 12 GB of RAM, a disk
+12 cores at a quarter of the CPU weight of anything else on the box, 12 GB of RAM, a disk
 of up to 128 GB. It reaches the internet and nothing else: `firewall.sh`
 (`flexspeak-ci-firewall.service`) drops what it sends to private networks and to the
 Beelink itself. Its ports are bound to the Beelink's localhost.
@@ -43,8 +43,9 @@ Beelink itself. Its ports are bound to the Beelink's localhost.
 | `storage/` | the VM's disk |
 
 Two runners, `beelink-1` and `beelink-2`, run as services under the VM's user `ci`.
-Build output lives in `C:\ci\target\<job>` and Opus in `C:\ci\opus`; deleting them makes
-the next run start from scratch.
+Build output lives in `C:\ci\target\checks` (the checks and the release's test) and
+`C:\ci\target\release`, and Opus in `C:\ci\opus`; deleting them makes the next run start
+from scratch. Defender leaves those, the checkouts and the toolchain alone (`setup.ps1`).
 
 The web console is at `ssh -L 8006:127.0.0.1:8006 bee`, then http://127.0.0.1:8006.
 

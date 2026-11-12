@@ -12,7 +12,7 @@ services:
       VERSION: "2022"
       USERNAME: "ci"
       PASSWORD: "${WIN_PASSWORD}"
-      CPU_CORES: "6"
+      CPU_CORES: "12"
       RAM_SIZE: "12G"
       DISK_SIZE: "128G"
     devices:
@@ -21,7 +21,8 @@ services:
     cap_add:
       - NET_ADMIN
     # Lower CPU weight than everything else on the box (default 1024), so game
-    # servers win when both want the CPU.
+    # servers win when both want the CPU. That is what makes 12 of the 16 threads fair: two
+    # jobs build side by side, and an idle VM uses none of them.
     cpu_shares: 256
     ports:
       - 127.0.0.1:8006:8006
