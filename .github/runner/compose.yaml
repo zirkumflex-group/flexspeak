@@ -1,0 +1,48 @@
+# Windows Server 2022 VM (dockur) running the GitHub Actions runner for
+# zirkumflex-group/flexspeak. Outbound internet only: flexspeak-ci-firewall.service
+# drops anything it sends to private networks. Ports are bound to localhost only:
+#   web console  ssh -L 8006:127.0.0.1:8006 bee  ->  http://127.0.0.1:8006
+#   VM ssh       ssh -i /srv/flexspeak-ci/ssh/id_ed25519 -p 2222 ci@127.0.0.1 (on bee)
+name: flexspeak-ci
+services:
+  windows:
+    image: docker.io/dockurr/windows:6.06
+    container_name: flexspeak-ci
+    environment:
+      VERSION: "2022"
+      USERNAME: "ci"
+      PASSWORD: "${WIN_PASSWORD}"
+      CPU_CORES: "6"
+      RAM_SIZE: "12G"
+      DISK_SIZE: "128G"
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    # Lower CPU weight than everything else on the box (default 1024), so game
+    # servers win when both want the CPU.
+    cpu_shares: 256
+    ports:
+      - 127.0.0.1:8006:8006
+      - 127.0.0.1:3389:3389/tcp
+      - 127.0.0.1:2222:22/tcp
+    volumes:
+      - ./storage:/storage
+      - ./oem:/oem
+    networks:
+      - ci
+    dns:
+      - 1.1.1.1
+      - 9.9.9.9
+    restart: unless-stopped
+    stop_grace_period: 2m
+
+networks:
+  ci:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-flexspeak-ci
+    ipam:
+      config:
+        - subnet: 10.88.0.0/24

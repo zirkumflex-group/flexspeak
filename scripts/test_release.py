@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -229,6 +230,20 @@ class PlatformSwitchTests(unittest.TestCase):
     def test_linux_runs_the_release_test_while_it_is_on(self):
         outputs = self.outputs({"windows": True, "macos": True, "linux": True})
         self.assertEqual((outputs["test-os"], outputs["test-cache"]), ("ubuntu-24.04", "linux-checks"))
+
+    def test_windows_moves_to_the_self_hosted_runner_only_when_one_is_named(self):
+        switches = {"windows": True, "macos": True, "linux": False}
+        with patch.dict(os.environ, {"FLEXSPEAK_WINDOWS_RUNNER": "flexspeak-win"}):
+            outputs = self.outputs(switches)
+        matrix = json.loads(outputs["matrix"])["include"]
+        self.assertEqual([entry["os"] for entry in matrix], ["flexspeak-win", "macos-26"])
+        # The cache key stays: GitHub's runner still finds its cache when it takes over again.
+        self.assertEqual(matrix[0]["cache"], "windows-checks")
+        self.assertEqual(outputs["test-os"], "flexspeak-win")
+        # An untrusted run gets an empty name, and stays on GitHub's runner.
+        with patch.dict(os.environ, {"FLEXSPEAK_WINDOWS_RUNNER": ""}):
+            matrix = json.loads(self.outputs(switches)["matrix"])["include"]
+        self.assertEqual(matrix[0]["os"], "windows-2022")
 
     def test_a_manual_check_of_everything_ignores_the_switches(self):
         outputs = self.outputs({"windows": True, "macos": False, "linux": False}, everything=True)
