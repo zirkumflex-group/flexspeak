@@ -280,8 +280,9 @@ pub struct UiState {
     pub streams_idle: bool,
     /// The pointer is over a stream's bar or the toolbar, which keeps the overlays up.
     pub streams_bar_hover: bool,
-    /// When a click last moved a stream from the grid onto the stage.
-    pub focused_at: Option<Instant>,
+    /// The last click on a stream landed on the stage, so a double-click there began there,
+    /// not on the grid tile it replaced.
+    pub stage_click: bool,
     /// The stream fills the screen: `Some` holds whether the other streams were tucked away
     /// before, to put them back after.
     pub fullscreen: Option<bool>,
@@ -350,7 +351,7 @@ impl Default for UiState {
             streams_moved: Instant::now(),
             streams_idle: false,
             streams_bar_hover: false,
-            focused_at: None,
+            stage_click: false,
             fullscreen: None,
             window_fullscreen: false,
             share_advanced: false,
@@ -717,9 +718,9 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         toast_expiry,
         overlays_until.filter(|until| now < *until),
     ]
-        .into_iter()
-        .flatten()
-        .fold(s.next_usage_tick, Instant::min);
+    .into_iter()
+    .flatten()
+    .fold(s.next_usage_tick, Instant::min);
     tx.wake_after(wake.saturating_duration_since(now));
     if s.server_mut().streaming.sync_frame() {
         changed = true;

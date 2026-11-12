@@ -107,7 +107,11 @@ fn fullscreen_button(s: &App, t: &Theme) -> El {
     icon_button(
         t,
         "fullscreen",
-        if on { &icons::MINIMIZE } else { &icons::MAXIMIZE },
+        if on {
+            &icons::MINIMIZE
+        } else {
+            &icons::MAXIMIZE
+        },
         if on {
             "Leave full screen (Esc)"
         } else {
@@ -942,24 +946,19 @@ fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
                         }) => dispatch(s, tx, Message::SwapStreams(from, to)),
                         Some(_) => {}
                         None if !on_stage => {
-                            s.ui.focused_at = Some(std::time::Instant::now());
+                            s.ui.stage_click = false;
                             dispatch(s, tx, Message::FocusStream(Some(id.clone())))
                         }
-                        None if d.clicks >= 2 && !just_focused(s) => {
+                        None if d.clicks >= 2 && s.ui.stage_click => {
+                            s.ui.stage_click = false;
                             let on = s.ui.fullscreen.is_none();
                             dispatch(s, tx, Message::StreamFullscreen(on));
                         }
-                        None => {}
+                        None => s.ui.stage_click = true,
                     }
                 }
             }
         })
-}
-
-/// Whether a click just moved a stream onto the stage, so a second click there belongs to it.
-fn just_focused(s: &App) -> bool {
-    s.ui.focused_at
-        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(700))
 }
 
 /// A double-click on a lone stream takes it full screen, or back.
@@ -1163,12 +1162,14 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
         } else {
             pulse(t.fair)
         };
-        frame.child(thumbnail_label(s, t, watch.stream.publisher, dot).child(mute_button(
-            s,
-            t,
-            watch,
-            Variant::Ghost,
-        )))
+        frame.child(
+            thumbnail_label(s, t, watch.stream.publisher, dot).child(mute_button(
+                s,
+                t,
+                watch,
+                Variant::Ghost,
+            )),
+        )
     } else {
         frame.child(controls(s, t, watch, mode, width))
     }
@@ -1286,9 +1287,9 @@ fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, 
                     )
                     .child(
                         text(format!("{subtitle} · {viewers} · {audio}"))
-                        .font(ty::CAPTION)
-                        .color(t.faint)
-                        .truncate_fade(),
+                            .font(ty::CAPTION)
+                            .color(t.faint)
+                            .truncate_fade(),
                     ),
             ),
     )
@@ -1502,6 +1503,7 @@ fn trouble(t: &Theme, problem: health::Problem, compact: bool) -> El {
         .center_y()
         .px(if compact { 4.0 } else { 9.0 })
         .py(if compact { 4.0 } else { 5.0 })
+        .min_w(0.0)
         .radius(radius::ROW)
         .fill(Color::BLACK.alpha(0.62))
         .help(help.clone())
@@ -1512,7 +1514,9 @@ fn trouble(t: &Theme, problem: health::Problem, compact: bool) -> El {
         badge = badge.child(
             text(problem.label())
                 .font(ty::CAPTION)
-                .color(Color::WHITE.alpha(0.9)),
+                .color(Color::WHITE.alpha(0.9))
+                .min_w(0.0)
+                .truncate_fade(),
         );
     }
     badge
@@ -2023,7 +2027,12 @@ fn quality_fields(s: &App, t: &Theme, k: &Kit, body: El, privacy: bool, menus: &
                             Preset::Smooth => &icons::GAMEPAD,
                             Preset::Quality => &icons::SPARKLES,
                         };
-                        (glyph, p.label(), p.help(), Message::ShareQuality(p.quality()))
+                        (
+                            glyph,
+                            p.label(),
+                            p.help(),
+                            Message::ShareQuality(p.quality()),
+                        )
                     })
                     .collect(),
                 Preset::ALL.iter().position(|p| Some(*p) == preset),

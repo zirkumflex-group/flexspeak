@@ -2689,8 +2689,10 @@ impl App {
                 if self.ui.fullscreen.is_none() && ui::fullscreen_allowed(self) {
                     let streaming = &mut self.server_mut().streaming;
                     if streaming.stage().is_none() {
-                        streaming.focused =
-                            streaming.watching.first().map(|watch| watch.stream.id.clone());
+                        streaming.focused = streaming
+                            .watching
+                            .first()
+                            .map(|watch| watch.stream.id.clone());
                     }
                     let hidden = std::mem::replace(&mut streaming.others_hidden, true);
                     self.ui.fullscreen = Some(hidden);
@@ -2750,6 +2752,11 @@ impl App {
             Message::OpenShare => {
                 if self.live() && self.tab == Tab::Home {
                     self.server_mut().streaming.share_open = true;
+                    // How the last share ended is old news in a dialog starting a new one.
+                    let status = &mut self.server_mut().streaming.sharing.status;
+                    if !status.active {
+                        status.detail.clear();
+                    }
                     if self.server().streaming.sharing.sources.is_empty() {
                         return self.update(Message::RefreshShareSources);
                     }
@@ -5123,7 +5130,7 @@ mod tests {
                 frame: None,
             });
         app.server_mut().streaming.sharing.status.active = true;
-        app.server_mut().streaming.strip = streaming::Strip::Beside;
+        let _ = app.update(Message::StreamLayout(Some(streaming::Strip::Beside)));
         let _ = app.update(Message::SwitchServer(second));
         assert!(app.server().streaming.watching.is_empty());
         assert_eq!(app.server().streaming.strip, streaming::Strip::Beside);

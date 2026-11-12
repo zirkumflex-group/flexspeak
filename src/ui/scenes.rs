@@ -3692,7 +3692,8 @@ mod tests {
         assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s4"));
         assert_eq!(order(&rt), ["s2", "s1", "s4", "s3", "s5"]);
 
-        // Double-clicking the stage returns to the grid, as the grid button does.
+        // Double-clicking the stage takes it full screen with the others tucked away; leaving
+        // brings them back, and the grid button returns to the grid.
         let (x, y) = rt.find("tile-s4").unwrap();
         rt.pointer_move(x, y);
         rt.frame(1.0 / 60.0);
@@ -3702,6 +3703,13 @@ mod tests {
             rt.frame(1.0 / 60.0);
         }
         settle(&mut rt);
+        assert_eq!(rt.state.ui.fullscreen, Some(false));
+        assert!(rt.state.server().streaming.others_hidden);
+        assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s4"));
+        click(&mut rt, "fullscreen");
+        assert_eq!(rt.state.ui.fullscreen, None);
+        assert!(!rt.state.server().streaming.others_hidden);
+        click(&mut rt, "unfocus");
         assert_eq!(rt.state.server().streaming.focused, None);
 
         click(&mut rt, "layout-below");

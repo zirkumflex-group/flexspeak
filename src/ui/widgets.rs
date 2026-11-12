@@ -396,7 +396,9 @@ pub fn slider(
     current: impl Fn(&App) -> i32 + Copy + 'static,
     on_change: impl Fn(i32) -> Message + Copy + 'static,
 ) -> El {
-    slider_with_home(t, key, label, value, spoken, range, None, current, on_change)
+    slider_with_home(
+        t, key, label, value, spoken, range, None, current, on_change,
+    )
 }
 
 /// [`slider`] with a resting value, such as 100% on a volume: a tick marks it, a drag that
@@ -435,11 +437,13 @@ pub fn slider_with_home(
             .h(height)
             .child(el().w_frac(at).h(1.0))
             .child(
-                el().w(knob)
-                    .h(height)
-                    .ml(-knob * at)
-                    .center()
-                    .child(el().key("home").w(2.0).h(10.0).radius(1.0).fill(t.wash(0.28))),
+                el().w(knob).h(height).ml(-knob * at).center().child(
+                    el().key("home")
+                        .w(2.0)
+                        .h(10.0)
+                        .radius(1.0)
+                        .fill(t.wash(0.28)),
+                ),
             )
             .a11y_hidden()
     });

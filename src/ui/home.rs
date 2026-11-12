@@ -1346,7 +1346,7 @@ fn quick_share(s: &App, t: &Theme) -> Option<El> {
     }
     let mut chips = row().w_full().gap(6.0);
     for (index, source) in sources.iter().enumerate() {
-        let help = format!("Go live publicly: {}", source.name);
+        let help = streams::quick_share_help(s, source);
         chips = chips.child(
             row()
                 .key(format!("quick-share-{index}"))

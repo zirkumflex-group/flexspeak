@@ -763,7 +763,12 @@ impl Preset {
 /// The name a share goes out under: what it shows ("Counter-Strike 2", "Main screen"), or
 /// what kind of share it is when the source has no name.
 fn announced_name(source: &ShareSource) -> String {
-    let name: String = source.name.trim().chars().take(MAX_ANNOUNCED_NAME).collect();
+    let name: String = source
+        .name
+        .trim()
+        .chars()
+        .take(MAX_ANNOUNCED_NAME)
+        .collect();
     if !name.is_empty() {
         name
     } else if source.kind.is_camera() {

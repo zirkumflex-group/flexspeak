@@ -224,12 +224,7 @@ impl Session {
                 self.publisher
                     .stop("Sharing stopped after changing channels");
             }
-            self.stop(
-                connection,
-                None,
-                Phase::Stopped,
-                CHANGED_CHANNELS,
-            );
+            self.stop(connection, None, Phase::Stopped, CHANGED_CHANNELS);
             self.channel = channel;
             self.catalog.clear();
             self.discovery.clear();
@@ -462,12 +457,7 @@ impl Session {
         }
         // Your own share carries on in the background; only watching is tied to the screen.
         if !visible {
-            self.stop(
-                connection,
-                None,
-                Phase::Stopped,
-                LEFT_VIEW,
-            );
+            self.stop(connection, None, Phase::Stopped, LEFT_VIEW);
         }
         if visible && !self.was_visible {
             self.publish_catalog();
