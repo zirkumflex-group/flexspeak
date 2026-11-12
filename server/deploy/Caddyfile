@@ -1,0 +1,14 @@
+# Caddy answers on the server's domain, gets and renews its HTTPS certificate by itself,
+# and passes every request on to the server. DOMAIN and ACME_EMAIL come from .env.
+
+{
+	# Where the certificate authority writes if a certificate has a problem.
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	# Caddy puts the caller's address in X-Forwarded-For, which the server uses for its
+	# per-address limits.
+	reverse_proxy monster:8787
+}

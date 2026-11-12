@@ -53,6 +53,12 @@ pub const SCENES: &[Scene] = &[
     ("settings-omarchy", settings_omarchy),
     ("settings-wip", settings_wip),
     ("settings-wip-server", settings_wip_server),
+    ("settings-sync-signed-out", settings_wip_server),
+    ("settings-sync-syncing", settings_sync_syncing),
+    ("settings-sync-up-to-date", settings_sync_up_to_date),
+    ("settings-sync-choose", settings_sync_choose),
+    ("settings-sync-offline", settings_sync_offline),
+    ("settings-sync-off", settings_sync_off),
     ("monster-empty", monster_empty),
     ("monster-board", monster_board),
     ("monster-search", monster_search),
@@ -1400,6 +1406,95 @@ fn settings_wip_server(s: &mut App) {
     settings_wip(s);
     use_scene_server(s);
     s.sync_fields();
+}
+
+/// Signed in to the collection server with settings sync on and its first check out. The
+/// steps run on their own, so no request goes anywhere and nothing is saved.
+fn settings_sync_started(s: &mut App, seen: i64) -> crate::settings_sync::SettingsSync {
+    settings_wip_server(s);
+    if let Some(saved) = &mut s.saved {
+        saved.monster_server = s.monster.server.clone();
+    }
+    s.monster.session = Some("scene".into());
+    s.monster.session_read = true;
+    let mut sync = crate::settings_sync::SettingsSync::new(true, seen);
+    let _ = sync.signed_in(Instant::now(), settings_sync_context(s));
+    sync
+}
+
+fn settings_sync_context(s: &App) -> crate::settings_sync::Context<'_> {
+    crate::settings_sync::Context {
+        signed_in: true,
+        onboarding: false,
+        local: s.saved.as_ref(),
+    }
+}
+
+/// The account's copy at `version`, holding what travels from `settings`.
+fn settings_sync_copy(
+    version: i64,
+    settings: &settings::Settings,
+) -> crate::monster_api::SyncedSettings {
+    crate::monster_api::SyncedSettings {
+        version,
+        updated_at: 1_700_000_000,
+        data: serde_json::to_value(settings::Synced::from_settings(settings)).unwrap_or_default(),
+    }
+}
+
+/// The server's answer to the first check, as if it came at `at`.
+fn settings_sync_answer(
+    s: &mut App,
+    mut sync: crate::settings_sync::SettingsSync,
+    at: Instant,
+    result: Result<Option<crate::monster_api::SyncedSettings>, crate::monster_api::Problem>,
+) {
+    let answer = crate::settings_sync::Answer::Fetched(sync.generation(), result);
+    let _ = sync.answer(at, answer, settings_sync_context(s));
+    s.settings_sync = sync;
+}
+
+fn settings_sync_syncing(s: &mut App) {
+    s.settings_sync = settings_sync_started(s, 3);
+}
+
+/// The account's copy is the one this computer last saw, checked two minutes ago.
+fn settings_sync_up_to_date(s: &mut App) {
+    let sync = settings_sync_started(s, 3);
+    let copy = s.saved.as_ref().map(|saved| settings_sync_copy(3, saved));
+    let now = Instant::now();
+    let at = now.checked_sub(Duration::from_secs(125)).unwrap_or(now);
+    settings_sync_answer(s, sync, at, Ok(copy));
+}
+
+/// First contact, and the account keeps other settings: nothing changes until a choice.
+fn settings_sync_choose(s: &mut App) {
+    let sync = settings_sync_started(s, 0);
+    let theirs = settings::Settings {
+        nickname: "Sam".into(),
+        ..settings::Settings::default()
+    };
+    settings_sync_answer(
+        s,
+        sync,
+        Instant::now(),
+        Ok(Some(settings_sync_copy(6, &theirs))),
+    );
+}
+
+fn settings_sync_offline(s: &mut App) {
+    let sync = settings_sync_started(s, 3);
+    let problem = crate::monster_api::Problem {
+        error: crate::monster_api::OFFLINE.into(),
+        message: "Can't reach the collection server.".into(),
+        tries_left: None,
+    };
+    settings_sync_answer(s, sync, Instant::now(), Err(problem));
+}
+
+fn settings_sync_off(s: &mut App) {
+    settings_sync_up_to_date(s);
+    s.settings_sync.enabled = false;
 }
 
 fn monster_empty(s: &mut App) {
@@ -4779,6 +4874,51 @@ mod tests {
             .unwrap();
         assert_eq!(saved.chat.layout, chat::Layout::Feed);
         assert!(!saved.chat.popups);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn choosing_the_accounts_settings_applies_them_and_sends_nothing_back() {
+        let root =
+            std::env::temp_dir().join(format!("flexspeak-settings-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("settings.json");
+        let mut rt = runtime(settings_sync_choose, (1100.0, 900.0));
+        settle(&mut rt);
+        rt.state.settings_path = Some(path.clone());
+        assert!(rt.find("settings-sync-computer").is_some());
+        click(&mut rt, "settings-sync-account");
+        settle(&mut rt);
+        assert_eq!(rt.state.nickname, "Sam");
+        assert!(rt.find("settings-sync-choice").is_none());
+        let saved = crate::settings::load(&path).unwrap().unwrap();
+        assert_eq!(saved.nickname, "Sam");
+        assert_eq!(saved.settings_sync_version, 6);
+        // The next ticks see the change it made, and send none of it back.
+        for _ in 0..4 {
+            deliver(&mut rt, crate::Message::UsageTick);
+        }
+        assert!(
+            rt.state.settings_sync_sent.is_empty(),
+            "{:?}",
+            rt.state.settings_sync_sent
+        );
+        // A check that finds the version it remembers changes nothing.
+        let current = rt.state.saved.clone().unwrap();
+        let generation = rt.state.settings_sync.generation();
+        deliver(
+            &mut rt,
+            crate::Message::SettingsSyncAnswer(crate::settings_sync::Answer::Fetched(
+                generation,
+                Ok(Some(settings_sync_copy(6, &current))),
+            )),
+        );
+        assert_eq!(rt.state.saved.as_ref(), Some(&current));
+        assert!(rt.state.settings_sync_sent.is_empty());
+        // Turned off, the choice is saved and the row says so.
+        click(&mut rt, "settings-sync");
+        settle(&mut rt);
+        assert!(!crate::settings::load(&path).unwrap().unwrap().settings_sync);
         let _ = std::fs::remove_dir_all(root);
     }
 

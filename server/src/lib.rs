@@ -10,6 +10,7 @@ mod mail;
 mod me;
 mod passkey;
 mod secret;
+mod settings;
 mod shelf;
 
 use std::{
@@ -35,6 +36,7 @@ use rusqlite::Connection;
 use webauthn_rs::{Webauthn, WebauthnBuilder};
 
 pub use config::{Config, Mail};
+pub use db::{backup, delete_account};
 use error::ApiError;
 
 /// The server's sense of time, in Unix seconds. Tests set and move it by hand.
@@ -146,6 +148,7 @@ pub fn router(state: AppState) -> Router {
         .route("/cans/{id}", delete(shelf::remove))
         .route("/leaderboard", get(shelf::leaderboard))
         .route("/users/{id}/cans", get(shelf::collection))
+        .route("/settings", get(settings::get).put(settings::put))
         .route("/passkeys/options", post(passkey::options))
         .route("/passkeys/finish", post(passkey::finish));
     Router::new()

@@ -12,8 +12,8 @@ use std::time::Duration;
 use monster_core::Ranking;
 pub use monster_core::api::{
     self, AddCan, Can, Cans, Challenge, Collection, Import, Imported, Leaderboard, LinkIdentity,
-    LoginFinish, LoginFinished, LoginStart, Me, Polled, Problem, Ticket, UnlinkIdentity, UpdateMe,
-    problem,
+    LoginFinish, LoginFinished, LoginStart, Me, Polled, Problem, PutSettings, SettingsSaved,
+    SyncedSettings, Ticket, UnlinkIdentity, UpdateMe, problem,
 };
 use reqwest::{Method, StatusCode, header};
 use serde::{Serialize, de::DeserializeOwned};
@@ -217,6 +217,37 @@ impl Server {
     pub async fn collection(&self, user: i64) -> Result<Collection, Problem> {
         self.call(Method::GET, &format!("/v1/users/{user}/cans"), None::<&()>)
             .await
+    }
+
+    /// The account's synced settings, or `None` when none were saved yet (404).
+    pub async fn settings(&self) -> Result<Option<SyncedSettings>, Problem> {
+        match self.call(Method::GET, "/v1/settings", None::<&()>).await {
+            Ok(settings) => Ok(Some(settings)),
+            Err(problem) if problem.error == problem::NOT_FOUND => Ok(None),
+            Err(problem) => Err(problem),
+        }
+    }
+
+    /// Saves the settings over version `base`. A 409 here can only mean another computer
+    /// saved first, so one without the server's own problem still reads as `conflict`.
+    pub async fn put_settings(
+        &self,
+        base: i64,
+        data: serde_json::Value,
+    ) -> Result<SettingsSaved, Problem> {
+        let body = PutSettings { base, data };
+        self.call(Method::PUT, "/v1/settings", Some(&body))
+            .await
+            .map_err(|problem| {
+                if problem.error == problem::TAKEN {
+                    Problem {
+                        error: problem::CONFLICT.into(),
+                        ..problem
+                    }
+                } else {
+                    problem
+                }
+            })
     }
 }
 
@@ -506,6 +537,31 @@ mod tests {
                 .map_err(|p| p.message)?;
             let uid = identity.key().to_pub().get_uid();
             assert!(linked.identities.iter().any(|linked| linked.uid == uid));
+
+            // Settings sync: nothing at first, then one copy whose version counts saves.
+            assert_eq!(server.settings().await.map_err(|p| p.message)?, None);
+            let first = serde_json::json!({ "nickname": "Sam" });
+            let saved = server
+                .put_settings(0, first.clone())
+                .await
+                .map_err(|p| p.message)?;
+            assert_eq!(saved.version, 1);
+            let fetched = server
+                .settings()
+                .await
+                .map_err(|p| p.message)?
+                .expect("saved a moment ago");
+            assert_eq!((fetched.version, fetched.data), (1, first));
+            let stale = server
+                .put_settings(0, serde_json::json!({ "nickname": "Robin" }))
+                .await
+                .expect_err("another computer saved first");
+            assert_eq!(stale.error, problem::CONFLICT);
+            let second = server
+                .put_settings(1, serde_json::json!({ "nickname": "Robin" }))
+                .await
+                .map_err(|p| p.message)?;
+            assert_eq!(second.version, 2);
 
             server.delete_me().await.map_err(|p| p.message)?;
             let gone = server.me().await.expect_err("the account is gone");

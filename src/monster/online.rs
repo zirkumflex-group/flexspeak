@@ -200,6 +200,15 @@ impl Tracker {
         vec![Effect::Me, Effect::Cans]
     }
 
+    /// Settings sync heard from the server that the session has ended: the page asks to sign
+    /// in again, as it does when its own requests hear it.
+    pub fn session_ended(&mut self) -> Vec<Effect> {
+        if !self.online() || self.session.is_none() {
+            return Vec::new();
+        }
+        self.ended()
+    }
+
     /// The session ended on the server: sign in again.
     fn ended(&mut self) -> Vec<Effect> {
         let had = self.session.is_some();

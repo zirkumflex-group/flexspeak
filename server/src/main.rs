@@ -1,12 +1,16 @@
 use std::net::SocketAddr;
 
-use flexspeak_monster::{AppState, Clock, Config, Mail, router};
+use flexspeak_monster::{AppState, Clock, Config, Mail, backup, delete_account, router};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        std::process::exit(if healthy() { 0 } else { 1 });
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("healthcheck") => std::process::exit(if healthy() { 0 } else { 1 }),
+        Some("backup") => std::process::exit(backup_to(args.get(1))),
+        Some("delete-account") => std::process::exit(delete_account_of(args.get(1))),
+        _ => {}
     }
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -112,4 +116,55 @@ fn healthy() -> bool {
     }
     let mut head = [0u8; 12];
     stream.read_exact(&mut head).is_ok() && head.ends_with(b" 200")
+}
+
+/// `flexspeak-monster backup <file>`: writes a consistent copy of the database in `DATA_DIR`
+/// to `<file>` while the server keeps running, so the image needs no `sqlite3` tool.
+fn backup_to(dest: Option<&String>) -> i32 {
+    let Some(dest) = dest else {
+        eprintln!("usage: flexspeak-monster backup <file>");
+        return 2;
+    };
+    match backup(&data_dir(), std::path::Path::new(dest)) {
+        Ok(()) => {
+            println!("backed up to {dest}");
+            0
+        }
+        Err(problem) => {
+            eprintln!("backup failed: {problem}");
+            1
+        }
+    }
+}
+
+/// `flexspeak-monster delete-account <email>`: removes that account and everything in it,
+/// as the app's own "delete account" does, for a request made to the server's owner.
+fn delete_account_of(email: Option<&String>) -> i32 {
+    let Some(email) = email else {
+        eprintln!("usage: flexspeak-monster delete-account <email>");
+        return 2;
+    };
+    match delete_account(&data_dir(), email) {
+        Ok(true) => {
+            println!("deleted the account of {email} and everything in it");
+            0
+        }
+        Ok(false) => {
+            eprintln!("there is no account with the address {email}");
+            1
+        }
+        Err(problem) => {
+            eprintln!("could not delete: {problem}");
+            1
+        }
+    }
+}
+
+/// `DATA_DIR`, as the server reads it.
+fn data_dir() -> std::path::PathBuf {
+    std::env::var("DATA_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "/data".into())
+        .into()
 }

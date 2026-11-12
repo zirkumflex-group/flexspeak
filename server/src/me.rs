@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{
     AppState,
     error::{ApiError, ApiResult, Body},
-    secret,
+    secret, settings,
 };
 use axum::{Json, extract::State};
 
@@ -136,23 +136,31 @@ pub async fn update_me(
     Ok(Json(load_me(&db, caller.user)?))
 }
 
-/// Removes the account; its sessions, passkeys, identities, cans and tickets go with it.
+/// Removes the account; its sessions, passkeys, identities, cans, settings and tickets go
+/// with it.
 pub async fn delete_me(State(state): State<AppState>, caller: Caller) -> ApiResult<StatusCode> {
-    let mut db = state.db();
-    let tx = db.transaction()?;
-    let email: String = tx.query_row(
-        "SELECT email FROM users WHERE id = ?1",
-        [caller.user],
-        |row| row.get(0),
-    )?;
+    delete_account(&mut state.db(), caller.user)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes `user` and everything that belongs to it, including rate-limit rows keyed by its
+/// address or id. Needs a connection with foreign keys on, as [`crate::db::open`] makes.
+pub fn delete_account(conn: &mut Connection, user: i64) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let email: String = tx.query_row("SELECT email FROM users WHERE id = ?1", [user], |row| {
+        row.get(0)
+    })?;
     tx.execute("DELETE FROM login_codes WHERE email = ?1", [&email])?;
     tx.execute(
         "DELETE FROM hits WHERE bucket = ?1",
         [format!("code-email:{email}")],
     )?;
-    tx.execute("DELETE FROM users WHERE id = ?1", [caller.user])?;
-    tx.commit()?;
-    Ok(StatusCode::NO_CONTENT)
+    tx.execute(
+        "DELETE FROM hits WHERE bucket = ?1",
+        [settings::saves_bucket(user)],
+    )?;
+    tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
+    tx.commit()
 }
 
 pub async fn sign_out(State(state): State<AppState>, caller: Caller) -> ApiResult<StatusCode> {

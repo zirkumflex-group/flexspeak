@@ -2,6 +2,8 @@
 
 The server behind the Monster collection page in Flexspeak. It holds accounts, rolls each can's card with a secret only it knows, stores collections and answers the leaderboard. It is one Rust process with one SQLite file.
 
+To host it, see [`DEPLOY.md`](DEPLOY.md): a step-by-step guide for a server owner, with the production setup in [`deploy/`](deploy/). This file is for working on the server.
+
 Every call the app makes is specified in [`crates/monster-core/src/api.rs`](../crates/monster-core/src/api.rs); the rules both sides share (flavours, rarities, the roll, the rankings) are in [`crates/monster-core/src/lib.rs`](../crates/monster-core/src/lib.rs).
 
 ## Running it locally
@@ -53,7 +55,15 @@ docker run -p 8787:8787 -v monster-data:/data \
 
 It runs as an unprivileged user (uid 10001) and keeps everything in the `/data` volume. A host that mounts a volume owned by root must make it writable for that user, or run the container as root. The health check runs `flexspeak-monster healthcheck`, which asks the server for `/health`.
 
-[`compose.yaml`](compose.yaml) is an example with a named volume: `docker compose up --build` from this folder.
+[`compose.yaml`](compose.yaml) is an example for trying it out locally, with a named volume: `docker compose up --build` from this folder. The production setup (the published image, Caddy for HTTPS, Watchtower for updates) is in [`deploy/`](deploy/).
+
+## Publishing
+
+On every push to `main` that touches `server/`, `crates/monster-core/` or the workflow, [`server.yml`](../.github/workflows/server.yml) lints, tests and test-builds the image, then publishes it as `ghcr.io/<owner>/flexspeak-monster:latest` and `:<commit sha>`. Pull requests never publish. Hosts running [`deploy/compose.yaml`](deploy/compose.yaml) pick up `:latest` within minutes.
+
+## Backups
+
+`flexspeak-monster backup <file>` writes a consistent copy of the database in `DATA_DIR` to `<file>` while the server keeps running (SQLite's `VACUUM INTO`, which includes what is still in the write-ahead log), refuses to overwrite a file, and checks that the copy opens. The image has no `sqlite3` tool, so this is how [`deploy/backup.sh`](deploy/backup.sh) takes its nightly copy.
 
 ## What it stores
 
@@ -63,14 +73,15 @@ Everything is in `monster.sqlite`:
 | --- | --- |
 | `users` | Email address, display name, when the account was made, whether it is hidden, whether local cans were imported, the account's secret roll key, its passkey user handle, and the last can number handed out. |
 | `login_codes` | For each address with a pending code: the code's SHA-256 hash, when it runs out (10 minutes), and the tries left (5). |
-| `hits` | One row each time a rate-limited thing happens (a code sent to an address, a code or passkey sign-in asked for from a network address), kept for an hour. |
+| `hits` | One row each time a rate-limited thing happens (a code sent to an address, a code or passkey sign-in asked for from a network address, a settings save by an account), kept for an hour. |
 | `sessions` | The SHA-256 of each session token, whose it is, and when it runs out (30 days after it was last used). |
 | `tickets` | The SHA-256 of each passkey ticket, its kind, whose it is once known, and whether the passkey page finished it. 15 minutes, used once. |
 | `passkeys` | Each passkey's credential id and public key, as `webauthn-rs` stores it, with when it was made and last used. |
 | `challenges` | Identity-linking challenges: whose, and when they run out (5 minutes, used once). |
 | `identities` | Linked TeamSpeak identities: uid, public key, where it was found, when it was linked. Never a private key. |
 | `cans` | Every can: its number in the collection, flavour, time, rarity and seed, whether it was imported (`legacy`), when it was removed, and the app's key for retrying an add. Removed cans stay, so their numbers are never reused, but are never listed or counted. |
+| `settings` | One row per account: the app's settings as the JSON text it sent (an object, at most 256 KB), the version (counts saves from 1) and when it was last saved. The server never looks inside or logs it; only the app knows what is in it. |
 
-Sign-in codes, session tokens and tickets are only stored as hashes, and none of them, nor email bodies, are logged. `DELETE /v1/me` removes the account's row and, with it, everything above that belongs to it.
+Sign-in codes, session tokens and tickets are only stored as hashes, and none of them, nor email bodies, nor settings, are logged. `DELETE /v1/me` removes the account's row and, with it, everything above that belongs to it.
 
-There is no backup yet: the volume is the only copy.
+Backups are copies of this file; see [Backups](#backups) above and [`DEPLOY.md`](DEPLOY.md).

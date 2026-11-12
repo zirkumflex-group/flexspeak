@@ -65,6 +65,10 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, problem::TAKEN, message)
     }
 
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, problem::CONFLICT, message)
+    }
+
     pub fn server() -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,

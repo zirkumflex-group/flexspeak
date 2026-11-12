@@ -533,7 +533,7 @@ fn wip_section(s: &App, t: &Theme, k: &Kit) -> Section {
         "wip",
         "Work in Progress",
         "wip unfinished",
-        vec![
+        [
             item(
                 "wip secret",
                 form_row(
@@ -561,8 +561,80 @@ fn wip_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     server,
                 ),
             ),
-        ],
+        ]
+        .into_iter()
+        .chain(settings_sync_rows(s, t, k))
+        .collect(),
     )
+    .note(group_note(
+        t,
+        "Sends your saved servers, nickname and preferences to the collection server. Passwords, devices and shortcuts stay on this computer.",
+    ))
+}
+
+/// The sync switch under Collection Server, with one line saying where it stands, and the two
+/// choices while this computer and the account first differ.
+fn settings_sync_rows(s: &App, t: &Theme, k: &Kit) -> Vec<Row> {
+    use crate::settings_sync::{Choice, Status, ago};
+    let signed_in = s.monster.online() && s.monster.session.is_some();
+    let status = s.settings_sync.status(signed_in);
+    let line = match status {
+        Status::SignedOut => "Sign in on the secret page to turn this on.".to_owned(),
+        Status::Off => "Off. This computer keeps its own settings.".to_owned(),
+        Status::Syncing => "Syncing…".to_owned(),
+        Status::UpToDate(Some(at)) => format!("Up to date. Last synced {}.", ago(at.elapsed())),
+        Status::UpToDate(None) => "Up to date.".to_owned(),
+        Status::Offline => "Can't reach the server. Trying again soon.".to_owned(),
+        Status::Choose => "Waiting for your choice below.".to_owned(),
+    };
+    let mut rows = vec![item(
+        "wip sync settings servers account computers same",
+        form_row(
+            t,
+            "Sync Settings and Servers",
+            Some(&line),
+            switch(
+                "settings-sync",
+                "Sync Settings and Servers",
+                signed_in && s.settings_sync.enabled,
+                signed_in,
+                k,
+                |_, on| Message::SettingsSync(on),
+            ),
+        )
+        .key("settings-sync-row"),
+    )];
+    if status == Status::Choose {
+        rows.push(item(
+            "wip sync settings choose account computer",
+            form_row(
+                t,
+                "Your account has other settings",
+                Some("They differ from this computer's. Nothing changes until you choose."),
+                row()
+                    .gap(size::GAP)
+                    .flex_wrap()
+                    .child(button(
+                        t,
+                        "settings-sync-account",
+                        "Use My Account's Settings",
+                        None,
+                        Variant::Primary,
+                        Some(Message::SettingsSyncChoice(Choice::Account)),
+                    ))
+                    .child(button(
+                        t,
+                        "settings-sync-computer",
+                        "Keep This Computer's",
+                        None,
+                        Variant::Secondary,
+                        Some(Message::SettingsSyncChoice(Choice::ThisComputer)),
+                    )),
+            )
+            .key("settings-sync-choice"),
+        ));
+    }
+    rows
 }
 
 fn sidebar(

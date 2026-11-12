@@ -90,6 +90,14 @@ pub struct Settings {
     /// other systems keep it in `monster-session` beside this file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monster_session: Option<String>,
+    /// Keeps the settings in [`Synced`] the same on every computer signed in to the collection
+    /// server (Settings > WIP). On unless turned off; it does nothing while signed out.
+    #[serde(skip_serializing_if = "is_true")]
+    pub settings_sync: bool,
+    /// The version of the account's settings this computer last saw; 0 for none. Forgotten on
+    /// signing out, so the next account starts by comparing.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub settings_sync_version: i64,
 }
 
 /// What the window's close button does while connected (Settings > Appearance > Window).
@@ -410,6 +418,267 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+fn is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
+/// The settings that travel between computers through the collection server: an allow-list,
+/// so a setting added to [`Settings`] later stays on its computer until someone adds it here.
+///
+/// Every field is optional and read on its own: one this version doesn't know is ignored, one
+/// missing or unreadable keeps this computer's value. So older and newer versions of the app
+/// can share one copy. Devices, shortcuts, the window and everything bound to one computer stay
+/// out, and so does every server password.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Synced {
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub servers: Option<Vec<SyncedServer>>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub nickname: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audio_processing: Option<crate::audio_processing::Settings>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub transmission: Option<crate::transmission::Settings>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub appearance: Option<Appearance>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub custom_themes: Option<Vec<serde_json::Value>>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chat: Option<Chat>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sound_cues: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sounds: Option<crate::sounds::Settings>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub share: Option<crate::streaming::publishing::ShareDefaults>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stream_view: Option<StreamView>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub close_button: Option<CloseButton>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub footer_hidden: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_download_updates: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub user_audio: Option<BTreeMap<String, UserAudio>>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stream_volumes: Option<BTreeMap<String, u16>>,
+}
+
+/// A saved server as it travels: never its password, which stays sealed on its computer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncedServer {
+    pub name: String,
+    pub address: String,
+    pub auto_connect: bool,
+}
+
+/// Reads a value that may be from another version of the app: one that doesn't fit is
+/// dropped, so the computer keeps its own.
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value)
+        .map_err(|error| tracing::debug!("A synced setting was left out: {error}"))
+        .ok())
+}
+
+impl Synced {
+    /// What travels from these settings.
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            servers: Some(
+                settings
+                    .servers
+                    .iter()
+                    .map(|server| SyncedServer {
+                        name: server.name.clone(),
+                        address: server.address.clone(),
+                        auto_connect: server.auto_connect,
+                    })
+                    .collect(),
+            ),
+            nickname: Some(settings.nickname.clone()),
+            audio_processing: Some(settings.audio_processing),
+            transmission: Some(settings.transmission),
+            appearance: Some(settings.appearance.clone()),
+            custom_themes: Some(settings.custom_themes.clone()),
+            chat: Some(settings.chat),
+            sound_cues: Some(settings.sound_cues),
+            sounds: Some(settings.sounds.clone()),
+            share: Some(settings.share),
+            stream_view: Some(settings.stream_view),
+            close_button: Some(settings.close_button),
+            footer_hidden: Some(settings.footer_hidden),
+            auto_download_updates: Some(settings.auto_download_updates),
+            user_audio: Some(settings.user_audio.clone()),
+            stream_volumes: Some(settings.stream_volumes.clone()),
+        }
+    }
+
+    /// Reads a copy fetched from the server; anything unreadable is left out.
+    pub fn read(data: &serde_json::Value) -> Self {
+        serde_json::from_value(data.clone()).unwrap_or_default()
+    }
+
+    /// Puts what travelled onto this computer's settings. A field that is missing, or would
+    /// make the settings invalid, keeps this computer's value. A server already saved here
+    /// keeps its remembered password.
+    pub fn apply(self, settings: &mut Settings) {
+        if let Some(servers) = self.servers.filter(|servers| {
+            !servers.is_empty()
+                && servers
+                    .iter()
+                    .all(|server| !server.address.trim().is_empty())
+        }) {
+            let passwords: BTreeMap<String, String> = settings
+                .servers
+                .iter()
+                .filter(|server| !server.password.is_empty())
+                .map(|server| (server.address.trim().to_owned(), server.password.clone()))
+                .collect();
+            settings.servers = servers
+                .into_iter()
+                .map(|server| Server {
+                    password: passwords
+                        .get(server.address.trim())
+                        .cloned()
+                        .unwrap_or_default(),
+                    name: server.name,
+                    address: server.address,
+                    auto_connect: server.auto_connect,
+                })
+                .collect();
+        }
+        if let Some(nickname) = self
+            .nickname
+            .filter(|nickname| crate::onboarding::nickname_problem(nickname).is_none())
+        {
+            settings.nickname = nickname.trim().to_owned();
+        }
+        if let Some(processing) = self.audio_processing {
+            settings.audio_processing = processing;
+        }
+        if let Some(transmission) = self
+            .transmission
+            .filter(|transmission| transmission.validate().is_ok())
+        {
+            settings.transmission = transmission;
+        }
+        if let Some(appearance) = self.appearance {
+            settings.appearance = appearance;
+        }
+        if let Some(themes) = self.custom_themes {
+            settings.custom_themes = themes;
+        }
+        if let Some(chat) = self.chat {
+            settings.chat = chat;
+        }
+        if let Some(on) = self.sound_cues {
+            settings.sound_cues = on;
+        }
+        if let Some(sounds) = self.sounds {
+            settings.sounds = sounds;
+        }
+        if let Some(share) = self.share {
+            settings.share = share;
+        }
+        if let Some(view) = self.stream_view {
+            settings.stream_view = view;
+        }
+        if let Some(close) = self.close_button {
+            settings.close_button = close;
+        }
+        if let Some(hidden) = self.footer_hidden {
+            settings.footer_hidden = hidden;
+        }
+        if let Some(on) = self.auto_download_updates {
+            settings.auto_download_updates = on;
+        }
+        if let Some(audio) = self.user_audio {
+            settings.user_audio = audio;
+        }
+        if let Some(volumes) = self.stream_volumes {
+            settings.stream_volumes = volumes;
+        }
+    }
+
+    /// Whether taking this copy would change nothing on a computer with `settings`.
+    pub fn matches(&self, settings: &Settings) -> bool {
+        let mut taken = settings.clone();
+        self.clone().apply(&mut taken);
+        taken == *settings
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -442,6 +711,8 @@ impl Default for Settings {
             chat: Chat::default(),
             monster_server: None,
             monster_session: None,
+            settings_sync: true,
+            settings_sync_version: 0,
         }
     }
 }
@@ -744,5 +1015,208 @@ mod tests {
         assert_eq!(fs::read_to_string(&path)?, "{ malformed");
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    fn travelling() -> Settings {
+        Settings {
+            servers: vec![
+                Server {
+                    name: "Friends".into(),
+                    address: "voice.example".into(),
+                    auto_connect: true,
+                    password: "sealed-secret".into(),
+                },
+                Server::new("other.example:9988"),
+            ],
+            nickname: "Sam".into(),
+            transmission: crate::transmission::Settings {
+                mode: crate::transmission::Mode::VoiceActivation,
+                voice_threshold_db: -30,
+                ptt_release_ms: 200,
+            },
+            appearance: Appearance {
+                scheme: ColorScheme::Light,
+                light_theme: ThemeName::Ocean,
+                ..Appearance::default()
+            },
+            footer_hidden: true,
+            close_button: CloseButton::Quit,
+            sound_cues: false,
+            user_audio: BTreeMap::from([(
+                "uid-1".into(),
+                UserAudio {
+                    volume_percent: 150,
+                    muted: true,
+                },
+            )]),
+            stream_volumes: BTreeMap::from([("uid-2".into(), 60)]),
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn synced_settings_round_trip_what_travels() {
+        let from = travelling();
+        let json = serde_json::to_value(Synced::from_settings(&from)).unwrap();
+        let mut onto = Settings::default();
+        Synced::read(&json).apply(&mut onto);
+        assert_eq!(onto.nickname, "Sam");
+        assert_eq!(onto.transmission, from.transmission);
+        assert_eq!(onto.appearance, from.appearance);
+        assert!(onto.footer_hidden);
+        assert_eq!(onto.close_button, CloseButton::Quit);
+        assert!(!onto.sound_cues);
+        assert_eq!(onto.user_audio, from.user_audio);
+        assert_eq!(onto.stream_volumes, from.stream_volumes);
+        assert_eq!(onto.servers.len(), 2);
+        assert!(onto.servers[0].auto_connect);
+        assert_eq!(onto.servers[0].name, "Friends");
+        assert!(Synced::read(&json).matches(&onto));
+    }
+
+    #[test]
+    fn passwords_never_travel_and_a_local_one_survives() {
+        let from = travelling();
+        let text = serde_json::to_string(&Synced::from_settings(&from)).unwrap();
+        assert!(!text.contains("password"), "{text}");
+        assert!(!text.contains("sealed-secret"), "{text}");
+        // This computer remembers a password for voice.example; the fetched list keeps it.
+        let mut here = Settings {
+            servers: vec![Server {
+                password: "kept-here".into(),
+                ..Server::new(" voice.example ")
+            }],
+            ..Settings::default()
+        };
+        let fetched = Synced {
+            servers: Some(vec![
+                SyncedServer {
+                    name: "Renamed".into(),
+                    address: "voice.example".into(),
+                    auto_connect: false,
+                },
+                SyncedServer {
+                    address: "new.example".into(),
+                    ..SyncedServer::default()
+                },
+            ]),
+            ..Synced::default()
+        };
+        fetched.apply(&mut here);
+        assert_eq!(here.servers[0].password, "kept-here");
+        assert_eq!(here.servers[0].name, "Renamed");
+        assert_eq!(here.servers[1].password, "");
+    }
+
+    #[test]
+    fn applying_leaves_what_stays_on_this_computer_alone() {
+        let mut here = Settings {
+            playback_volume_percent: 30,
+            input_device_id: Some("input-id".into()),
+            output_device_id: Some("output-id".into()),
+            keybinds: Keybinds {
+                toggle_mute: "F8".into(),
+                ..Keybinds::default()
+            },
+            window: Some(WindowPlace {
+                x: 1,
+                y: 2,
+                width: 800,
+                height: 600,
+                maximized: false,
+            }),
+            sidebar_width: Some(300),
+            log_pane: LogPane {
+                height: 200,
+                collapsed: true,
+            },
+            collapsed_channels: BTreeMap::from([("voice.example".into(), BTreeSet::from([4]))]),
+            streaming: Streaming {
+                hardware_av1: true,
+                fast_capture: true,
+            },
+            skip_install_prompt: true,
+            monster_server: Some("https://collection.example.com".into()),
+            monster_session: Some("sealed".into()),
+            settings_sync: false,
+            settings_sync_version: 7,
+            ..Settings::default()
+        };
+        let before = here.clone();
+        let text = serde_json::to_string(&Synced::from_settings(&here)).unwrap();
+        for local in [
+            "playback_volume",
+            "input_device",
+            "output_device",
+            "keybinds",
+            "window",
+            "sidebar",
+            "log_pane",
+            "collapsed",
+            "streaming",
+            "skip_install",
+            "monster",
+            "settings_sync",
+        ] {
+            assert!(!text.contains(local), "{local} travelled: {text}");
+        }
+        Synced::from_settings(&travelling()).apply(&mut here);
+        assert_eq!(here.nickname, "Sam");
+        here.servers = before.servers.clone();
+        here.nickname = before.nickname.clone();
+        assert_eq!(here.playback_volume_percent, 30);
+        assert_eq!(here.input_device_id, before.input_device_id);
+        assert_eq!(here.output_device_id, before.output_device_id);
+        assert_eq!(here.keybinds, before.keybinds);
+        assert_eq!(here.window, before.window);
+        assert_eq!(here.sidebar_width, before.sidebar_width);
+        assert_eq!(here.log_pane, before.log_pane);
+        assert_eq!(here.collapsed_channels, before.collapsed_channels);
+        assert_eq!(here.streaming, before.streaming);
+        assert!(here.skip_install_prompt);
+        assert_eq!(here.monster_server, before.monster_server);
+        assert_eq!(here.monster_session, before.monster_session);
+        assert!(!here.settings_sync);
+        assert_eq!(here.settings_sync_version, 7);
+    }
+
+    #[test]
+    fn unknown_missing_and_unreadable_synced_fields_are_tolerated() {
+        let mut here = Settings {
+            nickname: "Here".into(),
+            footer_hidden: true,
+            ..Settings::default()
+        };
+        // From a newer version: a field this one doesn't know, a nickname, and a footer value
+        // of a shape it can't read. Everything else is missing.
+        let fetched = Synced::read(&serde_json::json!({
+            "laser_mode": true,
+            "nickname": "Sam",
+            "footer_hidden": { "new": "shape" },
+            "transmission": { "mode": "push_to_talk", "voice_threshold_db": 5, "ptt_release_ms": 9999 },
+        }));
+        assert_eq!(fetched.nickname.as_deref(), Some("Sam"));
+        assert_eq!(fetched.footer_hidden, None);
+        let before = here.clone();
+        fetched.apply(&mut here);
+        assert_eq!(here.nickname, "Sam");
+        assert!(here.footer_hidden, "unreadable keeps this computer's");
+        assert_eq!(
+            here.transmission, before.transmission,
+            "invalid keeps this computer's"
+        );
+        assert_eq!(
+            here.servers, before.servers,
+            "missing keeps this computer's"
+        );
+        assert_eq!(here.appearance, before.appearance);
+        // Something that isn't an object at all changes nothing.
+        let mut same = before.clone();
+        Synced::read(&serde_json::json!([1, 2])).apply(&mut same);
+        assert_eq!(same, before);
+        // An empty server list or a blank nickname would make the settings invalid.
+        let mut kept = before.clone();
+        Synced::read(&serde_json::json!({ "servers": [], "nickname": "  " })).apply(&mut kept);
+        assert_eq!(kept, before);
     }
 }

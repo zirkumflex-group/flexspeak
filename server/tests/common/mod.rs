@@ -57,6 +57,11 @@ impl Server {
         }
     }
 
+    /// The folder that holds the server's database.
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self._dir.path().join("data")
+    }
+
     pub async fn send(
         &self,
         method: Method,
@@ -79,6 +84,23 @@ impl Server {
             None => req.body(Body::empty()),
         }
         .unwrap();
+        self.answer(req).await
+    }
+
+    /// A GET whose answer comes back as the text it was sent as.
+    pub async fn get_text(&self, path: &str, session: &str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .uri(path)
+            .header("authorization", format!("Bearer {session}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = self.app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn answer(&self, req: Request<Body>) -> Answer {
         let res = self.app.clone().oneshot(req).await.unwrap();
         let status = res.status();
         let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
@@ -98,6 +120,23 @@ impl Server {
 
     pub async fn post(&self, path: &str, session: Option<&str>, body: Value) -> Answer {
         self.send(Method::POST, path, session, None, Some(body))
+            .await
+    }
+
+    /// Sends `text` as a JSON body exactly as written, for checking what is kept byte for byte.
+    pub async fn put_text(&self, path: &str, session: &str, text: String) -> Answer {
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(path)
+            .header("authorization", format!("Bearer {session}"))
+            .header("content-type", "application/json")
+            .body(Body::from(text))
+            .unwrap();
+        self.answer(req).await
+    }
+
+    pub async fn put(&self, path: &str, session: &str, body: Value) -> Answer {
+        self.send(Method::PUT, path, Some(session), None, Some(body))
             .await
     }
 
