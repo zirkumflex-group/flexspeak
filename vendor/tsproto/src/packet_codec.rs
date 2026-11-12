@@ -90,9 +90,7 @@ impl PacketCodec {
 				// fake one.
 				// If it is the first ack packet of a client, try to fake
 				// decrypt it.
-				if (p_type == PacketType::Ack && id <= 1 && con.is_client)
-					|| con.params.is_none()
-				{
+				if (p_type == PacketType::Ack && id <= 1 && con.is_client) || con.params.is_none() {
 					if let Err(e) = algs::decrypt_fake(dir, &mut packet_data).or_else(|_| {
 						if let Some(params) = &mut con.params {
 							// Decrypt the packet
