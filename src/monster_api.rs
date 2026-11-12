@@ -4,10 +4,10 @@
 //!
 //! Nothing here decides anything; `monster::Tracker::answer` does, so tests can feed it answers.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+// Only the session file, which Windows doesn't keep, needs paths.
+#[cfg(not(windows))]
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use monster_core::Ranking;
 pub use monster_core::api::{
@@ -303,6 +303,7 @@ fn problem_from(status: StatusCode, body: &[u8]) -> Problem {
 
 /// Where the session is kept on systems without DPAPI: beside `settings.json`, readable only by
 /// the person signed in to the computer. Windows seals it into `settings.json` instead.
+#[cfg(not(windows))]
 pub fn session_path(settings: &Path) -> PathBuf {
     settings.with_file_name("monster-session")
 }
