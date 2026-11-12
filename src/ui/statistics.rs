@@ -28,9 +28,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
             .child(muted(
                 t,
                 format!(
-                    "Voice packets · sent {} · received {}",
+                    "Voice packets · sent {} · received {} · playback gaps {}",
                     s.server().sent,
-                    s.server().received
+                    s.server().received,
+                    crate::audio::playback_gaps()
                 ),
             ))
             .child(faint(t, s.server().detail.clone()))

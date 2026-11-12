@@ -414,6 +414,7 @@ impl AudioEngine {
                         .as_ref()
                         .map(|reference| reference.samples.clone()),
                     discontinuity.clone(),
+                    true,
                 )
             };
         }
@@ -535,12 +536,15 @@ impl AudioEngine {
 
     pub fn set_capture(&mut self, enabled: bool) -> Result<()> {
         if self.capture.enabled() != enabled {
-            self.reset_capture(enabled)?;
+            self.reset_capture(enabled, false)?;
         }
         Ok(())
     }
 
-    fn reset_capture(&mut self, enabled: bool) -> Result<()> {
+    /// Empties the microphone pipeline. `fresh` also rebuilds the processor, which takes long
+    /// enough to make playback wait: only a change of server needs that. Muting and a dropped
+    /// device buffer keep the one that has already adapted to the room.
+    fn reset_capture(&mut self, enabled: bool, fresh: bool) -> Result<()> {
         self.packet_boundary.end();
         self.capture.clear(enabled);
         self.pcm.clear();
@@ -549,7 +553,11 @@ impl AudioEngine {
         self.input_clock = ResampleClock::default();
         self.input_len = 0;
         self.input_at = None;
-        self.processor.reset()?;
+        if fresh {
+            self.processor.reset()?;
+        } else {
+            self.processor.clear();
+        }
         self.voice_gate.reset()?;
         self.last_frame = None;
         if let Some(reference) = &mut self.reference {
@@ -585,7 +593,7 @@ impl AudioEngine {
     /// Ends any utterance in progress and clears the microphone pipeline, so nothing spoken to
     /// one server reaches another. Returns the packets that close that utterance.
     pub fn end_utterance(&mut self) -> Result<Vec<Vec<u8>>> {
-        self.reset_capture(false)?;
+        self.reset_capture(false, true)?;
         let mut packets = Vec::new();
         self.packet_boundary.flush(&mut packets);
         Ok(packets)
@@ -643,7 +651,7 @@ impl AudioEngine {
             bail!("Audio device failed: {error}");
         }
         if self.capture.discontinuity.swap(false, Ordering::AcqRel) {
-            self.reset_capture(self.capture.enabled())?;
+            self.reset_capture(self.capture.enabled(), false)?;
         }
         if let Some(reference) = &mut self.reference {
             reference.process(&mut self.processor)?;
@@ -1134,6 +1142,7 @@ fn play_alone_now(
                 volume.clone(),
                 None,
                 discontinuity.clone(),
+                false,
             )
         };
     }
@@ -1154,6 +1163,85 @@ fn play_alone_now(
     Ok(())
 }
 
+/// How often playback ran out of audio since the app started. Each time is a short dropout:
+/// the worker filling the queue fell behind the device.
+static PLAYBACK_GAPS: AtomicU64 = AtomicU64::new(0);
+
+pub fn playback_gaps() -> u64 {
+    PLAYBACK_GAPS.load(Ordering::Relaxed)
+}
+
+/// Keeps the output continuous when the queue runs dry. Silence cut into the middle of a wave
+/// is a click, so the last sample dies away instead and the audio that follows fades in over it.
+struct Flow {
+    last: [f32; 2],
+    tail: [f32; 2],
+    fade: f32,
+    fade_step: f32,
+    decay: f32,
+    dry: bool,
+    /// Set by the first sample, so the wait for the worker to start is not counted.
+    primed: bool,
+    gaps: u32,
+}
+
+impl Flow {
+    /// Both the fade in and the dying away take about this long.
+    const SECONDS: f32 = 0.004;
+
+    fn new(rate: u32) -> Self {
+        let samples = rate as f32 * Self::SECONDS;
+        Self {
+            last: [0.0; 2],
+            tail: [0.0; 2],
+            fade: 1.0,
+            fade_step: 1.0 / samples,
+            // Down 60 dB over those samples.
+            decay: 0.001_f32.powf(1.0 / samples),
+            dry: false,
+            primed: false,
+            gaps: 0,
+        }
+    }
+
+    fn next(&mut self, queue: &ArrayQueue<[f32; 2]>) -> [f32; 2] {
+        let Some(sample) = queue.pop() else {
+            if !self.dry {
+                self.dry = true;
+                self.tail = self.last;
+                self.fade = 0.0;
+                self.gaps += u32::from(self.primed);
+            }
+            self.fall();
+            self.last = self.tail;
+            return self.tail;
+        };
+        self.primed = true;
+        self.dry = false;
+        if self.fade < 1.0 || self.tail != [0.0; 2] {
+            self.fade = (self.fade + self.fade_step).min(1.0);
+            self.fall();
+            self.last = [
+                sample[0] * self.fade + self.tail[0],
+                sample[1] * self.fade + self.tail[1],
+            ];
+        } else {
+            self.last = sample;
+        }
+        self.last
+    }
+
+    fn fall(&mut self) {
+        for value in &mut self.tail {
+            *value *= self.decay;
+            if value.abs() < 1e-5 {
+                *value = 0.0;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn make_output<T>(
     device: &Device,
     config: &SupportedStreamConfig,
@@ -1162,6 +1250,7 @@ fn make_output<T>(
     volume: Arc<PlaybackVolume>,
     reference: Option<Arc<ArrayQueue<Timed<[f32; 2]>>>>,
     discontinuity: Arc<AtomicBool>,
+    count_gaps: bool,
 ) -> Result<Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -1171,6 +1260,7 @@ where
     let rate = config.sample_rate();
     let failure = discontinuity.clone();
     let mut gain = volume.gain();
+    let mut flow = Flow::new(rate);
     // Smooth live volume changes over about 5 ms to avoid abrupt sample jumps.
     let gain_step = 1.0 / (config.sample_rate() as f32 * 0.005);
     Ok(device.build_output_stream(
@@ -1178,7 +1268,19 @@ where
         move |data: &mut [T], info| {
             let _trace = profiler::scope(Category::AudioCallbacks, "audio.playback_callback");
             let observed = reference.as_ref().map(|_| Instant::now());
-            write_playback(data, channels, &queue, &mut gain, volume.gain(), gain_step);
+            let gaps = flow.gaps;
+            write_playback(
+                data,
+                channels,
+                &queue,
+                &mut flow,
+                &mut gain,
+                volume.gain(),
+                gain_step,
+            );
+            if count_gaps && flow.gaps != gaps {
+                PLAYBACK_GAPS.fetch_add(u64::from(flow.gaps - gaps), Ordering::Relaxed);
+            }
             if let Some(reference) = &reference {
                 let timestamp = info.timestamp();
                 let at = callback_time(timestamp.playback, timestamp.callback, observed.unwrap());
@@ -1230,6 +1332,7 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
     data: &mut [T],
     channels: usize,
     queue: &ArrayQueue<[f32; 2]>,
+    flow: &mut Flow,
     gain: &mut f32,
     target_gain: f32,
     gain_step: f32,
@@ -1237,7 +1340,7 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
     fn write<T: SizedSample + FromSample<f32>>(
         data: &mut [T],
         channels: usize,
-        queue: &ArrayQueue<[f32; 2]>,
+        mut next: impl FnMut() -> [f32; 2],
         gain: &mut f32,
         target: f32,
         step: f32,
@@ -1247,17 +1350,17 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
         while *gain != target {
             let Some(frame) = frames.next() else { return };
             *gain += (target - *gain).clamp(-step, step);
-            frame_out(frame, queue.pop().unwrap_or([0.0; 2]), *gain);
+            frame_out(frame, next(), *gain);
         }
         for frame in frames {
-            frame_out(frame, queue.pop().unwrap_or([0.0; 2]), *gain);
+            frame_out(frame, next(), *gain);
         }
     }
     match channels {
         1 => write(
             data,
             channels,
-            queue,
+            || flow.next(queue),
             gain,
             target_gain,
             gain_step,
@@ -1268,7 +1371,7 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
         2 => write(
             data,
             channels,
-            queue,
+            || flow.next(queue),
             gain,
             target_gain,
             gain_step,
@@ -1280,7 +1383,7 @@ fn write_playback<T: SizedSample + FromSample<f32>>(
         _ => write(
             data,
             channels,
-            queue,
+            || flow.next(queue),
             gain,
             target_gain,
             gain_step,
@@ -1307,15 +1410,21 @@ mod tests {
                 let queue = ArrayQueue::new(700);
                 let mut expected = vec![0_i16; 800 * channels];
                 let mut old_gain = initial;
+                // Past the end of the queue the last sample dies away.
+                let decay = Flow::new(48_000).decay;
+                let mut last = [0.0_f32; 2];
                 for (index, frame) in expected.chunks_exact_mut(channels).enumerate() {
                     old_gain += (target - old_gain).clamp(-1.0_f32 / 240.0, 1.0 / 240.0);
-                    let [left, right] = if index < 700 {
-                        let value = [index as f32 / 1000.0, -(index as f32) / 2000.0];
-                        queue.push(value).unwrap();
-                        value
+                    if index < 700 {
+                        last = [index as f32 / 1000.0, -(index as f32) / 2000.0];
+                        queue.push(last).unwrap();
                     } else {
-                        [0.0; 2]
-                    };
+                        last = last.map(|value| {
+                            let value = value * decay;
+                            if value.abs() < 1e-5 { 0.0 } else { value }
+                        });
+                    }
+                    let [left, right] = last;
                     frame[0] = i16::from_sample(if channels == 1 {
                         (left + right) * 0.5 * old_gain
                     } else {
@@ -1327,8 +1436,17 @@ mod tests {
                 }
                 let mut actual = vec![123_i16; expected.len()];
                 let mut gain = initial;
+                let mut flow = Flow::new(48_000);
                 for chunk in actual.chunks_mut(channels * 137) {
-                    write_playback(chunk, channels, &queue, &mut gain, target, 1.0 / 240.0);
+                    write_playback(
+                        chunk,
+                        channels,
+                        &queue,
+                        &mut flow,
+                        &mut gain,
+                        target,
+                        1.0 / 240.0,
+                    );
                 }
                 assert_eq!(actual, expected);
                 assert_eq!(gain, old_gain);
@@ -1544,7 +1662,15 @@ mod tests {
             playback.push([0.8, -0.2]).unwrap();
             playback.push([0.4, 0.6]).unwrap();
             let mut submitted = vec![0_i16; channels * 3];
-            write_playback(&mut submitted, channels, &playback, &mut 0.0, 0.5, 0.25);
+            write_playback(
+                &mut submitted,
+                channels,
+                &playback,
+                &mut Flow::new(48_000),
+                &mut 0.0,
+                0.5,
+                0.25,
+            );
             let reference = ArrayQueue::new(3);
             let dropped = AtomicBool::new(false);
             record_playback(&submitted, channels, 48000, Some(now), &reference, &dropped);
@@ -1558,9 +1684,6 @@ mod tests {
                 };
                 assert_eq!(sample.value, [left, right]);
                 assert_eq!(sample.at, sample_time(Some(now), index, 48000));
-                if index == 2 {
-                    assert_eq!(sample.value, [0.0; 2]);
-                }
             }
             assert!(!dropped.load(Ordering::Relaxed));
             let small = ArrayQueue::new(1);
@@ -1634,15 +1757,69 @@ mod tests {
             queue.push([0.8, -0.4]).unwrap();
             let mut output = [1.0_f32; 2];
             let mut gain = volume.gain();
-            write_playback(&mut output, 2, &queue, &mut gain, volume.gain(), 0.01);
+            write_playback(
+                &mut output,
+                2,
+                &queue,
+                &mut Flow::new(48_000),
+                &mut gain,
+                volume.gain(),
+                0.01,
+            );
             assert_eq!(output, expected);
             assert!(queue.is_empty());
         }
         let queue = ArrayQueue::new(1);
         queue.push([0.8, -0.4]).unwrap();
         let mut mono = [0.0_f32];
-        write_playback(&mut mono, 1, &queue, &mut 0.5, 0.5, 0.01);
+        write_playback(
+            &mut mono,
+            1,
+            &queue,
+            &mut Flow::new(48_000),
+            &mut 0.5,
+            0.5,
+            0.01,
+        );
         assert!((mono[0] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_dry_queue_dies_away_and_the_next_audio_fades_in() {
+        let queue = ArrayQueue::new(2048);
+        let mut flow = Flow::new(48_000);
+        let mut output = [1.0_f32; 2 * 900];
+        // Nothing has played yet: waiting for the first sample is not a gap.
+        write_playback(&mut output, 2, &queue, &mut flow, &mut 1.0, 1.0, 0.01);
+        assert_eq!(flow.gaps, 0);
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        // A steady 0.8 for 300 frames, nothing for the next 300, then 0.8 again.
+        for (part, gaps) in output.chunks_mut(2 * 300).zip([0, 1, 1]) {
+            if gaps != 1 || flow.gaps == 1 {
+                for _ in 0..300 {
+                    queue.push([0.8, -0.8]).unwrap();
+                }
+            }
+            write_playback(part, 2, &queue, &mut flow, &mut 1.0, 1.0, 0.01);
+            assert_eq!(flow.gaps, gaps);
+        }
+        let left: Vec<f32> = output.iter().step_by(2).copied().collect();
+        assert_eq!(left[299], 0.8);
+        // No step anywhere: an abrupt cut would jump by 0.8.
+        let step = left
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(step < 0.03, "largest step {step}");
+        assert!(left[599].abs() < 1e-3);
+        assert_eq!(left[899], 0.8);
+        assert!(
+            output
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|frame| frame[0] == -frame[1])
+        );
     }
 
     #[test]
@@ -1653,7 +1830,15 @@ mod tests {
         }
         let mut output = [0.0_f32; 482];
         let mut gain = 1.0;
-        write_playback(&mut output, 2, &queue, &mut gain, 0.0, 1.0 / 240.0);
+        write_playback(
+            &mut output,
+            2,
+            &queue,
+            &mut Flow::new(48_000),
+            &mut gain,
+            0.0,
+            1.0 / 240.0,
+        );
         assert!(output[0] > 0.99 && output[0] < 1.0);
         assert_eq!(gain, 0.0);
         assert!(
