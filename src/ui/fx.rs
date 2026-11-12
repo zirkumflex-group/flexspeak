@@ -3,6 +3,9 @@
 //! view marks an element with [`card_fx`]; the compositor finds the marked instances each frame
 //! and draws the matching layer there.
 
+use std::sync::mpsc::{Sender, channel};
+use std::thread::JoinHandle;
+
 use rune::El;
 use rune::compose::{Compositor, DeviceKey, Frame};
 use rune::render::{EffectPhase, EffectSite, KIND_EFFECT};
@@ -427,15 +430,98 @@ fn new_renderer(device: &wgpu::Device, format: wgpu::TextureFormat) -> FxRendere
     FxRenderer::new(device, format, FxOptions { dither: true })
 }
 
+/// What a card takes to draw, as `warm` builds it.
+type Warmed = (FxRenderer, super::can3d::Warm);
+
+/// Builds every card shader and the cans' pipelines for targets of `format`. Done on another
+/// thread from the window's first frame, because built when the first card showed they held
+/// that frame for 300 to 400 ms on a MacBook. Isolated layers draw into `Rgba16Float`, and
+/// `set_srgb_blend` moves the target to the other sRGB variant of `format`, as `prepare` does.
+fn warm(device: &wgpu::Device, format: wgpu::TextureFormat, srgb: bool) -> Warmed {
+    let mut fx = new_renderer(device, format);
+    let blended = if srgb {
+        format.remove_srgb_suffix()
+    } else {
+        format.add_srgb_suffix()
+    };
+    fx.add_format(device, blended);
+    fx.add_format(device, wgpu::TextureFormat::Rgba16Float);
+    fx.build_every_pipeline();
+    let cans = super::can3d::warm(device, &[format, wgpu::TextureFormat::Rgba16Float]);
+    (fx, cans)
+}
+
+/// How long after the window's first frame the card shaders start building, so they don't
+/// compete with launch. A card shown sooner starts them at once and waits for them.
+const WARM_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether this frame shows a card layer or a can.
+fn cards_shown(f: &Frame<'_, App>) -> bool {
+    f.rt.instances.iter().enumerate().any(|(n, instance)| {
+        let kind = f.rt.marks.get(n).copied().unwrap_or(0) & 0xff;
+        instance.params[1] == KIND_EFFECT
+            && (kind == super::can3d::CAN || CardFx::from_mark(kind).is_some())
+    })
+}
+
 #[derive(Default)]
 pub struct Effects {
     videos: super::video::Videos,
     cans: super::can3d::Cans,
     renderer: Option<(DeviceKey, FxRenderer)>,
+    /// The card shaders being built ahead on another thread, for the device of that key, and
+    /// the way to tell it to start at once.
+    warming: Option<(DeviceKey, Sender<()>, JoinHandle<Warmed>)>,
+    /// The device they were last built for, so each GPU the window lands on builds them once.
+    warmed_for: Option<DeviceKey>,
     /// Whether a layer drawn last frame moves on its own, so the window keeps drawing.
     moving: bool,
     /// The reveal that last landed, and when, for effects that run once from that moment.
     landed: Option<(u64, f32)>,
+}
+
+impl Effects {
+    /// Starts building the card shaders for this frame's device, and takes them once they're
+    /// built, or as soon as a card is on screen, waiting for the rest then if it must.
+    fn warm(&mut self, f: &Frame<'_, App>) {
+        let key = f.device_key();
+        if self.warmed_for != Some(key) {
+            self.warmed_for = Some(key);
+            let (device, format, srgb) = (f.device.clone(), f.format, f.srgb_blend());
+            let (start, started) = channel();
+            match std::thread::Builder::new()
+                .name("card shaders".to_owned())
+                .spawn(move || {
+                    // Compiled alongside launch's own first frame, they doubled it.
+                    let _ = started.recv_timeout(WARM_AFTER);
+                    warm(&device, format, srgb)
+                }) {
+                Ok(thread) => self.warming = Some((key, start, thread)),
+                Err(error) => tracing::warn!("Card shaders aren't built ahead: {error}"),
+            }
+        }
+        let Some((_, start, thread)) = &self.warming else {
+            return;
+        };
+        if !thread.is_finished() {
+            if !cards_shown(f) {
+                return;
+            }
+            let _ = start.send(());
+        }
+        let (built_for, _, thread) = self.warming.take().expect("checked above");
+        match thread.join() {
+            // The window moved to another GPU meanwhile: what it builds there is used.
+            Ok(_) if built_for != key => {}
+            Ok((fx, cans)) => {
+                if self.renderer.as_ref().is_none_or(|(k, _)| *k != key) {
+                    self.renderer = Some((key, fx));
+                }
+                self.cans.adopt(key, cans);
+            }
+            Err(_) => tracing::warn!("Building the card shaders ahead failed"),
+        }
+    }
 }
 
 impl Compositor<App> for Effects {
@@ -446,6 +532,7 @@ impl Compositor<App> for Effects {
     fn render(&mut self, f: &mut Frame<'_, App>) {
         // The first frame built the frosted backdrop's pipelines; the next can drop the speck.
         f.rt.state.ui.warm_blur = false;
+        self.warm(f);
         let video_visible = self.videos.prepare(f);
         let cans = self.cans.prepare(f);
         let key = f.device_key();
@@ -461,7 +548,6 @@ impl Compositor<App> for Effects {
         let mut at = Vec::new();
         let mut layers = Vec::new();
         let mut slots = Vec::new();
-        let mut warmed = false;
         for (n, instance) in f.rt.instances.iter().enumerate() {
             if instance.params[1] != KIND_EFFECT {
                 continue;
@@ -479,8 +565,6 @@ impl Compositor<App> for Effects {
             ) else {
                 continue;
             };
-            // Only the Monster page's warm-up speck is a point across.
-            warmed |= w <= 1.5 && h <= 1.5;
             at.push(n as u32);
             layers.push(layer);
             slots.push(
@@ -491,23 +575,13 @@ impl Compositor<App> for Effects {
             );
         }
         self.moving = layers.iter().any(FxLayer::is_animating) || cans.moving;
-        // This frame builds the reveal's shaders; the next view can leave the speck out.
-        if warmed && f.rt.state.ui.warm_cards {
-            f.rt.state.ui.warm_cards = false;
-            f.rt.invalidate();
-        }
         if layers.is_empty() && !video_visible && !cans.visible {
             f.draw_ui();
             return;
         }
-        // Built the first time a card is on screen, so nobody else pays for its pipelines.
-        // Resources belong to one device; a window shown again on another GPU makes them anew.
+        // Normally `warm` built it already. Resources belong to one device, so a renderer
+        // that couldn't be built ahead, or was built for another GPU, is made here.
         if !layers.is_empty() && self.renderer.as_ref().is_none_or(|(k, _)| *k != key) {
-            // Another GPU has built none of the shaders: the speck draws there once more.
-            if self.renderer.is_some() && !warmed {
-                f.rt.state.ui.warm_cards = true;
-                f.rt.invalidate();
-            }
             self.renderer = Some((key, new_renderer(device, f.format)));
         }
         let mut fx = self

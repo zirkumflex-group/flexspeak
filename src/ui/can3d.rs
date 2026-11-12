@@ -306,6 +306,146 @@ struct Gpu {
     cells: Option<(wgpu::TextureView, wgpu::BindGroup, [u32; 2])>,
 }
 
+impl Gpu {
+    fn new(device: &wgpu::Device) -> Gpu {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("can"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(UNIFORM_SIZE),
+                },
+                count: None,
+            }],
+        });
+        let cells_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("can cells"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("can"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    rune::render::CLIP_WGSL,
+                    include_str!("can3d.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("can cells"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let trace = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("can cells"),
+            layout: Some(&trace_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("cover"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("trace"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: CELLS_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let align = u64::from(device.limits().min_uniform_buffer_offset_alignment);
+        Gpu {
+            layout,
+            cells_layout,
+            shader,
+            pipelines: Vec::new(),
+            trace,
+            stride: wgpu::util::align_to(UNIFORM_SIZE, align),
+            uniforms: None,
+            cells: None,
+        }
+    }
+
+    /// Builds the pipeline that draws cans into targets of `format`, unless it's built.
+    fn add_format(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if self.pipelines.iter().any(|(f, _)| *f == format) {
+            return;
+        }
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("can"),
+            bind_group_layouts: &[Some(&self.layout), Some(&self.cells_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("can"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &self.shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &self.shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.pipelines.push((format, pipeline));
+    }
+}
+
+/// The cans' shaders and pipelines, built ahead of time on another thread (`warm`), so the
+/// first card on screen doesn't wait for them.
+pub struct Warm(Gpu);
+
+/// Builds what drawing cans takes on `device`, with a pipeline for each of `formats`.
+pub fn warm(device: &wgpu::Device, formats: &[wgpu::TextureFormat]) -> Warm {
+    let mut gpu = Gpu::new(device);
+    for &format in formats {
+        gpu.add_format(device, format);
+    }
+    Warm(gpu)
+}
+
 /// Where this frame put a can: its uniform slot, and its cells in `cells`.
 #[derive(Debug, Clone, Copy)]
 struct Slot {
@@ -341,6 +481,13 @@ pub struct Seen {
 }
 
 impl Cans {
+    /// Takes what `warm` built for the device `key`, unless that's already made.
+    pub fn adopt(&mut self, key: DeviceKey, warm: Warm) {
+        if self.gpu.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.gpu = Some((key, warm.0));
+        }
+    }
+
     /// Finds this frame's cans and moves their poses on by the time since the last one.
     pub fn prepare(&mut self, f: &mut Frame<'_, App>) -> Seen {
         let time = f.rt.t as f32;
@@ -595,90 +742,7 @@ impl Cans {
 
     fn gpu(&mut self, key: DeviceKey, device: &wgpu::Device) -> &mut Gpu {
         if self.gpu.as_ref().is_none_or(|(k, _)| *k != key) {
-            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("can"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(UNIFORM_SIZE),
-                    },
-                    count: None,
-                }],
-            });
-            let cells_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("can cells"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                }],
-            });
-            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("can"),
-                source: wgpu::ShaderSource::Wgsl(
-                    format!(
-                        "{}\n{}",
-                        rune::render::CLIP_WGSL,
-                        include_str!("can3d.wgsl")
-                    )
-                    .into(),
-                ),
-            });
-            let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("can cells"),
-                bind_group_layouts: &[Some(&layout)],
-                immediate_size: 0,
-            });
-            let trace = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("can cells"),
-                layout: Some(&trace_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("cover"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("trace"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: CELLS_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
-            let align = u64::from(device.limits().min_uniform_buffer_offset_alignment);
-            self.gpu = Some((
-                key,
-                Gpu {
-                    layout,
-                    cells_layout,
-                    shader,
-                    pipelines: Vec::new(),
-                    trace,
-                    stride: wgpu::util::align_to(UNIFORM_SIZE, align),
-                    uniforms: None,
-                    cells: None,
-                },
-            ));
+            self.gpu = Some((key, Gpu::new(device)));
         }
         &mut self.gpu.as_mut().expect("just made").1
     }
@@ -719,46 +783,7 @@ impl Cans {
             bytes
         });
         let gpu = self.gpu(key, device);
-        if !gpu
-            .pipelines
-            .iter()
-            .any(|(format, _)| *format == site.format)
-        {
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("can"),
-                bind_group_layouts: &[Some(&gpu.layout), Some(&gpu.cells_layout)],
-                immediate_size: 0,
-            });
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("can"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &gpu.shader,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &gpu.shader,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: site.format,
-                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
-            gpu.pipelines.push((site.format, pipeline));
-        }
+        gpu.add_format(device, site.format);
         let (Some((_, uniforms, _)), Some((_, cells, _))) = (&gpu.uniforms, &gpu.cells) else {
             return;
         };

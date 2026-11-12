@@ -330,9 +330,6 @@ pub struct UiState {
     pub log_search: TextEdit,
     /// The first frame still has to build the frosted backdrop's pipelines.
     pub warm_blur: bool,
-    /// The Monster page still has to draw its speck of reveal effects once, so their shaders
-    /// are built before the first reveal. Set again when the window moves to another GPU.
-    pub warm_cards: bool,
     /// Nobody could see the window at the last poll: hidden in the tray, or minimized.
     pub unseen: bool,
     /// Settings → Updates lists every release, not only the latest.
@@ -409,7 +406,6 @@ impl Default for UiState {
             log_people: false,
             log_search: TextEdit::new(""),
             warm_blur: true,
-            warm_cards: true,
             unseen: false,
             changelog_open: false,
             sound_groups: std::collections::BTreeSet::new(),

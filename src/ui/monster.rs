@@ -66,11 +66,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         .self_center()
         .padding(size::PAGE)
         .gap(20.0)
-        // Nothing covers it on the leaderboard, and no reveal starts from there.
-        .children(
-            (s.ui.warm_cards && !matches!(section, Section::Leaderboard | Section::Person(_)))
-                .then(|| warm_up(reduced)),
-        )
         .child(tabs(s, t, section))
         .children(sync_choice(s, t))
         .children(sections);
@@ -1121,38 +1116,6 @@ fn showcase(s: &App, reduced: bool) -> El {
         s.monster.reveal.as_ref(),
         "Your first card lands here",
         reduced,
-    )
-}
-
-/// A one-point speck of every effect a reveal uses. Shaders compile the first time they draw,
-/// and without this the first Legendary would stutter at the worst possible moment. Drawn once:
-/// its layers move, and left in place they kept the window drawing at the display's rate.
-fn warm_up(reduced: bool) -> El {
-    // Clipped, because glow and fire reach well outside their box.
-    // Placed where every section's cabinet, drawn after it, covers it.
-    let mut speck = el()
-        .absolute(size::PAGE + 40.0, 150.0)
-        .size(1.0, 1.0)
-        .clip_rounded(0.0)
-        .a11y_hidden();
-    for part in [
-        CardFx::Back,
-        CardFx::RevealGlow,
-        CardFx::RevealSparkles,
-        CardFx::RevealElectric,
-        CardFx::RevealFire,
-        CardFx::Ripple,
-    ] {
-        speck = speck.child(
-            card_fx(part, 0, Rarity::Legendary, 100, reduced)
-                .absolute(0.0, 0.0)
-                .size(1.0, 1.0),
-        );
-    }
-    speck.child(
-        can3d::mystery(None, 0.0, reduced)
-            .absolute(0.0, 0.0)
-            .size(1.0, 1.0),
     )
 }
 
