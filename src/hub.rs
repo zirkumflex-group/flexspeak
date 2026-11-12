@@ -256,6 +256,21 @@ impl Line {
     }
 }
 
+/// Asks Windows to schedule this thread as audio work, ahead of ordinary threads, so a busy
+/// machine doesn't hold up the refill of the playback queue. It lasts until the thread ends.
+fn prioritize_audio_thread() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+        let task: Vec<u16> = "Pro Audio".encode_utf16().chain([0]).collect();
+        let mut index = 0;
+        // Safety: the task name is a NUL-terminated string that outlives the call.
+        if unsafe { AvSetMmThreadCharacteristicsW(task.as_ptr(), &mut index) }.is_null() {
+            tracing::warn!("Audio thread priority unavailable");
+        }
+    }
+}
+
 impl Device {
     fn open(hub: Arc<AudioHub>, open: Open) -> Result<Self> {
         let shared = Arc::new(Shared::default());
@@ -265,6 +280,7 @@ impl Device {
         let thread = std::thread::Builder::new()
             .name("audio-hub".into())
             .spawn(move || {
+                prioritize_audio_thread();
                 // CPAL streams belong to the thread that made them, so they are opened here.
                 // Without a working device the connection goes ahead, and the hub keeps trying.
                 let mut core = Core::closed(thread_shared, hub, &open);
@@ -473,9 +489,12 @@ impl Core {
         let mut next = Instant::now();
         loop {
             next += TICK;
+            // Sleep, not a timed wait on the channel: on Windows a timed wait wakes on the
+            // system clock tick, about every 15 ms, and playback holds little more than that.
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
             let now = Instant::now();
-            match stopped.recv_timeout(next.saturating_duration_since(now)) {
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            match stopped.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 _ => return self.finish_sounds(),
             }
             // After a stall, carry on rather than rush through the missed ticks.
