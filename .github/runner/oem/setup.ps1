@@ -34,6 +34,15 @@ New-Item -Force $au | Out-Null
 Set-ItemProperty $au AUOptions 3        # download automatically, install when told
 Set-ItemProperty $au NoAutoRebootWithLoggedOnUsers 1
 
+# Every trusted root, as GitHub's image has them. Windows otherwise fetches a root only when
+# its own APIs need it, and Python, which reads the store directly, fails to verify sites
+# (the release's Opus download) whose root was never fetched.
+$roots = Join-Path $downloads 'roots.sst'
+certutil -generateSSTFromWU $roots | Out-Null
+if ($LASTEXITCODE) { throw 'Could not download the root certificates from Windows Update' }
+Import-Certificate -FilePath $roots -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+Remove-Item $roots
+
 # What GitHub's windows-2022 image has and the workflows use: MSVC + Windows SDK, Git with
 # bash, Python, PowerShell 7 (the default `run` shell), CMake (bundled Opus) and rustup.
 if (-not (Test-Path 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC')) {
