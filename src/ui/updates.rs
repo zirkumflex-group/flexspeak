@@ -149,8 +149,8 @@ pub fn notice(s: &App, t: &Theme) -> Option<El> {
         Phase::Ready => (
             &icons::ROTATE_CW,
             t.good,
-            "New update available",
-            format!("{version} is downloaded and verified. Restart to install it."),
+            "Update Ready",
+            format!("{version} is verified. Restart to install it and rejoin your servers."),
         ),
         Phase::Installing => (
             &icons::ROTATE_CW,
@@ -288,7 +288,9 @@ pub fn settings(s: &App, t: &Theme, k: &Kit) -> El {
                     speed(progress)
                 )
             }
-            Phase::Ready => format!("{next} is ready. Restart to install it."),
+            Phase::Ready => {
+                format!("{next} is ready. Restart to install it and rejoin your servers.")
+            }
             Phase::Installing => format!("Installing {next}…"),
             Phase::Failed { detail, .. } => shorten(detail),
             Phase::Idle if u.checking => "Checking for updates…".into(),
@@ -428,12 +430,30 @@ fn earlier_toggle(t: &Theme, count: usize, open: bool) -> El {
         )
 }
 
-/// The latest release, then a row that opens the rest back to the first build.
+/// A downloaded update's notes, then the latest release, then a row that opens the rest back
+/// to the first build.
 pub fn changelog(s: &App, t: &Theme) -> Vec<El> {
     let Some((latest, earlier)) = changelog::entries().split_first() else {
         return Vec::new();
     };
-    let mut rows = vec![release(t, latest)];
+    let mut rows = Vec::new();
+    // What restarting brings, ahead of what this build already has.
+    if let Some(pending) = s
+        .updater
+        .release
+        .as_ref()
+        .filter(|pending| matches!(s.updater.phase, Phase::Ready) && !pending.notes.is_empty())
+    {
+        rows.push(release(
+            t,
+            &Entry {
+                build: pending.build,
+                date: "Ready to install",
+                notes: (*pending.notes).clone(),
+            },
+        ));
+    }
+    rows.push(release(t, latest));
     if !earlier.is_empty() {
         rows.push(earlier_toggle(t, earlier.len(), s.ui.changelog_open));
     }

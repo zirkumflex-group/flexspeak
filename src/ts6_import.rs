@@ -17,6 +17,7 @@ const DEFAULT_PORT: u64 = 9987;
 const MAX_SERVERS: usize = 32;
 /// The bookmark field holding a plain server, among the other bookmark kinds.
 const SERVER_BOOKMARK: u64 = 16;
+const BOOKMARK_NAME: u64 = 1;
 const BOOKMARK_ADDRESS: u64 = 2;
 const BOOKMARK_PORT: u64 = 3;
 const ACCOUNT_DISPLAY_NAME: u64 = 4;
@@ -27,6 +28,8 @@ const MAX_NAME_CHARS: usize = 30;
 pub struct Imported {
     pub nickname: Option<String>,
     pub servers: Vec<String>,
+    /// The bookmarks' names, by address, for those that have one.
+    pub names: std::collections::BTreeMap<String, String>,
     /// Microphone and speakers by name, because device IDs differ between the two apps.
     pub input: Option<String>,
     pub output: Option<String>,
@@ -70,10 +73,13 @@ pub fn read(path: &Path) -> Result<Imported> {
     let mut rows = items.query([])?;
     while let Some(row) = rows.next()? {
         if let Ok(item) = row.get_ref(0)?.as_bytes()
-            && let Some(server) = server_address(item)
+            && let Some((server, name)) = server_address(item)
             && !imported.servers.contains(&server)
             && imported.servers.len() < MAX_SERVERS
         {
+            if let Some(name) = name {
+                imported.names.insert(server.clone(), name);
+            }
             imported.servers.push(server);
         }
     }
@@ -158,7 +164,8 @@ fn display_name(account: &[u8]) -> Option<String> {
     plausible.then(|| name.to_owned())
 }
 
-fn server_address(item: &[u8]) -> Option<String> {
+/// A server bookmark's address, with `:port` when it isn't the default, and its name if it has one.
+fn server_address(item: &[u8]) -> Option<(String, Option<String>)> {
     let top = fields(item)?;
     let bookmark = top.iter().find_map(|(number, field)| match field {
         Field::Bytes(bookmark) if *number == SERVER_BOOKMARK => Some(*bookmark),
@@ -166,9 +173,22 @@ fn server_address(item: &[u8]) -> Option<String> {
     })?;
     let bookmark = fields(bookmark)?;
     let mut address = None;
+    let mut name = None;
     let mut port = DEFAULT_PORT;
     for (number, field) in &bookmark {
         match (*number, field) {
+            (BOOKMARK_NAME, Field::Bytes(value)) => {
+                name = std::str::from_utf8(value)
+                    .ok()
+                    .map(|name| {
+                        name.chars()
+                            .filter(|c| !c.is_control())
+                            .take(64)
+                            .collect::<String>()
+                    })
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty());
+            }
             (BOOKMARK_ADDRESS, Field::Bytes(value)) => address = std::str::from_utf8(value).ok(),
             (BOOKMARK_PORT, Field::Number(value)) => port = *value,
             _ => {}
@@ -183,11 +203,14 @@ fn server_address(item: &[u8]) -> Option<String> {
     if !plausible {
         return None;
     }
-    Some(if port == DEFAULT_PORT || port == 0 || port > 65535 {
+    let address = if port == DEFAULT_PORT || port == 0 || port > 65535 {
         address.to_owned()
     } else {
         format!("{address}:{port}")
-    })
+    };
+    // A bookmark named after its own address has no name worth showing.
+    let name = name.filter(|name| !name.eq_ignore_ascii_case(&address));
+    Some((address, name))
 }
 
 #[cfg(test)]
@@ -298,6 +321,11 @@ mod tests {
             Imported {
                 nickname: Some("Display Name".into()),
                 servers: vec!["voice.example.org".into(), "games.example.org:1234".into()],
+                names: [
+                    ("voice.example.org".to_owned(), "A name".to_owned()),
+                    ("games.example.org:1234".to_owned(), "A name".to_owned()),
+                ]
+                .into(),
                 input: Some("Desk Mic".into()),
                 output: Some("Studio Speakers".into()),
                 push_to_talk: true,

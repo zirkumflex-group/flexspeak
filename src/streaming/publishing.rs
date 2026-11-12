@@ -87,6 +87,13 @@ impl Access {
             Self::Private => "Private",
         }
     }
+    /// One line on what the choice means for viewers.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Public => "Anyone in the channel can watch without asking.",
+            Self::Private => "Viewers ask, and you let each one in.",
+        }
+    }
     pub fn wire_value(self) -> u8 {
         match self {
             Self::Public => 1,
@@ -712,32 +719,65 @@ impl Quality {
 pub enum Preset {
     /// Light on the computer and the connection; stays smooth when either struggles.
     Performance,
+    /// 1080p at 60 fps, for games and fast motion.
+    Smooth,
     /// The source's own size up to 1440p, sharp enough for small text.
     Quality,
 }
 impl Preset {
-    pub const ALL: [Self; 2] = [Self::Performance, Self::Quality];
+    pub const ALL: [Self; 3] = [Self::Performance, Self::Smooth, Self::Quality];
     pub fn label(self) -> &'static str {
         match self {
             Self::Performance => "Performance",
+            Self::Smooth => "Smooth",
             Self::Quality => "Quality",
+        }
+    }
+    /// One line on what the preset is for, for its tooltip.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Performance => "720p at 30 fps: light on your computer and connection",
+            Self::Smooth => "1080p at 60 fps: fluid motion for games",
+            Self::Quality => "Up to 1440p at 30 fps: sharp enough for small text",
         }
     }
     pub fn quality(self) -> Quality {
         // Generous for their size: a screen share at 30 fps is mostly text and sharp edges,
         // which VP8 needs bits for. Hardware AV1 makes the same bitrate look better still.
-        let (resolution, video_kbps, struggle) = match self {
-            Self::Performance => (Resolution::P720, 3000, Struggle::Smoothness),
-            Self::Quality => (Resolution::P1440, 8000, Struggle::Sharpness),
+        let (resolution, frame_rate, video_kbps, struggle) = match self {
+            Self::Performance => (Resolution::P720, 30, 3000, Struggle::Smoothness),
+            // Twice the frames need nearly twice the bits to look the same.
+            Self::Smooth => (Resolution::P1080, 60, 7000, Struggle::Smoothness),
+            Self::Quality => (Resolution::P1440, 30, 8000, Struggle::Sharpness),
         };
         Quality {
             resolution,
-            frame_rate: 30,
+            frame_rate,
             video_kbps,
             audio_kbps: 128,
             struggle,
         }
     }
+}
+
+/// The name a share is announced under. It says only what kind of share it is: a window's
+/// title can hold private text (a browser tab, a document), so it never leaves this machine.
+/// Viewers see who shares, and the publisher's own sidebar tile shows the source.
+fn announced_name(source: &ShareSource) -> String {
+    if source.kind.is_camera() {
+        "Camera".into()
+    } else {
+        "Screen share".into()
+    }
+}
+
+/// Whether a stream's name says only what kind of share it is, as older Flexspeak builds and
+/// other clients announce, so the publisher's name should lead instead.
+pub fn generic_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "" | "screen share" | "screenshare" | "screen" | "camera" | "stream" | "window"
+    )
 }
 
 #[derive(Debug, Clone, Default)]
@@ -748,6 +788,8 @@ pub struct Status {
     pub detail: String,
     /// Who may watch the running share. A quick share is public whatever the dialog says.
     pub access: Access,
+    /// What the running share shows: a screen's, window's or camera's name.
+    pub source: String,
     pub requests: Vec<(u16, String)>,
     pub viewers: Vec<(u16, String, bool)>,
     pub video_frames: u64,
@@ -1066,6 +1108,11 @@ impl Publisher {
             .options
             .as_ref()
             .map_or_else(Access::default, |o| o.access);
+        self.status.source = self
+            .options
+            .as_ref()
+            .map(|o| o.source.name.clone())
+            .unwrap_or_default();
         self.status.requests = self
             .requests
             .iter()
@@ -1527,11 +1574,7 @@ impl Publisher {
                     .as_ref()
                     .ok_or_else(|| anyhow!("Sharing was cancelled"))?;
                 let packet = protocol::setup(
-                    if options.source.kind.is_camera() {
-                        "Camera"
-                    } else {
-                        "Screen share"
-                    },
+                    &announced_name(&options.source),
                     &options.source.kind,
                     options.audio.is_some(),
                     options.quality,

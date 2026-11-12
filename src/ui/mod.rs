@@ -31,7 +31,8 @@ use tokio::sync::mpsc;
 
 use crate::{App, Message, Tab, client, shortcuts, usage};
 
-pub use chat::MIN_DOCK_WINDOW as CHAT_MIN_DOCK_WINDOW;
+pub use chat::dock_window as chat_dock_window;
+pub use streams::fullscreen_allowed;
 pub use theme::Theme;
 
 /// A [`Task::Stream`] job: interim messages go to the callback, the result is the last one.
@@ -236,6 +237,8 @@ pub struct UiState {
     pub server_name: TextEdit,
     pub server_address: TextEdit,
     pub server_password: TextEdit,
+    /// The password prompt a server's refusal opens.
+    pub prompt_password: TextEdit,
     pub poke_message: TextEdit,
     pub moderation_reason: TextEdit,
     /// The device or source picker whose list is open.
@@ -244,12 +247,20 @@ pub struct UiState {
     pub member_menu: Option<(u16, rune::PointerPress)>,
     /// The server in the rail a context menu is open for, and where it opened.
     pub rail_menu: Option<(crate::hub::SessionId, rune::PointerPress)>,
+    /// The channel a context menu is open for, and where it opened.
+    pub channel_menu: Option<(u64, rune::PointerPress)>,
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
     pub rail_peek: RailPeek,
     /// The chat column while it hides behind the right edge, as the rail does behind the left.
     pub chat_peek: RailPeek,
     pub chat_input: TextEdit,
+    /// A message line's menu is open: the line's id, and where it was right-clicked.
+    pub chat_line_menu: Option<(u64, rune::PointerPress)>,
+    /// The history is scrolled back from its newest line, so new lines stay unread.
+    pub chat_back: bool,
+    /// Where the side-by-side bar and its tabs lie, to find tabs scrolled out of sight.
+    pub chat_strip: ChatStrip,
     pub chat_toast: Option<ChatToast>,
     /// The pointer is over the pop-up, which keeps it up.
     pub chat_toast_hover: bool,
@@ -273,6 +284,20 @@ pub struct UiState {
     pub update_hover: bool,
     /// Whether the pointer is over the streams, which shows their toolbar.
     pub streams_hover: bool,
+    /// When the pointer last moved over the streams; their overlays hide once it rests.
+    pub streams_moved: Instant,
+    /// The pointer has rested over the streams long enough to hide their overlays.
+    pub streams_idle: bool,
+    /// The pointer is over a stream's bar or the toolbar, which keeps the overlays up.
+    pub streams_bar_hover: bool,
+    /// The last click on a stream landed on the stage, so a double-click there began there,
+    /// not on the grid tile it replaced.
+    pub stage_click: bool,
+    /// The stream fills the screen: `Some` holds whether the other streams were tucked away
+    /// before, to put them back after.
+    pub fullscreen: Option<bool>,
+    /// Whether the window was last asked to go full screen, so it is asked only on a change.
+    pub window_fullscreen: bool,
     /// The share dialog shows its Advanced tab: resolution, frame rate and bitrates one by one.
     pub share_advanced: bool,
     /// The share dialog's Screen, Window or Camera choice while nothing of that kind is picked.
@@ -284,6 +309,8 @@ pub struct UiState {
     pub close_hover: bool,
     /// The server log's splitter is being dragged.
     pub log_resizing: bool,
+    /// The sidebar's edge is being dragged.
+    pub sidebar_resizing: bool,
     pub log_people: bool,
     pub log_search: TextEdit,
     /// The first frame still has to build the frosted backdrop's pipelines.
@@ -311,15 +338,20 @@ impl Default for UiState {
             server_name: TextEdit::new(""),
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
+            prompt_password: TextEdit::new("").secure(),
             poke_message: TextEdit::new(""),
             moderation_reason: TextEdit::new(""),
             open: None,
             member_menu: None,
             rail_menu: None,
+            channel_menu: None,
             move_menu: false,
             rail_peek: RailPeek::default(),
             chat_peek: RailPeek::default(),
             chat_input: TextEdit::new(""),
+            chat_line_menu: None,
+            chat_back: false,
+            chat_strip: ChatStrip::default(),
             chat_toast: None,
             chat_toast_hover: false,
             chat_over_stream: false,
@@ -333,12 +365,19 @@ impl Default for UiState {
             tile_drag: None,
             update_hover: false,
             streams_hover: false,
+            streams_moved: Instant::now(),
+            streams_idle: false,
+            streams_bar_hover: false,
+            stage_click: false,
+            fullscreen: None,
+            window_fullscreen: false,
             share_advanced: false,
             share_group: None,
             log_hover: false,
             #[cfg(windows)]
             close_hover: false,
             log_resizing: false,
+            sidebar_resizing: false,
             log_people: false,
             log_search: TextEdit::new(""),
             warm_blur: true,
@@ -356,6 +395,32 @@ impl UiState {
     /// on it, or its message box is being typed in.
     pub fn chat_peek_open(&self, now: Instant) -> bool {
         self.chat_peek.open(now) || self.chat_input.focused
+    }
+}
+
+/// The side-by-side chat bar as last laid out: `[x, y, w, h]` in window points.
+#[derive(Default)]
+pub struct ChatStrip {
+    /// The scrolling viewport.
+    pub bar: [f32; 4],
+    /// The row of tabs inside it, which moves as it scrolls.
+    pub content: [f32; 4],
+    pub tabs: std::collections::HashMap<String, [f32; 4]>,
+}
+
+impl ChatStrip {
+    /// How far the tabs are scrolled, and how far they can go.
+    pub fn offset(&self) -> (f32, f32) {
+        let offset = self.bar[0] - self.content[0];
+        (offset, (self.content[2] - self.bar[2]).max(0.0))
+    }
+
+    /// Whether the tab keyed `key` is at least partly out of sight.
+    pub fn hides(&self, key: &str) -> bool {
+        let [x, _, w, _] = self.bar;
+        self.tabs
+            .get(key)
+            .is_some_and(|tab| tab[0] < x - 1.0 || tab[0] + tab[2] > x + w + 1.0)
     }
 }
 
@@ -382,6 +447,11 @@ impl App {
         mirror(&mut self.ui.server_name, &editor.name);
         mirror(&mut self.ui.server_address, &editor.address);
         mirror(&mut self.ui.server_password, &editor.password);
+        let prompt = self
+            .server_password_prompt
+            .as_ref()
+            .map_or(String::new(), |prompt| prompt.password.clone());
+        mirror(&mut self.ui.prompt_password, &prompt);
         let poke = self
             .server()
             .poke
@@ -432,7 +502,12 @@ fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
     };
     let chatting = matches!(message, Message::Chat(_));
     let target = chatting.then(|| s.server().chat.target.clone());
+    let place = own_place(s);
     let task = s.update(message);
+    // Arriving on a server, or being moved, brings your own row into view in a long tree.
+    if let Some((_, me)) = own_place(s).filter(|now| Some(*now) != place) {
+        tx.scroll_into_view_in("channel-scroll", format!("member-{me}"));
+    }
     // A conversation opened from elsewhere may have its tab scrolled out of the bar.
     if let Some(before) = target
         && s.server().chat.target != before
@@ -442,7 +517,28 @@ fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
     execute(s, tx, task);
     s.sync_fields();
     sync_tray(s);
+    sync_fullscreen(s, tx);
     !invisible
+}
+
+/// The channel you are in and your own id there, once the server has said.
+fn own_place(s: &App) -> Option<(u64, u16)> {
+    let channel = s.server().state.current.as_ref()?;
+    let me = channel.members.iter().find(|member| member.is_self)?;
+    Some((channel.id, me.id))
+}
+
+/// Takes the window full screen while a stream should fill it, and back when it ends: you
+/// left, the streams stopped or another page opened.
+fn sync_fullscreen(s: &mut App, tx: &mut Tx) {
+    if s.ui.fullscreen.is_some() && !streams::fullscreen_allowed(s) {
+        s.ui.fullscreen = None;
+    }
+    let want = s.ui.fullscreen.is_some();
+    if want != s.ui.window_fullscreen {
+        s.ui.window_fullscreen = want;
+        tx.toggle_full_screen();
+    }
 }
 
 /// Keeps the notification-area icon in step with the server on screen. Cheap when nothing
@@ -462,7 +558,8 @@ fn tray_action(handle: &rune::AppHandle<App>, action: crate::tray::Action) {
         Action::Show => return handle.open(),
         Action::Mute => Message::Mute,
         Action::Deafen => Message::Deafen,
-        Action::Quit => Message::Close,
+        Action::Disconnect => Message::TrayDisconnect,
+        Action::Quit => Message::Quit,
     };
     handle.update(move |s, tx| dispatch(s, tx, message));
 }
@@ -590,6 +687,7 @@ fn setup(s: &mut App, waker: Waker) {
 /// Sampling timers and video frame bookkeeping. True only when something visible changed.
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     crate::window_icon::apply();
+    crate::window_place::apply();
     let mut changed = false;
     let now = Instant::now();
     if now >= s.next_usage_tick {
@@ -664,17 +762,31 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     for list in &mut s.ui.chat_lists {
         changed |= list.expired(now);
     }
+    // The streams' overlays step aside once the pointer rests on the picture.
+    let overlays_until = (s.ui.streams_hover && !s.ui.streams_idle)
+        .then(|| s.ui.streams_moved + streams::OVERLAY_IDLE);
+    if overlays_until.is_some_and(|until| now >= until) {
+        s.ui.streams_idle = true;
+        changed = true;
+    }
+    sync_fullscreen(s, tx);
     let toast_expiry =
         s.ui.chat_toast
             .as_ref()
             .filter(|_| !s.ui.chat_toast_hover)
             .map(|toast| toast.until);
-    let wake = [s.updater.next_check, s.alerts.next_expiry(), toast_expiry]
-        .into_iter()
-        .flatten()
-        .fold(s.next_usage_tick, Instant::min);
+    let wake = [
+        s.updater.next_check,
+        s.alerts.next_expiry(),
+        toast_expiry,
+        overlays_until.filter(|until| now < *until),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(s.next_usage_tick, Instant::min);
     tx.wake_after(wake.saturating_duration_since(now));
-    if s.server_mut().streaming.sync_frame() {
+    // Under Statistics streams keep running unseen; their frames don't redraw the window.
+    if s.server_mut().streaming.sync_frame() && s.tab == Tab::Home {
         changed = true;
     }
     changed | s.ui.rail_peek.expired(now)
@@ -699,6 +811,22 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
     // Escape leaves the log's search, wherever the focus is.
     if key.key == rune::Key::Escape && s.server().log.searching && s.settings_page.is_none() {
         dispatch(s, tx, Message::LogSearch(false));
+        return true;
+    }
+    // Escape brings a full-screen stream back into the window before anything else.
+    if key.key == rune::Key::Escape && s.ui.fullscreen.is_some() && s.settings_page.is_none() {
+        dispatch(s, tx, Message::StreamFullscreen(false));
+        return true;
+    }
+    // F takes the large stream full screen, or brings it back, as video players do.
+    if matches!(&key.key, rune::Key::Text(typed) if typed.eq_ignore_ascii_case("f"))
+        && !key.mods.cmd
+        && !key.mods.alt
+        && s.onboarding.is_none()
+        && s.settings_page.is_none()
+        && streams::fullscreen_allowed(s)
+    {
+        dispatch(s, tx, Message::StreamFullscreen(s.ui.fullscreen.is_none()));
         return true;
     }
     if key.key == rune::Key::Escape && s.ui.rail_peek.unpin() {
@@ -749,6 +877,17 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// The palette for the chosen scheme and theme.
+/// The connected sidebar's usual width, in points.
+pub const SIDEBAR_WIDTH: u16 = theme::size::SIDEBAR as u16;
+/// How narrow and how wide its edge can drag it.
+const SIDEBAR_MIN: u16 = 220;
+const SIDEBAR_MAX: u16 = 420;
+
+/// The sidebar's width from settings, kept within what its edge allows.
+pub fn sidebar_width(saved: Option<u16>) -> u16 {
+    saved.map_or(SIDEBAR_WIDTH, |width| width.clamp(SIDEBAR_MIN, SIDEBAR_MAX))
+}
+
 pub fn theme(s: &App) -> Theme {
     if !s.appearance.ignore_omarchy
         && let Some(current) = &s.omarchy
@@ -842,7 +981,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         // handler would re-run layout every frame.
         .on_layout_tx(|s: &mut App, r: [f32; 4], tx: &mut Tx| {
             // The one width that changes the view: where the chat column docks or folds away.
-            let docks = |width: f32| width >= chat::MIN_DOCK_WINDOW;
+            let at = chat::dock_window(s);
+            let docks = |width: f32| width >= at;
             let crossed = docks(s.window_size.0) != docks(r[2]);
             s.window_size = (r[2], r[3]);
             if !crossed {
@@ -858,12 +998,18 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             .child(content),
     );
     #[cfg(windows)]
-    layer.push(window_controls(s, &t));
+    if !streams::fullscreen(s) {
+        layer.push(window_controls(s, &t));
+    }
     if s.ui.warm_blur {
         layer.push(blur_warm_up(&t));
     }
     rune_kit::root(base, layer)
         .hover_motion_within(rune::Spring::new(0.12, 0.0), rune::Spring::new(0.28, 0.0))
+        // Messages that arrive while another app is in front wait as unread.
+        .on_window_focus(|s: &mut App, focused, tx: &mut Tx| {
+            dispatch(s, tx, Message::WindowFocus(focused));
+        })
 }
 
 /// A one-point speck of frosted glass in the canvas colour, for the first frame only. The
@@ -880,8 +1026,20 @@ fn blur_warm_up(t: &Theme) -> El {
         .child(el().size(1.0, 1.0).backdrop_blur(1.0).fill(t.canvas))
 }
 
+/// How this launch opens the window.
+pub struct Launch {
+    /// Open where the window was when it last closed; previews keep their own size.
+    pub restore_place: bool,
+    /// Start in the notification area, as Start Minimized asks at sign-in.
+    pub minimized: bool,
+}
+
+/// The window starts hidden in the tray; read once by `App::new`.
+pub static STARTED_HIDDEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Opens the window and runs until the app quits.
-pub fn run() {
+pub fn run(launch: Launch) {
     rune::prewarm_gpu();
     // Wayland app id and X11 class: desktops match it to flexspeak.desktop and its icon.
     rune::set_app_id("flexspeak");
@@ -894,6 +1052,25 @@ pub fn run() {
         // Wide enough for the chat column beside the stage (`chat::MIN_DOCK_WINDOW`).
         ..AppSpec::new("Flexspeak", (1180.0, 790.0), placeholder, view)
     };
+    let saved = launch
+        .restore_place
+        .then(crate::settings::path)
+        .and_then(Result::ok)
+        .and_then(|path| crate::settings::load(&path).ok().flatten());
+    let place = saved
+        .as_ref()
+        .and_then(|saved| saved.window)
+        .filter(|place| {
+            crate::window_place::usable(place) && crate::window_place::on_screen(place)
+        });
+    if place.is_some_and(|place| place.maximized) {
+        crate::window_place::maximize_when_shown();
+    }
+    // Hidden only with a tray icon to come back from.
+    let hidden = launch.minimized
+        && crate::tray::SUPPORTED
+        && !saved.is_some_and(|saved| saved.appearance.hide_tray_icon);
+    STARTED_HIDDEN.store(hidden, std::sync::atomic::Ordering::Relaxed);
     let app = rune::App::new(spec);
     let handle = app.handle();
     app.init(move || App::new(Some(handle)))
@@ -906,6 +1083,9 @@ pub fn run() {
         })
         .window_options(rune::WindowOptions {
             borderless: cfg!(windows),
+            visible: !hidden,
+            position: place.map(|place| (place.x, place.y)),
+            physical_size: place.map(|place| (place.width, place.height)),
             ..Default::default()
         })
         .compositor(fx::Effects::default())
@@ -917,6 +1097,34 @@ pub fn run() {
 /// `AppSpec` needs an `init`; the real state comes from `App::init`, which has the handle.
 fn placeholder() -> App {
     App::with_devices(crate::audio::Devices::default(), None)
+}
+
+/// This run renders a still with `--snap`, so entrance animations start settled.
+pub fn snapping() -> bool {
+    static SNAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SNAP.get_or_init(|| std::env::args().any(|arg| arg == "--snap"))
+}
+
+/// The window size a headless run asks for with `--size WxH`, so a single frame lays out
+/// against it before any layout has reported the real size.
+pub fn requested_size() -> Option<(f32, f32)> {
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|arg| arg == "--size")?;
+    parse_size(args.get(at + 1)?)
+}
+
+fn parse_size(value: &str) -> Option<(f32, f32)> {
+    let (w, h) = value.split_once(['x', 'X'])?;
+    let size = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (size.0 > 0.0 && size.1 > 0.0).then_some(size)
+}
+
+#[cfg(test)]
+#[test]
+fn a_requested_size_is_read_as_width_by_height() {
+    assert_eq!(parse_size("760x560"), Some((760.0, 560.0)));
+    assert_eq!(parse_size("760"), None);
+    assert_eq!(parse_size("0x5"), None);
 }
 
 /// Flags handled by Rune's headless tooling rather than the app.

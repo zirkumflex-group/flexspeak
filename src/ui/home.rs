@@ -11,13 +11,22 @@ use rune_kit::{Kit, MenuItem, TextInput, context_menu};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Variant, body, button, card, divider, faint, heading, icon_button, labelled, meter, muted,
-    overline, pulse, scroll_page, struck,
+    Variant, body, button, card, divider, faint, heading, icon_button, meter, muted, overline,
+    pulse, scroll_page, struck,
 };
 use super::{RailPeek, chat, dispatch, footer, icons, members, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+    // Full screen, the streams are all there is: no header, sidebar, chat or status bar.
+    if streams::fullscreen(s) {
+        return pane(t)
+            .fill(t.stage)
+            .key("main-pane")
+            .w_full()
+            .h_full()
+            .child(streams::view(s, cx, t, k, layer));
+    }
     let page = match s.tab {
         Tab::Home => home(s, cx, t, k, layer),
         // On the same panel as the connected window, so it scrolls clear of the status bar.
@@ -126,8 +135,15 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
 
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     rail_menu(s, k, layer);
-    if !s.loopback && s.sessions.iter().any(|session| session.connected) {
-        if !s.server().connected {
+    // A server coming back from a dropped connection keeps its window: only a first connect
+    // shows the connecting pane.
+    if !s.loopback
+        && s.sessions
+            .iter()
+            .any(|session| session.connected || session.reconnecting)
+    {
+        let reconnecting = !s.server().connected && s.server().reconnecting;
+        if !s.server().connected && !reconnecting {
             return row()
                 .w_full()
                 .h_full()
@@ -145,12 +161,12 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
         if chat.is_none() {
             chat::edge(s, t, k, layer);
         }
-        return row()
+        let window = row()
             .w_full()
             .h_full()
             .children((!hidden).then(|| server_rail(s, t, k)))
             .child(sidebar(s, cx, t, k, layer))
-            .child(vertical_rule(t))
+            .child(sidebar_edge(s, t))
             .child(
                 pane(t)
                     .fill(t.stage)
@@ -164,8 +180,59 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
                     .into_iter()
                     .flatten(),
             );
+        if reconnecting {
+            return reconnecting_window(s, t, window);
+        }
+        return window;
     }
     saved_servers(s, t, k)
+}
+
+/// The server's last known channels and chat, dimmed and out of reach, under one line saying
+/// the connection is coming back.
+fn reconnecting_window(s: &App, t: &Theme, window: El) -> El {
+    let session = s.server();
+    let strip = row()
+        .key("reconnecting-strip")
+        .w_full()
+        .h(36.0)
+        .px(size::CARD_PAD)
+        .gap(8.0)
+        .center_y()
+        .fill(t.chrome)
+        .child(pulse(t.fair))
+        .child(muted(t, client::CONNECTION_LOST).grow(1.0).min_w(0.0))
+        .child(button(
+            t,
+            "cancel-reconnecting",
+            if session.stopping {
+                "Stopping…"
+            } else {
+                "Disconnect"
+            },
+            None,
+            Variant::Ghost,
+            (!session.stopping).then_some(Message::Stop),
+        ));
+    col()
+        .w_full()
+        .h_full()
+        .child(strip)
+        .child(el().w_full().h(1.0).fill(t.hairline).a11y_hidden())
+        .child(
+            el().key("reconnecting-window")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(window.opacity(0.45).a11y_hidden())
+                // Takes the presses meant for what is behind it, which can't act until it's back.
+                .child(
+                    el().absolute(0.0, 0.0)
+                        .w_full()
+                        .h_full()
+                        .on_press(|_: &mut App| {}),
+                ),
+        )
 }
 
 /// The saved servers, each with its own Connect. Only a microphone test holds them back.
@@ -193,11 +260,14 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(overline(t, "Saved servers").grow(1.0))
-                .child(labelled(
-                    &icons::USER,
-                    format!("Connect as {}", saved.nickname),
-                    t.muted,
-                ))
+                // Who you connect as: a plain caption, not a control.
+                .child(
+                    text(format!("Connect as {}", saved.nickname))
+                        .font(ty::SMALL)
+                        .color(t.muted)
+                        .truncate_fade()
+                        .min_w(0.0),
+                )
                 .child(icon_button(
                     t,
                     "add-server",
@@ -212,7 +282,8 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
         for (index, server) in s.servers.iter().enumerate() {
             let session = s.session_at(&server.address);
             if index > 0 {
-                list = list.child(divider(t).mx(8.0));
+                // Inset by the rows' own padding, so it ends where the Connect buttons do.
+                list = list.child(el().h(1.0).w_full().px(8.0).child(divider(t)));
             }
             list = list.child(server_row(t, index, server, session, busy, ready));
         }
@@ -241,7 +312,7 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
                 if s.server().stopping {
                     "Stopping…"
                 } else {
-                    "Stop test"
+                    "Stop Test"
                 },
                 Some(&icons::STOP),
                 Variant::Secondary,
@@ -275,8 +346,13 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
         .key("saved-server")
         .max_w(560.0)
         .padding(20.0)
-        .child(content)
-        .sequence(rune::Sequence::new(ENTRANCE).delay(0.05));
+        .child(content);
+    // A snapshot is one frame: it shows the card settled, not the first frame of its fade.
+    let hero = if super::snapping() {
+        hero
+    } else {
+        hero.sequence(rune::Sequence::new(ENTRANCE).delay(0.05))
+    };
     col()
         .w_full()
         .h_full()
@@ -552,20 +628,34 @@ fn rail_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(session) = s.rail_sessions().find(|session| session.id == id) else {
         return;
     };
-    let menu = context_menu("rail-menu", el(), Some(point))
+    let saved = s
+        .servers
+        .iter()
+        .position(|server| server.address.trim() == session.address.trim());
+    let mut menu = context_menu("rail-menu", el(), Some(point))
         .min_width(180.0)
         .on_close(|s: &mut App| s.ui.rail_menu = None)
-        .group_label(session.title().to_owned())
-        .item(
-            MenuItem::new("Disconnect")
-                .icon(&icons::DISCONNECT)
-                .danger(true)
-                .disabled(session.stopping)
+        .group_label(session.title().to_owned());
+    if let Some(index) = saved {
+        menu = menu.item(
+            MenuItem::new("Edit Server…")
+                .icon(&icons::PENCIL)
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     s.ui.rail_menu = None;
-                    dispatch(s, tx, Message::StopServer(id));
+                    dispatch(s, tx, Message::EditServer(index));
                 }),
         );
+    }
+    let menu = menu.item(
+        MenuItem::new("Disconnect")
+            .icon(&icons::DISCONNECT)
+            .danger(true)
+            .disabled(session.stopping)
+            .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                s.ui.rail_menu = None;
+                dispatch(s, tx, Message::StopServer(id));
+            }),
+    );
     let _ = menu.build(k, layer);
 }
 
@@ -624,6 +714,7 @@ fn rail_edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         .key("rail-edge")
         .role("button")
         .label("Show servers")
+        .help("Show servers")
         .absolute(0.0, size::HEADER)
         .size(RAIL_EDGE, height)
         .focusable(true)
@@ -712,6 +803,7 @@ fn connecting_pane(s: &App, t: &Theme) -> El {
 
 fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     members::menu(s, t, k, layer);
+    channel_menu(s, k, layer);
     members::ghost(s, t, layer);
     let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
     let name = s.server().state.server.clone();
@@ -766,7 +858,7 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
     };
     pane(t)
         .key("sidebar")
-        .w(size::SIDEBAR)
+        .w(f32::from(s.sidebar_width))
         .padding(12.0)
         .gap(8.0)
         .child(server)
@@ -780,6 +872,48 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
         .children(selection_bar(s, t))
         .children(server_log(s, cx, t, k))
         .child(voice_controls(s, t))
+}
+
+/// The hairline between the sidebar and the stage, which drags to resize the sidebar; a
+/// double-click puts it back. Its grip is wider than the line, on the panels' own colours.
+fn sidebar_edge(s: &App, t: &Theme) -> El {
+    let resizing = s.ui.sidebar_resizing;
+    row()
+        .key("sidebar-edge")
+        .role("separator")
+        .label("Resize the sidebar")
+        .help("Drag to resize the sidebar · double-click to reset it")
+        .w(5.0)
+        .h_full()
+        .cursor(rune::Cursor::ResizeColumn)
+        .on_drag(|s: &mut App, d: &mut Drag, tx: &mut Tx| match d.phase {
+            Phase::Down => {
+                s.ui.sidebar_resizing = true;
+                d.data = f32::from(s.sidebar_width);
+                if d.clicks == 2 {
+                    s.sidebar_width = super::SIDEBAR_WIDTH;
+                }
+            }
+            Phase::Move => {
+                tx.instant();
+                s.sidebar_width = super::sidebar_width(Some((d.data + d.dx).round() as u16));
+            }
+            Phase::Up => {
+                s.ui.sidebar_resizing = false;
+                if d.cancelled() {
+                    s.sidebar_width = d.data.round() as u16;
+                }
+                dispatch(s, tx, Message::SaveSidebarWidth);
+            }
+        })
+        .child(el().w(2.0).h_full().fill(t.surface).a11y_hidden())
+        .child(
+            el().w(1.0)
+                .h_full()
+                .fill(if resizing { t.accent } else { t.hairline })
+                .a11y_hidden(),
+        )
+        .child(el().w(2.0).h_full().fill(t.stage).a11y_hidden())
 }
 
 const LOG_ROW: f32 = 24.0;
@@ -881,7 +1015,7 @@ fn server_log(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> Option<El> {
                 .child(button(
                     t,
                     "log-clear",
-                    "Clear search",
+                    "Clear Search",
                     None,
                     Variant::Ghost,
                     Some(Message::LogClear),
@@ -951,7 +1085,8 @@ fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
     if !log.searching || collapsed {
         return bar
             .child(overline(t, "Server log").ml(6.0).grow(1.0))
-            .children((s.ui.log_hover && !collapsed).then(|| {
+            // Faint until the pointer is over the log, so it can be found without hovering.
+            .children((!collapsed).then(|| {
                 icon_button(
                     t,
                     "log-search-open",
@@ -960,7 +1095,8 @@ fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
                     Variant::Ghost,
                     Some(Message::LogSearch(true)),
                 )
-                .transition(Transition::opacity())
+                .opacity(if s.ui.log_hover { 1.0 } else { 0.4 })
+                .motion(motion::QUICK)
             }))
             .child(fold);
     }
@@ -979,14 +1115,26 @@ fn log_bar(s: &App, t: &Theme, k: &Kit) -> El {
             let value = s.ui.log_search.text.clone();
             dispatch(s, tx, Message::LogQuery(value));
         })
-        .trailing(icon_button(
-            t,
-            "log-search-close",
-            &icons::X,
-            "Close search · Esc",
-            Variant::Ghost,
-            Some(Message::LogSearch(false)),
-        ))
+        // The X clears what's typed first; with nothing typed it closes the search.
+        .trailing(if log.query().is_empty() {
+            icon_button(
+                t,
+                "log-search-close",
+                &icons::X,
+                "Close search · Esc",
+                Variant::Ghost,
+                Some(Message::LogSearch(false)),
+            )
+        } else {
+            icon_button(
+                t,
+                "log-search-close",
+                &icons::X,
+                "Clear the search",
+                Variant::Ghost,
+                Some(Message::LogQuery(String::new())),
+            )
+        })
         .build(k);
     let person = match log.person() {
         Some(person) => {
@@ -1064,7 +1212,7 @@ fn log_people(s: &App, t: &Theme, k: &Kit) -> El {
         .key("log-people-menu")
         // Under the search bar, below the splitter and the log's 4 pt gap.
         .absolute(
-            size::SIDEBAR - 24.0 - WIDTH,
+            f32::from(s.sidebar_width) - 24.0 - WIDTH,
             SPLITTER + 4.0 + size::CONTROL + 4.0,
         )
         .w(WIDTH)
@@ -1186,32 +1334,50 @@ fn log_row(s: &App, t: &Theme, index: usize) -> El {
     } else {
         format!("{} {}", entry.name, entry.action)
     };
-    let mut spans = Vec::new();
-    if lead > 0 {
-        spans.push(Span::new(0, entry.name.len()).bold());
-    }
     let mark = |range: std::ops::Range<usize>| {
         Span::new(range.start, range.end).bg(t.fair.alpha(0.35), 1.0)
     };
-    spans.extend(find(&entry.name, log.query()).map(mark));
-    spans.extend(
-        find(&entry.action, log.query()).map(|range| mark(range.start + lead..range.end + lead)),
-    );
+    // The name and what happened are separate, so a long name shortens before the event.
+    let mut name_spans = vec![Span::new(0, entry.name.len()).bold()];
+    name_spans.extend(find(&entry.name, log.query()).map(mark));
+    let action_spans: Vec<Span> = find(&entry.action, log.query())
+        .map(mark)
+        .into_iter()
+        .collect();
+    // The event keeps room for about 18 characters before it shortens as well.
+    let action_room = (entry.action.chars().count() as f32 * 6.0).min(110.0);
+    let help = format!("{words}\n{}", entry.at.format("%A, %-d %B %Y, %H:%M:%S"));
+    let line = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .center_y()
+        .children((lead > 0).then(|| {
+            rich(entry.name.clone(), name_spans)
+                .font(ty::SMALL)
+                .color(t.text)
+                .shrink()
+                .min_w(24.0)
+                .truncate_fade()
+        }))
+        .child(
+            rich(entry.action.clone(), action_spans)
+                .font(ty::SMALL)
+                .color(t.text)
+                .shrink()
+                .min_w(action_room)
+                .truncate_fade(),
+        );
     row()
         .w_full()
         .gap(8.0)
         .center_y()
         .pl(6.0)
         .pr(8.0)
+        .help(help.clone())
+        .label(help)
         .child(marker)
-        .child(
-            rich(words, spans)
-                .font(ty::SMALL)
-                .color(t.text)
-                .grow(1.0)
-                .min_w(0.0)
-                .truncate_fade(),
-        )
+        .child(line)
         .child(text(entry.time.clone()).font(ty::NUMERIC).color(t.faint))
 }
 
@@ -1254,25 +1420,15 @@ fn selection_bar(s: &App, t: &Theme) -> Option<El> {
 
 fn voice_controls(s: &App, t: &Theme) -> El {
     let enabled = s.server().connected && !s.loopback && !s.server().stopping;
-    // Deafening keeps the microphone off, but the mute button still shows and changes your own
-    // mute, which is what you get back once you undeafen.
+    // Deafening keeps the microphone off, but the mute button still changes your own mute,
+    // which is what you get back once you undeafen. The icon shows what is sent: nothing.
     let deafened_open = s.server().deafened && !s.server().muted && s.server().state.can_talk;
     let mut controls = row().w_full().gap(size::GAP);
     for (key, glyph, label, message, active, on) in [
         (
             "mute",
-            if deafened_open {
-                crate::Icon::Mic.glyph()
-            } else {
-                s.microphone_icon().glyph()
-            },
-            if s.server().muted {
-                "Unmute microphone"
-            } else if deafened_open {
-                "Mute microphone · it stays off while you're deafened"
-            } else {
-                "Mute microphone"
-            },
+            s.microphone_icon().glyph(),
+            microphone_help(s, deafened_open),
             Message::Mute,
             s.server().muted,
             enabled,
@@ -1280,11 +1436,15 @@ fn voice_controls(s: &App, t: &Theme) -> El {
         (
             "deafen",
             s.playback_icon().glyph(),
-            if s.server().deafened {
-                "Undeafen"
-            } else {
-                "Deafen"
-            },
+            with_key(
+                if s.server().deafened {
+                    "Undeafen"
+                } else {
+                    "Deafen"
+                }
+                .to_owned(),
+                &s.keybinds.toggle_deafen,
+            ),
             Message::Deafen,
             s.server().deafened,
             enabled,
@@ -1330,6 +1490,53 @@ fn voice_controls(s: &App, t: &Theme) -> El {
 /// One click to go live while other streams fill the pane, which offers the same itself when
 /// it is empty: your main screen, then the game you're playing. Plain until you are live;
 /// the live colour belongs to streams that are running.
+/// The microphone button's tooltip: why it is on or off, what a click does with its global
+/// key, and how you talk in push-to-talk or voice activation.
+fn microphone_help(s: &App, deafened_open: bool) -> String {
+    let action = if s.server().muted {
+        "Unmute microphone"
+    } else if deafened_open {
+        "Mute microphone · it stays off while you're deafened"
+    } else {
+        "Mute microphone"
+    };
+    let mut help = format!(
+        "Microphone: {}
+{}",
+        s.microphone_status(),
+        with_key(action.to_owned(), &s.keybinds.toggle_mute)
+    );
+    match s.transmission.mode {
+        crate::transmission::Mode::PushToTalk => {
+            let key = s.keybinds.push_to_talk.trim();
+            help.push_str(if key.is_empty() {
+                "
+Push-to-talk · no key set"
+            } else {
+                "
+Push-to-talk · hold "
+            });
+            help.push_str(key);
+        }
+        crate::transmission::Mode::VoiceActivation => help.push_str(
+            "
+Voice activation",
+        ),
+        crate::transmission::Mode::Continuous => {}
+    }
+    help
+}
+
+/// A control's help with the global key bound to it, as "Settings · Ctrl+," reads.
+fn with_key(mut help: String, key: &str) -> String {
+    let key = key.trim();
+    if !key.is_empty() {
+        help.push_str(" · ");
+        help.push_str(key);
+    }
+    help
+}
+
 fn quick_share(s: &App, t: &Theme) -> Option<El> {
     let sources = streams::quick_sources(s);
     if sources.is_empty() || !streams::on_stage(s) {
@@ -1337,7 +1544,7 @@ fn quick_share(s: &App, t: &Theme) -> Option<El> {
     }
     let mut chips = row().w_full().gap(6.0);
     for (index, source) in sources.iter().enumerate() {
-        let help = format!("Go live publicly: {}", source.name);
+        let help = streams::quick_share_help(s, source);
         chips = chips.child(
             row()
                 .key(format!("quick-share-{index}"))
@@ -1465,6 +1672,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         .is_some_and(|drag| drag.ids.contains(&member.id)),
                     s.is_streaming(member),
                     s.user_audio(&member.uid).muted,
+                    s.user_audio(&member.uid).volume_percent,
                     private_unread(s, member),
                 )
             })
@@ -1487,6 +1695,9 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 s.ui.drag.as_ref().and_then(|drag| drag.target),
             ),
             || {
+                if let Some(spacer) = channel.spacer() {
+                    return spacer_row(t, channel.id, &spacer);
+                }
                 let hint = if current {
                     "Current channel"
                 } else {
@@ -1497,10 +1708,14 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         client::JoinAccess::UnsupportedCodec => {
                             "This channel uses an unsupported audio codec"
                         }
-                        _ if channel.has_password => "Click to join · a password will be requested",
-                        _ => "Click to join this channel",
+                        _ if channel.has_password => {
+                            "Double-click to join · a password will be requested"
+                        }
+                        _ => "Double-click to join · right-click for options",
                     }
                 };
+                // The full name leads, since a long one is cut on the row.
+                let hint = format!("{}\n{hint}", channel.name);
                 let joinable = (!s.server().stopping && current) || s.can_request_join(channel.id);
                 // Where people are reads first: an empty channel steps back, one you can't
                 // join further still.
@@ -1565,13 +1780,31 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 } else if current {
                     name = name.fill(t.accent.alpha(0.16));
                 }
+                // A double-click joins, as in TeamSpeak, so a slip of one click never moves
+                // you mid-conversation; Return joins the focused row.
+                let id = channel.id;
                 if joinable {
                     name = name
                         .focusable(true)
                         .cursor(rune::Cursor::Pointer)
                         .hover(t.wash(0.05))
                         .press(t.wash(0.09))
-                        .on_press_tx(send(Message::Join(channel.id)));
+                        .on_double_press_tx(send(Message::Join(id)))
+                        .on_key(move |s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
+                            if key.key != rune::Key::Enter {
+                                return false;
+                            }
+                            dispatch(s, tx, Message::Join(id));
+                            true
+                        });
+                }
+                if s.server().connected && !s.loopback && !s.server().stopping {
+                    name = name.on_secondary_press(
+                        move |s: &mut App, point: PointerPress, _: &mut Tx| {
+                            s.ui.member_menu = None;
+                            s.ui.channel_menu = Some((id, point));
+                        },
+                    );
                 }
                 // An empty channel keeps the arrow's space, so names stay lined up.
                 let disclosure = if !foldable {
@@ -1642,6 +1875,93 @@ fn channel_tree(s: &App, t: &Theme) -> El {
     tree
 }
 
+/// A spacer channel: a section label across the tree, with nothing to join or click.
+fn spacer_row(t: &Theme, id: u64, spacer: &client::Spacer) -> El {
+    let label = text(match spacer.align {
+        // Enough copies to cross the widest sidebar; the row clips the rest.
+        client::SpacerAlign::Repeat if !spacer.text.is_empty() => spacer
+            .text
+            .repeat(160 / spacer.text.chars().count().max(1) + 1),
+        _ => spacer.text.clone(),
+    })
+    .font(ty::SMALL_STRONG)
+    .color(t.faint)
+    .min_w(0.0)
+    .a11y_hidden();
+    let line = row()
+        .key("name")
+        .w_full()
+        .h(size::ROW)
+        .px(8.0)
+        .center_y()
+        .label(spacer.text.clone())
+        .help(spacer.text.clone());
+    let line = match spacer.align {
+        client::SpacerAlign::Left => line.child(label.truncate_fade()),
+        client::SpacerAlign::Center => line.justify_center().child(label.truncate_fade()),
+        client::SpacerAlign::Right => line.justify_end().child(label.truncate_fade()),
+        client::SpacerAlign::Repeat => line.child(label.truncate_fade_width(0.0).grow(1.0)),
+    };
+    // Lined up with the channel names beside the disclosure arrows' column.
+    col()
+        .key(format!("channel-{id}"))
+        .w_full()
+        .pl(20.0)
+        .child(line)
+}
+
+/// Right-clicking a channel: join it, or fold it.
+fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let Some((id, point)) = s.ui.channel_menu else {
+        return;
+    };
+    let channels = &s.server().state.channels;
+    let Some(index) = channels.iter().position(|channel| channel.id == id) else {
+        return;
+    };
+    let channel = &channels[index];
+    let current = s
+        .server()
+        .state
+        .current
+        .as_ref()
+        .is_some_and(|value| value.id == id);
+    let foldable = !channel.members.is_empty()
+        || channels
+            .get(index + 1)
+            .is_some_and(|next| next.depth > channel.depth);
+    let collapsed = s.server().collapsed_channels.contains(&id);
+    let mut join = MenuItem::new("Join")
+        .icon(&icons::CONNECT)
+        .disabled(current || !s.can_request_join(id))
+        .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            s.ui.channel_menu = None;
+            dispatch(s, tx, Message::Join(id));
+        });
+    if current {
+        join = join.description("You're in this channel");
+    }
+    let menu = context_menu("channel-menu", el(), Some(point))
+        .min_width(180.0)
+        .on_close(|s: &mut App| s.ui.channel_menu = None)
+        .group_label(channel.name.clone())
+        .item(join)
+        .item(
+            MenuItem::new(if collapsed { "Expand" } else { "Collapse" })
+                .icon(if collapsed {
+                    &icons::CHEVRON_DOWN
+                } else {
+                    &icons::CHEVRON_RIGHT
+                })
+                .disabled(!foldable)
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    s.ui.channel_menu = None;
+                    dispatch(s, tx, Message::ToggleChannel(id));
+                }),
+        );
+    let _ = menu.build(k, layer);
+}
+
 fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El {
     let mic_muted =
         member.mic_muted || (member.is_self && s.microphone_icon() == crate::Icon::MicOff);
@@ -1663,7 +1983,8 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
             } else {
                 member.name.clone()
             })
-            .font(ty::BODY)
+            // Someone talking reads in a heavier weight as well as by the ring.
+            .font(if talking { ty::BODY_STRONG } else { ty::BODY })
             .color(t.text)
             .truncate_fade()
             .grow(1.0)
@@ -1683,8 +2004,8 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
     }
     if s.is_streaming(member) {
         entry = entry.child(
-            el().help("Sharing a stream")
-                .label("Sharing a stream")
+            el().help("Sharing")
+                .label("Sharing")
                 .child(icon(&icons::SCREEN_SHARE, 13.0).color(t.live)),
         );
     }
@@ -1693,7 +2014,16 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         entry = entry
             .child(chat::badge(t, unread, t.private).help("Private messages you haven't read"));
     }
-    if !member.is_self && s.user_audio(&member.uid).muted {
+    let audio = s.user_audio(&member.uid);
+    if !member.is_self && !audio.muted && !member.uid.is_empty() && audio.volume_percent != 100 {
+        let help = format!("Volume {}% · set by you", audio.volume_percent);
+        entry = entry.child(
+            el().help(help.clone())
+                .label(help)
+                .child(icon(&icons::VOLUME_2, 13.0).color(t.faint)),
+        );
+    }
+    if !member.is_self && audio.muted {
         entry = entry.child(
             el().help("Muted by you")
                 .label("Muted by you")

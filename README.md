@@ -183,7 +183,7 @@ Validation on 2026-10-26: the optimized Apple Silicon build, native window, audi
 
 The app stores a TeamSpeak identity under the operating system's per-user application-data directory (`--identity-path` shows the location). It is a private key, saved with owner-only file permissions on Unix. Back it up to retain the same server identity. Windows uses the account's inherited application-data permissions. Passwords are held in memory and are not saved. Audio is neither recorded nor stored on disk.
 
-This is a voice prototype. It does not implement myTeamSpeak, your future authentication/chat/file services, or full TS6 audio-processing parity. Server acceptance also depends on minimum client-version rules and permissions. The protocol library's compatibility must be tested against each target server.
+It covers voice, screen sharing and text chat (channel, server and private messages, kept on this computer). It does not implement myTeamSpeak, file transfers, or full TS6 audio-processing parity. Server acceptance also depends on minimum client-version rules and permissions. The protocol library's compatibility must be tested against each target server.
 
 ## Structure
 

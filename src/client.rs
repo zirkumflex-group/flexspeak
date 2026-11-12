@@ -88,6 +88,8 @@ pub enum Command {
     SetGroups(Vec<u16>, GroupEdit),
     /// Asks for the group lists, for servers that haven't sent them.
     RequestGroups,
+    /// New devices or voice settings for the microphone test; a server takes them from the hub.
+    Retune(hub::Retune),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +180,54 @@ pub struct Channel {
     pub has_password: bool,
     pub members_visible: bool,
     pub members: Vec<Member>,
+}
+
+/// How a spacer channel lays out its text across the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpacerAlign {
+    Left,
+    Center,
+    Right,
+    /// The text repeats across the whole row, as a rule.
+    Repeat,
+}
+
+/// A spacer channel's look: a top-level channel named `[cspacer]Games`, `[lspacer0]Text`,
+/// `[rspacer]Text`, `[*spacer1]─` or `[spacer0]` is a section divider, not a room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spacer {
+    pub align: SpacerAlign,
+    pub text: String,
+}
+
+impl Channel {
+    /// The divider this channel draws instead of a joinable row, as TeamSpeak reads it: only
+    /// top-level channels are spacers.
+    pub fn spacer(&self) -> Option<Spacer> {
+        if self.parent != 0 {
+            return None;
+        }
+        let (tag, text) = self.name.strip_prefix('[')?.split_once(']')?;
+        let (align, rest) = match tag.chars().next()? {
+            'c' | 'C' => (SpacerAlign::Center, &tag[1..]),
+            'l' | 'L' => (SpacerAlign::Left, &tag[1..]),
+            'r' | 'R' => (SpacerAlign::Right, &tag[1..]),
+            '*' => (SpacerAlign::Repeat, &tag[1..]),
+            _ => (SpacerAlign::Left, tag),
+        };
+        let counter = rest
+            .get(..6)
+            .filter(|word| word.eq_ignore_ascii_case("spacer"))
+            .and_then(|_| rest.get(6..))?;
+        // TeamSpeak keeps names unique with a trailing counter: `[spacer0]`, `[cspacer12]`.
+        if !counter.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        Some(Spacer {
+            align,
+            text: text.to_owned(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -444,6 +494,8 @@ pub enum Event {
         pending: bool,
     },
     ChannelPasswordRequired(u64),
+    /// Why the connection is about to stop, in plain words; `Stopped` follows.
+    Refused(Refusal),
     /// The server refused something for lack of permission.
     PermissionDenied,
     /// Someone poked you.
@@ -527,6 +579,13 @@ pub fn start(
             })();
             // Disconnected by now: count it out before telling the app, which may quit on it.
             drop(running);
+            if let Some(refusal) = result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<Refusal>())
+            {
+                let _ = events.blocking_send(Event::Refused(refusal.clone()));
+            }
             let _ = events.blocking_send(Event::Stopped(result.err().map(|error| {
                 let source = if error.downcast_ref::<AudioFailure>().is_some() {
                     Source::Audio
@@ -1081,15 +1140,77 @@ async fn close(connection: &mut Connection) {
     .await;
 }
 
-fn connection_error(error: tsclientlib::Error) -> anyhow::Error {
-    if let tsclientlib::Error::ConnectFailed { address, errors } = &error
-        && errors.is_empty()
-    {
-        return anyhow::anyhow!(
-            "Could not resolve '{address}'. Check the hostname or enter an IP address and UDP port (usually 9987)."
-        );
+/// Why a connection ended, as one plain sentence for the notice. The library's own words stay
+/// in the error chain beneath it, for the Error Log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    HostNotFound,
+    TimedOut,
+    /// The server password was missing or wrong.
+    Password,
+    Full,
+    /// Kicked from the server.
+    Kicked,
+    Banned,
+}
+
+impl Refusal {
+    pub fn sentence(&self) -> &'static str {
+        match self {
+            Self::HostNotFound => {
+                "The server's address wasn't found. Check its spelling, or enter an IP address."
+            }
+            Self::TimedOut => {
+                "The server didn't answer. Check the address and UDP port, or try again later."
+            }
+            Self::Password => "The server password is wrong.",
+            Self::Full => "The server is full. Try again when someone leaves.",
+            Self::Kicked => "You were kicked from the server.",
+            Self::Banned => "You are banned from this server.",
+        }
     }
-    error.into()
+
+    /// The server sent you away on purpose, so connecting straight back isn't offered.
+    pub fn deliberate(&self) -> bool {
+        matches!(self, Self::Kicked | Self::Banned)
+    }
+
+    /// Reads the cause out of what the library reported.
+    fn of(error: &tsclientlib::Error) -> Option<Self> {
+        use tsclientlib::{Error, TsError};
+        Some(match error {
+            Error::ConnectFailed { errors, .. } if errors.is_empty() => Self::HostNotFound,
+            Error::ConnectFailed { errors, .. } => return errors.iter().find_map(Self::of),
+            Error::ResolveAddress(_) => Self::HostNotFound,
+            Error::InitserverTimeout => Self::TimedOut,
+            Error::ConnectTs(TsError::ServerInvalidPassword) => Self::Password,
+            Error::ConnectTs(TsError::ServerMaxclientsReached) => Self::Full,
+            Error::ConnectTs(TsError::ConnectFailedBanned | TsError::BanFlooding) => Self::Banned,
+            other => {
+                let text = other.to_string().to_lowercase();
+                if text.contains("timeout") || text.contains("timed out") {
+                    Self::TimedOut
+                } else {
+                    return None;
+                }
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.sentence())
+    }
+}
+
+fn connection_error(error: tsclientlib::Error) -> anyhow::Error {
+    let refusal = Refusal::of(&error);
+    let error = anyhow::Error::from(error);
+    match refusal {
+        Some(refusal) => error.context(refusal),
+        None => error,
+    }
 }
 
 async fn run_connection(
@@ -1146,6 +1267,8 @@ async fn run_connection(
         let mut subscription: Option<(Ticket, bool)> = None;
         let mut subscribed: Option<bool> = None;
         let mut connected = false;
+        // The server kicked or banned you, which it says just before it closes the connection.
+        let mut sent_away: Option<Refusal> = None;
         let mut deadline = Instant::now();
         let mut sent = 0;
         let mut received = 0;
@@ -1319,6 +1442,8 @@ async fn run_connection(
                         Command::DecideViewer(id, allow) => if let Err(error) = streams.publisher.decide(id,allow) {
                             let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() });
                         },
+                        // The shared devices take new settings from the hub, not from here.
+                        Command::Retune(_) => {}
                         Command::Stop => break,
                     }
                     let _ = events.try_send(Event::State(snapshot(&connection)?));
@@ -1347,6 +1472,11 @@ async fn run_connection(
                         // by the time your change of channel arrives and isn't heard as a move too.
                         if !first_batch {
                             let happened: Vec<_> = changes.iter().filter_map(|change| activity(state, change)).collect();
+                            sent_away = sent_away.or_else(|| happened.iter().find(|done| done.is_self).and_then(|done| match done.kind {
+                                ActivityKind::KickedFromServer => Some(Refusal::Kicked),
+                                ActivityKind::Banned => Some(Refusal::Banned),
+                                _ => None,
+                            }));
                             if !happened.is_empty() {
                                 let _ = events.try_send(Event::Activity(happened));
                             }
@@ -1517,8 +1647,15 @@ async fn run_connection(
                     StreamItem::StreamCommand { name, content } => streams.notification(&mut connection, &name, &content),
                     _ => {},
                 },
-                Step::Network(Some(Err(error))) => return Err(connection_error(error)).context("TeamSpeak connection failed"),
-                Step::Network(None) => bail!("The server closed the connection."),
+                Step::Network(Some(Err(error))) => {
+                    let error = connection_error(error);
+                    let error = match sent_away.take() { Some(refusal) => error.context(refusal), None => error };
+                    return Err(error).context("TeamSpeak connection failed");
+                },
+                Step::Network(None) => {
+                    let error = anyhow::anyhow!("The server closed the connection.");
+                    return Err(match sent_away.take() { Some(refusal) => error.context(refusal), None => error });
+                },
                 Step::Media(generation, event) => streams.media_event(&mut connection, generation, event),
                 Step::Voice(None) => {}
                 Step::Voice(Some(voice)) => {
@@ -1540,7 +1677,7 @@ async fn run_connection(
                 },
                 Step::Tick => {
                     if events.is_closed() { break; }
-                    if !connected && deadline.elapsed() > Duration::from_secs(40) { bail!("Connection timed out. Check the address, UDP port, password, and server availability."); }
+                    if !connected && deadline.elapsed() > Duration::from_secs(40) { return Err(anyhow::anyhow!("Connection timed out after 40 seconds.").context(Refusal::TimedOut)); }
                     {
                         // A device going away is reported, never a reason to disconnect.
                         let trouble = audio.trouble();
@@ -1680,6 +1817,13 @@ async fn run_loopback(
     )
     .map_err(AudioFailure)?;
     let mut ptt_gate = crate::transmission::PttGate::default();
+    let mut opened = hub::Retune {
+        input: config.input.clone(),
+        output: config.output.clone(),
+        processing: config.audio_processing,
+        transmission: config.transmission,
+    };
+    let mut transmission = config.transmission;
     let mut reported_transmission = false;
     let _ = events.try_send(Event::Connected(audio.description.clone()));
     let mut tick = tokio::time::interval(Duration::from_millis(10));
@@ -1688,10 +1832,36 @@ async fn run_loopback(
     let mut meter = MeterDelivery::default();
     loop {
         tokio::select! {
-            command = commands.recv() => if matches!(command, None | Some(Command::Stop)) { break; },
+            command = commands.recv() => match command {
+                None | Some(Command::Stop) => break,
+                // The test hears itself with the new choices straight away.
+                Some(Command::Retune(retune)) => {
+                    let same_devices = retune.input == opened.input
+                        && retune.output == opened.output
+                        && retune.processing == opened.processing;
+                    transmission = retune.transmission;
+                    if !(same_devices && audio.tune_transmission(transmission)) {
+                        // Let the old streams go before the same devices open again.
+                        drop(audio);
+                        audio = AudioEngine::open(
+                            &retune.input,
+                            &retune.output,
+                            config.playback_volume.clone(),
+                            retune.processing.for_session(true),
+                            transmission,
+                        )
+                        .map_err(AudioFailure)?;
+                        let _ = events.try_send(Event::Connected(audio.description.clone()));
+                    }
+                    opened = retune;
+                }
+
+                Some(_) => {}
+            },
             _ = tick.tick() => {
                 if events.is_closed() { break; }
-                let capture = ptt_gate.allows(true, config.ptt.load(Ordering::Acquire), Instant::now(), config.transmission);
+                let capture = ptt_gate.allows(true, config.ptt.load(Ordering::Acquire), Instant::now(), transmission);
+
                 audio.set_capture(capture).map_err(AudioFailure)?;
                 audio.tick(true, |_| {}).map_err(AudioFailure)?;
                 report_transmission(events, &mut reported_transmission, audio.transmitting());
@@ -1748,6 +1918,48 @@ pub fn probe(address: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spacer_names_become_dividers_only_at_the_top_level() {
+        let spacer = |name: &str, parent| {
+            Channel {
+                name: name.into(),
+                parent,
+                ..Channel::default()
+            }
+            .spacer()
+            .map(|spacer| (spacer.align, spacer.text))
+        };
+        assert_eq!(
+            spacer("[cspacer]━━ Games ━━", 0),
+            Some((SpacerAlign::Center, "━━ Games ━━".into()))
+        );
+        assert_eq!(
+            spacer("[lspacer0]Text", 0),
+            Some((SpacerAlign::Left, "Text".into()))
+        );
+        assert_eq!(
+            spacer("[rspacer]Text", 0),
+            Some((SpacerAlign::Right, "Text".into()))
+        );
+        assert_eq!(
+            spacer("[*spacer1]─", 0),
+            Some((SpacerAlign::Repeat, "─".into()))
+        );
+        assert_eq!(
+            spacer("[spacer0]", 0),
+            Some((SpacerAlign::Left, String::new()))
+        );
+        assert_eq!(
+            spacer("[CSPACER2]Loud", 0),
+            Some((SpacerAlign::Center, "Loud".into()))
+        );
+        // A subchannel keeps its name, as do names that only look a little like one.
+        assert_eq!(spacer("[cspacer]Games", 4), None);
+        assert_eq!(spacer("[clan] Raid", 0), None);
+        assert_eq!(spacer("[spacer-x]Text", 0), None);
+        assert_eq!(spacer("Lobby", 0), None);
+    }
 
     #[test]
     fn speakers_start_on_voice_and_stop_on_end_packet_or_silence() {

@@ -174,7 +174,7 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                     "App CPU",
                     s.process_usage.cpu_percent.map_or_else(
                         || "—".into(),
-                        |value| usage::format_cpu_whole(f64::from(value)),
+                        |value| usage::format_cpu_percent(f64::from(value)),
                     ),
                     &s.cpu_history,
                     true,
@@ -289,11 +289,16 @@ fn history_card(
         .child(text(label).font(ty::LABEL).color(t.muted))
         .child(text(current).font(ty::BIG_VALUE).color(t.text));
     if let Some((detail_label, value)) = memory_detail {
-        heading_row = heading_row.child(el().grow(1.0)).child(
-            text(format!("{detail_label}  {value}"))
-                .font(ty::NUMERIC)
-                .color(t.muted),
-        );
+        // Kept off the card's edge, and wrapped under the reading when the card is narrow.
+        heading_row = heading_row
+            .flex_wrap()
+            .pr(12.0)
+            .child(el().grow(1.0))
+            .child(
+                text(format!("{detail_label}  {value}"))
+                    .font(ty::NUMERIC)
+                    .color(t.muted),
+            );
     }
     col()
         .grow(1.0)

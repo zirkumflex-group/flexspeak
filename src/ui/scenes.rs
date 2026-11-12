@@ -25,6 +25,7 @@ pub const SCENES: &[Scene] = &[
     ("servers-poked", servers_poked),
     ("servers-switched", servers_switched),
     ("servers-connecting", servers_connecting),
+    ("server-reconnecting", server_reconnecting),
     ("servers-picker", servers_picker),
     ("setup-ts6-offer", setup_ts6_offer),
     ("setup-ts6-server", setup_ts6_server),
@@ -43,9 +44,12 @@ pub const SCENES: &[Scene] = &[
     ("own-channel-only", own_channel_only),
     ("limited", limited),
     ("footer-hidden", footer_hidden),
+    ("footer-expanded", footer_expanded),
     ("statistics", statistics),
     ("settings", settings_page),
+    ("settings-nickname-empty", settings_nickname_empty),
     ("settings-appearance", settings_appearance),
+    ("settings-general", settings_general),
     ("settings-omarchy", settings_omarchy),
     ("settings-sounds", settings_sounds),
     ("settings-sounds-pack", settings_sounds_pack),
@@ -62,14 +66,18 @@ pub const SCENES: &[Scene] = &[
     ("settings-sounds-search", settings_sounds_search),
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
+    ("settings-audio-ptt", settings_audio_ptt),
     ("settings-streaming", settings_streaming),
     ("settings-picker", settings_picker),
     ("settings-auto-connect", settings_auto_connect),
     ("server-add", server_add),
+    ("server-add-connect", server_add_connect),
     ("server-edit", server_edit),
+    ("server-edit-remove", server_edit_remove),
     ("home-connecting", home_connecting),
     ("settings-shortcuts", settings_shortcuts),
     ("settings-shortcuts-recording", settings_shortcuts_recording),
+    ("settings-shortcuts-taken", settings_shortcuts_taken),
     ("settings-permissions", settings_permissions),
     ("settings-file", settings_file),
     ("settings-search", settings_search),
@@ -89,6 +97,7 @@ pub const SCENES: &[Scene] = &[
     ("member-channel-group", member_channel_group),
     ("member-groups-guest", member_groups_guest),
     ("member-kick", member_kick),
+    ("member-kick-several", member_kick_several),
     ("member-ban", member_ban),
     ("servers-menu", servers_menu),
     ("member-volume", member_volume),
@@ -107,6 +116,8 @@ pub const SCENES: &[Scene] = &[
     ("share-quick-no-game", share_quick_no_game),
     ("share-quick-streams", share_quick_streams),
     ("channel-tree", channel_tree),
+    ("channel-tree-spacers", channel_tree_spacers),
+    ("channel-menu", channel_menu),
     ("sharing", sharing),
     ("sharing-stream-options", sharing_stream_options),
     (
@@ -119,6 +130,7 @@ pub const SCENES: &[Scene] = &[
     ("watching", watching),
     ("watching-solo", watching_solo),
     ("watching-solo-hover", watching_solo_hover),
+    ("watching-fullscreen", watching_fullscreen),
     ("watching-others-hidden", watching_others_hidden),
     ("watching-others-hidden-hover", watching_others_hidden_hover),
     ("watching-toolbar", watching_toolbar),
@@ -151,9 +163,15 @@ pub const SCENES: &[Scene] = &[
     ("watching-loud", watching_loud),
     ("sharing-live-audio", sharing_live_audio),
     ("install", install),
+    ("close-prompt", close_prompt),
+    ("close-prompt-no-tray", close_prompt_no_tray),
+    ("disconnect-sharing", disconnect_sharing),
     ("password", password),
+    ("server-password", server_password),
+    ("server-password-wrong", server_password_wrong),
     ("alert", alert),
     ("alert-dropped", alert_dropped),
+    ("alert-kicked", alert_kicked),
     ("alert-audio-fallback", alert_audio_fallback),
     ("alert-no-audio", alert_no_audio),
     ("alert-shortcut-taken", alert_shortcut_taken),
@@ -176,6 +194,11 @@ pub const SCENES: &[Scene] = &[
     ("chat-tabs", chat_tabs),
     ("chat-tabs-private", chat_tabs_private),
     ("chat-tabs-light", chat_tabs_light),
+    ("chat-new-messages", chat_new_messages),
+    ("chat-line-menu", chat_line_menu),
+    ("chat-composer-lines", chat_composer_lines),
+    ("chat-composer-limit", chat_composer_limit),
+    ("chat-composer-cut", chat_composer_cut),
     ("chat-feed", chat_feed),
     ("chat-feed-private", chat_feed_private),
     ("chat-feed-target", chat_feed_target),
@@ -281,6 +304,7 @@ fn setup_ts6_server(s: &mut App) {
             "games.example.org:1234".into(),
             "friends.example.net".into(),
         ],
+        names: [("ts.zirkumflex.io".to_owned(), "Zirkumflex".to_owned())].into(),
         input,
         output,
         push_to_talk: true,
@@ -391,6 +415,15 @@ fn servers_switched(s: &mut App) {
 fn servers_connecting(s: &mut App) {
     let [.., friends] = servers(s);
     s.activate(Some(friends));
+}
+
+/// The connection dropped: the last known channels and chat stay, dimmed, under one line.
+fn server_reconnecting(s: &mut App) {
+    connected(s);
+    let session = s.server_mut();
+    session.connected = false;
+    session.reconnecting = true;
+    session.status = crate::client::CONNECTION_LOST.into();
 }
 
 fn servers_picker(s: &mut App) {
@@ -541,6 +574,54 @@ fn chat_tabs_private(s: &mut App) {
 fn chat_tabs_light(s: &mut App) {
     chat_tabs(s);
     s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+/// Read back while three lines came in: they wait under a control that jumps to them.
+fn chat_new_messages(s: &mut App) {
+    chat_tabs(s);
+    s.ui.chat_back = true;
+    for _ in 0..3 {
+        s.server_mut().chat.mark_unread(&chat::Scope::Channel);
+    }
+}
+
+/// Right-clicking someone's line that holds a link.
+fn chat_line_menu(s: &mut App) {
+    chat_tabs(s);
+    let entry = say(
+        s,
+        chat::Scope::Channel,
+        false,
+        MARA.1,
+        "Lobby",
+        "route is on www.example.org/raid",
+        "21:10",
+    );
+    s.ui.chat_line_menu = Some((entry.id, rune::PointerPress { x: 900.0, y: 420.0 }));
+}
+
+/// A draft of three lines: the box grows with it.
+fn chat_composer_lines(s: &mut App) {
+    chat_tabs(s);
+    s.server_mut().chat.draft = "pull order:\n1. tank pulls left\n2. we burn the adds".into();
+    s.ui.chat_input.focused = true;
+    s.sync_fields();
+}
+
+/// Near the limit, the box counts the bytes left.
+fn chat_composer_limit(s: &mut App) {
+    chat_tabs(s);
+    s.server_mut().chat.draft = "notes ".repeat(160);
+    s.sync_fields();
+}
+
+/// A paste that didn't fit was cut, and the box says so.
+fn chat_composer_cut(s: &mut App) {
+    chat_tabs(s);
+    let chat = &mut s.server_mut().chat;
+    chat.draft = "log ".repeat(256);
+    chat.draft_cut = true;
+    s.sync_fields();
 }
 
 fn chat_feed(s: &mut App) {
@@ -1188,6 +1269,15 @@ fn member_states(s: &mut App) {
             }
         }
     }
+    // Theo turned down to 30%, which his row marks.
+    s.user_audio.insert(
+        "uid-3".into(),
+        settings::UserAudio {
+            volume_percent: 30,
+            muted: false,
+        },
+    );
+    s.server_mut().talking = [2].into();
 }
 
 /// Ines streams in Raid night while you sit in the Lobby: the tree marks her there too,
@@ -1197,8 +1287,8 @@ fn streaming_elsewhere(s: &mut App) {
     s.server_mut().streaming.streamers = [4].into_iter().collect();
 }
 
-/// Deafened with the microphone left unmuted: the mute button shows the mic as on, since
-/// that is what undeafening brings back. The CPU reads in whole percent.
+/// Deafened with the microphone left unmuted: the mute button shows the mic as off, since
+/// nothing is sent, and its tooltip says why. The CPU reads to one decimal.
 fn connected_deafened(s: &mut App) {
     connected_quiet(s);
     s.server_mut().muted = false;
@@ -1209,13 +1299,20 @@ fn connected_deafened(s: &mut App) {
     s.process_usage.cpu_percent = Some(23.415);
 }
 
-/// The hidden footer under load: CPU red, footprint amber.
+/// The compact footer, the usual one, under load: health and ping only.
 fn footer_hidden(s: &mut App) {
     connected(s);
     s.footer_hidden = true;
     s.process_usage.cpu_percent = Some(64.0);
     s.process_usage.memory_bytes = Some(812 * 1024 * 1024);
     s.process_usage.memory_detail_bytes = Some(590 * 1024 * 1024);
+}
+
+/// The footer expanded: packet loss and ping with their sparklines, then CPU (one decimal,
+/// red under load) and RAM (amber).
+fn footer_expanded(s: &mut App) {
+    footer_hidden(s);
+    s.footer_hidden = false;
 }
 
 fn statistics(s: &mut App) {
@@ -1254,11 +1351,15 @@ fn settings_more_themes(s: &mut App) {
     s.settings_query = "mocha".into();
 }
 
-/// Searching brings the sounds into view: one pack for all of them, and a switch for each group.
+/// Settings › Sounds: one pack for all of them, and a switch for each group.
 fn settings_sounds(s: &mut App) {
     connected(s);
-    s.settings_page = Some(SettingsPage::Audio);
-    s.settings_query = "sound cues".into();
+    s.settings_page = Some(SettingsPage::Sounds);
+}
+
+/// Settings › General: the tray icon and running setup again.
+fn settings_general(s: &mut App) {
+    settings_at(s, SettingsPage::General);
 }
 
 /// Ten hours of a busy server, running past midnight.
@@ -1273,10 +1374,10 @@ fn server_log(s: &mut App) {
     let people = ["Mara", "Theo", "Ines", "Lukas", "Priya with a long name"];
     let happenings = [
         (Tone::Arrived, "connected"),
-        (Tone::Moved, "→ Raid night"),
-        (Tone::Stream, "started streaming"),
-        (Tone::Moved, "moved to Lobby"),
-        (Tone::Stream, "stopped streaming"),
+        (Tone::Moved, "joined Raid night"),
+        (Tone::Stream, "started sharing"),
+        (Tone::Moved, "was moved to Lobby"),
+        (Tone::Stream, "stopped sharing"),
         (Tone::Left, "lost connection"),
         (Tone::Arrived, "connected"),
         (Tone::Left, "disconnected"),
@@ -1382,6 +1483,20 @@ fn settings_audio(s: &mut App) {
     settings_at(s, SettingsPage::Audio);
 }
 
+/// Push to talk chosen: its key is set right there, under the mode.
+fn settings_audio_ptt(s: &mut App) {
+    settings_at(s, SettingsPage::Audio);
+    s.transmission.mode = crate::transmission::Mode::PushToTalk;
+}
+
+/// An emptied nickname, committed: the reason shows under the field.
+fn settings_nickname_empty(s: &mut App) {
+    settings_page(s);
+    let _ = s.update(crate::Message::Nickname(String::new()));
+    let _ = s.update(crate::Message::CommitNickname);
+    s.sync_fields();
+}
+
 /// Settings > Streaming with both options on.
 fn settings_streaming(s: &mut App) {
     settings_at(s, SettingsPage::Streaming);
@@ -1407,10 +1522,24 @@ fn server_add(s: &mut App) {
     s.sync_fields();
 }
 
+/// Add Server from Home: saving connects too.
+fn server_add_connect(s: &mut App) {
+    home(s);
+    let _ = s.update(crate::Message::AddServer);
+    let _ = s.update(crate::Message::ServerAddress("eu.voicehub.net".into()));
+    s.sync_fields();
+}
+
 fn server_edit(s: &mut App) {
     settings_page(s);
     let _ = s.update(crate::Message::EditServer(1));
     s.sync_fields();
+}
+
+/// Remove pressed once in Edit Server: the second press removes the server.
+fn server_edit_remove(s: &mut App) {
+    server_edit(s);
+    let _ = s.update(crate::Message::RemoveServer);
 }
 
 /// Connecting to the second server: the others wait for it.
@@ -1442,6 +1571,14 @@ fn settings_shortcuts(s: &mut App) {
     s.sync_fields();
 }
 
+/// Mute cleared, and another app holding the deafen shortcut.
+fn settings_shortcuts_taken(s: &mut App) {
+    settings_shortcuts(s);
+    s.keybind_draft.toggle_mute.clear();
+    s.taken_shortcuts = vec![crate::shortcuts::Binding::Deafen];
+    s.sync_fields();
+}
+
 /// A mix of answers, to show the same live status outside setup.
 fn settings_permissions(s: &mut App) {
     settings_at(s, SettingsPage::Permissions);
@@ -1450,7 +1587,7 @@ fn settings_permissions(s: &mut App) {
 
 fn settings_file(s: &mut App) {
     settings_at(s, SettingsPage::File);
-    s.settings_message = Some("Settings saved".into());
+    s.settings_message = Some("Settings reloaded".into());
 }
 
 /// A query that finds rows in several categories.
@@ -1625,6 +1762,14 @@ fn member_kick(s: &mut App) {
     moderation_draft(s, client::Moderation::KickServer, "Please read the rules");
 }
 
+/// Kicking several people at once names each of them.
+fn member_kick_several(s: &mut App) {
+    moderation_draft(s, client::Moderation::KickChannel, "");
+    if let Some(draft) = &mut s.server_mut().moderation {
+        draft.ids = vec![2, 3, 4];
+    }
+}
+
 fn member_ban(s: &mut App) {
     moderation_draft(s, client::Moderation::Ban(Some(604_800)), "Repeated spam");
 }
@@ -1692,6 +1837,7 @@ fn poked(s: &mut App) {
     connected(s);
     s.server_mut().pokes.push(crate::Poke {
         from: "Theo".into(),
+        key: "uid-3".into(),
         message: "Can you hear me?".into(),
     });
 }
@@ -1820,6 +1966,31 @@ fn channel_tree(s: &mut App) {
     ];
     s.server_mut().state.current = Some(lobby);
     s.server_mut().talking.clear();
+}
+
+/// A server that parts its tree into sections with spacer channels: centred, left, right and
+/// repeated labels and an empty one, none of them joinable.
+fn channel_tree_spacers(s: &mut App) {
+    channel_tree(s);
+    let spacer = |id, name: &str| client::Channel {
+        id,
+        name: name.into(),
+        members_visible: true,
+        join_access: client::JoinAccess::Allowed,
+        ..client::Channel::default()
+    };
+    let channels = &mut s.server_mut().state.channels;
+    channels.insert(1, spacer(101, "[cspacer]━━ Games ━━"));
+    channels.insert(4, spacer(102, "[*spacer1]─"));
+    channels.insert(6, spacer(103, "[lspacer0]Quiet rooms"));
+    channels.push(spacer(104, "[spacer0]"));
+    channels.push(spacer(105, "[rspacer]AFK"));
+}
+
+/// Right-clicking a channel you can join: Join, and fold it away.
+fn channel_menu(s: &mut App) {
+    channel_tree(s);
+    s.ui.channel_menu = Some((3, rune::PointerPress { x: 150.0, y: 170.0 }));
 }
 
 fn share(s: &mut App) {
@@ -2007,6 +2178,7 @@ fn sharing(s: &mut App) {
     status.active = true;
     status.live = true;
     status.detail = "Private · Fast capture".into();
+    status.source = "Counter-Strike 2".into();
     status.viewers = vec![(2, "Mara".into(), true)];
     status.requests = vec![(4, "Ines".into())];
 }
@@ -2076,7 +2248,8 @@ fn watching_five(s: &mut App) {
         &[
             ("s1", 2, "Mara’s screen", Phase::Receiving),
             ("s2", 3, "Theo’s game", Phase::Receiving),
-            ("s3", 5, "Kai’s window", Phase::Receiving),
+            // An older client's name says only what kind of share it is: Kai's name leads.
+            ("s3", 5, "Screen share", Phase::Receiving),
             ("s4", 6, "Noor’s old capture", Phase::Receiving),
             ("s5", 7, "Lin’s second monitor", Phase::Negotiating),
         ],
@@ -2138,6 +2311,13 @@ fn watching_solo(s: &mut App) {
 fn watching_solo_hover(s: &mut App) {
     watching_solo(s);
     s.ui.streams_hover = true;
+}
+
+/// The stream fills the screen: no header, sidebar, chat or status bar, its bar on hover.
+fn watching_fullscreen(s: &mut App) {
+    watching_solo_hover(s);
+    s.ui.fullscreen = Some(false);
+    s.ui.window_fullscreen = true;
 }
 
 /// The other stream tucked away: the watched one fills the pane, a tab brings the other back.
@@ -2392,9 +2572,48 @@ fn install(s: &mut App) {
     s.install_prompt = true;
 }
 
+/// The window's close button while connected, with the tray icon on.
+fn close_prompt(s: &mut App) {
+    connected(s);
+    s.appearance.hide_tray_icon = false;
+    s.close_prompt = true;
+}
+
+/// The same with the tray icon switched off: nowhere to hide, so Quit is the default.
+fn close_prompt_no_tray(s: &mut App) {
+    connected(s);
+    s.appearance.hide_tray_icon = true;
+    s.close_prompt = true;
+}
+
+/// Disconnect while sharing live asks first.
+fn disconnect_sharing(s: &mut App) {
+    sharing(s);
+    s.disconnect_prompt = true;
+}
+
 fn password(s: &mut App) {
     connected(s);
     s.server_mut().password_channel = Some(3);
+}
+
+/// The server refused to let you in without its password.
+fn server_password(s: &mut App) {
+    home(s);
+    s.server_password_prompt = Some(crate::ServerPasswordPrompt {
+        index: 0,
+        title: "Zirkumflex".into(),
+        ..Default::default()
+    });
+    s.ui.prompt_password.focused = true;
+}
+
+/// The password tried was wrong: the prompt stays with a reason.
+fn server_password_wrong(s: &mut App) {
+    server_password(s);
+    if let Some(prompt) = &mut s.server_password_prompt {
+        prompt.error = Some("That password wasn't accepted.".into());
+    }
 }
 
 /// A saved server that never answered: the strip offers to try again.
@@ -2416,6 +2635,19 @@ fn alert_dropped(s: &mut App) {
         Some("Zirkumflex".into()),
         Source::Dropped,
         "TeamSpeak connection failed: You were kicked from the server: Take a break",
+    );
+}
+
+/// Kicked: the strip says so and offers no Reconnect.
+fn alert_kicked(s: &mut App) {
+    home(s);
+    s.alerts.raise_refused_at(
+        "ts.zirkumflex.io",
+        Some("Zirkumflex".into()),
+        Source::Dropped,
+        crate::client::Refusal::Kicked.sentence(),
+        "TeamSpeak connection failed: Connection aborted",
+        false,
     );
 }
 
@@ -2616,10 +2848,14 @@ fn update_install_failed(s: &mut App) {
     );
 }
 
-/// Settings with a downloaded build waiting and the notice closed.
+/// Settings with a downloaded build waiting and the notice closed. What's New leads with the
+/// waiting build's notes.
 fn update_settings(s: &mut App) {
     settings_at(s, SettingsPage::Updates);
     with_update(s, Phase::Ready);
+    if let Some(release) = &mut s.updater.release {
+        *release.notes = demo_notes();
+    }
     s.updater.dismissed = true;
 }
 
@@ -2926,6 +3162,50 @@ mod tests {
         assert!(rt.state.session(id).is_none_or(|session| session.stopping));
     }
 
+    #[test]
+    fn a_channel_joins_on_a_double_click_and_offers_a_menu() {
+        let mut rt = runtime(channel_tree, (900.0, 790.0));
+        settle(&mut rt);
+        let name = "channel-2/name";
+        click(&mut rt, name);
+        assert_eq!(
+            rt.state.server().expected_channel,
+            None,
+            "one click doesn't move you"
+        );
+        let (x, y) = rt.find(name).unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.secondary_down(x, y);
+        rt.secondary_up(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.channel_menu.map(|(open, _)| open), Some(2));
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Escape,
+            mods: rune::Mods::default(),
+        });
+        settle(&mut rt);
+        assert!(rt.state.ui.channel_menu.is_none());
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        settle(&mut rt);
+        assert_eq!(rt.state.server().expected_channel, Some(2));
+        // A spacer is a label: it never joins.
+        let mut rt = runtime(channel_tree_spacers, (900.0, 790.0));
+        settle(&mut rt);
+        let (x, y) = rt.find("channel-101/name").expect("the spacer");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        settle(&mut rt);
+        assert_eq!(rt.state.server().expected_channel, None);
+    }
+
     /// Ticking groups keeps the menu open, so several can be picked in a row.
     #[test]
     fn group_ticks_leave_the_menu_open() {
@@ -3075,8 +3355,8 @@ mod tests {
 
     #[test]
     #[cfg(any(windows, target_os = "macos"))]
-    fn the_tray_icon_stays_on_until_switched_off_in_appearance() {
-        let mut rt = runtime(settings_appearance, (1000.0, 1500.0));
+    fn the_tray_icon_stays_on_until_switched_off_in_general() {
+        let mut rt = runtime(settings_general, (1000.0, 1500.0));
         settle(&mut rt);
         assert!(!rt.state.appearance.hide_tray_icon, "on by default");
         assert!(rt.state.tray_status().is_some());
@@ -3085,7 +3365,7 @@ mod tests {
         let path = root.join("settings.json");
         crate::settings::save(&path, &crate::settings::Settings::default()).unwrap();
         rt.state.settings_path = Some(path.clone());
-        scroll_into_view(&mut rt, "settings-body-Appearance", "tray-icon");
+        scroll_into_view(&mut rt, "settings-body-General", "tray-icon");
         click(&mut rt, "tray-icon");
         assert!(rt.state.appearance.hide_tray_icon);
         assert!(rt.state.tray_status().is_none(), "no icon once it's off");
@@ -3106,6 +3386,8 @@ mod tests {
         let path = root.join("settings.json");
         crate::settings::save(&path, &crate::settings::Settings::default()).unwrap();
         rt.state.settings_path = Some(path.clone());
+        // Motion follows More Themes, below the fold.
+        scroll_into_view(&mut rt, "settings-body-Appearance", "disable-animations");
         click(&mut rt, "disable-animations");
         assert!(rt.state.appearance.disable_animations);
         let saved = crate::settings::load(&path).unwrap().unwrap();
@@ -3502,7 +3784,8 @@ mod tests {
         let mut rt = runtime(chat_hidden_private, (1180.0, 790.0));
         let root = temp_settings(&mut rt, "chat-toast");
         settle(&mut rt);
-        assert!(rt.find("chat-toast").is_some() && rt.find("chat-edge-dot").is_some());
+        // A private message shows its count on the handle, not just a dot.
+        assert!(rt.find("chat-toast").is_some() && rt.find("chat-edge-count").is_some());
         assert!(rt.find("chat-peek").is_none());
         click(&mut rt, "chat-toast-reply");
         assert!(rt.find("chat-toast").is_none());
@@ -3609,7 +3892,10 @@ mod tests {
     fn hovering_the_server_log_offers_search_and_escape_closes_it() {
         let mut rt = runtime(server_log, (900.0, 790.0));
         settle(&mut rt);
-        assert!(rt.find("log-search-open").is_none(), "hidden at rest");
+        assert!(
+            rt.find("log-search-open").is_some(),
+            "faint at rest, but there"
+        );
         click(&mut rt, "server-log");
         settle(&mut rt);
         click(&mut rt, "log-search-open");
@@ -3682,7 +3968,8 @@ mod tests {
         assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s4"));
         assert_eq!(order(&rt), ["s2", "s1", "s4", "s3", "s5"]);
 
-        // Double-clicking the stage returns to the grid, as the grid button does.
+        // Double-clicking the stage takes it full screen with the others tucked away; leaving
+        // brings them back, and the grid button returns to the grid.
         let (x, y) = rt.find("tile-s4").unwrap();
         rt.pointer_move(x, y);
         rt.frame(1.0 / 60.0);
@@ -3692,6 +3979,13 @@ mod tests {
             rt.frame(1.0 / 60.0);
         }
         settle(&mut rt);
+        assert_eq!(rt.state.ui.fullscreen, Some(false));
+        assert!(rt.state.server().streaming.others_hidden);
+        assert_eq!(rt.state.server().streaming.focused.as_deref(), Some("s4"));
+        click(&mut rt, "fullscreen");
+        assert_eq!(rt.state.ui.fullscreen, None);
+        assert!(!rt.state.server().streaming.others_hidden);
+        click(&mut rt, "unfocus");
         assert_eq!(rt.state.server().streaming.focused, None);
 
         click(&mut rt, "layout-below");
@@ -3823,6 +4117,16 @@ mod tests {
         assert!(rt.find("permission-0").is_some());
         search(&mut rt, "bluetooth");
         assert!(rt.find("no-results").is_some());
+        // Each page's results are headed by its name.
+        search(&mut rt, "password");
+        assert!(rt.find("edit-server-0").is_some());
+        assert!(rt.find("results-Server").is_some());
+        search(&mut rt, "auto connect");
+        assert!(rt.find("edit-server-0").is_some());
+        // History is the chat's, not the changelog's or the error log's.
+        search(&mut rt, "history");
+        assert!(rt.find("chat-history-clear").is_some());
+        assert!(rt.find("results-Updates").is_none() && rt.find("results-Error Log").is_none());
     }
 
     #[test]
@@ -3848,7 +4152,7 @@ mod tests {
         press(&mut rt, "add-server");
         assert_eq!(rt.state.settings_page, Some(SettingsPage::Server));
         assert_eq!(rt.state.server_editor.as_ref().unwrap().index, None);
-        key(&mut rt, rune::Key::Escape, false);
+        // Settings opened only for the dialog, so it closes with it.
         key(&mut rt, rune::Key::Escape, false);
         assert_eq!(rt.state.settings_page, None);
         press(&mut rt, "connect-1");
@@ -3907,7 +4211,7 @@ mod tests {
     // The switches exist only where WebRTC processing is built (Mac and Windows).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn processing_switches_apply_while_idle_and_lock_during_a_session() {
+    fn processing_switches_apply_while_idle_and_during_a_session() {
         let mut rt = runtime(settings_audio, (900.0, 2000.0));
         for _ in 0..10 {
             rt.frame(1.0 / 30.0);
@@ -3923,17 +4227,21 @@ mod tests {
             crate::audio_processing::AVAILABLE
         );
         let before = rt.state.audio_processing;
-        let id = add_session(&mut rt.state, "Locked", "locked.example");
+        let id = add_session(&mut rt.state, "Busy", "busy.example");
         rt.state.activate(Some(id));
         for _ in 0..10 {
             rt.frame(1.0 / 30.0);
         }
-        if let Some((x, y)) = rt.find("echo-cancellation-switch") {
-            rt.pointer_down(x, y);
-            rt.pointer_up(x, y);
-            rt.frame(1.0 / 60.0);
-        }
-        assert_eq!(rt.state.audio_processing, before);
+        let (x, y) = rt
+            .find("echo-cancellation-switch")
+            .expect("echo cancellation switch");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(
+            rt.state.audio_processing.echo_cancellation,
+            before.echo_cancellation != crate::audio_processing::AVAILABLE
+        );
     }
 
     /// The connected scene with enough streams to overflow the pane, whether or not this

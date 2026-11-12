@@ -3,6 +3,7 @@
 mod alerts;
 mod audio;
 mod audio_processing;
+mod autostart;
 mod changelog;
 mod chat;
 mod chat_store;
@@ -21,6 +22,7 @@ mod onboarding;
 mod permissions;
 mod profiler;
 mod resume;
+mod secret;
 mod server_log;
 mod session_end;
 mod settings;
@@ -36,6 +38,7 @@ mod ui;
 mod updater;
 mod usage;
 mod window_icon;
+mod window_place;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -59,6 +62,8 @@ const MIN_SIZE: (f32, f32) = (760.0, 560.0);
 /// How long a closed window's servers get to acknowledge the goodbye before the app quits
 /// regardless: each session waits up to 2 s for its server, after stopping its streams.
 const QUIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+/// At most one system notification this often; the rest of a burst only flashes the taskbar.
+const TOAST_GAP: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -119,16 +124,27 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("--uninstall") => return install::uninstall(),
+        // Start with Windows, with Start Minimized: the window waits in the notification area.
+        Some(autostart::MINIMIZED) => {}
         // Rune's headless preview tooling (`--snap`, `--scene`, `--tree`, …) reads the rest.
         Some(other) if ui::is_tool_flag(other) => {}
         Some(other) => anyhow::bail!("Unknown argument '{other}'. Use --help."),
         None => {}
     }
-    if !args.iter().any(|arg| ui::is_tool_flag(arg)) {
+    // Previews and other tools run beside the real client, so only the client itself is single.
+    let tool = args.iter().any(|arg| ui::is_tool_flag(arg));
+    if !tool {
+        // A second launch brings the running window forward, from the tray too, and ends.
+        if !rune::single_instance("io.venator.flexspeak") {
+            return Ok(());
+        }
         session_end::install();
         tray::allow();
     }
-    ui::run();
+    ui::run(ui::Launch {
+        restore_place: !tool,
+        minimized: !tool && args.iter().any(|arg| arg == autostart::MINIMIZED),
+    });
     Ok(())
 }
 
@@ -137,8 +153,9 @@ struct App {
     onboarding_error: Option<String>,
     permissions: permissions::Permissions,
     saved: Option<settings::Settings>,
-    last_shortcut: Option<shortcuts::Action>,
     shortcuts: Option<shortcuts::Shortcuts>,
+    /// The shortcuts another app holds, named on their rows in Settings.
+    taken_shortcuts: Vec<shortcuts::Binding>,
     keybinds: shortcuts::Keybinds,
     keybind_draft: shortcuts::Keybinds,
     /// The shortcut being recorded, if Change was pressed.
@@ -163,6 +180,8 @@ struct App {
     footer_hidden: bool,
     /// The server log's size; saved when a resize ends or it folds, like `footer_hidden`.
     log_pane: settings::LogPane,
+    /// The connected sidebar's width in points; saved when a resize ends.
+    sidebar_width: u16,
     /// Saved straight to settings when changed, like `footer_hidden`.
     appearance: settings::Appearance,
     user_audio: BTreeMap<String, settings::UserAudio>,
@@ -177,6 +196,8 @@ struct App {
     share_defaults: streaming::publishing::ShareDefaults,
     /// Settings > Streaming, applied when a share starts.
     stream_options: settings::Streaming,
+    /// The streams' layout and details toggle, saved straight away and shared by every server.
+    stream_view: settings::StreamView,
     /// Settings > Chat. Saved straight to settings when changed, like `footer_hidden`.
     chat_options: settings::Chat,
     /// The chat history on disk, opened the first time it is needed.
@@ -187,8 +208,17 @@ struct App {
     sound_bank: sounds::Bank,
     /// The sound volume moved and hasn't been saved yet.
     sounds_unsaved: bool,
+    /// The playback volume, threshold or release delay moved and hasn't been saved yet.
+    audio_unsaved: bool,
+    /// Why the nickname typed in Settings wasn't kept, shown under its field.
+    nickname_error: Option<String>,
     #[cfg(test)]
     played_sounds: Vec<sounds::Sound>,
+    /// System notifications shown, by title.
+    #[cfg(test)]
+    shown_toasts: Vec<String>,
+    /// When the last system notification went out, so a burst shows one.
+    last_toast: Option<Instant>,
     /// `custom_themes` as written in the settings file.
     custom_themes: Vec<serde_json::Value>,
     theme_library: themes::Library,
@@ -212,6 +242,8 @@ struct App {
     server_passwords: HashMap<String, String>,
     /// The Add or Edit Server dialog, while it is open.
     server_editor: Option<ServerEditor>,
+    /// Asks for a server's password after the server refused the one it was given.
+    server_password_prompt: Option<ServerPasswordPrompt>,
     loopback: bool,
     closing: bool,
     level: f32,
@@ -219,7 +251,22 @@ struct App {
     install_offer: Option<install::Offer>,
     /// The install dialog shows at launch until answered.
     install_prompt: bool,
+    /// Don't Ask Again was chosen, kept for the first save while setup hasn't saved yet.
+    never_install: bool,
     installing: bool,
+    /// The close button asked whether to hide or quit; `close_remember` is its Don't Ask Again.
+    close_prompt: bool,
+    close_remember: bool,
+    /// Disconnect asked first, because you were sharing live.
+    disconnect_prompt: bool,
+    /// The window has the system's focus; false while another app is in front or it is minimized.
+    window_focused: bool,
+    /// The window is hidden in the tray.
+    window_hidden: bool,
+    /// The window's last known place, kept from before it hid, for saving at quit.
+    window_place: Option<settings::WindowPlace>,
+    /// Start with Windows, as the Run entry says.
+    autostart: autostart::Autostart,
     /// Setup was opened from Settings over a saved profile, so it can be cancelled.
     redoing_setup: bool,
     process_monitor: usage::ProcessMonitor,
@@ -258,8 +305,13 @@ struct ServerSession {
     log: server_log::Log,
     /// The connection dropped and is coming back.
     reconnecting: bool,
+    /// Why the connection is ending, as the client read it from the server's answer.
+    refusal: Option<client::Refusal>,
     /// The first list of streams after joining shows who was already live, not who just went live.
     catalog_seen: bool,
+    /// Who you were watching when the connection dropped, by identity, to watch again once it
+    /// is back and they are still live.
+    rewatch: Vec<String>,
     /// The channel you asked to join, to tell that apart from being moved.
     expected_channel: Option<u64>,
     quiet_channel_change: bool,
@@ -339,7 +391,9 @@ impl ServerSession {
             kicked: false,
             log: server_log::Log::default(),
             reconnecting: false,
+            refusal: None,
             catalog_seen: false,
+            rewatch: Vec::new(),
             id,
             name,
             address,
@@ -409,11 +463,9 @@ impl ServerSession {
                 .current
                 .as_ref()
                 .is_none_or(|current| current.id != id)
-            && self
-                .state
-                .channels
-                .iter()
-                .any(|channel| channel.id == id && channel.join_access.can_request())
+            && self.state.channels.iter().any(|channel| {
+                channel.id == id && channel.join_access.can_request() && channel.spacer().is_none()
+            })
     }
 
     fn microphone_off(&self) -> bool {
@@ -468,6 +520,8 @@ impl GroupMark {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Poke {
     from: String,
+    /// What their private conversation is filed under (`chat_key`), for Reply.
+    key: String,
     message: String,
 }
 
@@ -484,6 +538,26 @@ struct ServerEditor {
     name: String,
     address: String,
     password: String,
+    /// Keep the password in the settings file, sealed for this user (Windows only).
+    remember: bool,
+    error: Option<String>,
+    /// Remove was pressed once; the second press removes the server.
+    remove_armed: bool,
+    /// Settings opened only to hold this dialog, from Home or the rail, and closes with it.
+    alone: bool,
+    /// Saving also connects: the dialog is Add and Connect.
+    connect: bool,
+}
+
+/// The prompt for a server's password, after the server refused the one it was given.
+#[derive(Debug, Clone, Default)]
+struct ServerPasswordPrompt {
+    /// The saved server's index.
+    index: usize,
+    /// The server's name or address, for the title.
+    title: String,
+    password: String,
+    remember: bool,
     error: Option<String>,
 }
 
@@ -495,22 +569,26 @@ enum SettingsPage {
     Chat,
     Streaming,
     Audio,
+    Sounds,
     Shortcuts,
     Permissions,
+    General,
     Updates,
     Errors,
     File,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 12] = [
         Self::Server,
         Self::Appearance,
         Self::Chat,
         Self::Streaming,
         Self::Audio,
+        Self::Sounds,
         Self::Shortcuts,
         Self::Permissions,
+        Self::General,
         Self::Updates,
         Self::Errors,
         Self::File,
@@ -523,8 +601,10 @@ impl SettingsPage {
             Self::Chat => "Chat",
             Self::Streaming => "Streaming",
             Self::Audio => "Audio",
+            Self::Sounds => "Sounds",
             Self::Shortcuts => "Shortcuts",
             Self::Permissions => "Permissions",
+            Self::General => "General",
             Self::Updates => "Updates",
             Self::Errors => "Error Log",
             Self::File => "Settings File",
@@ -613,18 +693,19 @@ fn log_activity(log: &mut server_log::Log, activity: &client::Activity) {
     };
     let action = match (activity.kind, activity.is_self) {
         (Switched, true) => format!("joined {}", activity.channel),
-        (Switched, false) => format!("→ {}", activity.channel),
+        // They went themselves, or someone put them there.
+        (Switched, false) => format!("joined {}", activity.channel),
         (Moved, true) => format!("were moved to {}", activity.channel),
-        (Moved, false) => format!("moved to {}", activity.channel),
+        (Moved, false) => format!("was moved to {}", activity.channel),
         (Connected, _) => "connected".to_owned(),
         (Disconnected, _) => "disconnected".to_owned(),
         (LostConnection, _) => "lost connection".to_owned(),
         (KickedFromChannel, true) => "were kicked from the channel".to_owned(),
-        (KickedFromChannel, false) => "kicked from the channel".to_owned(),
+        (KickedFromChannel, false) => "was kicked from the channel".to_owned(),
         (KickedFromServer, true) => "were kicked".to_owned(),
-        (KickedFromServer, false) => "kicked".to_owned(),
+        (KickedFromServer, false) => "was kicked".to_owned(),
         (Banned, true) => "were banned".to_owned(),
-        (Banned, false) => "banned".to_owned(),
+        (Banned, false) => "was banned".to_owned(),
         (RecordingStarted, _) => "started recording".to_owned(),
         (RecordingStopped, _) => "stopped recording".to_owned(),
         (TalkPowerGranted, _) => "got talk power".to_owned(),
@@ -648,7 +729,7 @@ fn stream_changes(
     session: &mut ServerSession,
     catalog: &[streaming::StreamInfo],
 ) -> Vec<sounds::Sound> {
-    const STARTED: &str = "started streaming";
+    const STARTED: &str = "started sharing";
     if !std::mem::replace(&mut session.catalog_seen, true) {
         return Vec::new();
     }
@@ -668,7 +749,7 @@ fn stream_changes(
             before
                 .iter()
                 .filter(|old| !catalog.iter().any(|stream| stream.id == old.id))
-                .map(|old| (old.publisher, "stopped streaming")),
+                .map(|old| (old.publisher, "stopped sharing")),
         )
         .filter_map(|(publisher, action)| {
             let person = member(publisher);
@@ -691,6 +772,16 @@ fn stream_changes(
             }
         })
         .collect()
+}
+
+/// Lays a server's streams out as saved: where the others go and whether details show.
+fn apply_stream_view(streaming: &mut streaming::View, view: settings::StreamView) {
+    streaming.strip = if view.beside {
+        streaming::Strip::Beside
+    } else {
+        streaming::Strip::Below
+    };
+    streaming.show_stats = view.details;
 }
 
 /// Your share going live or ending, then one sound for each viewer who arrived or left.
@@ -716,6 +807,24 @@ fn viewer_sounds(
     joined
         .map(|_| sounds::Sound::ViewerJoined)
         .chain(left.map(|_| sounds::Sound::ViewerLeft))
+        .chain(
+            asked_to_watch(before, event)
+                .into_iter()
+                .map(|_| sounds::Sound::WatchRequested),
+        )
+        .collect()
+}
+
+/// The names of people newly asking to watch your private share.
+fn asked_to_watch(before: &streaming::publishing::Status, event: &streaming::Event) -> Vec<String> {
+    let streaming::Event::Publishing(after) = event else {
+        return Vec::new();
+    };
+    after
+        .requests
+        .iter()
+        .filter(|(id, _)| !before.requests.iter().any(|(old, _)| old == id))
+        .map(|(_, name)| name.clone())
         .collect()
 }
 
@@ -729,7 +838,6 @@ pub struct KeyCapture {
 enum Message {
     SetupNext,
     SetupBack,
-    TestHotkeys,
     RequestPermission(permissions::Kind),
     PermissionDone(permissions::Kind, Result<String, String>),
     OpenPermissionSettings(permissions::Kind),
@@ -744,7 +852,6 @@ enum Message {
     RecordShortcut(shortcuts::Binding),
     CancelRecording,
     Recorded(shortcuts::Recorded),
-    SaveSettings,
     ReloadSettings,
     CopySettingsPath,
     /// Copies the error log as text, for a bug report.
@@ -755,6 +862,8 @@ enum Message {
     Transmission(transmission::Settings),
     Address(String),
     Nickname(String),
+    /// Enter in the nickname field, or the field losing the keyboard: keeps what was typed.
+    CommitNickname,
     Password(String),
     ChannelPassword(String),
     SubmitChannelPassword,
@@ -779,6 +888,13 @@ enum Message {
     ServerName(String),
     ServerAddress(String),
     ServerPassword(String),
+    /// Add/Edit Server's Remember Password.
+    ServerRemember(bool),
+    /// The server password prompt's field, its Remember Password, Connect and Cancel.
+    PromptPassword(String),
+    PromptRemember(bool),
+    SubmitPromptPassword,
+    CancelPromptPassword,
     SubmitServer,
     CancelServer,
     RemoveServer,
@@ -812,6 +928,7 @@ enum Message {
     ToggleLog,
     /// A resize of the server log ended: keep its size.
     SaveLogPane,
+    SaveSidebarWidth,
     SharePreview(
         streaming::publishing::ShareSource,
         Option<streaming::publishing::Still>,
@@ -822,7 +939,23 @@ enum Message {
     Backend(hub::SessionId, client::Event),
     /// A background task failed before it could report anywhere else.
     Alert(Source, String),
+    /// The window's close button, or the system asking the window to close.
     Close,
+    /// Leaves every server and quits.
+    Quit,
+    /// The close dialog's answer; `None` stays as you were.
+    CloseChoice(Option<settings::CloseButton>),
+    CloseRemember(bool),
+    /// Settings: what the close button does while connected.
+    SetCloseButton(settings::CloseButton),
+    /// Settings: start with Windows, and whether in the tray.
+    SetAutostart(autostart::Autostart),
+    /// The tray's Disconnect: leaves the server on screen without asking.
+    TrayDisconnect,
+    /// The answer to Disconnect while sharing live: `true` disconnects.
+    ConfirmDisconnect(bool),
+    /// The window gained or lost the system's focus.
+    WindowFocus(bool),
     UsageTick,
     ShowTab(Tab),
     OpenSettings(SettingsPage),
@@ -838,6 +971,8 @@ enum Message {
     StreamLayout(Option<streaming::Strip>),
     /// Tuck the streams around the stage away, or bring them back.
     HideOtherStreams(bool),
+    /// The large stream fills the screen, or comes back into the window.
+    StreamFullscreen(bool),
     /// Trades two watched streams' places.
     SwapStreams(String, String),
     /// A publisher's stream volume, in percent, up to `streaming::MAX_VOLUME`.
@@ -889,6 +1024,8 @@ enum Message {
     SubmitPoke,
     CancelPoke,
     DismissPoke,
+    /// Closes the poke on top and opens the private chat with whoever sent it.
+    ReplyPoke,
     /// Asks to kick or ban these clients; nothing happens until it's confirmed.
     OpenModeration(Vec<u16>, client::Moderation),
     ModerationReason(String),
@@ -928,6 +1065,9 @@ impl App {
         };
         let mut app = Self::with_devices(devices, error);
         app.handle = handle;
+        app.window_hidden = ui::STARTED_HIDDEN.load(Ordering::Relaxed);
+        app.window_focused = !app.window_hidden;
+        app.autostart = autostart::current();
         app.system_dark = system_appearance::is_dark().unwrap_or(true);
         match settings::path() {
             Ok(path) => app.load_settings(path),
@@ -1002,8 +1142,8 @@ impl App {
             onboarding_error: None,
             permissions: permissions::Permissions::default(),
             saved: None,
-            last_shortcut: None,
             shortcuts: None,
+            taken_shortcuts: Vec::new(),
             keybinds: shortcuts::Keybinds::default(),
             keybind_draft: shortcuts::Keybinds::default(),
             key_capture: None,
@@ -1021,8 +1161,9 @@ impl App {
             transmitting: false,
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
-            footer_hidden: false,
+            footer_hidden: true,
             log_pane: settings::LogPane::default(),
+            sidebar_width: ui::SIDEBAR_WIDTH,
             appearance: settings::Appearance::default(),
             user_audio: BTreeMap::new(),
             user_gains: client::UserGains::default(),
@@ -1032,6 +1173,7 @@ impl App {
             sounds: sounds::Settings::default(),
             share_defaults: Default::default(),
             stream_options: settings::Streaming::default(),
+            stream_view: settings::StreamView::default(),
             chat_options: settings::Chat::default(),
             chat_store: None,
             chat_store_failed: false,
@@ -1041,13 +1183,19 @@ impl App {
                 sounds::Bank::installed()
             },
             sounds_unsaved: false,
+            audio_unsaved: false,
+            nickname_error: None,
             #[cfg(test)]
             played_sounds: Vec::new(),
+            #[cfg(test)]
+            shown_toasts: Vec::new(),
+            last_toast: None,
             custom_themes: Vec::new(),
             theme_library: themes::Library::new(&[]),
             omarchy: None,
             system_dark: true,
-            window_size: (1180.0, 790.0),
+            // A headless `--size` run lays its first frame out at that size.
+            window_size: ui::requested_size().unwrap_or((1180.0, 790.0)),
             next_usage_tick: Instant::now() + usage::REFRESH_INTERVAL,
             handle: None,
             ui: ui::UiState::default(),
@@ -1059,13 +1207,22 @@ impl App {
             password: String::new(),
             servers: Vec::new(),
             server_passwords: HashMap::new(),
+            server_password_prompt: None,
             server_editor: None,
             loopback: false,
             closing: false,
             level: 0.0,
             install_offer: None,
             install_prompt: false,
+            never_install: false,
             installing: false,
+            close_prompt: false,
+            close_remember: false,
+            disconnect_prompt: false,
+            window_focused: true,
+            window_hidden: false,
+            window_place: None,
+            autostart: autostart::Autostart::default(),
             redoing_setup: false,
             process_monitor,
             process_usage,
@@ -1158,6 +1315,59 @@ impl App {
         self.sessions.is_empty()
     }
 
+    /// What the window's close button does while connected.
+    fn close_button(&self) -> settings::CloseButton {
+        self.saved
+            .as_ref()
+            .map(|saved| saved.close_button)
+            .unwrap_or_default()
+    }
+
+    /// Whether the notification-area icon is there to bring a hidden window back.
+    fn tray_available(&self) -> bool {
+        tray::SUPPORTED && !self.appearance.hide_tray_icon
+    }
+
+    /// Hides the window and stays connected. Without a tray icon to come back from, the window
+    /// is minimized instead.
+    fn hide_window(&mut self) {
+        self.window_focused = false;
+        // Hidden, the window can't be measured; its place is kept for saving at quit.
+        if let Some(place) = window_place::current() {
+            self.window_place = Some(place);
+        }
+        let Some(handle) = &self.handle else {
+            self.window_hidden = self.tray_available();
+            return;
+        };
+        if self.tray_available() {
+            self.window_hidden = true;
+            handle.hide();
+        } else {
+            #[cfg(windows)]
+            window_icon::minimize();
+            #[cfg(not(windows))]
+            handle.minimize();
+        }
+    }
+
+    /// Remembers where the window is, for the next launch to open there.
+    fn save_window_place(&mut self) {
+        let Some(place) = window_place::current().or(self.window_place) else {
+            return;
+        };
+        if self
+            .saved
+            .as_ref()
+            .is_some_and(|saved| saved.window != Some(place))
+        {
+            self.save_preference(
+                |saved| saved.window = Some(place),
+                "The window's size and place were not saved",
+            );
+        }
+    }
+
     /// Whether the window is on a server you're connected to.
     fn live(&self) -> bool {
         self.server().connected && !self.loopback && !self.server().stopping
@@ -1185,32 +1395,29 @@ impl App {
         if self.active == id {
             return;
         }
-        let (strip, others_hidden, show_stats) = {
+        let others_hidden = {
             let old = self.server_mut();
             // The session stops these streams itself; this clears them from the screen now.
             old.streaming.clear_picture();
             old.streaming.share_open = false;
-            (
-                old.streaming.strip,
-                old.streaming.others_hidden,
-                old.streaming.show_stats,
-            )
+            old.streaming.others_hidden
         };
+        let view = self.stream_view;
         self.active = id;
         self.hub.set_active(id);
         self.transmitting = false;
         self.level = 0.0;
         self.ui.open = None;
         self.ui.member_menu = None;
+        self.ui.channel_menu = None;
         self.ui.move_menu = false;
         self.ui.groups_menu = None;
         self.ui.drag = None;
         self.ui.tile_drag = None;
         self.ui.server_picker = false;
         let new = self.server_mut();
-        new.streaming.strip = strip;
+        apply_stream_view(&mut new.streaming, view);
         new.streaming.others_hidden = others_hidden;
-        new.streaming.show_stats = show_stats;
         new.unseen_pokes = 0;
         new.activate_on_connect = false;
         self.ui.chat_toast = None;
@@ -1299,8 +1506,14 @@ impl App {
         }
     }
 
+    /// Whether the microphone and sound can be switched: while connected, and while a dropped
+    /// connection comes back, when the change waits and applies once it's back.
+    fn controls_reachable(&self) -> bool {
+        self.live() || (self.server().reconnecting && !self.loopback && !self.server().stopping)
+    }
+
     fn toggle_mute(&mut self) {
-        if self.live()
+        if self.controls_reachable()
             && let Some(id) = self.active
         {
             let value = !self.server().muted;
@@ -1314,7 +1527,7 @@ impl App {
     }
 
     fn toggle_deafen(&mut self) {
-        if self.live()
+        if self.controls_reachable()
             && let Some(id) = self.active
         {
             let value = !self.server().deafened;
@@ -1329,6 +1542,34 @@ impl App {
 
     /// Plays an event's sound, if sounds are on and that one isn't turned off. It waits for a
     /// sound already playing, unless it answers something you just did.
+    /// Asks for attention while the window is in the background: the taskbar button flashes
+    /// until it comes to the front, and `toast` shows as a system notification, one per
+    /// `TOAST_GAP` at most. Does nothing while the window is in front.
+    fn background_attention(&mut self, toast: Option<(String, String)>) {
+        if self.window_focused {
+            return;
+        }
+        window_place::flash(true);
+        let Some((title, body)) = toast else {
+            return;
+        };
+        let now = Instant::now();
+        if self
+            .last_toast
+            .is_some_and(|at| now.saturating_duration_since(at) < TOAST_GAP)
+        {
+            return;
+        }
+        self.last_toast = Some(now);
+        #[cfg(test)]
+        {
+            let _ = body;
+            self.shown_toasts.push(title);
+        }
+        #[cfg(not(test))]
+        notify::show(&title, &body);
+    }
+
     fn play_sound(&mut self, sound: sounds::Sound) {
         if self.sound_cues && self.sounds.plays(sound) {
             #[cfg(test)]
@@ -1337,9 +1578,23 @@ impl App {
         }
     }
 
-    /// Plays the sound now, for hearing it in Settings, whether or not it is switched on.
+    /// Plays the sound now, for hearing it in Settings, whether or not it is switched on. With
+    /// no server's devices open, it plays on its own.
     fn preview_sound(&self, sound: sounds::Sound) {
-        self.send_sound(sound, true);
+        if !self.loopback && self.sessions.iter().any(|session| session.connected) {
+            self.send_sound(sound, true);
+            return;
+        }
+        let gain = self.sounds.gain();
+        let Some(output) = self.output.clone().or_else(|| self.devices.output.clone()) else {
+            return;
+        };
+        if gain == 0.0 || cfg!(test) {
+            return;
+        }
+        let mut samples = sounds::samples(self.sounds.pack, sound, &self.sound_bank);
+        samples.iter_mut().for_each(|sample| *sample *= gain);
+        audio::play_alone(output, samples, self.playback_volume.clone());
     }
 
     /// Hands the sound, from the chosen pack, to the output at the chosen volume.
@@ -1509,6 +1764,86 @@ impl App {
         );
     }
 
+    /// Stores the devices, playback volume and voice settings, and hands them to the devices
+    /// that are open, so a change applies during a session too.
+    fn save_audio(&mut self) {
+        self.audio_unsaved = false;
+        let input = self.input.as_ref().map(|device| device.id.clone());
+        let output = self.output.as_ref().map(|device| device.id.clone());
+        let volume = self.playback_volume.percent();
+        let (processing, transmission) = (self.audio_processing, self.transmission);
+        self.save_preference(
+            |saved| {
+                saved.input_device_id = input;
+                saved.output_device_id = output;
+                saved.playback_volume_percent = volume;
+                saved.audio_processing = processing;
+                saved.transmission = transmission;
+            },
+            "That audio choice applies for now but was not saved",
+        );
+        self.retune_audio();
+    }
+
+    /// Reopens whatever audio is running, a server's or the microphone test's, with the
+    /// devices and voice settings chosen now.
+    fn retune_audio(&mut self) {
+        let (Some(input), Some(output)) = (self.input.clone(), self.output.clone()) else {
+            return;
+        };
+        let retune = hub::Retune {
+            input,
+            output,
+            processing: self.audio_processing,
+            transmission: self.transmission,
+        };
+        if self.loopback {
+            if let Some(id) = self.active {
+                self.send_to(id, client::Command::Retune(retune));
+            }
+        } else {
+            self.hub.retune(retune);
+        }
+    }
+
+    /// The nickname typed in Settings differs from the saved one.
+    fn nickname_edited(&self) -> bool {
+        self.onboarding.is_none()
+            && self
+                .saved
+                .as_ref()
+                .is_some_and(|saved| saved.nickname != self.nickname.trim())
+    }
+
+    /// Saves the nickname typed in Settings, or says under its field why it can't be kept.
+    fn commit_nickname(&mut self) {
+        if !self.nickname_edited() {
+            self.nickname_error = None;
+            return;
+        }
+        let nickname = self.nickname.trim().to_owned();
+        if let Some(problem) = onboarding::nickname_problem(&nickname) {
+            self.nickname_error = Some(problem.into());
+            return;
+        }
+        self.nickname_error = None;
+        self.save_preference(
+            |saved| saved.nickname = nickname,
+            "Your nickname applies for now but was not saved",
+        );
+    }
+
+    /// Saves what sliders and the nickname field held back while they were being changed.
+    fn flush_unsaved(&mut self) {
+        if std::mem::take(&mut self.sounds_unsaved) {
+            self.save_sounds();
+        }
+        if self.audio_unsaved {
+            self.save_audio();
+        }
+        self.commit_nickname();
+    }
+
     /// What the voice threads play each person at. Everyone unset stays out of the map.
     fn sync_user_gains(&self) {
         *self.user_gains.lock().unwrap() = self
@@ -1532,6 +1867,22 @@ impl App {
             self.user_audio.insert(uid, audio);
         }
         self.sync_user_gains();
+    }
+
+    /// Saves the streams' layout and details toggle as they are on screen now.
+    fn save_stream_view(&mut self) {
+        let view = settings::StreamView {
+            beside: self.server().streaming.strip == streaming::Strip::Beside,
+            details: self.server().streaming.show_stats,
+        };
+        if view == self.stream_view {
+            return;
+        }
+        self.stream_view = view;
+        self.save_preference(
+            |saved| saved.stream_view = view,
+            "That stream layout applies for now but was not saved",
+        );
     }
 
     fn save_stream_volumes(&mut self) {
@@ -1623,6 +1974,7 @@ impl App {
     fn begin_setup(&mut self) {
         self.find_ts6();
         self.onboarding = Some(onboarding::Step::Username);
+        self.ui.nickname.focused = true;
         self.onboarding_error = None;
         self.saved = None;
         self.nickname.clear();
@@ -1633,6 +1985,32 @@ impl App {
         self.tab = Tab::Home;
         self.close_settings();
         self.sync_page_visibility();
+    }
+
+    /// Shows a setup step with its first field taking the keyboard. Permissions is passed over,
+    /// in the direction of travel, when nothing there needs doing (as on Windows, usually).
+    fn show_setup_step(&mut self, mut step: onboarding::Step, forward: bool) {
+        if step == onboarding::Step::Permissions && !self.permissions_needed() {
+            let beyond = if forward {
+                step.next()
+            } else {
+                step.previous()
+            };
+            if let Some(beyond) = beyond {
+                step = beyond;
+            }
+        }
+        self.onboarding = Some(step);
+        self.refresh_visible_permissions();
+        self.ui.nickname.focused = step == onboarding::Step::Username;
+        self.ui.address.focused = step == onboarding::Step::Server;
+    }
+
+    /// Whether any permission still needs the user, read fresh. Tests use what they set.
+    fn permissions_needed(&mut self) -> bool {
+        #[cfg(not(test))]
+        self.permissions.refresh();
+        self.permissions.needs_action()
     }
 
     /// Stops listening for a shortcut and gives the saved ones back to the system.
@@ -1657,8 +2035,12 @@ impl App {
 
     fn close_settings(&mut self) {
         self.end_recording();
-        if std::mem::take(&mut self.sounds_unsaved) {
-            self.save_sounds();
+        self.flush_unsaved();
+        // An empty nickname isn't kept: the saved one comes back.
+        if self.nickname_error.take().is_some()
+            && let Some(saved) = &self.saved
+        {
+            self.nickname = saved.nickname.clone();
         }
         self.settings_page = None;
         self.settings_query.clear();
@@ -1683,21 +2065,26 @@ impl App {
             .is_some_and(|server| self.session_at(&server.address).is_some())
     }
 
-    /// Adds or updates the dialog's server and saves the list.
-    fn submit_server(&mut self) {
-        let Some(editor) = self.server_editor.clone() else {
-            return;
+    /// Adds or updates the dialog's server and saves the list. Returns the server to connect to
+    /// when the dialog was Add and Connect.
+    fn submit_server(&mut self) -> Option<usize> {
+        let editor = self.server_editor.clone()?;
+        let normalized = onboarding::normalize_address(&editor.address);
+        let address = normalized.clone().unwrap_or_default();
+        let same = |server: &settings::Server| {
+            onboarding::normalize_address(&server.address)
+                .unwrap_or_else(|_| server.address.trim().to_lowercase())
+                == address
         };
-        let address = editor.address.trim().to_owned();
-        let error = if address.is_empty() {
-            Some("Enter the server's address.")
+        let error = if let Err(error) = normalized {
+            Some(error)
         } else if editor.index.is_some_and(|index| self.server_in_use(index)) {
             Some("Disconnect before editing this server.")
         } else if self
             .servers
             .iter()
             .enumerate()
-            .any(|(i, server)| Some(i) != editor.index && server.address.trim() == address)
+            .any(|(i, server)| Some(i) != editor.index && same(server))
         {
             Some("This server is already in the list.")
         } else {
@@ -1707,8 +2094,13 @@ impl App {
             if let Some(open) = &mut self.server_editor {
                 open.error = Some(error.into());
             }
-            return;
+            return None;
         }
+        let password = if editor.remember && !editor.password.is_empty() {
+            secret::protect(&editor.password).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let server = settings::Server {
             name: editor.name.trim().into(),
             address: address.clone(),
@@ -1716,24 +2108,56 @@ impl App {
                 .index
                 .and_then(|index| self.servers.get(index))
                 .is_some_and(|server| server.auto_connect),
+            password,
         };
         let mut servers = self.servers.clone();
-        match editor.index {
+        let index = match editor.index {
             Some(index) if index < servers.len() => {
                 let old = std::mem::replace(&mut servers[index], server);
                 if old.address.trim() != address {
                     self.server_passwords.remove(old.address.trim());
                 }
+                index
             }
-            _ => servers.push(server),
-        }
+            _ => {
+                servers.push(server);
+                servers.len() - 1
+            }
+        };
         if editor.password.is_empty() {
             self.server_passwords.remove(&address);
         } else {
             self.server_passwords.insert(address, editor.password);
         }
         self.set_servers(servers);
-        self.server_editor = None;
+        self.close_server_editor();
+        editor.connect.then_some(index)
+    }
+
+    /// Remembers or forgets the password of the saved server at `address`, as the user chose.
+    fn remember_password(&mut self, address: &str, password: Option<&str>) {
+        let sealed = password
+            .filter(|password| !password.is_empty())
+            .and_then(secret::protect)
+            .unwrap_or_default();
+        let mut servers = self.servers.clone();
+        let Some(server) = servers
+            .iter_mut()
+            .find(|server| server.address.trim() == address.trim())
+        else {
+            return;
+        };
+        if server.password != sealed {
+            server.password = sealed;
+            self.set_servers(servers);
+        }
+    }
+
+    /// Closes the Add or Edit Server dialog, and Settings with it if it opened only for it.
+    fn close_server_editor(&mut self) {
+        if self.server_editor.take().is_some_and(|editor| editor.alone) {
+            self.close_settings();
+        }
     }
 
     /// Removes the dialog's server, unless it is the last one or in use.
@@ -1744,11 +2168,17 @@ impl App {
         if self.servers.len() <= 1 || self.server_in_use(index) {
             return;
         }
+        // The first press only asks, as Clear History does.
+        if let Some(editor) = &mut self.server_editor
+            && !std::mem::replace(&mut editor.remove_armed, true)
+        {
+            return;
+        }
         let mut servers = self.servers.clone();
         let removed = servers.remove(index);
         self.server_passwords.remove(removed.address.trim());
         self.set_servers(servers);
-        self.server_editor = None;
+        self.close_server_editor();
     }
 
     /// Connects to the servers set to connect at launch; the first one is shown.
@@ -1805,10 +2235,12 @@ impl App {
 
     fn sync_page_visibility(&self) {
         let normal = self.onboarding.is_none();
-        self.server()
-            .streaming
-            .visible
-            .store(normal && self.tab == Tab::Home, Ordering::Relaxed);
+        // Statistics covers the server view without ending its streams: your share and the
+        // ones you watch keep running and are there again on the way back.
+        self.server().streaming.visible.store(
+            normal && matches!(self.tab, Tab::Home | Tab::Statistics),
+            Ordering::Relaxed,
+        );
         self.channel_health_visible.store(
             normal && matches!(self.tab, Tab::Home | Tab::Statistics),
             Ordering::Relaxed,
@@ -1848,6 +2280,16 @@ impl App {
             self.address = first;
         }
         self.servers = saved.servers;
+        // Remembered passwords open for this session; the in-memory ones win.
+        for server in &self.servers {
+            if !server.password.is_empty()
+                && let Some(password) = secret::unprotect(&server.password)
+            {
+                self.server_passwords
+                    .entry(server.address.trim().to_owned())
+                    .or_insert(password);
+            }
+        }
         self.nickname = saved.nickname;
         self.playback_volume
             .set_percent(saved.playback_volume_percent);
@@ -1857,6 +2299,7 @@ impl App {
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
         self.log_pane = saved.log_pane;
+        self.sidebar_width = ui::sidebar_width(saved.sidebar_width);
         self.updater.auto_download = saved.auto_download_updates;
         self.appearance = saved.appearance;
         self.user_audio = saved.user_audio;
@@ -1865,6 +2308,10 @@ impl App {
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
         self.stream_options = saved.streaming;
+        self.stream_view = saved.stream_view;
+        for session in &mut self.sessions {
+            apply_stream_view(&mut session.streaming, saved.stream_view);
+        }
         self.chat_options = saved.chat;
         self.share_defaults = if saved.share.quality.validate().is_ok() {
             saved.share.upgraded()
@@ -1896,6 +2343,12 @@ impl App {
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
             log_pane: self.log_pane,
+            sidebar_width: (self.sidebar_width != ui::SIDEBAR_WIDTH).then_some(self.sidebar_width),
+            collapsed_channels: self
+                .saved
+                .as_ref()
+                .map(|saved| saved.collapsed_channels.clone())
+                .unwrap_or_default(),
             auto_download_updates: self.updater.auto_download,
             appearance: self.appearance.clone(),
             custom_themes: self.custom_themes.clone(),
@@ -1905,11 +2358,15 @@ impl App {
             sounds: self.sounds.clone(),
             share: self.share_defaults,
             streaming: self.stream_options,
+            stream_view: self.stream_view,
             chat: self.chat_options,
-            skip_install_prompt: self
-                .saved
-                .as_ref()
-                .is_some_and(|saved| saved.skip_install_prompt),
+            skip_install_prompt: self.never_install
+                || self
+                    .saved
+                    .as_ref()
+                    .is_some_and(|saved| saved.skip_install_prompt),
+            close_button: self.close_button(),
+            window: self.saved.as_ref().and_then(|saved| saved.window),
         }
     }
 
@@ -1926,6 +2383,14 @@ impl App {
                     .any(|server| server.address.trim() == address)
                 {
                     servers.push(settings::Server::new(address));
+                }
+            }
+            // Bookmarks keep the names they had in TeamSpeak.
+            for server in &mut servers {
+                if server.name.trim().is_empty()
+                    && let Some(name) = imported.names.get(server.address.trim())
+                {
+                    server.name = name.clone();
                 }
             }
         }
@@ -1955,6 +2420,48 @@ impl App {
         self.save_preference(
             |saved| saved.footer_hidden = hidden,
             "The footer choice applies for now but was not saved",
+        );
+    }
+
+    /// Stores which channels this server's tree folds away, for the next time you connect.
+    fn save_collapsed_channels(&mut self) {
+        if self.loopback {
+            return;
+        }
+        let server = self.server();
+        let address = server.address.trim().to_owned();
+        // Channels deleted since are dropped as the set is saved.
+        let folded: BTreeSet<u64> = server
+            .collapsed_channels
+            .iter()
+            .copied()
+            .filter(|id| {
+                server
+                    .state
+                    .channels
+                    .iter()
+                    .any(|channel| channel.id == *id)
+            })
+            .collect();
+        if address.is_empty()
+            || self.saved.as_ref().is_some_and(|saved| {
+                saved
+                    .collapsed_channels
+                    .get(&address)
+                    .map_or(folded.is_empty(), |set| *set == folded)
+            })
+        {
+            return;
+        }
+        self.save_preference(
+            move |saved| {
+                if folded.is_empty() {
+                    saved.collapsed_channels.remove(&address);
+                } else {
+                    saved.collapsed_channels.insert(address, folded);
+                }
+            },
+            "The folded channels apply for now but were not saved",
         );
     }
 
@@ -2067,7 +2574,7 @@ impl App {
                         "The update restarts without returning to this session: {error}"
                     );
                 }
-                self.update(Message::Close)
+                self.update(Message::Quit)
             }
         }
     }
@@ -2180,7 +2687,6 @@ impl App {
                 self.apply_settings(saved);
                 self.alerts.recover(Source::SettingsSave);
                 self.alerts.recover(Source::SettingsLoad);
-                self.settings_message = Some("Settings saved".into());
                 true
             }
             Err(error) => {
@@ -2193,10 +2699,29 @@ impl App {
         }
     }
 
+    /// Applies the shortcuts as recorded and stores only them.
+    fn save_keybinds(&mut self) {
+        self.alerts.begin(Source::Shortcuts);
+        let keys = shortcuts::Keybinds {
+            toggle_mute: self.keybind_draft.toggle_mute.trim().into(),
+            toggle_deafen: self.keybind_draft.toggle_deafen.trim().into(),
+            push_to_talk: self.keybind_draft.push_to_talk.trim().into(),
+        };
+        if let Err(error) = keys.parse().and_then(|_| self.configure_shortcuts(&keys)) {
+            self.alerts.raise(Source::Shortcuts, format!("{error:#}"));
+            return;
+        }
+        self.keybinds = keys.clone();
+        self.save_preference(
+            |saved| saved.keybinds = keys,
+            "That shortcut applies for now but was not saved",
+        );
+    }
+
     fn configure_shortcuts(&mut self, keys: &shortcuts::Keybinds) -> anyhow::Result<()> {
         if !shortcuts::supported() {
             self.shortcut_error =
-                Some("Global shortcuts require X11; native Wayland is not supported.".into());
+                Some("Global shortcuts need X11; native Wayland is not supported.".into());
         }
         if let Some(shortcuts) = &mut self.shortcuts
             && shortcuts::supported()
@@ -2221,6 +2746,7 @@ impl App {
             .as_ref()
             .map(shortcuts::Shortcuts::taken)
             .unwrap_or_default();
+        self.taken_shortcuts = taken.clone();
         if taken.is_empty() {
             self.alerts.recover(Source::Shortcuts);
             return;
@@ -2271,7 +2797,14 @@ impl App {
                     .as_ref()
                     .is_some_and(shortcuts::Shortcuts::has_ptt))
         {
-            self.alerts.raise(Source::Shortcuts, "Push-to-talk needs a working global shortcut. Apply one in Settings, or choose another transmission mode. Native Wayland is not supported.");
+            self.alerts.raise(
+                Source::Shortcuts,
+                if shortcuts::supported() {
+                    "Push-to-talk needs a working global shortcut. Set one in Settings, or choose another transmission mode."
+                } else {
+                    "Push-to-talk needs a global shortcut, which native Wayland doesn't allow. Choose another transmission mode."
+                },
+            );
             return Task::none();
         }
         if self.transmission.mode == transmission::Mode::VoiceActivation
@@ -2342,6 +2875,7 @@ impl App {
                 session.activate_on_connect = self.active.is_some();
                 self.loopback = loopback;
                 session.streaming.sharing.apply(self.share_defaults);
+                apply_stream_view(&mut session.streaming, self.stream_view);
                 self.sessions.push(session);
                 if self.active.is_none() {
                     self.activate(Some(id));
@@ -2359,6 +2893,10 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task {
+        // The nickname field keeps its text when it loses the keyboard.
+        if !self.ui.nickname.focused && self.nickname_edited() && self.nickname_error.is_none() {
+            self.commit_nickname();
+        }
         let task = self.update_inner(message);
         // Whatever the message added to a conversation goes to the history on disk.
         self.chat_persist();
@@ -2379,9 +2917,13 @@ impl App {
                         return Task::none();
                     }
                     self.onboarding_error = None;
+                    if step == onboarding::Step::Server
+                        && let Ok(address) = onboarding::normalize_address(&self.address)
+                    {
+                        self.address = address;
+                    }
                     if let Some(next) = step.next() {
-                        self.onboarding = Some(next);
-                        self.refresh_visible_permissions();
+                        self.show_setup_step(next, true);
                     } else if self.save_settings() {
                         if !self.password.is_empty() {
                             self.server_passwords
@@ -2424,20 +2966,8 @@ impl App {
                     && self.permissions.pending.is_none()
                     && let Some(previous) = self.onboarding.and_then(onboarding::Step::previous)
                 {
-                    self.onboarding = Some(previous);
                     self.onboarding_error = None;
-                    self.refresh_visible_permissions();
-                }
-            }
-            Message::TestHotkeys => {
-                self.alerts.begin(Source::Shortcuts);
-                let keys = self.edited_settings().keybinds;
-                match keys.parse().and_then(|_| self.configure_shortcuts(&keys)) {
-                    Ok(()) => {
-                        self.keybinds = keys;
-                        self.last_shortcut = None;
-                    }
-                    Err(error) => self.alerts.raise(Source::Shortcuts, format!("{error:#}")),
+                    self.show_setup_step(previous, false);
                 }
             }
             Message::RequestPermission(kind) => {
@@ -2485,29 +3015,34 @@ impl App {
                 }
             }
             Message::DismissAlert(id) => self.alerts.dismiss(id),
-            Message::Shortcut(action) => {
-                self.last_shortcut = Some(action);
-                match action {
-                    shortcuts::Action::Mute => self.toggle_mute(),
-                    shortcuts::Action::Deafen => self.toggle_deafen(),
-                    shortcuts::Action::PushToTalk(_) => {}
-                }
-            }
+            Message::Shortcut(action) => match action {
+                shortcuts::Action::Mute => self.toggle_mute(),
+                shortcuts::Action::Deafen => self.toggle_deafen(),
+                shortcuts::Action::PushToTalk(_) => {}
+            },
             Message::PlaybackVolume(percent) => {
                 self.playback_volume.set_percent(percent);
-                self.settings_message = None;
+                // Saved as Settings closes or the app quits, not at every step of the slider.
+                self.audio_unsaved = true;
             }
             Message::AudioProcessing(options) => {
                 // Without WebRTC only typing suppression applies; refuse the other effects.
-                if self.idle() && options.for_session(false) == options {
+                if options.for_session(false) == options {
                     self.audio_processing = options;
-                    self.settings_message = None;
+                    self.save_audio();
                 }
             }
             Message::Transmission(settings) => {
-                if self.idle() && settings.validate().is_ok() {
+                if settings.validate().is_ok() {
+                    let mode_changed = settings.mode != self.transmission.mode;
                     self.transmission = settings;
-                    self.settings_message = None;
+                    if mode_changed {
+                        self.save_audio();
+                    } else {
+                        // A slider: the running audio follows it, the file waits for the end.
+                        self.audio_unsaved = true;
+                        self.retune_audio();
+                    }
                 }
             }
             Message::RecordShortcut(binding) => {
@@ -2535,13 +3070,8 @@ impl App {
                         self.end_recording();
                         return Task::none();
                     }
-                    shortcuts::Recorded::Clear if binding == shortcuts::Binding::PushToTalk => {
-                        String::new()
-                    }
-                    shortcuts::Recorded::Clear => {
-                        capture.error = Some("This shortcut can't be empty.".into());
-                        return Task::none();
-                    }
+                    // Any shortcut may be left unset.
+                    shortcuts::Recorded::Clear => String::new(),
                     shortcuts::Recorded::Shortcut(shortcut) => shortcut,
                 };
                 let next = self.keybind_draft.with(binding, shortcut);
@@ -2553,12 +3083,7 @@ impl App {
                 self.end_recording();
                 // Setup saves everything together at its last step.
                 if self.onboarding.is_none() {
-                    self.save_settings();
-                }
-            }
-            Message::SaveSettings => {
-                if self.onboarding.is_none() {
-                    self.save_settings();
+                    self.save_keybinds();
                 }
             }
             Message::ReloadSettings => {
@@ -2602,13 +3127,6 @@ impl App {
                 self.chat_seen();
                 self.sync_page_visibility();
                 self.refresh_visible_permissions();
-                if tab != Tab::Home {
-                    // The server page going away ends sharing and watching everywhere.
-                    for session in &self.sessions {
-                        session.streaming.sharing.stop_capture();
-                    }
-                    self.server_mut().streaming.clear_picture();
-                }
             }
             Message::OpenSettings(page) => {
                 if self.onboarding.is_none() {
@@ -2650,6 +3168,26 @@ impl App {
             Message::HideOtherStreams(hidden) => {
                 self.server_mut().streaming.others_hidden = hidden;
             }
+            // The large stream, or the first one, takes the whole screen with the others
+            // tucked away; leaving puts them back as they were.
+            Message::StreamFullscreen(true) => {
+                if self.ui.fullscreen.is_none() && ui::fullscreen_allowed(self) {
+                    let streaming = &mut self.server_mut().streaming;
+                    if streaming.stage().is_none() {
+                        streaming.focused = streaming
+                            .watching
+                            .first()
+                            .map(|watch| watch.stream.id.clone());
+                    }
+                    let hidden = std::mem::replace(&mut streaming.others_hidden, true);
+                    self.ui.fullscreen = Some(hidden);
+                }
+            }
+            Message::StreamFullscreen(false) => {
+                if let Some(hidden) = self.ui.fullscreen.take() {
+                    self.server_mut().streaming.others_hidden = hidden;
+                }
+            }
             Message::StreamLayout(None) => {
                 // The grid shows every stream, so nothing stays tucked away.
                 let streaming = &mut self.server_mut().streaming;
@@ -2660,6 +3198,7 @@ impl App {
                 // Choosing where the others go means showing them.
                 self.server_mut().streaming.others_hidden = false;
                 self.server_mut().streaming.strip = strip;
+                self.save_stream_view();
                 if self.server().streaming.stage().is_none() {
                     self.server_mut().streaming.focused = self
                         .server()
@@ -2692,11 +3231,17 @@ impl App {
                 self.server_mut().streaming.toggle_mute(publisher)
             }
             Message::ToggleStreamStats => {
-                self.server_mut().streaming.show_stats = !self.server().streaming.show_stats
+                self.server_mut().streaming.show_stats = !self.server().streaming.show_stats;
+                self.save_stream_view();
             }
             Message::OpenShare => {
                 if self.live() && self.tab == Tab::Home {
                     self.server_mut().streaming.share_open = true;
+                    // How the last share ended is old news in a dialog starting a new one.
+                    let status = &mut self.server_mut().streaming.sharing.status;
+                    if !status.active {
+                        status.detail.clear();
+                    }
                     if self.server().streaming.sharing.sources.is_empty() {
                         return self.update(Message::RefreshShareSources);
                     }
@@ -3023,52 +3568,56 @@ impl App {
                     }
                     self.address = value;
                     self.settings_message = None;
+                    self.onboarding_error = None;
                 }
             }
             Message::Nickname(value) => {
                 if self.idle() {
                     self.nickname = value;
-                    self.settings_message = None;
+                    self.nickname_error = None;
+                    self.onboarding_error = None;
                 }
             }
+            Message::CommitNickname => self.commit_nickname(),
             Message::Password(value) => self.password = value,
             Message::ChannelPassword(value) => self.server_mut().channel_password = value,
             Message::Input(value) => {
-                if self.idle() {
-                    self.input = Some(value);
-                }
+                self.input = Some(value);
+                self.save_audio();
             }
             Message::Output(value) => {
-                if self.idle() {
-                    self.output = Some(value);
-                }
+                self.output = Some(value);
+                self.save_audio();
             }
             Message::Refresh => {
                 self.alerts.begin(Source::Audio);
-                if self.idle() {
-                    match audio::devices() {
-                        Ok(devices) => {
-                            if !self
+                match audio::devices() {
+                    Ok(devices) => {
+                        // A chosen device that's unplugged stays chosen while connected: the
+                        // hub stands in for it and goes back to it once it returns.
+                        let keep = !self.idle();
+                        if !keep
+                            && !self
                                 .input
                                 .as_ref()
                                 .is_some_and(|d| devices.inputs.contains(d))
-                            {
-                                self.input = devices.input.clone();
-                            }
-                            if !self
+                        {
+                            self.input = devices.input.clone();
+                        }
+                        if !keep
+                            && !self
                                 .output
                                 .as_ref()
                                 .is_some_and(|d| devices.outputs.contains(d))
-                            {
-                                self.output = devices.output.clone();
-                            }
-                            self.devices = devices;
-                            self.alerts.recover(Source::Audio);
+                        {
+                            self.output = devices.output.clone();
                         }
-                        Err(error) => self
-                            .alerts
-                            .raise(Source::Audio, format!("Device detection failed: {error:#}")),
+                        self.devices = devices;
+                        self.alerts.recover(Source::Audio);
                     }
+                    Err(error) => self
+                        .alerts
+                        .raise(Source::Audio, format!("Device detection failed: {error:#}")),
                 }
             }
             Message::Connect(index) => {
@@ -3089,7 +3638,11 @@ impl App {
                     .cloned()
                     .unwrap_or_default();
                 self.address = address;
-                if let Some(saved) = &self.saved {
+                // An edited nickname is kept; one that can't be falls back to the saved one.
+                self.commit_nickname();
+                if self.nickname_error.take().is_some()
+                    && let Some(saved) = &self.saved
+                {
                     self.nickname = saved.nickname.clone();
                 }
                 self.alerts.begin(Source::Connection);
@@ -3100,15 +3653,26 @@ impl App {
             Message::AddServer => {
                 self.ui.server_picker = false;
                 if self.onboarding.is_none() {
-                    if self.settings_page.is_none() {
+                    let alone = self.settings_page.is_none();
+                    if alone {
                         self.open_settings(SettingsPage::Server);
                     }
-                    self.server_editor = Some(ServerEditor::default());
+                    self.server_editor = Some(ServerEditor {
+                        alone,
+                        connect: alone,
+                        ..ServerEditor::default()
+                    });
                 }
             }
             Message::EditServer(index) => {
+                // From the rail, Settings opens only to hold the dialog.
+                let alone = self.settings_page.is_none() && index < self.servers.len();
+                if alone {
+                    self.open_settings(SettingsPage::Server);
+                }
                 if let Some(server) = self.servers.get(index) {
                     self.server_editor = Some(ServerEditor {
+                        alone,
                         index: Some(index),
                         name: server.name.clone(),
                         address: server.address.clone(),
@@ -3117,7 +3681,8 @@ impl App {
                             .get(server.address.trim())
                             .cloned()
                             .unwrap_or_default(),
-                        error: None,
+                        remember: !server.password.is_empty(),
+                        ..ServerEditor::default()
                     });
                 }
             }
@@ -3145,14 +3710,74 @@ impl App {
                 }
             }
             Message::AutoConnect => return self.auto_connect(),
-            Message::SubmitServer => self.submit_server(),
-            Message::CancelServer => self.server_editor = None,
+            Message::ServerRemember(on) => {
+                if let Some(editor) = &mut self.server_editor {
+                    editor.remember = on;
+                }
+            }
+            Message::PromptPassword(value) => {
+                if let Some(prompt) = &mut self.server_password_prompt {
+                    prompt.password = value;
+                    prompt.error = None;
+                }
+            }
+            Message::PromptRemember(on) => {
+                if let Some(prompt) = &mut self.server_password_prompt {
+                    prompt.remember = on;
+                }
+            }
+            Message::SubmitPromptPassword => {
+                let Some(prompt) = self.server_password_prompt.take() else {
+                    return Task::none();
+                };
+                let Some(address) = self
+                    .servers
+                    .get(prompt.index)
+                    .map(|server| server.address.trim().to_owned())
+                else {
+                    return Task::none();
+                };
+                if prompt.password.is_empty() {
+                    self.server_passwords.remove(&address);
+                } else {
+                    self.server_passwords
+                        .insert(address.clone(), prompt.password.clone());
+                }
+                if secret::AVAILABLE {
+                    self.remember_password(
+                        &address,
+                        prompt.remember.then_some(prompt.password.as_str()),
+                    );
+                }
+                return self.update(Message::Connect(prompt.index));
+            }
+            Message::CancelPromptPassword => self.server_password_prompt = None,
+            Message::SubmitServer => {
+                if let Some(index) = self.submit_server() {
+                    return self.update(Message::Connect(index));
+                }
+            }
+            Message::CancelServer => self.close_server_editor(),
             Message::RemoveServer => self.remove_server(),
             Message::TestAudio => {
                 self.alerts.begin(Source::Audio);
                 return self.start(true);
             }
             Message::Stop => {
+                // Leaving cuts a live share off for its viewers, so that asks first.
+                if self.server().streaming.sharing.status.active {
+                    self.disconnect_prompt = true;
+                } else if let Some(id) = self.active {
+                    self.stop_session(id);
+                }
+            }
+            Message::ConfirmDisconnect(leave) => {
+                self.disconnect_prompt = false;
+                if leave && let Some(id) = self.active {
+                    self.stop_session(id);
+                }
+            }
+            Message::TrayDisconnect => {
                 if let Some(id) = self.active {
                     self.stop_session(id);
                 }
@@ -3295,6 +3920,23 @@ impl App {
                     self.server_mut().pokes.remove(0);
                 }
             }
+            Message::ReplyPoke => {
+                if self.server().pokes.is_empty() {
+                    return Task::none();
+                }
+                let poke = self.server_mut().pokes.remove(0);
+                let sender = self
+                    .server()
+                    .state
+                    .channels
+                    .iter()
+                    .flat_map(|channel| &channel.members)
+                    .find(|member| client::chat_key(&member.uid, member.id) == poke.key)
+                    .map(|member| member.id);
+                if let Some(id) = sender {
+                    return self.update(Message::Chat(chat::Action::Message(id)));
+                }
+            }
             Message::OpenModeration(ids, action) => {
                 let ids: Vec<u16> = ids
                     .into_iter()
@@ -3421,7 +4063,7 @@ impl App {
                     {
                         tracing::warn!("The installed copy opens without this session: {error}");
                     }
-                    return self.update(Message::Close);
+                    return self.update(Message::Quit);
                 }
                 Err(error) => {
                     self.installing = false;
@@ -3431,6 +4073,7 @@ impl App {
             Message::DeclineInstall(forever) => {
                 self.install_prompt = false;
                 if forever {
+                    self.never_install = true;
                     self.save_preference(
                         |saved| saved.skip_install_prompt = true,
                         "The choice applies for now but was not saved",
@@ -3444,6 +4087,7 @@ impl App {
                     self.redoing_setup = true;
                     self.find_ts6();
                     self.onboarding = Some(onboarding::Step::Username);
+                    self.ui.nickname.focused = true;
                     self.onboarding_error = None;
                     if let Some(first) = self.servers.first() {
                         self.address = first.address.clone();
@@ -3541,6 +4185,13 @@ impl App {
                 self.save_log_pane();
             }
             Message::SaveLogPane => self.save_log_pane(),
+            Message::SaveSidebarWidth => {
+                let width = (self.sidebar_width != ui::SIDEBAR_WIDTH).then_some(self.sidebar_width);
+                self.save_preference(
+                    |saved| saved.sidebar_width = width,
+                    "The sidebar's width applies for now but was not saved",
+                );
+            }
             Message::PreviewSound(sound) => self.preview_sound(sound),
             Message::SoundCues(on) => {
                 self.sound_cues = on;
@@ -3556,6 +4207,7 @@ impl App {
                 if !self.server_mut().collapsed_channels.remove(&id) {
                     self.server_mut().collapsed_channels.insert(id);
                 }
+                self.save_collapsed_channels();
             }
             Message::ToggleClient(id) => {
                 if self.server().connected
@@ -3572,9 +4224,61 @@ impl App {
                 }
             }
             Message::Close => {
+                if self.idle() {
+                    return self.update(Message::Quit);
+                }
+                match self.close_button() {
+                    settings::CloseButton::Ask => {
+                        self.close_prompt = true;
+                        self.close_remember = false;
+                    }
+                    settings::CloseButton::HideToTray => self.hide_window(),
+                    settings::CloseButton::Quit => return self.update(Message::Quit),
+                }
+            }
+            Message::CloseRemember(remember) => self.close_remember = remember,
+            Message::CloseChoice(choice) => {
+                self.close_prompt = false;
+                let Some(choice) = choice else {
+                    return Task::none();
+                };
+                if self.close_remember {
+                    self.save_preference(
+                        |saved| saved.close_button = choice,
+                        "The close choice applies for now but was not saved",
+                    );
+                }
+                if choice == settings::CloseButton::HideToTray {
+                    self.hide_window();
+                } else {
+                    return self.update(Message::Quit);
+                }
+            }
+            Message::SetCloseButton(choice) => self.save_preference(
+                |saved| saved.close_button = choice,
+                "The close choice applies for now but was not saved",
+            ),
+            Message::SetAutostart(wanted) => match autostart::set(wanted) {
+                Ok(()) => self.autostart = wanted,
+                Err(error) => self.alerts.raise(
+                    Source::SettingsSave,
+                    format!("Start with Windows was not changed: {error}"),
+                ),
+            },
+            Message::WindowFocus(focused) => {
+                self.window_focused = focused;
+                if focused {
+                    self.window_hidden = false;
+                    self.chat_seen();
+                }
+            }
+            Message::Quit => {
+                self.close_prompt = false;
+                self.save_window_place();
                 if self.stream_volumes_changed.is_some() {
                     self.save_stream_volumes();
                 }
+                self.flush_unsaved();
                 if self.idle() {
                     return Task::Exit;
                 }
@@ -3620,7 +4324,10 @@ impl App {
         let active = self.active == Some(id);
         let session = &mut self.sessions[index];
         let mut sounds_due = Vec::new();
+        let mut rewatch_streams: Vec<String> = Vec::new();
         let mut arrived = None;
+        // Shown only while the window is in the background.
+        let mut toast = None;
         // A first connection brings the server's saved conversations back.
         let restore =
             matches!(event, client::Event::Connected(_)) && session.chat.needs_restoring();
@@ -3640,6 +4347,24 @@ impl App {
                         .log
                         .add(server_log::Tone::Left, "", "Connection lost");
                     sounds_due.push(sounds::Sound::ConnectionLost);
+                }
+                if !session.streaming.watching.is_empty() {
+                    let uid = |publisher: u16| {
+                        session
+                            .state
+                            .channels
+                            .iter()
+                            .flat_map(|channel| &channel.members)
+                            .find(|member| member.id == publisher)
+                            .map(|member| member.uid.clone())
+                    };
+                    session.rewatch = session
+                        .streaming
+                        .watching
+                        .iter()
+                        .filter_map(|watch| uid(watch.stream.publisher))
+                        .filter(|uid| !uid.is_empty())
+                        .collect();
                 }
                 session.catalog_seen = false;
                 session.streaming.reset();
@@ -3670,6 +4395,14 @@ impl App {
                 }
                 session.connected = true;
                 session.detail = detail;
+                // The tree folds as you left it on this server.
+                if let Some(folded) = self
+                    .saved
+                    .as_ref()
+                    .and_then(|saved| saved.collapsed_channels.get(session.address.trim()))
+                {
+                    session.collapsed_channels = folded.iter().copied().collect();
+                }
                 session.status = if loopback {
                     "Local microphone test — only you can hear this"
                 } else {
@@ -3723,9 +4456,6 @@ impl App {
                 }) {
                     session.clear_client_details();
                 }
-                session
-                    .collapsed_channels
-                    .retain(|id| state.channels.iter().any(|channel| channel.id == *id));
                 let present = |id: &u16| {
                     state
                         .channels
@@ -3801,20 +4531,20 @@ impl App {
                 arrived = session.chat.receive(message, &channel).cloned();
             }
             client::Event::Poked { from, key, message } => {
-                session.chat.poke(key, &from, false, &message);
+                session.chat.poke(key.clone(), &from, false, &message);
                 sounds_due.push(sounds::Sound::Poke);
-                notify::show(
-                    &format!("{from} poked you"),
+                toast = Some((
+                    format!("{from} poked you"),
                     if message.is_empty() {
-                        "Open Flexspeak to reply."
+                        "Open Flexspeak to reply.".to_owned()
                     } else {
-                        &message
+                        message.clone()
                     },
-                );
+                ));
                 if session.pokes.len() >= 10 {
                     session.pokes.remove(0);
                 }
-                session.pokes.push(Poke { from, message });
+                session.pokes.push(Poke { from, key, message });
                 if !active {
                     session.unseen_pokes = session.unseen_pokes.saturating_add(1);
                 }
@@ -3822,10 +4552,18 @@ impl App {
             client::Event::Done(source) => self.alerts.recover_in(id.0, source),
             client::Event::Streaming(event) => {
                 let share_sounds = viewer_sounds(&session.streaming.sharing.status, &event);
+                if let Some(name) =
+                    asked_to_watch(&session.streaming.sharing.status, &event).first()
+                {
+                    toast = Some((
+                        format!("{name} asked to watch your stream"),
+                        "Open Flexspeak to let them in.".to_owned(),
+                    ));
+                }
                 for sound in &share_sounds {
                     let words = match sound {
-                        sounds::Sound::StreamStarted => "started streaming",
-                        sounds::Sound::StreamStopped => "stopped streaming",
+                        sounds::Sound::StreamStarted => "started sharing",
+                        sounds::Sound::StreamStopped => "stopped sharing",
                         _ => continue,
                     };
                     session.log.add(server_log::Tone::Stream, "You", words);
@@ -3833,6 +4571,25 @@ impl App {
                 sounds_due.extend(share_sounds);
                 if let streaming::Event::Catalog(catalog) = &event {
                     sounds_due.extend(stream_changes(session, catalog));
+                    // Back from a dropped connection: watch again whoever is still live.
+                    if session.connected && !session.rewatch.is_empty() {
+                        let rewatch = std::mem::take(&mut session.rewatch);
+                        let members: Vec<_> = session
+                            .state
+                            .channels
+                            .iter()
+                            .flat_map(|channel| &channel.members)
+                            .collect();
+                        rewatch_streams = catalog
+                            .iter()
+                            .filter(|stream| {
+                                members.iter().any(|member| {
+                                    member.id == stream.publisher && rewatch.contains(&member.uid)
+                                })
+                            })
+                            .map(|stream| stream.id.clone())
+                            .collect();
+                    }
                 }
                 // A streamer's stream starts at the volume saved for them.
                 if let streaming::Event::State { stream, .. } = &event
@@ -3847,10 +4604,19 @@ impl App {
                 {
                     session.streaming.volumes.insert(stream.publisher, *volume);
                 }
+                // Your own Stop forgets the stream first, so only an end you didn't ask for
+                // finds it still on screen.
+                let on_screen = matches!(&event, streaming::Event::State { generation, .. }
+                    if session.streaming.watching.iter().any(|w| w.generation == *generation));
                 session.streaming.update(event.clone());
                 match &event {
                     streaming::Event::State { phase, detail, .. } => match phase {
                         streaming::Phase::Failed => self.raise_for(id, Source::StreamWatch, detail),
+                        streaming::Phase::Stopped
+                            if on_screen && !streaming::ended_as_expected(detail) =>
+                        {
+                            self.raise_for(id, Source::StreamEnded, detail)
+                        }
                         streaming::Phase::Receiving => {
                             self.alerts.recover_in(id.0, Source::StreamWatch)
                         }
@@ -3907,6 +4673,7 @@ impl App {
                 session.server_controls = confirmed;
                 session.controls_pending = pending;
             }
+            client::Event::Refused(refusal) => session.refusal = Some(refusal),
             client::Event::ChannelPasswordRequired(channel) => {
                 if session.can_request_join(loopback, channel) {
                     session.password_channel = Some(channel);
@@ -3964,21 +4731,54 @@ impl App {
             client::Event::Stopped(error) => {
                 // Name the server before it goes, so its alert isn't taken for the active one's.
                 // Filed under its address, so connecting there again clears it.
-                let (address, name, was_connected) = (
+                // A session that was reconnecting had been connected: that is a drop too.
+                let (address, name, was_connected, refusal, tried) = (
                     session.address.trim().to_owned(),
                     session.title().to_owned(),
-                    session.connected,
+                    session.connected || session.reconnecting,
+                    session.refusal.take(),
+                    !session.password.is_empty(),
                 );
                 self.alerts.close_server(id.0);
                 let audio_failed = matches!(error, Some((Source::Audio, _)));
+                let saved = self
+                    .servers
+                    .iter()
+                    .position(|server| server.address.trim() == address);
                 match error {
+                    // A refused password asks for the right one instead of reporting a failure.
+                    Some((Source::Connection, _))
+                        if !loopback
+                            && refusal == Some(client::Refusal::Password)
+                            && saved.is_some() =>
+                    {
+                        let index = saved.unwrap_or_default();
+                        self.server_password_prompt = Some(ServerPasswordPrompt {
+                            index,
+                            title: name,
+                            password: String::new(),
+                            remember: !self.servers[index].password.is_empty(),
+                            error: tried.then(|| "That password wasn't accepted.".into()),
+                        });
+                        self.ui.prompt_password.focused = true;
+                    }
                     Some((Source::Connection, detail)) if !loopback => {
                         let source = if was_connected {
                             Source::Dropped
                         } else {
                             Source::Connection
                         };
-                        self.alerts.raise_at(&address, Some(name), source, detail);
+                        match refusal {
+                            Some(refusal) => self.alerts.raise_refused_at(
+                                &address,
+                                Some(name),
+                                source,
+                                refusal.sentence(),
+                                &detail,
+                                !refusal.deliberate(),
+                            ),
+                            None => self.alerts.raise_at(&address, Some(name), source, detail),
+                        }
                     }
                     Some((source, detail)) => self.alerts.raise(source, detail),
                     None => {}
@@ -4007,8 +4807,14 @@ impl App {
                 }
             }
         }
+        for stream in rewatch_streams {
+            self.send_to(id, client::Command::WatchStream(stream));
+        }
         for sound in sounds_due {
             self.play_sound(sound);
+        }
+        if toast.is_some() {
+            self.background_attention(toast);
         }
         if restore && !self.loopback {
             self.chat_restore(id);
@@ -4106,7 +4912,7 @@ impl App {
     /// Whether the chat column is docked beside the stage, rather than behind the window's edge.
     fn chat_docked(&self) -> bool {
         !self.chat_options.hidden
-            && self.window_size.0 >= ui::CHAT_MIN_DOCK_WINDOW
+            && self.window_size.0 >= ui::chat_dock_window(self)
             && !(self.chat_options.hide_while_watching
                 && self.server().streaming.active()
                 && !self.ui.chat_over_stream)
@@ -4115,6 +4921,9 @@ impl App {
     /// Whether the chat is on screen right now: docked, or peeking over the stage.
     fn chat_showing(&self, now: Instant) -> bool {
         self.live()
+            // In the background, a message waits as unread for you to come back.
+            && self.window_focused
+            && !self.window_hidden
             && self.tab == Tab::Home
             && self.onboarding.is_none()
             // Settings covers it.
@@ -4124,7 +4933,8 @@ impl App {
 
     /// Clears the unread counts of what the chat has on screen, and its pop-up.
     fn chat_seen(&mut self) {
-        if self.chat_showing(Instant::now()) {
+        // Read back, the lines below wait under the "new messages" control.
+        if self.chat_showing(Instant::now()) && !self.ui.chat_back {
             let layout = self.chat_options.layout;
             self.server_mut().chat.mark_seen(layout);
             self.ui.chat_toast = None;
@@ -4140,10 +4950,17 @@ impl App {
         let (layout, options) = (self.chat_options.layout, self.chat_options);
         let active = self.active == Some(id);
         let showing = active && self.chat_showing(now);
+        let back = self.ui.chat_back;
+        // A private message is for you alone: in the background it sounds and flashes the
+        // taskbar. Channel and server messages only wait as unread.
+        if entry.scope.is_private() && !self.window_focused {
+            self.play_sound(sounds::Sound::PrivateMessage);
+            self.background_attention(None);
+        }
         let Some(session) = self.session_mut(id) else {
             return;
         };
-        if showing && session.chat.shows(layout, &entry.scope) {
+        if showing && !back && session.chat.shows(layout, &entry.scope) {
             return;
         }
         session.chat.mark_unread(&entry.scope);
@@ -4169,6 +4986,24 @@ impl App {
             .iter()
             .flat_map(|channel| &channel.members)
             .find(|member| !member.is_self && client::chat_key(&member.uid, member.id) == key)
+    }
+
+    /// Who wrote a line, while they're still on the server: a private line's peer, else the
+    /// person with that name (names are unique on a server). None for your own lines.
+    pub(crate) fn chat_sender(&self, entry: &chat::Entry) -> Option<u16> {
+        if entry.own {
+            return None;
+        }
+        if let chat::Scope::Private(key) = &entry.scope {
+            return self.chat_member(key).map(|member| member.id);
+        }
+        self.server()
+            .state
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.members)
+            .find(|member| !member.is_self && member.name == entry.from)
+            .map(|member| member.id)
     }
 
     /// Shows a conversation and points the message box at it.
@@ -4222,7 +5057,10 @@ impl App {
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
-                self.server_mut().chat.draft = text[..end].to_owned();
+                let chat = &mut self.server_mut().chat;
+                // More than a character over: a paste was cut, which the box says.
+                chat.draft_cut = text.len() > chat::MAX_BYTES + 4;
+                chat.draft = text[..end].to_owned();
             }
             Action::Send => {
                 if !self.live() {
@@ -4247,8 +5085,9 @@ impl App {
                 self.begin_alert(Source::Chat);
                 if self.command(client::Command::Chat(target, text.clone())) {
                     let chat = &mut self.server_mut().chat;
-                    chat.draft.clear();
                     chat.sent(scope, &text, Instant::now());
+                    chat.draft.clear();
+                    chat.draft_cut = false;
                 }
             }
             Action::Target(scope) => {
@@ -4291,6 +5130,17 @@ impl App {
                     self.chat_reveal();
                     self.chat_seen();
                     self.ui.chat_input.focused = true;
+                }
+            }
+            Action::MessageFrom(entry) => {
+                let sender = self
+                    .server()
+                    .chat
+                    .entries()
+                    .find(|line| line.id == entry)
+                    .and_then(|line| self.chat_sender(line));
+                if let Some(id) = sender {
+                    return self.chat_action(Action::Message(id));
                 }
             }
             Action::ClosePeer(key) => {
@@ -4345,7 +5195,7 @@ impl App {
                     self.ui.chat_input.focused = false;
                     self.ui.chat_peek = ui::RailPeek::default();
                     self.ui.chat_lists = Default::default();
-                } else if self.window_size.0 < ui::CHAT_MIN_DOCK_WINDOW {
+                } else if self.window_size.0 < ui::chat_dock_window(self) {
                     // No room to dock: hold the peek open instead, or let it go.
                     self.ui.chat_peek.toggle_pin();
                 } else {
@@ -4717,6 +5567,10 @@ mod tests {
     }
 
     fn add_server(app: &mut App, name: &str, address: &str, password: &str) {
+        // From Settings, so the dialog is Add Server rather than Add and Connect.
+        if app.settings_page.is_none() {
+            app.open_settings(SettingsPage::Server);
+        }
         let _ = app.update(Message::AddServer);
         let _ = app.update(Message::ServerName(name.into()));
         let _ = app.update(Message::ServerAddress(address.into()));
@@ -4728,7 +5582,6 @@ mod tests {
     fn servers_are_added_edited_and_removed_and_save_at_once() {
         let (mut app, root) = saved_fixture("servers");
         let path = root.join("settings.json");
-        app.nickname = "Unsaved draft".into();
         add_server(&mut app, "Friends", " two.example:9988 ", "secret");
         assert!(app.server_editor.is_none());
         let stored = settings::load(&path).unwrap().unwrap();
@@ -4743,7 +5596,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(stored.nickname, "Alex", "other drafts stay unsaved");
+        assert_eq!(stored.nickname, "Alex", "the rest of the file is untouched");
         assert!(!std::fs::read_to_string(&path).unwrap().contains("secret"));
         // Empty and repeated addresses keep the dialog open with a reason.
         add_server(&mut app, "", "  ", "");
@@ -4764,6 +5617,9 @@ mod tests {
         );
         let _ = app.update(Message::EditServer(0));
         let _ = app.update(Message::RemoveServer);
+        assert_eq!(app.servers.len(), 2, "the first press only asks");
+        assert!(app.server_editor.as_ref().unwrap().remove_armed);
+        let _ = app.update(Message::RemoveServer);
         assert_eq!(app.servers.len(), 1);
         assert_eq!(app.servers[0].address, "two.example:9988");
         // The last server stays.
@@ -4772,6 +5628,145 @@ mod tests {
         assert_eq!(app.servers.len(), 1);
         assert_eq!(settings::load(&path).unwrap().unwrap().servers.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_remembered_password_is_sealed_in_the_file_and_opens_at_the_next_launch() {
+        let (mut app, root) = saved_fixture("remember");
+        let path = root.join("settings.json");
+        app.open_settings(SettingsPage::Server);
+        let _ = app.update(Message::AddServer);
+        let _ = app.update(Message::ServerAddress("Two.Example:9987".into()));
+        let _ = app.update(Message::ServerPassword("two-password".into()));
+        let _ = app.update(Message::ServerRemember(true));
+        let _ = app.update(Message::SubmitServer);
+        assert_eq!(
+            app.servers[1].address, "two.example",
+            "saved in its plain form"
+        );
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("two-password")
+        );
+        let stored = settings::load(&path).unwrap().unwrap();
+        assert_eq!(!stored.servers[1].password.is_empty(), secret::AVAILABLE);
+
+        let (mut again, _other) = setup_fixture("remember-again");
+        again.load_settings(path.clone());
+        assert_eq!(
+            again
+                .server_passwords
+                .get("two.example")
+                .map(String::as_str),
+            secret::AVAILABLE.then_some("two-password"),
+        );
+        let _ = again.update(Message::EditServer(1));
+        assert_eq!(
+            again.server_editor.as_ref().unwrap().remember,
+            secret::AVAILABLE
+        );
+        let _ = again.update(Message::ServerRemember(false));
+        let _ = again.update(Message::SubmitServer);
+        assert!(
+            settings::load(&path).unwrap().unwrap().servers[1]
+                .password
+                .is_empty(),
+            "forgetting takes it out of the file"
+        );
+        assert_eq!(
+            again
+                .server_passwords
+                .get("two.example")
+                .map(String::as_str),
+            secret::AVAILABLE.then_some("two-password"),
+            "but keeps it for this session"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refused_password_asks_for_one_and_other_refusals_say_why() {
+        let (mut app, root) = saved_fixture("refused");
+        app.address = "one.example".into();
+        let (id, _commands) = connection(&mut app);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Refused(client::Refusal::Password),
+        ));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Stopped(Some((Source::Connection, "invalid server password".into()))),
+        ));
+        let prompt = app
+            .server_password_prompt
+            .as_ref()
+            .expect("the prompt opens");
+        assert_eq!(prompt.index, 0);
+        assert!(prompt.error.is_none(), "no password was tried yet");
+        assert!(app.ui.prompt_password.focused);
+        assert!(app.alerts.current().is_none(), "no failure is reported");
+        let _ = app.update(Message::CancelPromptPassword);
+        assert!(app.server_password_prompt.is_none());
+
+        // A kick says so, and doesn't offer to go straight back.
+        let (id, _commands) = connection(&mut app);
+        app.session_mut(id).unwrap().connected = true;
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Refused(client::Refusal::Kicked),
+        ));
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Stopped(Some((Source::Connection, "connection closed".into()))),
+        ));
+        let alert = app.alerts.current().unwrap();
+        assert_eq!(alert.source, Source::Dropped);
+        assert_eq!(alert.detail, client::Refusal::Kicked.sentence());
+        assert_eq!(alert.address, None, "no Reconnect");
+        assert!(
+            app.alerts.history_text().contains("connection closed"),
+            "the library's words stay in the Error Log"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mute_changes_while_the_connection_comes_back() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.address = "ts.example.org".into();
+        let (id, mut commands) = connection(&mut app);
+        app.session_mut(id).unwrap().connected = true;
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Status(client::CONNECTION_LOST.into()),
+        ));
+        while commands.try_recv().is_ok() {}
+        let muted = app.server().muted;
+        let _ = app.update(Message::Mute);
+        assert_eq!(app.server().muted, !muted);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::Mute(value)) if value == !muted
+        ));
+    }
+
+    #[test]
+    fn a_session_lost_while_reconnecting_is_reported_as_dropped() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.address = "ts.example.org".into();
+        let (id, _commands) = connection(&mut app);
+        app.session_mut(id).unwrap().connected = true;
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Status(client::CONNECTION_LOST.into()),
+        ));
+        assert!(!app.session_mut(id).unwrap().connected);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Stopped(Some((Source::Connection, "timed out".into()))),
+        ));
+        assert_eq!(app.alerts.current().unwrap().source, Source::Dropped);
     }
 
     #[test]
@@ -4974,7 +5969,7 @@ mod tests {
     #[test]
     fn quitting_waits_for_every_server_to_stop() {
         let (mut app, (first, mut a), (second, mut b)) = two_servers();
-        assert!(matches!(app.update(Message::Close), Task::None));
+        assert!(matches!(app.update(Message::Quit), Task::None));
         assert!(matches!(a.try_recv(), Ok(client::Command::Stop)));
         assert!(matches!(b.try_recv(), Ok(client::Command::Stop)));
         assert!(matches!(
@@ -5061,7 +6056,7 @@ mod tests {
                 frame: None,
             });
         app.server_mut().streaming.sharing.status.active = true;
-        app.server_mut().streaming.strip = streaming::Strip::Beside;
+        let _ = app.update(Message::StreamLayout(Some(streaming::Strip::Beside)));
         let _ = app.update(Message::SwitchServer(second));
         assert!(app.server().streaming.watching.is_empty());
         assert_eq!(app.server().streaming.strip, streaming::Strip::Beside);
@@ -5070,6 +6065,46 @@ mod tests {
             app.session(first).unwrap().streaming.sharing.status.active,
             "a share in the background is left running"
         );
+    }
+
+    #[test]
+    fn setup_passes_over_permissions_with_nothing_to_do_and_keeps_dont_ask_again() {
+        let (mut app, root) = setup_fixture("skip-permissions");
+        let path = root.join("settings.json");
+        assert!(
+            app.ui.nickname.focused,
+            "the first field takes the keyboard"
+        );
+        let _ = app.update(Message::DeclineInstall(true));
+        app.permissions.status = [
+            permissions::Status::Granted,
+            permissions::Status::NotRequired,
+            permissions::Status::NotRequired,
+        ];
+        let _ = app.update(Message::SetupNext);
+        assert_eq!(app.onboarding_error.as_deref(), Some("Enter a nickname."));
+        let _ = app.update(Message::Nickname("Al".into()));
+        assert!(app.onboarding_error.is_none(), "typing clears it");
+        let _ = app.update(Message::SetupNext);
+        assert!(app.onboarding_error.is_some(), "too short");
+        let _ = app.update(Message::Nickname("Alex".into()));
+        let _ = app.update(Message::SetupNext);
+        assert_eq!(app.onboarding, Some(onboarding::Step::Server));
+        assert!(app.ui.address.focused && !app.ui.nickname.focused);
+        let _ = app.update(Message::Address(
+            "ts3server://Voice.Example?port=9987".into(),
+        ));
+        let _ = app.update(Message::SetupNext);
+        assert_eq!(app.onboarding, Some(onboarding::Step::Devices));
+        assert_eq!(app.address, "voice.example");
+        let _ = app.update(Message::SetupBack);
+        assert_eq!(app.onboarding, Some(onboarding::Step::Server));
+        assert!(!path.exists(), "nothing is saved before setup ends");
+        assert!(
+            app.edited_settings().skip_install_prompt,
+            "Don't Ask Again reaches the first save"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -5123,11 +6158,11 @@ mod tests {
         assert_eq!(app.password, "temporary-test-password");
         let saved = settings::load(&path).unwrap().unwrap();
         assert_eq!(saved.nickname, "Alex");
-        assert_eq!(saved.servers, [settings::Server::new("voice.example:9987")]);
+        assert_eq!(saved.servers, [settings::Server::new("voice.example")]);
         assert_eq!(saved.chat.layout, chat::Layout::Feed);
         assert_eq!(
             app.server_passwords
-                .get("voice.example:9987")
+                .get("voice.example")
                 .map(String::as_str),
             Some("temporary-test-password"),
             "the setup password is remembered for the session"
@@ -5199,7 +6234,7 @@ mod tests {
     }
 
     #[test]
-    fn hiding_the_footer_saves_only_that_choice_and_survives_a_restart() {
+    fn expanding_the_footer_saves_only_that_choice_and_survives_a_restart() {
         let (mut app, root) = setup_fixture("footer");
         let path = root.join("settings.json");
         let saved = settings::Settings {
@@ -5208,17 +6243,20 @@ mod tests {
         };
         settings::save(&path, &saved).unwrap();
         app.load_settings(path.clone());
-        app.nickname = "Unsaved draft".into();
+        assert!(app.footer_hidden, "the footer starts compact");
         let _ = app.update(Message::ToggleFooter);
-        assert!(app.footer_hidden);
+        assert!(!app.footer_hidden);
         let stored = settings::load(&path).unwrap().unwrap();
-        assert!(stored.footer_hidden);
-        assert_eq!(stored.nickname, "Saved name", "drafts stay unsaved");
+        assert!(!stored.footer_hidden);
+        assert_eq!(
+            stored.nickname, "Saved name",
+            "the rest of the file is untouched"
+        );
         let (mut restarted, _) = setup_fixture("footer-restart");
         restarted.load_settings(path.clone());
-        assert!(restarted.footer_hidden);
+        assert!(!restarted.footer_hidden);
         let _ = restarted.update(Message::ToggleFooter);
-        assert!(!settings::load(&path).unwrap().unwrap().footer_hidden);
+        assert!(settings::load(&path).unwrap().unwrap().footer_hidden);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5229,12 +6267,14 @@ mod tests {
         settings::save(&path, &settings::Settings::default()).unwrap();
         app.load_settings(path.clone());
         assert!(app.updater.auto_download, "on by default");
-        app.nickname = "Unsaved draft".into();
         let _ = app.update(Message::Updater(updater::Event::AutoDownload(false)));
         assert!(!app.updater.auto_download);
         let stored = settings::load(&path).unwrap().unwrap();
         assert!(!stored.auto_download_updates);
-        assert_eq!(stored.nickname, "Flexspeak", "drafts stay unsaved");
+        assert_eq!(
+            stored.nickname, "Flexspeak",
+            "the rest of the file is untouched"
+        );
         let (mut restarted, _) = setup_fixture("auto-update-restart");
         restarted.load_settings(path.clone());
         assert!(!restarted.updater.auto_download);
@@ -5255,7 +6295,6 @@ mod tests {
         let path = root.join("settings.json");
         settings::save(&path, &settings::Settings::default()).unwrap();
         app.load_settings(path.clone());
-        app.nickname = "Unsaved draft".into();
         let chosen = settings::Appearance {
             scheme: settings::ColorScheme::Light,
             light_theme: settings::ThemeName::Ocean,
@@ -5418,6 +6457,7 @@ mod tests {
         let imported = ts6_import::Imported {
             nickname: Some("Alex".into()),
             servers: vec!["one.example".into(), "two.example".into()],
+            names: [("two.example".to_owned(), "Two".to_owned())].into(),
             input: Some("Desk Mic".into()),
             output: Some("Unplugged Headset".into()),
             push_to_talk: true,
@@ -5445,6 +6485,11 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(saved(&app), ["mine.example", "one.example", "two.example"]);
+        assert_eq!(
+            app.setup_servers()[2].name,
+            "Two",
+            "the bookmark's name comes along"
+        );
         let _ = app.update(Message::DropTs6Server("one.example".into()));
         assert_eq!(saved(&app), ["mine.example", "two.example"]);
     }
@@ -5737,6 +6782,59 @@ mod tests {
     }
 
     #[test]
+    fn a_request_to_watch_sounds_and_in_the_background_flashes_and_toasts() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let publish = |app: &mut App, requests: &[u16]| {
+            let status = streaming::publishing::Status {
+                live: true,
+                requests: requests.iter().map(|r| (*r, format!("R{r}"))).collect(),
+                ..Default::default()
+            };
+            let event = streaming::Event::Publishing(status);
+            let _ = app.update(Message::Backend(id, client::Event::Streaming(event)));
+        };
+        publish(&mut app, &[]);
+        app.played_sounds.clear();
+        publish(&mut app, &[4]);
+        assert_eq!(app.played_sounds, [sounds::Sound::WatchRequested]);
+        assert!(app.shown_toasts.is_empty(), "The window is in front");
+        app.played_sounds.clear();
+        publish(&mut app, &[4]);
+        assert!(app.played_sounds.is_empty(), "Only a new request sounds");
+        let _ = app.update(Message::WindowFocus(false));
+        publish(&mut app, &[4, 5]);
+        assert_eq!(app.shown_toasts, ["R5 asked to watch your stream"]);
+    }
+
+    #[test]
+    fn pokes_toast_only_in_the_background_and_one_per_ten_seconds() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let poke = |app: &mut App| {
+            let _ = app.update(Message::Backend(
+                id,
+                client::Event::Poked {
+                    from: "Mara".into(),
+                    key: "uid-2".into(),
+                    message: "look".into(),
+                },
+            ));
+        };
+        poke(&mut app);
+        assert!(app.shown_toasts.is_empty());
+        let _ = app.update(Message::WindowFocus(false));
+        poke(&mut app);
+        poke(&mut app);
+        assert_eq!(app.shown_toasts, ["Mara poked you"]);
+        app.last_toast = app
+            .last_toast
+            .map(|at| at - TOAST_GAP - std::time::Duration::from_millis(1));
+        poke(&mut app);
+        assert_eq!(app.shown_toasts.len(), 2);
+    }
+
+    #[test]
     fn people_arriving_and_leaving_are_logged_with_their_sounds() {
         use client::{Activity, ActivityKind};
         let (mut app, _commands) = session_fixture();
@@ -5765,7 +6863,7 @@ mod tests {
         );
         let log = &app.server().log;
         assert_eq!(log.len(), 3);
-        assert_eq!(log.get(0).unwrap().action, "moved to Lobby");
+        assert_eq!(log.get(0).unwrap().action, "was moved to Lobby");
         assert_eq!(log.get(1).unwrap().tone, server_log::Tone::Left);
         assert_eq!(log.get(2).unwrap().action, "connected");
     }
@@ -6433,7 +7531,7 @@ mod tests {
         assert!(app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         let _ = app.update(Message::ShowTab(Tab::Statistics));
-        assert!(!app.server().streaming.visible.load(Ordering::Relaxed));
+        assert!(app.server().streaming.visible.load(Ordering::Relaxed));
         assert!(app.channel_health_visible.load(Ordering::Relaxed));
         // Settings floats over the page, so it leaves what that page shows running.
         let _ = app.update(Message::OpenSettings(SettingsPage::Audio));
@@ -6557,12 +7655,97 @@ mod tests {
         let _ = app.update(warning());
         assert_eq!(app.alerts.current().unwrap().reports, 1);
         let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
-        app.keybind_draft.toggle_mute.clear();
-        let _ = app.update(Message::SaveSettings);
-        assert_eq!(app.alerts.current().unwrap().source, Source::SettingsSave);
+        app.keybind_draft.toggle_mute = "Nonsense+Key".into();
+        app.save_keybinds();
+        assert_eq!(app.alerts.current().unwrap().source, Source::Shortcuts);
         let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
-        let _ = app.update(Message::SaveSettings);
-        assert_eq!(app.alerts.current().unwrap().source, Source::SettingsSave);
+        app.save_keybinds();
+        assert_eq!(app.alerts.current().unwrap().source, Source::Shortcuts);
+    }
+
+    /// An app with a valid saved profile written to a temporary settings file.
+    fn saved_app(name: &str) -> (App, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "flexspeak-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let saved = settings::Settings {
+            servers: vec![settings::Server::new("ts.example")],
+            nickname: "Ada".into(),
+            ..settings::Settings::default()
+        };
+        app.settings_path = Some(root.join("settings.json"));
+        settings::save(app.settings_path.as_deref().unwrap(), &saved).unwrap();
+        app.apply_settings(saved);
+        (app, root)
+    }
+
+    fn on_disk(app: &App) -> settings::Settings {
+        settings::load(app.settings_path.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn settings_save_as_they_change_without_a_save_button() {
+        let (mut app, root) = saved_app("save-on-change");
+        let _ = app.update(Message::Transmission(transmission::Settings {
+            mode: transmission::Mode::PushToTalk,
+            ..app.transmission
+        }));
+        assert_eq!(
+            on_disk(&app).transmission.mode,
+            transmission::Mode::PushToTalk
+        );
+        // Sliders wait for Settings to close, or the app to quit, before writing the file.
+        let _ = app.update(Message::PlaybackVolume(40));
+        let _ = app.update(Message::SoundVolume(30));
+        assert_ne!(on_disk(&app).playback_volume_percent, 40);
+        let _ = app.update(Message::Close);
+        let saved = on_disk(&app);
+        assert_eq!(saved.playback_volume_percent, 40);
+        assert_eq!(saved.sounds.volume, 30);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_nickname_saves_on_enter_and_an_empty_one_is_explained_under_its_field() {
+        let (mut app, root) = saved_app("nickname");
+        app.open_settings(SettingsPage::Server);
+        let _ = app.update(Message::Nickname("  ".into()));
+        let _ = app.update(Message::CommitNickname);
+        assert_eq!(app.nickname_error.as_deref(), Some("Enter a nickname."));
+        assert!(app.alerts.current().is_none(), "no corner notice for it");
+        assert_eq!(on_disk(&app).nickname, "Ada");
+        // Closing Settings brings the saved name back.
+        app.close_settings();
+        assert_eq!(
+            (app.nickname.as_str(), app.nickname_error.as_deref()),
+            ("Ada", None)
+        );
+
+        app.open_settings(SettingsPage::Server);
+        let _ = app.update(Message::Nickname("Grace".into()));
+        let _ = app.update(Message::CommitNickname);
+        assert_eq!(on_disk(&app).nickname, "Grace");
+        // An edit not yet committed is kept when Settings closes, too.
+        let _ = app.update(Message::Nickname("Hopper".into()));
+        app.close_settings();
+        assert_eq!(on_disk(&app).nickname, "Hopper");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn connecting_keeps_an_edited_nickname() {
+        let (mut app, root) = saved_app("nickname-connect");
+        let _ = app.update(Message::Nickname("Grace".into()));
+        let _ = app.update(Message::Connect(0));
+        assert_eq!(app.nickname, "Grace");
+        assert_eq!(on_disk(&app).nickname, "Grace");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6867,7 +8050,6 @@ mod tests {
         let (sender, mut commands) = mpsc::channel(16);
         live(&mut app, sender);
         let _ = app.update(Message::Shortcut(shortcuts::Action::Mute));
-        assert_eq!(app.last_shortcut, Some(shortcuts::Action::Mute));
         assert!(commands.try_recv().is_err());
         app.server_mut().connected = true;
         let _ = app.update(Message::Shortcut(shortcuts::Action::Deafen));
@@ -6940,7 +8122,7 @@ mod tests {
     }
 
     #[test]
-    fn processing_settings_are_saved_but_cannot_change_under_an_active_session() {
+    fn processing_settings_are_saved_and_reach_the_devices_of_an_active_session() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let chosen = audio_processing::Settings {
             noise_suppression: true,
@@ -6966,10 +8148,21 @@ mod tests {
         live(&mut app, sender);
         app.server_mut().muted = true;
         app.server_mut().deafened = true;
+        let device = audio::DeviceChoice {
+            id: "speakers".into(),
+            name: "Speakers".into(),
+        };
+        app.input = Some(device.clone());
+        app.output = Some(device);
         let _ = app.update(Message::AudioProcessing(
             audio_processing::Settings::default(),
         ));
-        assert_eq!(app.audio_processing, chosen);
+        assert_eq!(app.audio_processing, audio_processing::Settings::default());
+        assert_eq!(
+            app.hub.pending_retune().map(|retune| retune.processing),
+            Some(audio_processing::Settings::default()),
+            "the open devices take the change"
+        );
         assert!(app.server().muted && app.server().deafened);
     }
 
@@ -7004,8 +8197,9 @@ mod tests {
         assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
         app.server_mut().muted = true;
         assert_eq!(app.microphone_status(), "Muted");
+        // The mode can change during a session too.
         let _ = app.update(Message::Transmission(transmission::Settings::default()));
-        assert_eq!(app.transmission, settings);
+        assert_eq!(app.transmission, transmission::Settings::default());
     }
 
     #[test]
@@ -7148,6 +8342,85 @@ mod tests {
             chat_event(chat::Scope::Server, "Lukas", "really", false),
         ));
         assert_eq!(app.server().chat.unread(&chat::Scope::Server), 1);
+    }
+
+    #[test]
+    fn messages_in_the_background_wait_unread_and_private_ones_sound() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let mara = chat::Scope::Private("uid-2".into());
+        let _ = app.update(Message::WindowFocus(false));
+        assert!(!app.chat_showing(Instant::now()));
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(chat::Scope::Channel, "Theo", "back", false),
+        ));
+        assert_eq!(app.server().chat.unread(&chat::Scope::Channel), 1);
+        assert!(
+            !app.played_sounds.contains(&sounds::Sound::PrivateMessage),
+            "Channel messages only wait"
+        );
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(mara.clone(), "Mara", "psst", false),
+        ));
+        assert_eq!(app.server().chat.unread(&mara), 1);
+        assert!(app.played_sounds.contains(&sounds::Sound::PrivateMessage));
+        // Back in front, the conversation on screen is read.
+        let _ = app.update(Message::WindowFocus(true));
+        assert!(app.chat_showing(Instant::now()));
+        assert_eq!(app.server().chat.unread(&chat::Scope::Channel), 0);
+        app.played_sounds.clear();
+        let _ = app.update(Message::Backend(
+            id,
+            chat_event(mara.clone(), "Mara", "again", false),
+        ));
+        assert!(app.played_sounds.is_empty(), "In front, the chat shows it");
+        // Hidden in the tray counts as the background too.
+        app.window_hidden = true;
+        assert!(!app.chat_showing(Instant::now()));
+    }
+
+    #[test]
+    fn closing_while_connected_asks_and_can_hide_and_stay() {
+        let (mut app, mut commands) = session_fixture();
+        let _ = app.update(Message::Close);
+        assert!(app.close_prompt);
+        assert!(commands.try_recv().is_err(), "Nothing ends while it asks");
+        let _ = app.update(Message::CloseChoice(None));
+        assert!(!app.close_prompt && !app.closing);
+        let _ = app.update(Message::Close);
+        let _ = app.update(Message::CloseChoice(Some(
+            settings::CloseButton::HideToTray,
+        )));
+        assert!(!app.close_prompt && !app.closing && !app.window_focused);
+        assert!(commands.try_recv().is_err(), "Still connected");
+        let _ = app.update(Message::WindowFocus(true));
+        assert!(!app.window_hidden);
+        let _ = app.update(Message::Close);
+        let _ = app.update(Message::CloseChoice(Some(settings::CloseButton::Quit)));
+        assert!(app.closing);
+        assert!(matches!(commands.try_recv(), Ok(client::Command::Stop)));
+        let mut idle = App::with_devices(audio::Devices::default(), None);
+        assert!(matches!(idle.update(Message::Close), Task::Exit));
+    }
+
+    #[test]
+    fn disconnect_asks_first_only_while_sharing() {
+        let (mut app, mut commands) = session_fixture();
+        app.server_mut().streaming.sharing.status.active = true;
+        let _ = app.update(Message::Stop);
+        assert!(app.disconnect_prompt);
+        assert!(commands.try_recv().is_err());
+        let _ = app.update(Message::ConfirmDisconnect(false));
+        assert!(!app.disconnect_prompt && !app.server().stopping);
+        let _ = app.update(Message::Stop);
+        let _ = app.update(Message::ConfirmDisconnect(true));
+        assert!(app.server().stopping);
+        let (mut app, mut commands) = session_fixture();
+        let _ = app.update(Message::Stop);
+        assert!(!app.disconnect_prompt && app.server().stopping);
+        assert!(matches!(commands.try_recv(), Ok(client::Command::Stop)));
     }
 
     #[test]

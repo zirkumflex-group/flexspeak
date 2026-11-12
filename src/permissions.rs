@@ -69,6 +69,13 @@ pub struct Permissions {
 }
 
 impl Permissions {
+    /// Whether any row still asks something of the user: access not yet given, or refused.
+    pub fn needs_action(&self) -> bool {
+        self.status
+            .iter()
+            .any(|status| !matches!(status, Status::Granted | Status::NotRequired))
+    }
+
     /// Re-reads every status; cheap enough to run on the usage tick while the section shows.
     pub fn refresh(&mut self) {
         self.status = Kind::ALL.map(status);

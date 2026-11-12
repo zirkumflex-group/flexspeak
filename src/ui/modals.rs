@@ -3,14 +3,14 @@
 //! presses the default button. Problems never open one; they go to the notice strip.
 
 use rune::{El, col, el, row, text};
-use rune_kit::{Dialog, Kit, SegmentedControl};
+use rune_kit::{Checkbox, Dialog, Kit, SegmentedControl};
 
 use super::UserVolumeTarget;
 use super::icons;
 use super::theme::{Theme, size, ty};
-use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider};
+use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider_with_home};
 use crate::client::Moderation;
-use crate::{App, Message, ModerationDraft, Poke};
+use crate::{App, Message, ModerationDraft, Poke, ServerPasswordPrompt};
 
 /// Offers to copy a release that runs from Downloads or a disk image to where apps live.
 fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::install::Offer) {
@@ -21,8 +21,9 @@ fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::inst
         .gap(12.0)
         .child(
             text(
-                "Flexspeak is running from a temporary place, so updates would be lost when it is \
-                 moved or deleted. Install it to keep it and its updates. Your settings stay as they are.",
+                "This copy of Flexspeak runs from outside the apps folder. Install it to keep it and \
+                 its updates in one place, or choose Don’t Ask Again to keep using a copy you put \
+                 here on purpose. Your settings stay as they are.",
             )
             .font(ty::BODY)
             .color(t.text)
@@ -78,6 +79,217 @@ fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::inst
                 s.install_prompt = false;
             }
         })
+        .child(body)
+        .build(k, layer);
+}
+
+/// Remember Password, for the server password prompt and the Add/Edit Server dialog. Shown only
+/// where `crate::secret` can seal passwords; `None` disables it.
+pub(super) fn remember_password(
+    k: &Kit,
+    on: bool,
+    toggle: Option<fn(bool) -> Message>,
+    key: &str,
+) -> El {
+    let mut remember = Checkbox::new(on)
+        .label("Remember Password")
+        .disabled(toggle.is_none());
+    if let Some(toggle) = toggle {
+        remember = remember.on_toggle_tx(move |s: &mut App, tx| {
+            super::dispatch(s, tx, toggle(!on));
+        });
+    }
+    remember
+        .build(k)
+        .key(key)
+        .help("Saved in the settings file, sealed so only your Windows account can read it.")
+}
+
+/// Asks for a server's password after the server refused the one it was given.
+fn server_password(
+    s: &App,
+    t: &Theme,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    prompt: &ServerPasswordPrompt,
+) {
+    let mut body = col().w_full().px(16.0).pb(16.0).gap(10.0).child(field(
+        k,
+        &s.ui.prompt_password,
+        |s| &mut s.ui.prompt_password,
+        "Server password",
+        Some(Message::PromptPassword),
+        Some(Message::SubmitPromptPassword),
+    ));
+    if let Some(error) = &prompt.error {
+        body = body.child(error_text(t, error.clone()).key("server-password-error"));
+    }
+    if crate::secret::AVAILABLE {
+        body = body.child(remember_password(
+            k,
+            prompt.remember,
+            Some(Message::PromptRemember),
+            "prompt-remember",
+        ));
+    }
+    body = body.child(
+        row()
+            .w_full()
+            .gap(size::GAP)
+            .pt(4.0)
+            .child(el().grow(1.0))
+            .child(button(
+                t,
+                "cancel-server-password",
+                "Cancel",
+                None,
+                Variant::Secondary,
+                Some(Message::CancelPromptPassword),
+            ))
+            .child(
+                button(
+                    t,
+                    "submit-server-password",
+                    "Connect",
+                    Some(&icons::CONNECT),
+                    Variant::Primary,
+                    Some(Message::SubmitPromptPassword),
+                )
+                .default_button(),
+            ),
+    );
+    Dialog::new("server-password", format!("Connect to {}", prompt.title))
+        .description("This server needs a password.")
+        .open(true)
+        .fit()
+        .width(400.0)
+        .on_close(|s: &mut App| {
+            let task = s.update(Message::CancelPromptPassword);
+            drop(task);
+            s.sync_fields();
+        })
+        .child(body)
+        .build(k, layer);
+}
+
+/// The close button while connected: hide to the tray and stay, or leave every server and quit.
+fn close_prompt(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    use crate::settings::CloseButton;
+    let servers = s.sessions.len();
+    let detail = if servers == 1 {
+        "Quitting disconnects you from the server.".to_owned()
+    } else {
+        format!("Quitting disconnects you from all {servers} servers.")
+    };
+    let mut actions = row()
+        .w_full()
+        .gap(size::GAP)
+        .center_y()
+        .child(
+            Checkbox::new(s.close_remember)
+                .label("Don’t Ask Again")
+                .on_toggle_tx(|s: &mut App, tx| {
+                    let remember = !s.close_remember;
+                    super::dispatch(s, tx, Message::CloseRemember(remember));
+                })
+                .build(k),
+        )
+        .child(el().grow(1.0))
+        .child(button(
+            t,
+            "close-cancel",
+            "Cancel",
+            None,
+            Variant::Secondary,
+            Some(Message::CloseChoice(None)),
+        ));
+    let tray = s.tray_available();
+    if tray {
+        actions = actions.child(
+            button(
+                t,
+                "close-hide",
+                "Hide to Tray",
+                None,
+                Variant::Primary,
+                Some(Message::CloseChoice(Some(CloseButton::HideToTray))),
+            )
+            .default_button(),
+        );
+    }
+    let quit = button(
+        t,
+        "close-quit",
+        "Quit",
+        None,
+        if tray {
+            Variant::Secondary
+        } else {
+            Variant::Danger
+        },
+        Some(Message::CloseChoice(Some(CloseButton::Quit))),
+    );
+    actions = actions.child(if tray { quit } else { quit.default_button() });
+    let body = col()
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(14.0)
+        .child(text(detail).font(ty::BODY).color(t.text).w_full().wrap())
+        .child(actions);
+    Dialog::new("close-prompt", "Still connected")
+        .open(true)
+        .fit()
+        .width(440.0)
+        .on_close(|s: &mut App| s.close_prompt = false)
+        .child(body)
+        .build(k, layer);
+}
+
+/// Disconnect while you share live: leaving ends the stream for everyone watching it.
+fn disconnect_prompt(t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    let body = col()
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(14.0)
+        .child(
+            text("Disconnecting ends your stream for everyone watching it.")
+                .font(ty::BODY)
+                .color(t.text)
+                .w_full()
+                .wrap(),
+        )
+        .child(
+            row()
+                .w_full()
+                .gap(size::GAP)
+                .child(el().grow(1.0))
+                .child(button(
+                    t,
+                    "disconnect-cancel",
+                    "Cancel",
+                    None,
+                    Variant::Secondary,
+                    Some(Message::ConfirmDisconnect(false)),
+                ))
+                .child(
+                    button(
+                        t,
+                        "disconnect-confirm",
+                        "Disconnect",
+                        None,
+                        Variant::Danger,
+                        Some(Message::ConfirmDisconnect(true)),
+                    )
+                    .default_button(),
+                ),
+        );
+    Dialog::new("disconnect-prompt", "Stop sharing and disconnect?")
+        .open(true)
+        .fit()
+        .width(420.0)
+        .on_close(|s: &mut App| s.disconnect_prompt = false)
         .child(body)
         .build(k, layer);
 }
@@ -206,13 +418,14 @@ fn user_volume(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, target: &UserVo
                 .w_full()
                 .gap(12.0)
                 .center_y()
-                .child(el().grow(1.0).min_w(0.0).child(slider(
+                .child(el().grow(1.0).min_w(0.0).child(slider_with_home(
                     t,
                     "user-volume",
                     "Volume",
                     i32::from(percent),
                     format!("{percent}%"),
                     USER_VOLUME,
+                    Some(100),
                     |s: &App| {
                         s.ui.user_volume.as_ref().map_or(100, |target| {
                             i32::from(s.user_audio(&target.uid).volume_percent)
@@ -349,7 +562,17 @@ fn moderation(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, draft: &Moderati
             "Ban",
         ),
     };
-    let mut body = col().w_full().px(16.0).pb(16.0).gap(12.0).child(field(
+    let mut body = col().w_full().px(16.0).pb(16.0).gap(12.0);
+    // A dialog for several people names them, so nobody is kicked by surprise.
+    if draft.ids.len() > 1 {
+        let names: Vec<String> = draft
+            .ids
+            .iter()
+            .filter_map(|id| s.find_member(*id).map(|member| member.name.clone()))
+            .collect();
+        body = body.child(muted(t, names.join(", ")).w_full());
+    }
+    body = body.child(field(
         k,
         &s.ui.moderation_reason,
         |s| &mut s.ui.moderation_reason,
@@ -447,9 +670,20 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
             format!("{} more pokes waiting", s.server().pokes.len() - 1),
         ));
     }
+    // Reply opens the private chat with them, as a double-click on their row does.
+    let reachable = s.live()
+        && s.server().state.channels.iter().any(|channel| {
+            channel
+                .members
+                .iter()
+                .any(|member| crate::client::chat_key(&member.uid, member.id) == poke.key)
+        });
     body = body.child(
-        row().w_full().child(el().grow(1.0)).child(
-            button(
+        row()
+            .w_full()
+            .gap(size::GAP)
+            .child(el().grow(1.0))
+            .child(button(
                 t,
                 "dismiss-poke",
                 if s.server().pokes.len() > 1 {
@@ -458,11 +692,20 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
                     "Close"
                 },
                 None,
-                Variant::Primary,
+                Variant::Secondary,
                 Some(Message::DismissPoke),
-            )
-            .default_button(),
-        ),
+            ))
+            .child(
+                button(
+                    t,
+                    "reply-poke",
+                    "Reply",
+                    None,
+                    Variant::Primary,
+                    reachable.then_some(Message::ReplyPoke),
+                )
+                .default_button(),
+            ),
     );
     Dialog::new("poked", format!("{} poked you", poke.from))
         .open(true)
@@ -476,6 +719,14 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
 }
 
 pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
+    if s.close_prompt {
+        close_prompt(s, t, k, layer);
+        return;
+    }
+    if s.disconnect_prompt {
+        disconnect_prompt(t, k, layer);
+        return;
+    }
     if let Some(target) = &s.ui.user_volume {
         user_volume(s, t, k, layer, target);
         return;
@@ -484,6 +735,8 @@ pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         && let Some(offer) = &s.install_offer
     {
         install(s, t, k, layer, offer);
+    } else if let Some(prompt) = &s.server_password_prompt {
+        server_password(s, t, k, layer, prompt);
     } else if s.ui.server_picker {
         server_picker(s, t, k, layer);
     } else if let Some(draft) = &s.server().moderation {

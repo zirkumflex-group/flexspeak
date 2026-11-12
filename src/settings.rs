@@ -8,7 +8,7 @@ use std::{
 use crate::shortcuts::Keybinds;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -29,8 +29,8 @@ pub struct Settings {
     pub input_device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_device_id: Option<String>,
-    /// The footer shows only the connection status and resource icons.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    /// The footer shows only the connection status and ping, as it does unless expanded.
+    #[serde(skip_serializing_if = "is_true")]
     pub footer_hidden: bool,
     /// New releases download in the background; installing still waits for Restart.
     #[serde(skip_serializing_if = "is_true")]
@@ -55,18 +55,74 @@ pub struct Settings {
     /// Settings > Streaming. Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Streaming::is_default")]
     pub streaming: Streaming,
+    /// Where the other streams go and whether stream details show.
+    #[serde(skip_serializing_if = "StreamView::is_default")]
+    pub stream_view: StreamView,
     /// Kept as written, so one bad entry can't stop the settings from loading.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_themes: Vec<serde_json::Value>,
     /// A release running from Downloads or a disk image no longer offers to install itself.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub skip_install_prompt: bool,
+    /// What the window's close button does while a server is connected.
+    #[serde(skip_serializing_if = "CloseButton::is_default")]
+    pub close_button: CloseButton,
+    /// Where the window was and how big when it last closed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowPlace>,
     /// The server log's height under the channel list, and whether it is folded away.
     #[serde(skip_serializing_if = "LogPane::is_default")]
     pub log_pane: LogPane,
+    /// The sidebar's width in points, when dragged away from the usual 260.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<u16>,
+    /// The channels folded away in the tree, by server address, as they were left.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub collapsed_channels: BTreeMap<String, BTreeSet<u64>>,
     /// Settings > Chat. Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Chat::is_default")]
     pub chat: Chat,
+}
+
+/// What the window's close button does while connected (Settings > Appearance > Window).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseButton {
+    /// A dialog offers to hide to the tray or quit.
+    #[default]
+    Ask,
+    /// The window hides and every server stays connected.
+    HideToTray,
+    /// The app disconnects and quits, as it does when nothing is connected.
+    Quit,
+}
+
+impl CloseButton {
+    pub const ALL: [Self; 3] = [Self::Ask, Self::HideToTray, Self::Quit];
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Ask => "Ask",
+            Self::HideToTray => "Hide to Tray",
+            Self::Quit => "Quit",
+        }
+    }
+}
+
+/// The window's outer position and inner size in physical pixels, and whether it was maximized.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct WindowPlace {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maximized: bool,
 }
 
 /// How text chat shows, and what happens while its column is hidden (Settings > Chat).
@@ -125,6 +181,22 @@ impl Streaming {
     }
 }
 
+/// How watched streams are laid out. Saved straight away when changed, like `footer_hidden`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StreamView {
+    /// The other streams line up beside the large one rather than below it.
+    pub beside: bool,
+    /// Codec, resolution, frame rate and transport show over each stream.
+    pub details: bool,
+}
+
+impl StreamView {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// How much of the sidebar the server log takes. Saved straight away, like `footer_hidden`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -160,6 +232,10 @@ pub struct Server {
     /// Connect when Flexspeak opens.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub auto_connect: bool,
+    /// The password, when you chose to remember it, sealed by `crate::secret` (DPAPI on
+    /// Windows); empty when it isn't remembered.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub password: String,
 }
 
 impl Server {
@@ -168,6 +244,7 @@ impl Server {
             name: String::new(),
             address: address.into(),
             auto_connect: false,
+            password: String::new(),
         }
     }
 
@@ -337,8 +414,10 @@ impl Default for Settings {
             keybinds: Keybinds::default(),
             input_device_id: None,
             output_device_id: None,
-            footer_hidden: false,
+            footer_hidden: true,
             log_pane: LogPane::default(),
+            sidebar_width: None,
+            collapsed_channels: BTreeMap::new(),
             auto_download_updates: true,
             appearance: Appearance::default(),
             user_audio: BTreeMap::new(),
@@ -347,8 +426,11 @@ impl Default for Settings {
             sounds: crate::sounds::Settings::default(),
             share: Default::default(),
             streaming: Streaming::default(),
+            stream_view: StreamView::default(),
             custom_themes: Vec::new(),
             skip_install_prompt: false,
+            close_button: CloseButton::default(),
+            window: None,
             chat: Chat::default(),
         }
     }
@@ -445,6 +527,27 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remembered_password_round_trips_sealed_and_is_left_out_when_not_remembered() {
+        let plain = serde_json::to_string(&Server::new("one.example")).unwrap();
+        assert!(!plain.contains("password"), "{plain}");
+        let Some(sealed) = crate::secret::protect("server-secret") else {
+            return;
+        };
+        let server = Server {
+            password: sealed,
+            ..Server::new("one.example")
+        };
+        let json = serde_json::to_string(&server).unwrap();
+        assert!(!json.contains("server-secret"), "{json}");
+        let back: Server = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, server);
+        assert_eq!(
+            crate::secret::unprotect(&back.password).as_deref(),
+            Some("server-secret")
+        );
+    }
 
     #[test]
     fn streaming_options_round_trip_and_stay_out_of_the_file_when_off() {

@@ -396,13 +396,57 @@ pub fn slider(
     current: impl Fn(&App) -> i32 + Copy + 'static,
     on_change: impl Fn(i32) -> Message + Copy + 'static,
 ) -> El {
+    slider_with_home(
+        t, key, label, value, spoken, range, None, current, on_change,
+    )
+}
+
+/// [`slider`] with a resting value, such as 100% on a volume: a tick marks it, a drag that
+/// passes close to it settles on it, and a double-click goes back to it.
+#[allow(clippy::too_many_arguments)]
+pub fn slider_with_home(
+    t: &Theme,
+    key: &str,
+    label: &str,
+    value: i32,
+    spoken: String,
+    range: Range,
+    home: Option<i32>,
+    current: impl Fn(&App) -> i32 + Copy + 'static,
+    on_change: impl Fn(i32) -> Message + Copy + 'static,
+) -> El {
     let fraction = range.fraction(value);
     let knob = 16.0;
     let height = 22.0;
+    // Within 3% of the whole range of the resting value, a drag lands on it.
+    let pull = (range.max - range.min) as f32 * 0.03;
     let to_value = move |x: f32, w: f32| {
         let share = ((x - knob / 2.0) / (w - knob).max(1.0)).clamp(0.0, 1.0);
-        range.snap(range.min as f32 + share * (range.max - range.min) as f32)
+        let raw = range.min as f32 + share * (range.max - range.min) as f32;
+        match home {
+            Some(home) if (raw - home as f32).abs() <= pull => home,
+            _ => range.snap(raw),
+        }
     };
+    let tick = home.map(|home| {
+        let at = range.fraction(home);
+        row()
+            .key("home-lane")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h(height)
+            .child(el().w_frac(at).h(1.0))
+            .child(
+                el().w(knob).h(height).ml(-knob * at).center().child(
+                    el().key("home")
+                        .w(2.0)
+                        .h(10.0)
+                        .radius(1.0)
+                        .fill(t.wash(0.28)),
+                ),
+            )
+            .a11y_hidden()
+    });
     el().key(key.to_owned())
         .role("slider")
         .label(label.to_owned())
@@ -421,16 +465,22 @@ pub fn slider(
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
             let next = to_value(d.x, d.w);
             match d.phase {
+                // A double-click goes back to the resting value and ignores the jitter after.
+                Phase::Down if d.clicks >= 2 && home.is_some() => {
+                    d.data = f32::NAN;
+                    dispatch(s, tx, on_change(home.unwrap_or(next)));
+                }
                 Phase::Down => {
                     d.data = current(s) as f32;
                     dispatch(s, tx, on_change(next));
                 }
+                Phase::Move if d.data.is_nan() => {}
                 Phase::Move => {
                     tx.instant();
                     dispatch(s, tx, on_change(next));
                 }
                 Phase::Up => {
-                    if d.cancelled() {
+                    if d.cancelled() && !d.data.is_nan() {
                         dispatch(s, tx, on_change(d.data as i32));
                     }
                 }
@@ -455,6 +505,7 @@ pub fn slider(
                 .motion(motion::QUICK)
                 .a11y_hidden(),
         )
+        .children(tick)
         .child(
             row()
                 .key("knob-lane")
@@ -539,6 +590,21 @@ pub fn choice(
     options: Vec<(&'static Icon, &'static str, Message)>,
     selected: Option<usize>,
 ) -> El {
+    let options = options
+        .into_iter()
+        .map(|(glyph, name, message)| (glyph, name, "", message))
+        .collect();
+    choice_with_help(t, key, label, options, selected)
+}
+
+/// [`choice`] with a one-line tooltip on each option; an empty one shows none.
+pub fn choice_with_help(
+    t: &Theme,
+    key: &str,
+    label: &str,
+    options: Vec<(&'static Icon, &'static str, &'static str, Message)>,
+    selected: Option<usize>,
+) -> El {
     let mut group = row()
         .key(key.to_owned())
         .role("radiogroup")
@@ -550,7 +616,7 @@ pub fn choice(
         .radius(radius::CONTROL)
         .fill(t.recess)
         .border(1.0, t.hairline);
-    for (index, (glyph, name, message)) in options.into_iter().enumerate() {
+    for (index, (glyph, name, help, message)) in options.into_iter().enumerate() {
         let on = selected == Some(index);
         let mut option = row()
             .key(format!("{key}-{index}"))
@@ -586,6 +652,9 @@ pub fn choice(
                 .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
                 .on_press_tx(send(message))
         };
+        if !help.is_empty() {
+            option = option.help(help);
+        }
         group = group.child(option);
     }
     group
@@ -606,11 +675,13 @@ pub fn picker(
     layer: &mut Vec<El>,
 ) -> El {
     let lookup = names.clone();
-    Select::new(key, &names)
+    let width = width.max(160.0);
+    let before = layer.len();
+    let field = Select::new(key, &names)
         .current(current)
         .placeholder(placeholder)
         .label(placeholder)
-        .width(width.max(160.0))
+        .width(width)
         .appearance(rune_kit::SelectAppearance::Field)
         .open(s.ui.open == Some(key))
         .disabled(!enabled || names.is_empty())
@@ -628,7 +699,15 @@ pub fn picker(
                 dispatch(s, tx, on_choose(index));
             }
         })
-        .build(k, layer)
+        .build(k, layer);
+    // rune-kit sizes the open list to its truncated labels; keep it as wide as the field, so a
+    // long device name reads in full rather than as "Microphone (H…".
+    if layer.len() > before
+        && let Some(menu) = layer.pop()
+    {
+        layer.push(menu.min_w(width));
+    }
+    field
 }
 
 /// A pulsing dot for short-lived work (connecting, pending, recording). The loop samples at
