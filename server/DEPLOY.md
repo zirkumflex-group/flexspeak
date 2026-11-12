@@ -172,15 +172,16 @@ If public packages aren't offered, the organisation's settings may forbid them (
    sudo docker compose up -d
    ```
 
-## 6. Tell people the address
+## 6. Point the app at it
 
-In Flexspeak, each person enters the server's address under **Settings › WIP › Collection Server**:
+The address is built into Flexspeak, and people can't change it in the app. It is set in `.cargo/config.toml` at the top of the repository:
 
+```toml
+[env]
+FLEXSPEAK_COLLECTION_SERVER = "https://collection.zirkumflex.io"
 ```
-https://collection.example.com
-```
 
-Use exactly this form: with `https://`, without a slash or anything else at the end.
+Use exactly this form: with `https://`, without a slash or anything else at the end. Every build reads it, on your computer, in CI and for releases, so a moved server needs a change there and a new release. To try another server on your own computer, set the variable when building, which wins over the file: `FLEXSPEAK_COLLECTION_SERVER=https://collection.example.com cargo run`. Set it to nothing for a build that keeps the cans on the computer and never goes online.
 
 ## 7. How updates arrive
 

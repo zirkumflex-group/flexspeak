@@ -245,7 +245,6 @@ pub struct UiState {
     pub monster_search: TextEdit,
     pub monster_email: TextEdit,
     pub monster_login_code: TextEdit,
-    pub monster_server: TextEdit,
     /// Where dragging has left the large can on the Monster page.
     pub can_spin: can3d::Spin,
     /// The card the pointer is over there, by its key, whose can leans toward it.
@@ -357,7 +356,6 @@ impl Default for UiState {
             monster_search: TextEdit::new(""),
             monster_email: TextEdit::new(""),
             monster_login_code: TextEdit::new(""),
-            monster_server: TextEdit::new(""),
             can_spin: can3d::Spin::default(),
             can_hover: None,
             server_name: TextEdit::new(""),
@@ -475,7 +473,6 @@ impl App {
         mirror(&mut self.ui.key_capture, "");
         mirror(&mut self.ui.settings_search, &self.settings_query);
         mirror(&mut self.ui.monster_search, &self.monster.query);
-        mirror(&mut self.ui.monster_server, &self.monster_server_draft);
         let log_query = self.server().log.query().to_owned();
         mirror(&mut self.ui.log_search, &log_query);
         let editor = self.server_editor.clone().unwrap_or_default();

@@ -4,7 +4,7 @@
 //! it later. The roll mixes a random key kept in the database with the flavour, the time and
 //! the can's number. The collection lives in `monster.sqlite` beside `settings.json`.
 //!
-//! With a collection server set (Settings › WIP), the server keeps the collection and rolls the
+//! With a collection server built in ([`built_in_server`]), the server keeps the collection and rolls the
 //! cards instead, and the page needs an account; `online` decides what each answer changes.
 
 use std::{
@@ -23,7 +23,7 @@ pub use monster_core::{
     CARDS, FLAVOURS, Flavour, Ranking, Rarity, Standing, api, draw, flavour_by_id,
     flavour_or_other, from_hash,
 };
-pub use online::{Action, Answer, Effect, OWN_SOURCE, Visit, server_address};
+pub use online::{Action, Answer, Effect, OWN_SOURCE, Visit, built_in_server};
 
 mod online;
 /// How many more cards the collection shows at a time. Every card is several shader layers.

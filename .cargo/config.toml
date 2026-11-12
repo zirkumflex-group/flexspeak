@@ -1,0 +1,5 @@
+# Set for every build, local, CI and release alike. A variable of the same name in the
+# environment wins, e.g. `FLEXSPEAK_COLLECTION_SERVER= cargo run` for a build that stays offline.
+[env]
+# The Monster collection server the app talks to. People can't change it in the app.
+FLEXSPEAK_COLLECTION_SERVER = "https://collection.zirkumflex.io"
