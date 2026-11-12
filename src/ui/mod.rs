@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 use crate::{App, Message, Tab, client, shortcuts, usage};
 
 pub use chat::MIN_DOCK_WINDOW as CHAT_MIN_DOCK_WINDOW;
+pub use streams::fullscreen_allowed;
 pub use theme::Theme;
 
 /// A [`Task::Stream`] job: interim messages go to the callback, the result is the last one.
@@ -273,6 +274,20 @@ pub struct UiState {
     pub update_hover: bool,
     /// Whether the pointer is over the streams, which shows their toolbar.
     pub streams_hover: bool,
+    /// When the pointer last moved over the streams; their overlays hide once it rests.
+    pub streams_moved: Instant,
+    /// The pointer has rested over the streams long enough to hide their overlays.
+    pub streams_idle: bool,
+    /// The pointer is over a stream's bar or the toolbar, which keeps the overlays up.
+    pub streams_bar_hover: bool,
+    /// The last click on a stream landed on the stage, so a double-click there began there,
+    /// not on the grid tile it replaced.
+    pub stage_click: bool,
+    /// The stream fills the screen: `Some` holds whether the other streams were tucked away
+    /// before, to put them back after.
+    pub fullscreen: Option<bool>,
+    /// Whether the window was last asked to go full screen, so it is asked only on a change.
+    pub window_fullscreen: bool,
     /// The share dialog shows its Advanced tab: resolution, frame rate and bitrates one by one.
     pub share_advanced: bool,
     /// The share dialog's Screen, Window or Camera choice while nothing of that kind is picked.
@@ -333,6 +348,12 @@ impl Default for UiState {
             tile_drag: None,
             update_hover: false,
             streams_hover: false,
+            streams_moved: Instant::now(),
+            streams_idle: false,
+            streams_bar_hover: false,
+            stage_click: false,
+            fullscreen: None,
+            window_fullscreen: false,
             share_advanced: false,
             share_group: None,
             log_hover: false,
@@ -442,7 +463,21 @@ fn dispatch_visible(s: &mut App, tx: &mut Tx, message: Message) -> bool {
     execute(s, tx, task);
     s.sync_fields();
     sync_tray(s);
+    sync_fullscreen(s, tx);
     !invisible
+}
+
+/// Takes the window full screen while a stream should fill it, and back when it ends: you
+/// left, the streams stopped or another page opened.
+fn sync_fullscreen(s: &mut App, tx: &mut Tx) {
+    if s.ui.fullscreen.is_some() && !streams::fullscreen_allowed(s) {
+        s.ui.fullscreen = None;
+    }
+    let want = s.ui.fullscreen.is_some();
+    if want != s.ui.window_fullscreen {
+        s.ui.window_fullscreen = want;
+        tx.toggle_full_screen();
+    }
 }
 
 /// Keeps the notification-area icon in step with the server on screen. Cheap when nothing
@@ -666,15 +701,28 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     for list in &mut s.ui.chat_lists {
         changed |= list.expired(now);
     }
+    // The streams' overlays step aside once the pointer rests on the picture.
+    let overlays_until = (s.ui.streams_hover && !s.ui.streams_idle)
+        .then(|| s.ui.streams_moved + streams::OVERLAY_IDLE);
+    if overlays_until.is_some_and(|until| now >= until) {
+        s.ui.streams_idle = true;
+        changed = true;
+    }
+    sync_fullscreen(s, tx);
     let toast_expiry =
         s.ui.chat_toast
             .as_ref()
             .filter(|_| !s.ui.chat_toast_hover)
             .map(|toast| toast.until);
-    let wake = [s.updater.next_check, s.alerts.next_expiry(), toast_expiry]
-        .into_iter()
-        .flatten()
-        .fold(s.next_usage_tick, Instant::min);
+    let wake = [
+        s.updater.next_check,
+        s.alerts.next_expiry(),
+        toast_expiry,
+        overlays_until.filter(|until| now < *until),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(s.next_usage_tick, Instant::min);
     tx.wake_after(wake.saturating_duration_since(now));
     // Under Statistics streams keep running unseen; their frames don't redraw the window.
     if s.server_mut().streaming.sync_frame() && s.tab == Tab::Home {
@@ -702,6 +750,22 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
     // Escape leaves the log's search, wherever the focus is.
     if key.key == rune::Key::Escape && s.server().log.searching && s.settings_page.is_none() {
         dispatch(s, tx, Message::LogSearch(false));
+        return true;
+    }
+    // Escape brings a full-screen stream back into the window before anything else.
+    if key.key == rune::Key::Escape && s.ui.fullscreen.is_some() && s.settings_page.is_none() {
+        dispatch(s, tx, Message::StreamFullscreen(false));
+        return true;
+    }
+    // F takes the large stream full screen, or brings it back, as video players do.
+    if matches!(&key.key, rune::Key::Text(typed) if typed.eq_ignore_ascii_case("f"))
+        && !key.mods.cmd
+        && !key.mods.alt
+        && s.onboarding.is_none()
+        && s.settings_page.is_none()
+        && streams::fullscreen_allowed(s)
+    {
+        dispatch(s, tx, Message::StreamFullscreen(s.ui.fullscreen.is_none()));
         return true;
     }
     if key.key == rune::Key::Escape && s.ui.rail_peek.unpin() {
@@ -861,7 +925,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             .child(content),
     );
     #[cfg(windows)]
-    layer.push(window_controls(s, &t));
+    if !streams::fullscreen(s) {
+        layer.push(window_controls(s, &t));
+    }
     if s.ui.warm_blur {
         layer.push(blur_warm_up(&t));
     }

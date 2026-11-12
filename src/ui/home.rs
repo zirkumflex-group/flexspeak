@@ -18,6 +18,15 @@ use super::{RailPeek, chat, dispatch, footer, icons, members, send, statistics, 
 use crate::{App, Message, Tab, client, usage};
 
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
+    // Full screen, the streams are all there is: no header, sidebar, chat or status bar.
+    if streams::fullscreen(s) {
+        return pane(t)
+            .fill(t.stage)
+            .key("main-pane")
+            .w_full()
+            .h_full()
+            .child(streams::view(s, cx, t, k, layer));
+    }
     let page = match s.tab {
         Tab::Home => home(s, cx, t, k, layer),
         // On the same panel as the connected window, so it scrolls clear of the status bar.
@@ -1337,7 +1346,7 @@ fn quick_share(s: &App, t: &Theme) -> Option<El> {
     }
     let mut chips = row().w_full().gap(6.0);
     for (index, source) in sources.iter().enumerate() {
-        let help = format!("Go live publicly: {}", source.name);
+        let help = streams::quick_share_help(s, source);
         chips = chips.child(
             row()
                 .key(format!("quick-share-{index}"))

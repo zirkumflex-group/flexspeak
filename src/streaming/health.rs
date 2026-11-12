@@ -220,13 +220,13 @@ impl Problem {
     /// A few words for the corner of the picture.
     pub fn label(self) -> &'static str {
         match (self.trouble, self.reconnecting) {
-            (Trouble::StreamerPaused, _) => "Stream paused",
-            (Trouble::YourComputer, _) => "Your computer",
-            (Trouble::Yours, false) => "Your connection",
-            (Trouble::Yours, true) => "Reconnecting · your connection",
-            (Trouble::Streamers, false) => "Streamer's connection",
-            (Trouble::Streamers, true) => "Reconnecting · streamer's connection",
-            (Trouble::Between, false) => "Connection trouble",
+            (Trouble::StreamerPaused, _) => "Stream is paused",
+            (Trouble::YourComputer, _) => "Your computer is falling behind",
+            (Trouble::Yours, false) => "Your connection is unstable",
+            (Trouble::Yours, true) => "Reconnecting · your connection dropped",
+            (Trouble::Streamers, false) => "Streamer's connection is unstable",
+            (Trouble::Streamers, true) => "Reconnecting · streamer's connection dropped",
+            (Trouble::Between, false) => "Stream is stuttering",
             (Trouble::Between, true) => "Reconnecting",
         }
     }
@@ -235,19 +235,19 @@ impl Problem {
     pub fn explanation(self) -> &'static str {
         match self.trouble {
             Trouble::StreamerPaused => {
-                "The connection is fine, but no new picture is arriving. The streamer's window may be minimised or their capture stopped."
+                "The connection is fine, but no new picture is arriving. The streamer's window may be minimised or their capture stopped. Try: ask them to restore the window."
             }
             Trouble::YourComputer => {
-                "Video arrives, but this computer can't decode it fast enough, so frames are dropped. Watching fewer streams or closing heavy apps helps."
+                "Video arrives, but this computer can't decode it fast enough, so frames are dropped. Try: watch fewer streams or close heavy apps."
             }
             Trouble::Yours => {
-                "Your own connection to the server is unstable too, so the trouble is most likely on your side."
+                "Your own connection to the server is unstable too, so the trouble is most likely on your side. Try: pause downloads, or use a cable instead of Wi-Fi."
             }
             Trouble::Streamers => {
-                "The streamer's connection to the server is unstable too, so the trouble is most likely on their side."
+                "The streamer's connection to the server is unstable too, so the trouble is most likely on their side. Try: ask them to pick the Performance preset."
             }
             Trouble::Between => {
-                "Both connections to the server look fine, so the trouble is on the way between you and the streamer."
+                "Both connections to the server look fine, so the trouble is on the way between you and the streamer. Try: stop and watch again."
             }
         }
     }

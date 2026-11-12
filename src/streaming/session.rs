@@ -24,6 +24,26 @@ use tokio::sync::mpsc;
 use tsclientlib::{ChannelId, ClientId, CommandError, Connection};
 use tsproto_packets::packets::OutCommand;
 
+/// Why watches end that need no notice: you, or the publisher, ended them, or the connection
+/// went, which has its own.
+const PUBLISHER_STOPPED: &str = "The publisher stopped sharing";
+const LEFT_STREAM: &str = "You or the publisher left the stream";
+const CHANGED_CHANNELS: &str = "Stopped after changing channels";
+const LEFT_VIEW: &str = "Stopped when switching servers or leaving the server view";
+const CONNECTION_ENDED: &str = "The server connection ended";
+
+/// Whether a watch that stopped this way ended as expected, so it may end without a word.
+pub fn ended_as_expected(detail: &str) -> bool {
+    [
+        PUBLISHER_STOPPED,
+        LEFT_STREAM,
+        CHANGED_CHANNELS,
+        LEFT_VIEW,
+        CONNECTION_ENDED,
+    ]
+    .contains(&detail)
+}
+
 struct Watch {
     info: StreamInfo,
     generation: u64,
@@ -204,12 +224,7 @@ impl Session {
                 self.publisher
                     .stop("Sharing stopped after changing channels");
             }
-            self.stop(
-                connection,
-                None,
-                Phase::Stopped,
-                "Stopped after changing channels",
-            );
+            self.stop(connection, None, Phase::Stopped, CHANGED_CHANNELS);
             self.channel = channel;
             self.catalog.clear();
             self.discovery.clear();
@@ -417,7 +432,7 @@ impl Session {
                 slot: watch.slot,
                 stream: watch.info.clone(),
                 phase: Phase::Stopped,
-                detail: "The server connection ended".into(),
+                detail: CONNECTION_ENDED.into(),
             });
             self.surfaces.get(watch.slot).end(watch.generation);
         }
@@ -442,12 +457,7 @@ impl Session {
         }
         // Your own share carries on in the background; only watching is tied to the screen.
         if !visible {
-            self.stop(
-                connection,
-                None,
-                Phase::Stopped,
-                "Stopped when switching servers or leaving the server view",
-            );
+            self.stop(connection, None, Phase::Stopped, LEFT_VIEW);
         }
         if visible && !self.was_visible {
             self.publish_catalog();
@@ -455,12 +465,22 @@ impl Session {
         }
         self.was_visible = visible;
         self.publisher.tick();
-        self.stop_where(
-            connection,
-            |watch| watch.receiver.is_none() && watch.started.elapsed() > Duration::from_secs(45),
-            Phase::Failed,
-            "The publisher did not send an offer within 45 seconds",
-        );
+        // A request to watch that the publisher's client never answered, by name.
+        let unanswered = self.matching(|watch| {
+            watch.receiver.is_none() && watch.started.elapsed() > Duration::from_secs(45)
+        });
+        for generation in unanswered {
+            let name = self.find(generation).and_then(|watch| {
+                let state = connection.get_state().ok()?;
+                let client = state.clients.get(&ClientId(watch.info.publisher))?;
+                Some(client.name.to_string())
+            });
+            let detail = match name.filter(|name| !name.is_empty()) {
+                Some(name) => format!("{name} didn't answer your request."),
+                None => "The streamer didn't answer your request.".to_owned(),
+            };
+            self.stop_one(connection, generation, Phase::Failed, &detail);
+        }
         let expired: Vec<_> = self
             .pending
             .iter()
@@ -642,7 +662,7 @@ impl Session {
                                 connection,
                                 |watch| watch.info.publisher == id,
                                 Phase::Stopped,
-                                "The publisher stopped sharing",
+                                PUBLISHER_STOPPED,
                             );
                         }
                     }
@@ -677,7 +697,7 @@ impl Session {
                             connection,
                             |watch| watch.info.id == *id,
                             Phase::Stopped,
-                            "The publisher stopped sharing",
+                            PUBLISHER_STOPPED,
                         );
                     }
                 }
@@ -692,7 +712,7 @@ impl Session {
                                     .is_some_and(|id| Some(id) == own || id == watch.info.publisher)
                         },
                         Phase::Stopped,
-                        "You or the publisher left the stream",
+                        LEFT_STREAM,
                     );
                 }
                 "notifyrespondjoinstreamrequest" | "notifystreamsignaling" => {
