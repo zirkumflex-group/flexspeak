@@ -1,0 +1,13 @@
+[Unit]
+Description=Copy new Flexspeak releases to the update mirror every two minutes
+Documentation=file:///srv/flexspeak-updates/OPERATIONS.md
+
+[Timer]
+# Unchanged checks are conditional (ETag) and don't count against GitHub's anonymous limit
+# of 60 an hour; two minutes stays under it even if they did.
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

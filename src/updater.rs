@@ -36,6 +36,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 // Asset names written by scripts/release.py (scripts/test_release.py keeps them in step).
 pub const CHECKSUMS: &str = "SHA256SUMS.txt";
+/// Release files are fetched from here first (see [`mirror_base`]), then from GitHub.
+const MIRROR: &str = "https://updates.zirkumflex.io/flexspeak";
 pub const WINDOWS_EXE: &str = "Flexspeak-windows-x64.exe";
 /// What Windows installs update from: the executable deflates to well under half its size.
 pub const WINDOWS_ZIP: &str = "Flexspeak-windows-x64.zip";
@@ -173,6 +175,10 @@ pub struct Asset {
     pub size: u64,
     /// GitHub's own SHA-256 of the upload, lowercase hex, when the API reports one.
     pub digest: Option<String>,
+    /// The same file on the update mirror, tried before `url`. Only the bytes come from there:
+    /// they're checked against GitHub's checksums, so a mirror can fail an update but never
+    /// change one.
+    pub mirror: Option<String>,
 }
 
 /// A newer release with a package for this installation.
@@ -348,6 +354,7 @@ pub fn select(json: &str, running: Build, asset_name: &str) -> Result<Option<Rel
             url: asset.browser_download_url.clone(),
             size: asset.size,
             digest,
+            mirror: None,
         },
         checksums_url: checksums.browser_download_url.clone(),
         notes: Box::new(notes),
@@ -758,6 +765,17 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|error| format!("Cannot start an HTTPS client: {error}"))
 }
 
+/// The mirror is a box at home: give up on it quickly when it's away, since GitHub is next.
+fn mirror_client() -> Result<reqwest::Client, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .user_agent(concat!("Flexspeak/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("Cannot start an HTTPS client: {error}"))
+}
+
 fn describe(error: reqwest::Error) -> String {
     let mut text = error.to_string();
     let mut source = std::error::Error::source(&error);
@@ -814,6 +832,8 @@ async fn check_at(
     let Some(mut release) = select(&body, running, package.asset())? else {
         return Ok(None);
     };
+    release.asset.mirror =
+        mirror_base().map(|base| format!("{base}/{}/{}", release.tag, release.asset.name));
     if let Some(notes) = missed_notes(url, running, release.build)
         .await
         .filter(|notes| !notes.is_empty())
@@ -823,6 +843,17 @@ async fn check_at(
     forget_other_downloads(cache, &release.tag);
     let staged = staged(&cache.join(&release.tag), &release, package);
     Ok(Some(Found { release, staged }))
+}
+
+/// The update mirror: releases copied to `<base>/<tag>/<asset>` by `mirror/` in this repository.
+/// `FLEXSPEAK_UPDATE_MIRROR` points elsewhere, or turns the mirror off when empty.
+fn mirror_base() -> Option<String> {
+    let base = match std::env::var("FLEXSPEAK_UPDATE_MIRROR") {
+        Ok(base) => base,
+        Err(_) => MIRROR.to_owned(),
+    };
+    let base = base.trim().trim_end_matches('/');
+    base.starts_with("https://").then(|| base.to_owned())
 }
 
 /// Where downloads wait to be installed.
@@ -970,6 +1001,7 @@ fn write_error(error: std::io::Error) -> String {
 /// bytes received so far.
 async fn fetch_ranges(
     url: &str,
+    make_client: MakeClient,
     total: u64,
     ranges: Ranges,
     file: &fs::File,
@@ -980,7 +1012,7 @@ async fn fetch_ranges(
     let next = &Cell::new(0u64);
     let received = &Cell::new(0u64);
     let workers = (0..ranges.connections).map(|_| async move {
-        let client = client()?;
+        let client = make_client()?;
         loop {
             let start = next.get();
             if start >= total {
@@ -1113,6 +1145,71 @@ fn write_at(file: &fs::File, mut bytes: &[u8], mut offset: u64) -> std::io::Resu
     Ok(())
 }
 
+type MakeClient = fn() -> Result<reqwest::Client, String>;
+
+/// Fetches `release`'s asset from `url` into `partial` and checks it against `expected`.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_verified(
+    url: &str,
+    make_client: MakeClient,
+    partial: &Path,
+    release: &Release,
+    expected: &str,
+    ranges: Ranges,
+    cancel: &AtomicBool,
+    on_progress: &dyn Fn(Progress),
+) -> Result<(), String> {
+    let file = fs::File::create(partial)
+        .map_err(|error| format!("Cannot write {}: {error}", partial.display()))?;
+    let meter = std::cell::RefCell::new(SpeedMeter::new(Instant::now()));
+    let total = Some(release.asset.size).filter(|size| *size > 0);
+    let report = |received: u64, total: Option<u64>| {
+        if let Some(speed) = meter.borrow_mut().sample(Instant::now(), received) {
+            on_progress(Progress {
+                received,
+                total,
+                bytes_per_second: Some(speed),
+            });
+        }
+    };
+    let ranged = match total {
+        Some(total) if total > ranges.part => {
+            file.set_len(total).map_err(write_error)?;
+            match fetch_ranges(
+                url,
+                make_client,
+                total,
+                ranges,
+                &file,
+                cancel,
+                &|received| report(received, Some(total)),
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(Failure::NoRanges) => false,
+                Err(Failure::Error(error)) => return Err(error),
+            }
+        }
+        _ => false,
+    };
+    if !ranged {
+        file.set_len(0).map_err(write_error)?;
+        fetch_whole(&make_client()?, url, total, &file, cancel, &report).await?;
+    }
+    file.sync_all().map_err(write_error)?;
+    drop(file);
+    let actual =
+        sha256_file(partial).map_err(|error| format!("Cannot read the download: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "{} failed verification (SHA-256 {actual}, expected {expected}) and was discarded.",
+            release.asset.name
+        ));
+    }
+    Ok(())
+}
+
 async fn download_into(
     dir: &Path,
     release: &Release,
@@ -1123,8 +1220,7 @@ async fn download_into(
 ) -> Result<PathBuf, String> {
     let _ = fs::remove_file(dir.join(VERIFIED));
     fs::create_dir_all(dir).map_err(|error| format!("Cannot create {}: {error}", dir.display()))?;
-    let client = client()?;
-    let sums = client
+    let sums = client()?
         .get(&release.checksums_url)
         .timeout(Duration::from_secs(30))
         .send()
@@ -1148,60 +1244,36 @@ async fn download_into(
     }
 
     let partial = dir.join(format!("{}.part", release.asset.name));
-    let result = async {
-        let file = fs::File::create(&partial)
-            .map_err(|error| format!("Cannot write {}: {error}", partial.display()))?;
-        let meter = std::cell::RefCell::new(SpeedMeter::new(Instant::now()));
-        let total = Some(release.asset.size).filter(|size| *size > 0);
-        let report = |received: u64, total: Option<u64>| {
-            if let Some(speed) = meter.borrow_mut().sample(Instant::now(), received) {
-                on_progress(Progress {
-                    received,
-                    total,
-                    bytes_per_second: Some(speed),
-                });
+    // The mirror first, GitHub if it fails for any reason: unreachable, not synced yet, or
+    // bytes that don't match GitHub's checksums.
+    let mirror = release
+        .asset
+        .mirror
+        .as_deref()
+        .map(|url| (url, mirror_client as MakeClient));
+    let github = (release.asset.url.as_str(), client as MakeClient);
+    let mut result = Err(String::new());
+    for (url, make_client) in mirror.into_iter().chain([github]) {
+        result = fetch_verified(
+            url,
+            make_client,
+            &partial,
+            release,
+            &expected,
+            ranges,
+            cancel,
+            &on_progress,
+        )
+        .await;
+        match &result {
+            Ok(()) => break,
+            Err(error) if error == REPLACED => break,
+            Err(error) if url != github.0 => {
+                tracing::warn!("Update mirror failed, downloading from GitHub instead: {error}");
             }
-        };
-        let ranged = match total {
-            Some(total) if total > ranges.part => {
-                file.set_len(total)
-                    .map_err(|error| format!("Cannot write the download: {error}"))?;
-                match fetch_ranges(
-                    &release.asset.url,
-                    total,
-                    ranges,
-                    &file,
-                    cancel,
-                    &|received| report(received, Some(total)),
-                )
-                .await
-                {
-                    Ok(()) => true,
-                    Err(Failure::NoRanges) => false,
-                    Err(Failure::Error(error)) => return Err(error),
-                }
-            }
-            _ => false,
-        };
-        if !ranged {
-            file.set_len(0)
-                .map_err(|error| format!("Cannot write the download: {error}"))?;
-            fetch_whole(&client, &release.asset.url, total, &file, cancel, &report).await?;
+            Err(_) => {}
         }
-        file.sync_all()
-            .map_err(|error| format!("Cannot write the download: {error}"))?;
-        drop(file);
-        let actual =
-            sha256_file(&partial).map_err(|error| format!("Cannot read the download: {error}"))?;
-        if actual != expected {
-            return Err(format!(
-                "{} failed verification (SHA-256 {actual}, expected {expected}) and was discarded.",
-                release.asset.name
-            ));
-        }
-        Ok(())
     }
-    .await;
     if let Err(error) = result {
         let _ = fs::remove_file(&partial);
         return Err(error);
@@ -2152,9 +2224,48 @@ mod tests {
                 url: format!("{base}/zip"),
                 size: archive.len() as u64,
                 digest,
+                mirror: None,
             },
             checksums_url: format!("{base}/sums"),
             notes: Box::default(),
+        }
+    }
+
+    #[test]
+    fn the_mirror_is_tried_first_and_github_takes_over_when_it_fails() {
+        let exe = b"flexspeak from the mirror".repeat(500);
+        let archive = windows_zip(&exe);
+        let sums = format!("{}  {WINDOWS_ZIP}\n", digest(&archive));
+        let mut corrupt = archive.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 1;
+        let cases = [
+            // GitHub has no /zip, so this passes only if the mirror served it.
+            ("good", Some(archive.clone()), false),
+            ("missing", None, true),
+            ("corrupt", Some(corrupt), true),
+        ];
+        for (case, on_mirror, github_has_it) in cases {
+            let mirror = serve(on_mirror.map(|body| ("/zip", body)).into_iter().collect());
+            let mut routes = vec![("/sums", sums.clone().into_bytes())];
+            if github_has_it {
+                routes.push(("/zip", archive.clone()));
+            }
+            let github = serve(routes);
+            let mut release = windows_release(&github, &archive, Some(digest(&archive)));
+            release.asset.mirror = Some(format!("{mirror}/zip"));
+            let dir = scratch("mirror");
+            let staged_path = block_on(download_into(
+                &dir,
+                &release,
+                Package::WindowsExe,
+                TEST_RANGES,
+                &AtomicBool::new(false),
+                |_| {},
+            ))
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert_eq!(fs::read(&staged_path).unwrap(), exe, "{case}");
+            fs::remove_dir_all(dir).unwrap();
         }
     }
 
