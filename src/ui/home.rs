@@ -11,8 +11,8 @@ use rune_kit::{Kit, MenuItem, TextInput, context_menu};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Variant, body, button, card, divider, faint, heading, icon_button, meter, muted, overline,
-    pulse, scroll_page, struck,
+    Variant, body, button, card, divider, faint, heading, icon_button, icon_button_with, meter,
+    muted, overline, pulse, scroll_page, struck,
 };
 use super::{RailPeek, chat, dispatch, footer, icons, members, monster, send, statistics, streams};
 use crate::{App, Message, Tab, client, usage};
@@ -531,12 +531,16 @@ pub(super) fn initials(name: &str) -> String {
         .collect()
 }
 
+/// The hues a server or a person may get: eight, evenly apart at one lightness and strength,
+/// so tiles sit together as a set and none passes for a status colour.
+const TILE_HUES: [f32; 8] = [20.0, 65.0, 110.0, 165.0, 210.0, 255.0, 300.0, 340.0];
+
 /// A colour of its own for each server, the same every time it's connected.
 pub(super) fn tile_colour(name: &str) -> rune::Color {
     let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });
-    rune::oklch(0.55, 0.13, (hash % 360) as f32)
+    rune::oklch(0.55, 0.12, TILE_HUES[hash as usize % TILE_HUES.len()])
 }
 
 /// A tile's marker for pokes that arrived while another server was active.
@@ -548,41 +552,28 @@ fn poke_marker(t: &Theme, pokes: u32) -> El {
         .gap(2.0)
         .center()
         .radius(radius::PILL)
-        .fill(t.fair)
+        .fill(t.accent)
         .border(2.0, t.canvas)
         .a11y_hidden()
-        .child(icon(&icons::HAND, 11.0).color(rune::Color::BLACK));
+        .child(icon(&icons::HAND, 11.0).color(t.on_accent));
     if pokes > 1 {
         marker = marker.child(
             text(pokes.min(99).to_string())
                 .font(ty::CAPTION)
-                .color(rune::Color::BLACK),
+                .color(t.on_accent),
         );
     }
     marker
 }
 
-/// Your microphone or sound on one server: plain while on, struck through in red while off,
-/// as the tree draws everyone's.
-fn rail_status_icon(
-    t: &Theme,
-    on: &'static rune::Icon,
-    off: &'static rune::Icon,
-    is_off: bool,
-) -> El {
-    if is_off {
-        struck(t, off, &icons::STRIKE, 13.0)
-    } else {
-        icon(on, 13.0).color(t.muted).a11y_hidden()
-    }
-}
-
-/// One server on the rail: its tile, and the mic and sound state beneath it.
+/// One server on the rail: its tile, and beneath it your microphone or sound there while
+/// either is off, struck through as the tree draws everyone's. On is the usual state and
+/// shows nothing.
 fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
     let name = session.title().to_owned();
     let mut tile = el()
         .size(RAIL_TILE, RAIL_TILE)
-        .radius(if active { 14.0 } else { RAIL_TILE / 2.0 })
+        .radius(RAIL_TILE / 2.0)
         .center()
         .fill(tile_colour(&name))
         .motion(motion::QUICK)
@@ -593,6 +584,10 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
         );
     if !session.talking.is_empty() {
         tile = tile.border(2.0, t.good);
+    }
+    // The server on screen wears a ring; the tile keeps its shape.
+    if active {
+        tile = tile.outline(2.0, 2.0, t.accent);
     }
     let unread = session.chat.unread_private();
     if session.unseen_pokes > 0 {
@@ -618,27 +613,29 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
                 .child(pulse(t.fair)),
         );
     }
-    let status = row()
-        .gap(4.0)
-        .center_y()
-        .child(rail_status_icon(
-            t,
-            &icons::MIC,
-            &icons::MIC_OFF_GLYPH,
-            session.microphone_off(),
-        ))
-        .child(rail_status_icon(
-            t,
-            &icons::HEADPHONES,
-            &icons::HEADPHONE_OFF_GLYPH,
-            session.deafened,
-        ));
-    let mut entry = row()
+    let off = [
+        (session.microphone_off(), &icons::MIC_OFF_GLYPH),
+        (session.deafened, &icons::HEADPHONE_OFF_GLYPH),
+    ];
+    let status = off.iter().any(|(is_off, _)| *is_off).then(|| {
+        row().gap(4.0).center_y().children(
+            off.iter()
+                .filter(|(is_off, _)| *is_off)
+                .map(|(_, glyph)| struck(t, glyph, &icons::STRIKE, 13.0)),
+        )
+    });
+    // Global shortcuts act on the server on screen, which the tooltip says where it matters.
+    let help = if active {
+        format!("{name}\nShortcuts control this server")
+    } else {
+        name.clone()
+    };
+    row()
         .key(format!("rail-{}", session.id.0))
         .role("button")
         .w_full()
         .center()
-        .help(name.clone())
+        .help(help)
         .label(name)
         .focusable(true)
         .cursor(rune::Cursor::Pointer)
@@ -649,19 +646,9 @@ fn rail_entry(t: &Theme, session: &crate::ServerSession, active: bool) -> El {
                 s.ui.rail_menu = Some((id, point));
             }
         })
-        .child(col().gap(4.0).center().child(tile).child(status));
-    if active {
-        entry = entry.child(
-            el().absolute(0.0, 10.0)
-                .size(3.0, 24.0)
-                .radius(1.5)
-                .fill(t.accent),
-        );
-    }
-    entry
+        .child(col().gap(5.0).center().child(tile).children(status))
 }
 
-/// The servers you're connected to, Discord-style, down the left of the window.
 /// Right-clicking a server in the rail.
 fn rail_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some((id, point)) = s.ui.rail_menu else {
@@ -701,8 +688,9 @@ fn rail_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let _ = menu.build(k, layer);
 }
 
+/// The servers you're connected to, down the left of the window.
 fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
-    let mut tiles = col().w_full().pt(4.0).pb(12.0).gap(12.0);
+    let mut tiles = col().w_full().pt(6.0).pb(12.0).gap(12.0);
     for session in s.rail_sessions() {
         tiles = tiles.child(rail_entry(t, session, s.active == Some(session.id)));
     }
@@ -728,7 +716,7 @@ fn server_rail(s: &App, t: &Theme, k: &Kit) -> El {
                     .cursor(rune::Cursor::Pointer)
                     .hover(t.wash(0.08))
                     .on_press_tx(send(Message::OpenServerPicker))
-                    .child(icon(&icons::PLUS, 18.0).color(t.good).a11y_hidden()),
+                    .child(icon(&icons::PLUS, 18.0).color(t.muted).a11y_hidden()),
             ),
         );
     col()
@@ -749,9 +737,10 @@ fn rail_edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     let open = peek.open(Instant::now()) || s.ui.rail_menu.is_some();
     let near = peek.inside();
     let height = (s.window_size.1 - size::HEADER - 40.0).max(80.0);
-    let (width, length) = if near { (5.0, 60.0) } else { (3.0, 44.0) };
-    // A handle, not a status light: it stays quiet while people talk.
-    let ink = if near { t.muted } else { t.faint };
+    let (width, length) = if near { (4.0, 56.0) } else { (2.0, 32.0) };
+    // A handle, not a status light: it stays quiet while people talk, and at rest it is only
+    // a hint, so it doesn't read as a mark on the window's edge.
+    let ink = if near { t.muted } else { t.faint.alpha(0.45) };
     let mut strip = el()
         .key("rail-edge")
         .role("button")
@@ -849,22 +838,24 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
     members::ghost(s, t, layer);
     let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
     let name = s.server().state.server.clone();
+    // The tree's root, as TeamSpeak draws it: the server's glyph in the column the channels
+    // indent from, its name one step above theirs, and how many people are on it. No tile:
+    // the rail owns those, and with one server there is nothing to tell apart.
+    let online: usize = s
+        .server()
+        .state
+        .channels
+        .iter()
+        .map(|channel| channel.members.len())
+        .sum();
     let server = row()
+        .key("server-root")
         .w_full()
+        .h(size::CONTROL)
+        .pl(8.0)
         .gap(8.0)
         .center_y()
-        .child(
-            el().size(28.0, 28.0)
-                .radius(radius::CONTROL)
-                .center()
-                .fill(tile_colour(s.server().title()))
-                .child(
-                    text(initials(s.server().title()))
-                        .font(ty::SMALL_STRONG)
-                        .color(rune::Color::WHITE),
-                )
-                .a11y_hidden(),
-        )
+        .child(icon(&icons::SERVER, 14.0).color(t.muted).a11y_hidden())
         .child(
             text(name)
                 .font(ty::SERVER)
@@ -873,6 +864,13 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
                 .grow(1.0)
                 .min_w(0.0),
         )
+        // Only while every channel is in view: otherwise the count would be your own channel's.
+        .children((all && online > 0).then(|| {
+            text(format!("{online} online"))
+                .font(ty::CAPTION)
+                .color(t.faint)
+                .a11y_hidden()
+        }))
         .child(icon_button(
             t,
             "subscribe-all",
@@ -886,28 +884,14 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
             if all { Variant::Ghost } else { Variant::Active },
             Some(Message::ToggleSubscribeAll),
         ));
-    let server = if s.connected_servers() < 2 {
-        server
-    } else {
-        col().w_full().gap(6.0).child(server).child(
-            row()
-                .key("shortcut-hint")
-                .gap(6.0)
-                .center_y()
-                .child(icon(&icons::KEYBOARD, 12.0).color(t.faint))
-                .child(faint(t, "Shortcuts control this server")),
-        )
-    };
     pane(t)
         .key("sidebar")
         .w(f32::from(s.sidebar_width))
         .padding(12.0)
-        .gap(8.0)
-        // More room under the server than between the panes below it, so it heads the tree
-        // instead of reading as its first row.
-        .child(server.mb(6.0))
-        // The channel list takes the free height, so the voice controls sit at the bottom. The
-        // tree needs no heading: the server above it says whose channels they are.
+        .pt(8.0)
+        .gap(4.0)
+        .child(server)
+        // The channel list takes the free height, so the voice controls sit at the bottom.
         .child(scroll_page(
             k,
             "channel-scroll",
@@ -1468,13 +1452,13 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     // which is what you get back once you undeafen. The icon shows what is sent: nothing.
     let deafened_open = s.server().deafened && !s.server().muted && s.server().state.can_talk;
     let mut controls = row().w_full().gap(size::GAP);
-    for (key, glyph, label, message, active, on) in [
+    for (key, glyph, label, message, off, on) in [
         (
             "mute",
             s.microphone_icon().glyph(),
             microphone_help(s, deafened_open),
             Message::Mute,
-            s.server().muted,
+            (s.microphone_icon() == crate::Icon::MicOff).then_some(&icons::MIC_OFF_GLYPH),
             enabled,
         ),
         (
@@ -1490,21 +1474,22 @@ fn voice_controls(s: &App, t: &Theme) -> El {
                 &s.keybinds.toggle_deafen,
             ),
             Message::Deafen,
-            s.server().deafened,
+            s.server().deafened.then_some(&icons::HEADPHONE_OFF_GLYPH),
             enabled,
         ),
     ] {
-        controls = controls.child(dock_button(icon_button(
+        // Off is drawn as the tree and the rail draw it: the glyph plain, only its strike red.
+        // The button itself stays plain, so red beside it can mean one thing, a live share.
+        let glyph = match off {
+            Some(off) => struck(t, off, &icons::STRIKE, 16.0),
+            None => icon(glyph, 16.0).color(t.text).a11y_hidden(),
+        };
+        controls = controls.child(dock_button(icon_button_with(
             t,
             key,
             glyph,
             label,
-            // Red while off, the colour of the strike on the tree's and the rail's own icons.
-            if active {
-                Variant::Danger
-            } else {
-                Variant::Secondary
-            },
+            Variant::Secondary,
             on.then_some(message),
         )));
     }
@@ -1657,16 +1642,16 @@ fn share_button(s: &App, t: &Theme) -> El {
     } else {
         "Share your screen"
     };
-    icon_button(
+    // Live, the glyph takes the live colour of the dot in the card above it; the button stays
+    // plain, as the others do.
+    icon_button_with(
         t,
         "share-screen",
-        &icons::MONITOR_UP,
+        icon(&icons::MONITOR_UP, 16.0)
+            .color(if sharing { t.live } else { t.text })
+            .a11y_hidden(),
         help,
-        if sharing {
-            Variant::Active
-        } else {
-            Variant::Secondary
-        },
+        Variant::Secondary,
         (supported || sharing).then_some(Message::OpenShare),
     )
 }

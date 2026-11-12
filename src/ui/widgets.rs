@@ -16,7 +16,8 @@ pub enum Variant {
     Ghost,
     /// A toggled-on control (a selected page).
     Active,
-    /// Ending the call: a solid danger fill.
+    /// Ending the call: a plain control that turns red under the pointer, so at rest the only
+    /// red beside the voice buttons is a share that is live.
     Hangup,
 }
 
@@ -64,12 +65,12 @@ fn skin(t: &Theme, v: Variant) -> Skin {
             press: t.wash(0.10),
         },
         Variant::Hangup => Skin {
-            fill: t.poor,
-            top: Color::WHITE.alpha(0.25),
-            bottom: Color::BLACK.alpha(0.15),
-            ink: t.on_accent,
-            hover: Color::WHITE.alpha(0.10),
-            press: Color::BLACK.alpha(0.12),
+            fill: t.raised,
+            top: t.bevel_top,
+            bottom: t.bevel_bottom,
+            ink: t.text,
+            hover: t.poor.alpha(0.32),
+            press: t.poor.alpha(0.44),
         },
         Variant::Active => Skin {
             fill: t.accent.alpha(0.16),
@@ -146,8 +147,28 @@ pub fn icon_button(
     v: Variant,
     on: Option<Message>,
 ) -> El {
-    let help = help.into();
     let ink = skin(t, v).ink;
+    icon_button_with(
+        t,
+        key,
+        icon(glyph, 16.0).color(ink).a11y_hidden(),
+        help,
+        v,
+        on,
+    )
+}
+
+/// A square icon button around a glyph drawn by the caller: a two-tone one, or one in a
+/// colour of its own.
+pub fn icon_button_with(
+    t: &Theme,
+    key: &str,
+    glyph: El,
+    help: impl Into<String>,
+    v: Variant,
+    on: Option<Message>,
+) -> El {
+    let help = help.into();
     let e = el()
         .key(key.to_owned())
         .role("button")
@@ -156,7 +177,7 @@ pub fn icon_button(
         .size(size::ICON_BUTTON, size::ICON_BUTTON)
         .center()
         .radius(radius::CONTROL)
-        .child(icon(glyph, 16.0).color(ink).a11y_hidden());
+        .child(glyph);
     surface(t, e, v, true, on)
 }
 

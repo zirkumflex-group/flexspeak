@@ -1524,14 +1524,6 @@ impl App {
         self.server().connected && !self.loopback && !self.server().stopping
     }
 
-    /// How many servers are connected right now.
-    fn connected_servers(&self) -> usize {
-        self.sessions
-            .iter()
-            .filter(|s| s.connected && !s.stopping)
-            .count()
-    }
-
     /// The servers on the rail, oldest first. One being disconnected leaves the rail at once,
     /// unless it's the last one and the page is still showing it.
     fn rail_sessions(&self) -> impl Iterator<Item = &ServerSession> {

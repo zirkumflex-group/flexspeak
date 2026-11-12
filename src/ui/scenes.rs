@@ -3776,13 +3776,13 @@ mod tests {
     }
 
     #[test]
-    fn the_shortcut_hint_needs_more_than_one_server() {
+    fn the_server_heads_the_tree_with_one_server_or_several() {
         let mut rt = runtime(connected, (900.0, 790.0));
         settle(&mut rt);
-        assert!(rt.find("shortcut-hint").is_none());
+        assert!(rt.find("server-root").is_some());
         let mut rt = runtime(servers_rail, (900.0, 790.0));
         settle(&mut rt);
-        assert!(rt.find("shortcut-hint").is_some());
+        assert!(rt.find("server-root").is_some());
     }
 
     #[test]
@@ -5244,7 +5244,9 @@ mod tests {
         }
         let mut wide = runtime(watching_five, (1700.0, 900.0));
         settle(&mut wide);
-        assert_eq!(row_of(&wide, "s1"), row_of(&wide, "s3"), "three across");
+        assert_eq!(row_of(&wide, "s1"), row_of(&wide, "s2"), "two lead");
+        assert_eq!(row_of(&wide, "s3"), row_of(&wide, "s5"), "three across");
+        assert!(row_of(&wide, "s3") > row_of(&wide, "s1"), "under them");
         let mut normal = runtime(watching_five, (900.0, 790.0));
         settle(&mut normal);
         assert_eq!(row_of(&normal, "s1"), row_of(&normal, "s2"), "two across");
@@ -5292,9 +5294,22 @@ mod tests {
     }
 
     #[test]
-    fn the_streams_toolbar_appears_while_the_pointer_is_over_them() {
+    fn several_streams_keep_their_tools_in_the_stage_header() {
         let mut rt = runtime(watching, (900.0, 790.0));
         settle(&mut rt);
+        assert!(rt.find("stage-header").is_some());
+        assert!(rt.find("refresh-streams").is_some(), "there at rest");
+        assert!(rt.find("stage-tools").is_none(), "nothing floats");
+    }
+
+    #[test]
+    fn a_lone_streams_toolbar_appears_while_the_pointer_is_over_it() {
+        let mut rt = runtime(watching_solo, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(
+            rt.find("stage-header").is_none(),
+            "the picture has the pane"
+        );
         assert!(rt.find("refresh-streams").is_none(), "hidden at rest");
         let (x, y) = rt.find("stage").unwrap();
         rt.pointer_move(x, y);

@@ -113,7 +113,7 @@ fn readings(s: &App, t: &Theme) -> El {
         ))
 }
 
-/// The compact footer's one reading: ping, in its health colour.
+/// The compact footer's one reading: ping, coloured only while it is off.
 fn ping(s: &App, t: &Theme) -> El {
     let quality = s.server().connection_usage;
     let health = usage::Health::ping(quality.ping_ms, quality.ping_deviation_ms);
@@ -132,7 +132,7 @@ fn ping(s: &App, t: &Theme) -> El {
         .child(
             text(value)
                 .font(ty::NUMERIC)
-                .color(t.health(health))
+                .color(t.reading(health))
                 .a11y_hidden(),
         )
 }
