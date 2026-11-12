@@ -75,9 +75,8 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
                         drag.at = at;
                         tx.element_at(at.0, at.1, |s: &mut App, picked, _tx: &mut Tx| {
                             // A spacer is a label, not somewhere to go.
-                            let target = picked
-                                .and_then(|p| channel_in_path(p.path()))
-                                .filter(|id| {
+                            let target =
+                                picked.and_then(|p| channel_in_path(p.path())).filter(|id| {
                                     s.server().state.channels.iter().any(|channel| {
                                         channel.id == *id && channel.spacer().is_none()
                                     })

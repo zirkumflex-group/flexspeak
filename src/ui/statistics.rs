@@ -290,11 +290,15 @@ fn history_card(
         .child(text(current).font(ty::BIG_VALUE).color(t.text));
     if let Some((detail_label, value)) = memory_detail {
         // Kept off the card's edge, and wrapped under the reading when the card is narrow.
-        heading_row = heading_row.flex_wrap().pr(12.0).child(el().grow(1.0)).child(
-            text(format!("{detail_label}  {value}"))
-                .font(ty::NUMERIC)
-                .color(t.muted),
-        );
+        heading_row = heading_row
+            .flex_wrap()
+            .pr(12.0)
+            .child(el().grow(1.0))
+            .child(
+                text(format!("{detail_label}  {value}"))
+                    .font(ty::NUMERIC)
+                    .color(t.muted),
+            );
     }
     col()
         .grow(1.0)

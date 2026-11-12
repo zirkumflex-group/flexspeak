@@ -581,7 +581,11 @@ fn side_by_side(t: &Theme, head: &Head, strip: El, tabs: &[(String, u32, bool)])
             .press(t.wash(0.10))
             .focus_ring(2.0, -2.0, t.accent.alpha(0.7))
             .on_press_tx(move |_: &mut App, tx: &mut Tx| tx.scroll_into_view(first.clone()))
-            .child(icon(&icons::CHEVRON_RIGHT, 12.0).color(t.muted).a11y_hidden());
+            .child(
+                icon(&icons::CHEVRON_RIGHT, 12.0)
+                    .color(t.muted)
+                    .a11y_hidden(),
+            );
         if unread > 0 {
             let color = if hidden
                 .iter()
@@ -797,7 +801,14 @@ fn tabs(t: &Theme, head: &Head) -> El {
     for (key, name, unread) in &head.peers {
         let scope = Scope::Private((*key).to_owned());
         let selected = on(&scope);
-        let tab = tab(t, avatar(name, 16.0), name, scope.clone(), selected, *unread);
+        let tab = tab(
+            t,
+            avatar(name, 16.0),
+            name,
+            scope.clone(),
+            selected,
+            *unread,
+        );
         strip = add(strip, tab, &scope, *unread);
     }
     for (id, name) in &head.past {
@@ -1537,16 +1548,16 @@ fn composer(s: &App, t: &Theme, k: &Kit, head: &Head) -> El {
                 // In the feed, Escape lets go of a private or server target.
                 let elsewhere = s.server().chat.target != Scope::Channel;
                 if key.key == rune::Key::Escape && feed && elsewhere {
-                let back = if everything {
-                    Action::SendTo(Scope::Channel)
-                } else {
-                    Action::Target(Scope::Channel)
-                };
-                dispatch(s, tx, Message::Chat(back));
-                return true;
-            }
-            false
-        });
+                    let back = if everything {
+                        Action::SendTo(Scope::Channel)
+                    } else {
+                        Action::Target(Scope::Channel)
+                    };
+                    dispatch(s, tx, Message::Chat(back));
+                    return true;
+                }
+                false
+            });
     }
     let left = chat::MAX_BYTES.saturating_sub(chat.draft.len());
     let note = if chat.draft_cut {
@@ -1765,7 +1776,11 @@ fn fresh(s: &App, t: &Theme, layout: Layout) -> Option<El> {
                     .press(t.wash(0.10))
                     .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
                     .on_press_tx(|_: &mut App, tx: &mut Tx| tx.scroll_to_bottom(HISTORY))
-                    .child(icon(&icons::CHEVRON_DOWN, 12.0).color(t.muted).a11y_hidden())
+                    .child(
+                        icon(&icons::CHEVRON_DOWN, 12.0)
+                            .color(t.muted)
+                            .a11y_hidden(),
+                    )
                     .child(text(label).font(ty::SMALL_STRONG).color(t.text)),
             ),
     )

@@ -3892,7 +3892,10 @@ mod tests {
     fn hovering_the_server_log_offers_search_and_escape_closes_it() {
         let mut rt = runtime(server_log, (900.0, 790.0));
         settle(&mut rt);
-        assert!(rt.find("log-search-open").is_some(), "faint at rest, but there");
+        assert!(
+            rt.find("log-search-open").is_some(),
+            "faint at rest, but there"
+        );
         click(&mut rt, "server-log");
         settle(&mut rt);
         click(&mut rt, "log-search-open");

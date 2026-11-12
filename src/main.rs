@@ -463,13 +463,9 @@ impl ServerSession {
                 .current
                 .as_ref()
                 .is_none_or(|current| current.id != id)
-            && self
-                .state
-                .channels
-                .iter()
-                .any(|channel| {
-                    channel.id == id && channel.join_access.can_request() && channel.spacer().is_none()
-                })
+            && self.state.channels.iter().any(|channel| {
+                channel.id == id && channel.join_access.can_request() && channel.spacer().is_none()
+            })
     }
 
     fn microphone_off(&self) -> bool {
@@ -2439,11 +2435,20 @@ impl App {
             .collapsed_channels
             .iter()
             .copied()
-            .filter(|id| server.state.channels.iter().any(|channel| channel.id == *id))
+            .filter(|id| {
+                server
+                    .state
+                    .channels
+                    .iter()
+                    .any(|channel| channel.id == *id)
+            })
             .collect();
         if address.is_empty()
             || self.saved.as_ref().is_some_and(|saved| {
-                saved.collapsed_channels.get(&address).map_or(folded.is_empty(), |set| *set == folded)
+                saved
+                    .collapsed_channels
+                    .get(&address)
+                    .map_or(folded.is_empty(), |set| *set == folded)
             })
         {
             return;
@@ -4391,9 +4396,11 @@ impl App {
                 session.connected = true;
                 session.detail = detail;
                 // The tree folds as you left it on this server.
-                if let Some(folded) = self.saved.as_ref().and_then(|saved| {
-                    saved.collapsed_channels.get(session.address.trim())
-                }) {
+                if let Some(folded) = self
+                    .saved
+                    .as_ref()
+                    .and_then(|saved| saved.collapsed_channels.get(session.address.trim()))
+                {
                     session.collapsed_channels = folded.iter().copied().collect();
                 }
                 session.status = if loopback {
@@ -6241,7 +6248,10 @@ mod tests {
         assert!(!app.footer_hidden);
         let stored = settings::load(&path).unwrap().unwrap();
         assert!(!stored.footer_hidden);
-        assert_eq!(stored.nickname, "Saved name", "the rest of the file is untouched");
+        assert_eq!(
+            stored.nickname, "Saved name",
+            "the rest of the file is untouched"
+        );
         let (mut restarted, _) = setup_fixture("footer-restart");
         restarted.load_settings(path.clone());
         assert!(!restarted.footer_hidden);

@@ -1340,13 +1340,13 @@ fn log_row(s: &App, t: &Theme, index: usize) -> El {
     // The name and what happened are separate, so a long name shortens before the event.
     let mut name_spans = vec![Span::new(0, entry.name.len()).bold()];
     name_spans.extend(find(&entry.name, log.query()).map(mark));
-    let action_spans: Vec<Span> = find(&entry.action, log.query()).map(mark).into_iter().collect();
+    let action_spans: Vec<Span> = find(&entry.action, log.query())
+        .map(mark)
+        .into_iter()
+        .collect();
     // The event keeps room for about 18 characters before it shortens as well.
     let action_room = (entry.action.chars().count() as f32 * 6.0).min(110.0);
-    let help = format!(
-        "{words}\n{}",
-        entry.at.format("%A, %-d %B %Y, %H:%M:%S")
-    );
+    let help = format!("{words}\n{}", entry.at.format("%A, %-d %B %Y, %H:%M:%S"));
     let line = row()
         .grow(1.0)
         .min_w(0.0)
@@ -1518,8 +1518,10 @@ Push-to-talk · hold "
             });
             help.push_str(key);
         }
-        crate::transmission::Mode::VoiceActivation => help.push_str("
-Voice activation"),
+        crate::transmission::Mode::VoiceActivation => help.push_str(
+            "
+Voice activation",
+        ),
         crate::transmission::Mode::Continuous => {}
     }
     help
@@ -1877,9 +1879,9 @@ fn channel_tree(s: &App, t: &Theme) -> El {
 fn spacer_row(t: &Theme, id: u64, spacer: &client::Spacer) -> El {
     let label = text(match spacer.align {
         // Enough copies to cross the widest sidebar; the row clips the rest.
-        client::SpacerAlign::Repeat if !spacer.text.is_empty() => {
-            spacer.text.repeat(160 / spacer.text.chars().count().max(1) + 1)
-        }
+        client::SpacerAlign::Repeat if !spacer.text.is_empty() => spacer
+            .text
+            .repeat(160 / spacer.text.chars().count().max(1) + 1),
         _ => spacer.text.clone(),
     })
     .font(ty::SMALL_STRONG)
@@ -1946,7 +1948,11 @@ fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .item(join)
         .item(
             MenuItem::new(if collapsed { "Expand" } else { "Collapse" })
-                .icon(if collapsed { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT })
+                .icon(if collapsed {
+                    &icons::CHEVRON_DOWN
+                } else {
+                    &icons::CHEVRON_RIGHT
+                })
                 .disabled(!foldable)
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     s.ui.channel_menu = None;

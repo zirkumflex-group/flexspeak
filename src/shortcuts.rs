@@ -283,10 +283,11 @@ impl Shortcuts {
                 taken.push(*key);
             }
         }
-        self.edges
-            .lock()
-            .unwrap()
-            .bind(next.iter().map(|(binding, key)| (*binding, key.id())).collect());
+        self.edges.lock().unwrap().bind(
+            next.iter()
+                .map(|(binding, key)| (*binding, key.id()))
+                .collect(),
+        );
         self.ptt.store(false, Ordering::Release);
         self.bindings = next;
         self.taken = taken;
@@ -463,7 +464,10 @@ mod tests {
         .parse()
         .unwrap();
         assert_eq!(
-            cleared.iter().map(|(binding, _)| *binding).collect::<Vec<_>>(),
+            cleared
+                .iter()
+                .map(|(binding, _)| *binding)
+                .collect::<Vec<_>>(),
             [Binding::Deafen, Binding::PushToTalk]
         );
     }

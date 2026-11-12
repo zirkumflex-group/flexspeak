@@ -288,7 +288,9 @@ pub fn settings(s: &App, t: &Theme, k: &Kit) -> El {
                     speed(progress)
                 )
             }
-            Phase::Ready => format!("{next} is ready. Restart to install it and rejoin your servers."),
+            Phase::Ready => {
+                format!("{next} is ready. Restart to install it and rejoin your servers.")
+            }
             Phase::Installing => format!("Installing {next}…"),
             Phase::Failed { detail, .. } => shorten(detail),
             Phase::Idle if u.checking => "Checking for updates…".into(),

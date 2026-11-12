@@ -534,7 +534,6 @@ impl AudioEngine {
     }
 
     pub fn set_capture(&mut self, enabled: bool) -> Result<()> {
-
         if self.capture.enabled() != enabled {
             self.reset_capture(enabled)?;
         }
@@ -1102,7 +1101,11 @@ pub fn play_alone(output: DeviceChoice, samples: Vec<f32>, volume: Arc<PlaybackV
         });
 }
 
-fn play_alone_now(output: &DeviceChoice, samples: &[f32], volume: Arc<PlaybackVolume>) -> Result<()> {
+fn play_alone_now(
+    output: &DeviceChoice,
+    samples: &[f32],
+    volume: Arc<PlaybackVolume>,
+) -> Result<()> {
     let output = stand_in(output, false).context("No playback device is connected")?;
     let device = find_device(&output, false)?;
     let config = config(&device, false).context("No usable playback configuration")?;
@@ -1145,7 +1148,9 @@ fn play_alone_now(output: &DeviceChoice, samples: &[f32], volume: Arc<PlaybackVo
     .context("Cannot open playback device")?;
     stream.play()?;
     // What the device still holds once the last sample has been handed to it.
-    std::thread::sleep(Duration::from_secs_f64(frames as f64 / f64::from(rate)) + Duration::from_millis(150));
+    std::thread::sleep(
+        Duration::from_secs_f64(frames as f64 / f64::from(rate)) + Duration::from_millis(150),
+    );
     Ok(())
 }
 

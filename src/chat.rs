@@ -710,9 +710,8 @@ impl Chat {
 /// breaks are dropped.
 pub fn plain(text: &str) -> String {
     const TAGS: [&str; 26] = [
-        "b", "i", "u", "s", "url", "img", "color", "size", "center", "left", "right", "list",
-        "*", "hr", "table", "tr", "th", "td", "quote", "code", "font", "ul", "ol", "li", "sub",
-        "sup",
+        "b", "i", "u", "s", "url", "img", "color", "size", "center", "left", "right", "list", "*",
+        "hr", "table", "tr", "th", "td", "quote", "code", "font", "ul", "ol", "li", "sub", "sup",
     ];
     let mut out = String::with_capacity(text.len().min(MAX_RECEIVED));
     // The address of an open `[URL=…]`, added after its label.
