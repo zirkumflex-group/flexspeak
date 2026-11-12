@@ -779,11 +779,16 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
             Some(Message::AddServer),
         )]),
     ));
-    Section::boxed("servers", "Servers", "saved servers list bookmarks address hostname", rows)
-        .note(group_note(
-            t,
-            "Save as many servers as you like and connect to several at once.",
-        ))
+    Section::boxed(
+        "servers",
+        "Servers",
+        "saved servers list bookmarks address hostname",
+        rows,
+    )
+    .note(group_note(
+        t,
+        "Save as many servers as you like and connect to several at once.",
+    ))
 }
 
 /// A word beside a name in the accent colour: the server in use.
@@ -906,7 +911,10 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
             button(
                 t,
                 "remove-server",
-                if s.server_editor.as_ref().is_some_and(|editor| editor.remove_armed) {
+                if s.server_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.remove_armed)
+                {
                     "Press Again to Remove"
                 } else {
                     "Remove"
@@ -2555,8 +2563,15 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
     // The key itself, so push-to-talk is set up in one place.
     if settings.mode == transmission::Mode::PushToTalk && shortcuts::supported() {
         rows.push(
-            shortcut_row(s, t, k, shortcuts::Binding::PushToTalk, "Push-to-talk key", None)
-                .key("transmission-ptt-key"),
+            shortcut_row(
+                s,
+                t,
+                k,
+                shortcuts::Binding::PushToTalk,
+                "Push-to-talk key",
+                None,
+            )
+            .key("transmission-ptt-key"),
         );
     }
     match settings.mode {
@@ -2629,8 +2644,15 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
 }
 
 /// Operating-system access, with its note. Onboarding shows it too.
+/// The permission rows for setup, whose step title already says Permissions.
 pub fn permissions(s: &App, t: &Theme) -> El {
-    permission_section(s, t).render(t, "").unwrap_or_else(el)
+    let section = permission_section(s, t);
+    col()
+        .key(section.key)
+        .w_full()
+        .gap(8.0)
+        .child(group(t, section.rows.into_iter().map(|row| row.el)))
+        .children(section.note)
 }
 
 fn permission_section(s: &App, t: &Theme) -> Section {

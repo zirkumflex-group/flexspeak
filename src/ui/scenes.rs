@@ -295,6 +295,7 @@ fn setup_ts6_server(s: &mut App) {
             "games.example.org:1234".into(),
             "friends.example.net".into(),
         ],
+        names: [("ts.zirkumflex.io".to_owned(), "Zirkumflex".to_owned())].into(),
         input,
         output,
         push_to_talk: true,

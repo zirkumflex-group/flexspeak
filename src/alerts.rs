@@ -258,7 +258,12 @@ impl Alerts {
                 incident.address = None;
             }
             let id = incident.id;
-            if let Some(entry) = self.history.iter_mut().rev().find(|entry| entry.incident == id) {
+            if let Some(entry) = self
+                .history
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.incident == id)
+            {
                 entry.detail = format!("{shown} ({logged})");
             }
         }

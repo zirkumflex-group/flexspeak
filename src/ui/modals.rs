@@ -21,8 +21,9 @@ fn install(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, offer: &crate::inst
         .gap(12.0)
         .child(
             text(
-                "Flexspeak is running from a temporary place, so updates would be lost when it is \
-                 moved or deleted. Install it to keep it and its updates. Your settings stay as they are.",
+                "This copy of Flexspeak runs from outside the apps folder. Install it to keep it and \
+                 its updates in one place, or choose Don’t Ask Again to keep using a copy you put \
+                 here on purpose. Your settings stay as they are.",
             )
             .font(ty::BODY)
             .color(t.text)
@@ -105,7 +106,13 @@ pub(super) fn remember_password(
 }
 
 /// Asks for a server's password after the server refused the one it was given.
-fn server_password(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, prompt: &ServerPasswordPrompt) {
+fn server_password(
+    s: &App,
+    t: &Theme,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    prompt: &ServerPasswordPrompt,
+) {
     let mut body = col().w_full().px(16.0).pb(16.0).gap(10.0).child(field(
         k,
         &s.ui.prompt_password,

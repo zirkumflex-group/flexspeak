@@ -531,7 +531,11 @@ pub fn start(
             })();
             // Disconnected by now: count it out before telling the app, which may quit on it.
             drop(running);
-            if let Some(refusal) = result.as_ref().err().and_then(|error| error.downcast_ref::<Refusal>()) {
+            if let Some(refusal) = result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<Refusal>())
+            {
                 let _ = events.blocking_send(Event::Refused(refusal.clone()));
             }
             let _ = events.blocking_send(Event::Stopped(result.err().map(|error| {
