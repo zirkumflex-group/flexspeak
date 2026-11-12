@@ -225,6 +225,8 @@ pub struct Chat {
     /// Tabs is on its All tab: every conversation together, tagged as the feed tags them.
     pub everything: bool,
     pub draft: String,
+    /// The last paste didn't fit and was cut at `MAX_BYTES`; cleared by the next edit.
+    pub draft_cut: bool,
     unread: Vec<(Scope, u32)>,
     /// Sent and not yet seen coming back, oldest first.
     sent: Vec<Sent>,
@@ -242,6 +244,8 @@ struct Sent {
     scope: Scope,
     /// As the history would show it.
     text: String,
+    /// As it was typed, to put back in the box if the server refuses it.
+    draft: String,
     at: Instant,
 }
 
@@ -340,14 +344,20 @@ impl Chat {
         self.sent.push(Sent {
             scope,
             text: plain(text),
+            draft: self.draft.trim().to_owned(),
             at: now,
         });
     }
 
-    /// The server refused a message: the oldest one waiting isn't coming back.
+    /// The server refused a message: the oldest one waiting isn't coming back. Its text goes
+    /// back in the box unless something new is being written there.
     pub fn refused(&mut self) {
-        if !self.sent.is_empty() {
-            self.sent.remove(0);
+        if self.sent.is_empty() {
+            return;
+        }
+        let lost = self.sent.remove(0);
+        if self.draft.trim().is_empty() {
+            self.draft = lost.draft;
         }
     }
 
@@ -668,6 +678,18 @@ impl Chat {
         }
     }
 
+    /// Unread lines among what `layout` has on screen: those that came while you read back.
+    pub fn unread_shown(&self, layout: Layout) -> u32 {
+        self.unread
+            .iter()
+            .filter(|(scope, _)| match layout {
+                Layout::Tabs => self.everything || *scope == self.target,
+                Layout::Feed => self.filter.shows(scope),
+            })
+            .map(|(_, count)| count)
+            .sum()
+    }
+
     /// Clears what `layout` has on screen. True when that changed a count.
     pub fn mark_seen(&mut self, layout: Layout) -> bool {
         let before = self.unread.len();
@@ -980,12 +1002,22 @@ mod tests {
         assert!(chat.receive(own("hello"), "Lobby").is_some());
         assert_eq!(chat.entries().count(), 2);
 
-        // Refused: nothing is shown.
-        let mut chat = Chat::default();
+        // Refused: nothing is shown, and the text goes back in the empty box.
+        let mut chat = Chat {
+            draft: "hi all ".into(),
+            ..Chat::default()
+        };
         chat.sent(Scope::Server, "hi all", base);
+        chat.draft.clear();
         chat.refused();
         assert!(!chat.overdue(base + Duration::from_secs(3), "Jan", "Lobby"));
         assert!(chat.is_empty_for_tests());
+        assert_eq!(chat.draft, "hi all");
+        // Something new in the box stays.
+        chat.sent(Scope::Server, "hi all", base);
+        chat.draft = "next".into();
+        chat.refused();
+        assert_eq!(chat.draft, "next");
     }
 
     #[test]

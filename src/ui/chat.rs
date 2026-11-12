@@ -10,7 +10,7 @@ use rune::{
     Color, El, Icon, Link, ScrollSpec, Span, TextStyle, Transition, Tx, col, el, icon, rich, row,
     text,
 };
-use rune_kit::{Kit, TextInput};
+use rune_kit::Kit;
 
 use super::home::tile_colour;
 use super::theme::{Theme, motion, radius, shadow, size, ty};
@@ -318,6 +318,8 @@ struct Head<'a> {
     tab_bar: TabBar,
     /// Whether the bar ends in the button that hides the column.
     hide: bool,
+    /// Where the side-by-side tabs lie; none in an inert sample.
+    strip: Option<&'a crate::ui::ChatStrip>,
 }
 
 impl<'a> Head<'a> {
@@ -353,6 +355,7 @@ impl<'a> Head<'a> {
             unread_server: chat.unread(&Scope::Server),
             tab_bar: s.chat_options.tab_bar,
             hide,
+            strip: Some(&s.ui.chat_strip),
         }
     }
 
@@ -415,6 +418,25 @@ fn hide_button(t: &Theme) -> El {
 
 /// The bar both layouts share: what leads scrolls sideways, the hide button stays put.
 fn bar(t: &Theme, strip: El, hide: bool) -> El {
+    bar_with(t, scrolling(strip), hide, None)
+}
+
+/// The key of the bar's sideways viewport.
+const STRIP: &str = "chat-bar-strip";
+
+/// `strip` in a viewport that scrolls sideways.
+fn scrolling(strip: El) -> El {
+    el().key(STRIP)
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .scroll_x()
+        .scroll_edge_fade(12.0)
+        .child(strip)
+}
+
+/// The bar around a prepared strip, with an optional mark before the hide button.
+fn bar_with(t: &Theme, strip: El, hide: bool, mark: Option<El>) -> El {
     row()
         .key("chat-bar")
         .w_full()
@@ -423,16 +445,87 @@ fn bar(t: &Theme, strip: El, hide: bool) -> El {
         .pr(6.0)
         .gap(4.0)
         .center_y()
-        .child(
-            el().key("chat-bar-strip")
-                .grow(1.0)
-                .min_w(0.0)
-                .h_full()
-                .scroll_x()
-                .scroll_edge_fade(12.0)
-                .child(strip),
-        )
+        .child(strip)
+        .children(mark)
         .children(hide.then(|| hide_button(t)))
+}
+
+/// Side by side: the plain wheel scrolls the tabs too, and a mark at the end counts what's
+/// unread in tabs out of sight; pressing it brings the first of them into view.
+fn side_by_side(t: &Theme, head: &Head, strip: El, tabs: &[(String, u32, bool)]) -> El {
+    let Some(place) = head.strip else {
+        return bar(t, strip, head.hide);
+    };
+    let strip = strip.on_layout(|s: &mut App, rect| s.ui.chat_strip.content = rect);
+    let viewport = scrolling(strip)
+        .on_layout(|s: &mut App, rect| s.ui.chat_strip.bar = rect)
+        .on_wheel(|s: &mut App, wheel: rune::WheelEvent, tx: &mut Tx| {
+            if wheel.dx != 0.0 || wheel.dy == 0.0 || wheel.mods.shift {
+                return false;
+            }
+            let (offset, max) = s.ui.chat_strip.offset();
+            if max <= 0.0 {
+                return false;
+            }
+            tx.scroll_to_x(STRIP, (offset - wheel.dy).clamp(0.0, max));
+            true
+        });
+    let hidden: Vec<&(String, u32, bool)> =
+        tabs.iter().filter(|(key, ..)| place.hides(key)).collect();
+    let mark = (!hidden.is_empty()).then(|| {
+        let unread: u32 = hidden.iter().map(|(_, count, _)| count).sum();
+        let first = hidden
+            .iter()
+            .find(|(_, count, _)| *count > 0)
+            .or(hidden.last())
+            .map(|(key, ..)| key.clone())
+            .unwrap_or_default();
+        let help = match unread {
+            0 => "More conversations".to_owned(),
+            1 => "More conversations · 1 unread".to_owned(),
+            n => format!("More conversations · {n} unread"),
+        };
+        let mut mark = row()
+            .key("chat-bar-more")
+            .role("button")
+            .label(help.clone())
+            .help(help)
+            .h(24.0)
+            .px(4.0)
+            .gap(3.0)
+            .center_y()
+            .radius(radius::CONTROL)
+            .focusable(true)
+            .cursor(rune::Cursor::Pointer)
+            .hover(t.wash(0.06))
+            .press(t.wash(0.10))
+            .focus_ring(2.0, -2.0, t.accent.alpha(0.7))
+            .on_press_tx(move |_: &mut App, tx: &mut Tx| tx.scroll_into_view(first.clone()))
+            .child(icon(&icons::CHEVRON_RIGHT, 12.0).color(t.muted).a11y_hidden());
+        if unread > 0 {
+            let color = if hidden
+                .iter()
+                .any(|(_, count, private)| *count > 0 && *private)
+            {
+                t.private
+            } else {
+                t.accent
+            };
+            mark = mark.child(badge(t, unread, color));
+        }
+        mark
+    });
+    bar_with(t, viewport, head.hide, mark)
+}
+
+/// A tab that reports where it lies, so the bar knows when it is out of sight.
+fn watched(head: &Head, tab: El, key: String) -> El {
+    if head.strip.is_none() {
+        return tab;
+    }
+    tab.on_layout(move |s: &mut App, rect| {
+        s.ui.chat_strip.tabs.insert(key.clone(), rect);
+    })
 }
 
 /// The key of a conversation's tab in the side-by-side bar.
@@ -581,47 +674,66 @@ fn tabs(t: &Theme, head: &Head) -> El {
         return groups(t, head);
     }
     let on = |scope: &Scope| head.on(scope);
+    // Each tab's key, what's unread in it, and whether it is private.
+    let mut keys = Vec::with_capacity(head.peers.len() + head.past.len() + 2);
+    let mut add = |strip: El, tab: El, scope: &Scope, unread: u32| {
+        let key = tab_key(scope);
+        keys.push((key.clone(), unread, scope.is_private()));
+        strip.child(watched(head, tab, key))
+    };
     let mut strip = row()
         .role("tablist")
         .label("Conversations")
         .h_full()
         .gap(0.0)
         .center_y()
-        .child(all_tab(t, head.everything))
-        .child(tab(
+        .child(all_tab(t, head.everything));
+    strip = add(
+        strip,
+        tab(
             t,
             glyph(t, &icons::HASH, &Scope::Channel, on(&Scope::Channel)),
             head.channel_name(),
             Scope::Channel,
             on(&Scope::Channel),
             head.unread_channel,
-        ))
-        .child(tab(
+        ),
+        &Scope::Channel,
+        head.unread_channel,
+    );
+    strip = add(
+        strip,
+        tab(
             t,
             glyph(t, &icons::GLOBE, &Scope::Server, on(&Scope::Server)),
             "Server",
             Scope::Server,
             on(&Scope::Server),
             head.unread_server,
-        ));
+        ),
+        &Scope::Server,
+        head.unread_server,
+    );
     for (key, name, unread) in &head.peers {
         let scope = Scope::Private((*key).to_owned());
         let selected = on(&scope);
-        strip = strip.child(tab(t, avatar(name, 16.0), name, scope, selected, *unread));
+        let tab = tab(t, avatar(name, 16.0), name, scope.clone(), selected, *unread);
+        strip = add(strip, tab, &scope, *unread);
     }
     for (id, name) in &head.past {
         let scope = Scope::Past(*id);
         let selected = on(&scope);
-        strip = strip.child(tab(
+        let tab = tab(
             t,
             glyph(t, &icons::HASH, &scope, selected),
             name,
-            scope,
+            scope.clone(),
             selected,
             0,
-        ));
+        );
+        strip = add(strip, tab, &scope, 0);
     }
-    bar(t, strip, head.hide)
+    side_by_side(t, head, strip, &keys)
 }
 
 /// One tab that stands for a kind of conversation. It shows the open one of its kind, and a
@@ -654,6 +766,7 @@ fn group_tab(
         .px(7.0)
         .gap(5.0)
         .center_y()
+        .shrink()
         .radius(radius::CONTROL)
         .motion(motion::QUICK)
         .focusable(true)
@@ -670,11 +783,19 @@ fn group_tab(
         })
         .child(lead)
         .child(
+            // The bar never scrolls: names shorten, the channel's first, so the count and
+            // chevron always show.
             text(label.to_owned())
                 .font(if selected { ty::BODY_STRONG } else { ty::BODY })
                 .color(ink)
                 .max_w(96.0)
-                .truncate_fade(),
+                .truncate_fade()
+                .shrink()
+                .min_w(if matches!(list, List::Channels) {
+                    0.0
+                } else {
+                    36.0
+                }),
         );
     if unread > 0 {
         tab = tab.child(badge(t, unread, color));
@@ -749,7 +870,14 @@ fn groups(t: &Theme, head: &Head) -> El {
             Action::People,
         ));
     }
-    bar(t, strip, head.hide)
+    let strip = row()
+        .key(STRIP)
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .clip_rounded(0.0)
+        .child(strip.shrink());
+    bar_with(t, strip, head.hide, None)
 }
 
 /// The pointer came onto or left a list's tab or the list itself.
@@ -1152,15 +1280,24 @@ fn history(t: &Theme, k: &Kit, lines: Vec<El>, key: &str, empty: &str) -> El {
                 .key("chat-empty"),
         );
     }
+    let mut list = col()
+        .key(key.to_owned())
+        .role("list")
+        .label("Messages")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full();
+    // Lines that arrive while you read back stay unread until you are at the foot again.
+    if key == HISTORY {
+        list = list.on_at_bottom(|s: &mut App, at| {
+            s.ui.chat_back = !at;
+            if at {
+                s.chat_seen();
+            }
+        });
+    }
     k.scroll_bar(
-        col()
-            .key(key.to_owned())
-            .role("list")
-            .label("Messages")
-            .grow(1.0)
-            .min_h(0.0)
-            .w_full()
-            .scroll(ScrollSpec { stick_bottom: true })
+        list.scroll(ScrollSpec { stick_bottom: true })
             .scroll_edge_fade(14.0)
             .child(
                 // A short conversation rests on the message box, as the newest line always does.
@@ -1294,24 +1431,32 @@ fn composer(s: &App, t: &Theme, k: &Kit, head: &Head) -> El {
     let feed = head.feed;
     let everything = head.everything;
     let (placeholder, enabled) = prompt(s, head);
-    let ready = enabled && !s.server().chat.draft.trim().is_empty();
-    let field = TextInput::new(&s.ui.chat_input)
-        .placeholder(&placeholder)
-        .label(&placeholder)
-        .plain()
-        .width(None)
-        .height(34.0)
-        .disabled(!enabled)
-        .on_edit(|s: &mut App| &mut s.ui.chat_input)
-        .on_change(|s: &mut App, tx: &mut Tx| {
-            let value = s.ui.chat_input.text.clone();
-            dispatch(s, tx, Message::Chat(Action::Draft(value)));
-        })
-        .on_submit(send(Message::Chat(Action::Send)))
-        // In the feed, Escape lets go of a private or server target.
-        .on_key(move |s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
-            let elsewhere = s.server().chat.target != Scope::Channel;
-            if key.key == rune::Key::Escape && feed && elsewhere {
+    let chat = &s.server().chat;
+    let ready = enabled && !chat.draft.trim().is_empty();
+    // Up to five lines: Enter sends, Shift+Enter starts a new line.
+    let mut editor = rune::text_input(&s.ui.chat_input, ty::BODY)
+        .key("input")
+        .w_full()
+        .color(t.text)
+        .placeholder(placeholder.clone(), t.faint)
+        .caret(t.text, k.selection())
+        .label(placeholder.clone())
+        .disabled(!enabled);
+    if enabled {
+        editor = editor
+            .on_edit(|s: &mut App| &mut s.ui.chat_input)
+            .on_input_change(|s: &mut App, tx: &mut Tx| {
+                let value = s.ui.chat_input.text.clone();
+                dispatch(s, tx, Message::Chat(Action::Draft(value)));
+            })
+            .on_input_key(move |s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
+                if key.key == rune::Key::Enter && !key.mods.shift {
+                    dispatch(s, tx, Message::Chat(Action::Send));
+                    return true;
+                }
+                // In the feed, Escape lets go of a private or server target.
+                let elsewhere = s.server().chat.target != Scope::Channel;
+                if key.key == rune::Key::Escape && feed && elsewhere {
                 let back = if everything {
                     Action::SendTo(Scope::Channel)
                 } else {
@@ -1321,16 +1466,58 @@ fn composer(s: &App, t: &Theme, k: &Kit, head: &Head) -> El {
                 return true;
             }
             false
-        })
-        .trailing(icon_button(
+        });
+    }
+    let left = chat::MAX_BYTES.saturating_sub(chat.draft.len());
+    let note = if chat.draft_cut {
+        Some(format!("Cut to fit, {left} left"))
+    } else {
+        (left <= 100).then(|| left.to_string())
+    };
+    let mut side = row().key("trailing").self_end().center_y().gap(4.0).pb(3.0);
+    if let Some(note) = note {
+        side = side.child(
+            text(note)
+                .key("chat-left")
+                .font(ty::CAPTION.features("'tnum' 1"))
+                .color(if left == 0 || chat.draft_cut {
+                    t.fair
+                } else {
+                    t.faint
+                })
+                .help(format!(
+                    "Messages hold up to {} bytes; long letters and emoji take more than one",
+                    chat::MAX_BYTES
+                )),
+        );
+    }
+    let field = row()
+        .role("textbox")
+        .w_full()
+        .pl(10.0)
+        .pr(3.0)
+        .gap(6.0)
+        .layer_opacity(if enabled { 1.0 } else { 0.5 })
+        .child(
+            col()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .py(8.0)
+                .child(rune::auto_grow(editor, 1, 5)),
+        )
+        .child(side.child(icon_button(
             t,
             "chat-send",
             &icons::SEND,
-            "Send · Return",
+            if cfg!(target_os = "macos") {
+                "Send · Return"
+            } else {
+                "Send · Enter"
+            },
             Variant::Ghost,
             ready.then_some(Message::Chat(Action::Send)),
-        ))
-        .build(k);
+        )));
     let mut to = recipient(t, head);
     if feed {
         let list = List::SendTo;
@@ -1431,7 +1618,7 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
                 t,
                 k,
                 lines,
-                "chat-scroll",
+                HISTORY,
                 match (style, &chat.target) {
                     (Layout::Tabs, Scope::Past(_)) => "Nothing was said here",
                     (Layout::Tabs, _) => "No messages here yet",
@@ -1450,8 +1637,58 @@ fn panel(s: &App, t: &Theme, k: &Kit, docked: bool) -> El {
             Layout::Feed => filters(t, &head),
         })
         .child(divider(t))
-        .child(lines)
+        .child(
+            col()
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(lines)
+                .children(fresh(s, t, layout)),
+        )
         .child(composer(s, t, k, &head))
+}
+
+/// The history's scroll viewport.
+const HISTORY: &str = "chat-scroll";
+
+/// While you read back: how many lines came in since, as a control that jumps to the newest.
+fn fresh(s: &App, t: &Theme, layout: Layout) -> Option<El> {
+    let count = s.server().chat.unread_shown(layout);
+    if !s.ui.chat_back || count == 0 {
+        return None;
+    }
+    let label = if count == 1 {
+        "1 new message".to_owned()
+    } else {
+        format!("{count} new messages")
+    };
+    Some(
+        row()
+            .pin(Some(0.0), None, Some(0.0), Some(8.0))
+            .justify_center()
+            .child(
+                row()
+                    .key("chat-fresh")
+                    .role("button")
+                    .label(label.clone())
+                    .help("Jump to the newest message")
+                    .h(24.0)
+                    .px(10.0)
+                    .gap(6.0)
+                    .center_y()
+                    .radius(12.0)
+                    .fill(t.raised)
+                    .border(1.0, t.hairline)
+                    .focusable(true)
+                    .cursor(rune::Cursor::Pointer)
+                    .hover(t.wash(0.06))
+                    .press(t.wash(0.10))
+                    .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
+                    .on_press_tx(|_: &mut App, tx: &mut Tx| tx.scroll_to_bottom(HISTORY))
+                    .child(icon(&icons::CHEVRON_DOWN, 12.0).color(t.muted).a11y_hidden())
+                    .child(text(label).font(ty::SMALL_STRONG).color(t.text)),
+            ),
+    )
 }
 
 /// The column docked beside the stage, when there is room and it isn't hidden.
@@ -1664,6 +1901,7 @@ fn sample(t: &Theme, k: &Kit, layout: Layout, tab_bar: TabBar) -> El {
         unread_server: 0,
         tab_bar,
         hide: false,
+        strip: None,
     };
     let lines = entries
         .iter()

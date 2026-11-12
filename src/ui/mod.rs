@@ -251,6 +251,10 @@ pub struct UiState {
     /// The chat column while it hides behind the right edge, as the rail does behind the left.
     pub chat_peek: RailPeek,
     pub chat_input: TextEdit,
+    /// The history is scrolled back from its newest line, so new lines stay unread.
+    pub chat_back: bool,
+    /// Where the side-by-side bar and its tabs lie, to find tabs scrolled out of sight.
+    pub chat_strip: ChatStrip,
     pub chat_toast: Option<ChatToast>,
     /// The pointer is over the pop-up, which keeps it up.
     pub chat_toast_hover: bool,
@@ -335,6 +339,8 @@ impl Default for UiState {
             rail_peek: RailPeek::default(),
             chat_peek: RailPeek::default(),
             chat_input: TextEdit::new(""),
+            chat_back: false,
+            chat_strip: ChatStrip::default(),
             chat_toast: None,
             chat_toast_hover: false,
             chat_over_stream: false,
@@ -377,6 +383,32 @@ impl UiState {
     /// on it, or its message box is being typed in.
     pub fn chat_peek_open(&self, now: Instant) -> bool {
         self.chat_peek.open(now) || self.chat_input.focused
+    }
+}
+
+/// The side-by-side chat bar as last laid out: `[x, y, w, h]` in window points.
+#[derive(Default)]
+pub struct ChatStrip {
+    /// The scrolling viewport.
+    pub bar: [f32; 4],
+    /// The row of tabs inside it, which moves as it scrolls.
+    pub content: [f32; 4],
+    pub tabs: std::collections::HashMap<String, [f32; 4]>,
+}
+
+impl ChatStrip {
+    /// How far the tabs are scrolled, and how far they can go.
+    pub fn offset(&self) -> (f32, f32) {
+        let offset = self.bar[0] - self.content[0];
+        (offset, (self.content[2] - self.bar[2]).max(0.0))
+    }
+
+    /// Whether the tab keyed `key` is at least partly out of sight.
+    pub fn hides(&self, key: &str) -> bool {
+        let [x, _, w, _] = self.bar;
+        self.tabs
+            .get(key)
+            .is_some_and(|tab| tab[0] < x - 1.0 || tab[0] + tab[2] > x + w + 1.0)
     }
 }
 

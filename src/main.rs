@@ -4587,7 +4587,8 @@ impl App {
 
     /// Clears the unread counts of what the chat has on screen, and its pop-up.
     fn chat_seen(&mut self) {
-        if self.chat_showing(Instant::now()) {
+        // Read back, the lines below wait under the "new messages" control.
+        if self.chat_showing(Instant::now()) && !self.ui.chat_back {
             let layout = self.chat_options.layout;
             self.server_mut().chat.mark_seen(layout);
             self.ui.chat_toast = None;
@@ -4603,6 +4604,7 @@ impl App {
         let (layout, options) = (self.chat_options.layout, self.chat_options);
         let active = self.active == Some(id);
         let showing = active && self.chat_showing(now);
+        let back = self.ui.chat_back;
         // A private message is for you alone: in the background it sounds and flashes the
         // taskbar. Channel and server messages only wait as unread.
         if entry.scope.is_private() && !self.window_focused {
@@ -4612,7 +4614,7 @@ impl App {
         let Some(session) = self.session_mut(id) else {
             return;
         };
-        if showing && session.chat.shows(layout, &entry.scope) {
+        if showing && !back && session.chat.shows(layout, &entry.scope) {
             return;
         }
         session.chat.mark_unread(&entry.scope);
@@ -4691,7 +4693,10 @@ impl App {
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
-                self.server_mut().chat.draft = text[..end].to_owned();
+                let chat = &mut self.server_mut().chat;
+                // More than a character over: a paste was cut, which the box says.
+                chat.draft_cut = text.len() > chat::MAX_BYTES + 4;
+                chat.draft = text[..end].to_owned();
             }
             Action::Send => {
                 if !self.live() {
@@ -4716,8 +4721,9 @@ impl App {
                 self.begin_alert(Source::Chat);
                 if self.command(client::Command::Chat(target, text.clone())) {
                     let chat = &mut self.server_mut().chat;
-                    chat.draft.clear();
                     chat.sent(scope, &text, Instant::now());
+                    chat.draft.clear();
+                    chat.draft_cut = false;
                 }
             }
             Action::Target(scope) => {
