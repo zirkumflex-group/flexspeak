@@ -2571,13 +2571,13 @@ fn streaming_section(s: &App, t: &Theme, k: &Kit) -> Section {
             ),
         ),
         item(
-            "Fast capture (experimental)",
-            "fast capture experimental gpu game stall screen window",
+            "Fast capture",
+            "fast capture gpu game stall screen window standard",
             form_row(
                 t,
-                "Fast capture (experimental)",
+                "Fast capture",
                 Some(
-                    "Captures and resizes on the graphics card, so a busy game no longer stalls your stream or loads the CPU. Turn it off if the picture stays black or freezes.",
+                    "Captures and resizes on the graphics card, so a busy game doesn't stall your stream or load the CPU. If it stops working, your share carries on with standard capture. Turn it off if the picture stays black or freezes.",
                 ),
                 switch(
                     "fast-capture",

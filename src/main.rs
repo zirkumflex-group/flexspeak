@@ -1863,7 +1863,8 @@ impl App {
                 voice_output: self.output.clone(),
                 quality,
                 access,
-                fast_capture,
+                // Windows only: elsewhere it isn't asked for, so the dialog doesn't report it.
+                fast_capture: fast_capture && cfg!(windows),
                 hardware_av1,
             },
         )) {

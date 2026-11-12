@@ -194,6 +194,10 @@ pub const SCENES: &[Scene] = &[
         "sharing-stream-options-unavailable",
         sharing_stream_options_unavailable,
     ),
+    (
+        "sharing-fast-capture-fallback",
+        sharing_fast_capture_fallback,
+    ),
     ("sharing-alone", sharing_alone),
     ("sharing-sound", sharing_sound),
     ("sharing-audio-off", sharing_audio_off),
@@ -2891,6 +2895,17 @@ fn sharing_stream_options_unavailable(s: &mut App) {
     sharing_stream_options(s);
     s.server_mut().streaming.sharing.status.detail =
         "Public · VP8, AV1 unavailable · Standard capture".into();
+}
+
+/// Fast capture gave up during the share: a notice says so, and the dialog names the
+/// standard capture the share carries on with.
+fn sharing_fast_capture_fallback(s: &mut App) {
+    sharing_stream_options(s);
+    s.server_mut().streaming.sharing.status.detail = "Public · Standard capture".into();
+    s.alerts.raise(
+        Source::StreamCapture,
+        "Fast capture stopped working (the GPU has not finished a frame in 2 s). Your share carries on.",
+    );
 }
 
 /// Your share is the only one in the channel: the pane says so in place of its empty state.

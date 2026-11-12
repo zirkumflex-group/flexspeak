@@ -34,7 +34,7 @@ pub struct Live {
 }
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub enum Output {
-    /// The first frame was sent. Says whether the experimental fast capture produced it and
+    /// The first frame was sent. Says whether fast capture produced it and
     /// whether hardware AV1 is offered to viewers.
     Ready {
         fast_capture: bool,
@@ -52,6 +52,8 @@ pub enum Output {
     /// Something went wrong that the share carries on without, such as system audio that
     /// could not be opened after a change.
     Warning(String),
+    /// Fast capture gave up during the share, which carries on with the standard capture.
+    StandardCapture(String),
     Failed(String),
 }
 pub struct Publisher {
@@ -862,6 +864,59 @@ mod native {
             self.pc.close();
         }
     }
+    /// Starts WebRTC's own capture of a screen or window, which hands its pictures to `sink`.
+    fn start_desktop(kind: &SourceKind, sink: Arc<Sink>) -> Result<DesktopCapturer> {
+        let (window, id) = match *kind {
+            SourceKind::Window(id) => (true, Some(id)),
+            SourceKind::Screen(id) => (false, id),
+            SourceKind::Camera(_) => bail!("A camera is not captured as a screen"),
+        };
+        let mut desktop = capturer(window, id.is_none())?;
+        // Without its picker, macOS captures the main display when given no source.
+        #[cfg(target_os = "macos")]
+        let id = id.filter(|_| window);
+        let selected = id
+            .map(|id| {
+                desktop
+                    .get_source_list()
+                    .into_iter()
+                    .find(|source| source.id() == id)
+                    .ok_or_else(|| anyhow!("The selected screen or window is no longer available"))
+            })
+            .transpose()?;
+        desktop.start_capture(selected, move |frame| match frame {
+            Ok(frame) => sink.bgra(frame.data(), frame.stride(), frame.width(), frame.height()),
+            Err(CaptureError::Permanent) => {
+                *sink.failure.lock().unwrap() = Some(
+                    "Screen capture stopped. Check permission or select another window.".into(),
+                )
+            }
+            Err(CaptureError::Temporary) => {}
+        });
+        Ok(desktop)
+    }
+
+    /// Fast capture failed during a share: the standard capture takes over where it left off,
+    /// so viewers see a hitch at most, and the sharer is told.
+    #[cfg(target_os = "windows")]
+    fn fall_back(
+        kind: &SourceKind,
+        sink: &Arc<Sink>,
+        events: &mpsc::Sender<Output>,
+        error: &anyhow::Error,
+    ) -> Result<DesktopCapturer> {
+        tracing::warn!("Fast capture stopped, using standard capture: {error:#}");
+        let desktop = start_desktop(kind, sink.clone())
+            .with_context(|| format!("Fast capture stopped working ({error:#})"))?;
+        emit(
+            events,
+            Output::StandardCapture(format!(
+                "Fast capture stopped working ({error:#}). Your share carries on."
+            )),
+        )?;
+        Ok(desktop)
+    }
+
     fn emit(events: &mpsc::Sender<Output>, event: Output) -> Result<()> {
         events
             .try_send(event)
@@ -1117,37 +1172,7 @@ mod native {
             });
             camera_capture = Some(opened?);
         } else if !fast_started {
-            let (window, id) = match options.source.kind {
-                SourceKind::Window(id) => (true, Some(id)),
-                SourceKind::Screen(id) => (false, id),
-                SourceKind::Camera(_) => unreachable!(),
-            };
-            let mut desktop = capturer(window, id.is_none())?;
-            // Without its picker, macOS captures the main display when given no source.
-            #[cfg(target_os = "macos")]
-            let id = id.filter(|_| window);
-            let selected = id
-                .map(|id| {
-                    desktop
-                        .get_source_list()
-                        .into_iter()
-                        .find(|source| source.id() == id)
-                        .ok_or_else(|| {
-                            anyhow!("The selected screen or window is no longer available")
-                        })
-                })
-                .transpose()?;
-            let failed = failure.clone();
-            desktop.start_capture(selected, move |frame| match frame {
-                Ok(frame) => sink.bgra(frame.data(), frame.stride(), frame.width(), frame.height()),
-                Err(CaptureError::Permanent) => {
-                    *failed.lock().unwrap() = Some(
-                        "Screen capture stopped. Check permission or select another window.".into(),
-                    )
-                }
-                Err(CaptureError::Temporary) => {}
-            });
-            capture = Some(desktop);
+            capture = Some(start_desktop(&options.source.kind, sink.clone())?);
         }
         let mut audio_device = options.audio.clone();
         let mut system_audio = audio_device
@@ -1221,10 +1246,13 @@ mod native {
                                     largest.store(pack(quality.max_size()), Ordering::Relaxed);
                                     video_tick = frame_tick(quality);
                                     #[cfg(target_os = "windows")]
-                                    if let Some(fast) = &mut fast {
-                                        fast.reconfigure(quality.max_size(), frame_interval(quality))?;
+                                    if let Some(running) = &mut fast {
                                         // The last frame may be larger than the new limit.
                                         fast_frame = None;
+                                        if let Err(error) = running.reconfigure(quality.max_size(), frame_interval(quality)) {
+                                            fast = None;
+                                            capture = Some(fall_back(&options.source.kind, &sink, events, &error)?);
+                                        }
                                     }
                                     for (id, peer) in &peers {
                                         if let Err(error) = limit(&peer.pc, quality) {
@@ -1287,9 +1315,17 @@ mod native {
                         if idle.load(Ordering::Relaxed) && last_video.elapsed() < IDLE_FRAME { continue; }
                         if let Some(capture) = &mut capture { capture.capture_frame(); }
                         #[cfg(target_os = "windows")]
-                        if let Some(fast) = &mut fast {
-                            if let Some(buffer) = fast.poll()? {
-                                fast_frame = Some(VideoFrame::new(VideoRotation::VideoRotation0,buffer));
+                        if let Some(running) = &mut fast {
+                            match running.poll() {
+                                Ok(Some(buffer)) => fast_frame = Some(VideoFrame::new(VideoRotation::VideoRotation0,buffer)),
+                                Ok(None) => {},
+                                // The screen or window itself is gone: nothing else can capture it.
+                                Err(error) if running.closed() => return Err(error),
+                                Err(error) => {
+                                    fast = None;
+                                    fast_frame = None;
+                                    capture = Some(fall_back(&options.source.kind, &sink, events, &error)?);
+                                },
                             }
                             if let Some(frame) = &mut fast_frame {
                                 frame.timestamp_us = start.elapsed().as_micros() as i64;
@@ -1301,7 +1337,7 @@ mod native {
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             video.capture_frame(&frame); last_video = Instant::now(); frames += 1;
-                            if frames == 1 { emit(events,Output::Ready { fast_capture: fast_started, hardware_av1 })?; }
+                            if frames == 1 { emit(events,Output::Ready { fast_capture: false, hardware_av1 })?; }
                         }
                     }
                     _ = tick.tick() => {

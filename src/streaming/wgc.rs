@@ -281,11 +281,12 @@ impl Capture {
         if self.closed.load(Ordering::Acquire) {
             bail!("Screen capture stopped. Check permission or select another window.");
         }
-        self.step().map_err(|error| {
-            anyhow!(
-                "Fast capture stopped working ({error:#}). Turn off Fast capture in Settings > Streaming and share again."
-            )
-        })
+        self.step()
+    }
+
+    /// The screen or window being captured is gone, which no other capture gets around.
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     fn step(&mut self) -> Result<Option<I420Buffer>> {

@@ -35,6 +35,8 @@ pub enum Source {
     StreamEnded,
     StreamFrame,
     StreamPublish,
+    /// Fast capture gave up during a share, which carries on with the standard capture.
+    StreamCapture,
     Poke,
     /// A text message the server didn't take.
     Chat,
@@ -78,6 +80,7 @@ impl Source {
                 | Self::StreamEnded
                 | Self::StreamFrame
                 | Self::StreamPublish
+                | Self::StreamCapture
         )
     }
 
@@ -101,7 +104,9 @@ impl Source {
     pub fn severity(self) -> Severity {
         match self {
             Self::Connection | Self::Dropped | Self::Audio => Severity::Error,
-            Self::AudioFallback | Self::Flood | Self::StreamEnded => Severity::Notice,
+            Self::AudioFallback | Self::Flood | Self::StreamEnded | Self::StreamCapture => {
+                Severity::Notice
+            }
             _ => Severity::Warning,
         }
     }
@@ -126,6 +131,7 @@ impl Source {
             Self::StreamEnded => "Stream ended",
             Self::StreamFrame => "Video frame dropped",
             Self::StreamPublish => "Screen sharing stopped",
+            Self::StreamCapture => "Sharing with standard capture",
             Self::Poke => "Poke not sent",
             Self::Chat => "Message not sent",
             Self::ChatHistory => "Chat history not saved",
