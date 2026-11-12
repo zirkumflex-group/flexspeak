@@ -94,6 +94,7 @@ pub const SCENES: &[Scene] = &[
     ("member-channel-group", member_channel_group),
     ("member-groups-guest", member_groups_guest),
     ("member-kick", member_kick),
+    ("member-kick-several", member_kick_several),
     ("member-ban", member_ban),
     ("servers-menu", servers_menu),
     ("member-volume", member_volume),
@@ -1199,6 +1200,15 @@ fn member_states(s: &mut App) {
             }
         }
     }
+    // Theo turned down to 30%, which his row marks.
+    s.user_audio.insert(
+        "uid-3".into(),
+        settings::UserAudio {
+            volume_percent: 30,
+            muted: false,
+        },
+    );
+    s.server_mut().talking = [2].into();
 }
 
 /// Ines streams in Raid night while you sit in the Lobby: the tree marks her there too,
@@ -1668,6 +1678,14 @@ fn member_kick(s: &mut App) {
     moderation_draft(s, client::Moderation::KickServer, "Please read the rules");
 }
 
+/// Kicking several people at once names each of them.
+fn member_kick_several(s: &mut App) {
+    moderation_draft(s, client::Moderation::KickChannel, "");
+    if let Some(draft) = &mut s.server_mut().moderation {
+        draft.ids = vec![2, 3, 4];
+    }
+}
+
 fn member_ban(s: &mut App) {
     moderation_draft(s, client::Moderation::Ban(Some(604_800)), "Repeated spam");
 }
@@ -1735,6 +1753,7 @@ fn poked(s: &mut App) {
     connected(s);
     s.server_mut().pokes.push(crate::Poke {
         from: "Theo".into(),
+        key: "uid-3".into(),
         message: "Can you hear me?".into(),
     });
 }

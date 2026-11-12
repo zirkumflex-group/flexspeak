@@ -1488,6 +1488,7 @@ pub fn edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         .key("chat-edge")
         .role("button")
         .label(label)
+        .help(label)
         .pin(None, Some(size::HEADER), Some(0.0), None)
         .size(EDGE, height)
         .focusable(true)

@@ -301,6 +301,8 @@ pub struct UiState {
     pub close_hover: bool,
     /// The server log's splitter is being dragged.
     pub log_resizing: bool,
+    /// The sidebar's edge is being dragged.
+    pub sidebar_resizing: bool,
     pub log_people: bool,
     pub log_search: TextEdit,
     /// The first frame still has to build the frosted backdrop's pipelines.
@@ -363,6 +365,7 @@ impl Default for UiState {
             #[cfg(windows)]
             close_hover: false,
             log_resizing: false,
+            sidebar_resizing: false,
             log_people: false,
             log_search: TextEdit::new(""),
             warm_blur: true,
@@ -831,6 +834,17 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// The palette for the chosen scheme and theme.
+/// The connected sidebar's usual width, in points.
+pub const SIDEBAR_WIDTH: u16 = theme::size::SIDEBAR as u16;
+/// How narrow and how wide its edge can drag it.
+const SIDEBAR_MIN: u16 = 220;
+const SIDEBAR_MAX: u16 = 420;
+
+/// The sidebar's width from settings, kept within what its edge allows.
+pub fn sidebar_width(saved: Option<u16>) -> u16 {
+    saved.map_or(SIDEBAR_WIDTH, |width| width.clamp(SIDEBAR_MIN, SIDEBAR_MAX))
+}
+
 pub fn theme(s: &App) -> Theme {
     if !s.appearance.ignore_omarchy
         && let Some(current) = &s.omarchy

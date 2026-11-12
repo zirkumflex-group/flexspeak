@@ -73,6 +73,9 @@ pub struct Settings {
     /// The server log's height under the channel list, and whether it is folded away.
     #[serde(skip_serializing_if = "LogPane::is_default")]
     pub log_pane: LogPane,
+    /// The sidebar's width in points, when dragged away from the usual 260.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<u16>,
     /// The channels folded away in the tree, by server address, as they were left.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub collapsed_channels: BTreeMap<String, BTreeSet<u64>>,
@@ -408,6 +411,7 @@ impl Default for Settings {
             output_device_id: None,
             footer_hidden: false,
             log_pane: LogPane::default(),
+            sidebar_width: None,
             collapsed_channels: BTreeMap::new(),
             auto_download_updates: true,
             appearance: Appearance::default(),

@@ -159,7 +159,7 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
             .h_full()
             .children((!hidden).then(|| server_rail(s, t, k)))
             .child(sidebar(s, cx, t, k, layer))
-            .child(vertical_rule(t))
+            .child(sidebar_edge(s, t))
             .child(
                 pane(t)
                     .fill(t.stage)
@@ -633,6 +633,7 @@ fn rail_edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         .key("rail-edge")
         .role("button")
         .label("Show servers")
+        .help("Show servers")
         .absolute(0.0, size::HEADER)
         .size(RAIL_EDGE, height)
         .focusable(true)
@@ -776,7 +777,7 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
     };
     pane(t)
         .key("sidebar")
-        .w(size::SIDEBAR)
+        .w(f32::from(s.sidebar_width))
         .padding(12.0)
         .gap(8.0)
         .child(server)
@@ -790,6 +791,48 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
         .children(selection_bar(s, t))
         .children(server_log(s, cx, t, k))
         .child(voice_controls(s, t))
+}
+
+/// The hairline between the sidebar and the stage, which drags to resize the sidebar; a
+/// double-click puts it back. Its grip is wider than the line, on the panels' own colours.
+fn sidebar_edge(s: &App, t: &Theme) -> El {
+    let resizing = s.ui.sidebar_resizing;
+    row()
+        .key("sidebar-edge")
+        .role("separator")
+        .label("Resize the sidebar")
+        .help("Drag to resize the sidebar · double-click to reset it")
+        .w(5.0)
+        .h_full()
+        .cursor(rune::Cursor::ResizeColumn)
+        .on_drag(|s: &mut App, d: &mut Drag, tx: &mut Tx| match d.phase {
+            Phase::Down => {
+                s.ui.sidebar_resizing = true;
+                d.data = f32::from(s.sidebar_width);
+                if d.clicks == 2 {
+                    s.sidebar_width = super::SIDEBAR_WIDTH;
+                }
+            }
+            Phase::Move => {
+                tx.instant();
+                s.sidebar_width = super::sidebar_width(Some((d.data + d.dx).round() as u16));
+            }
+            Phase::Up => {
+                s.ui.sidebar_resizing = false;
+                if d.cancelled() {
+                    s.sidebar_width = d.data.round() as u16;
+                }
+                dispatch(s, tx, Message::SaveSidebarWidth);
+            }
+        })
+        .child(el().w(2.0).h_full().fill(t.surface).a11y_hidden())
+        .child(
+            el().w(1.0)
+                .h_full()
+                .fill(if resizing { t.accent } else { t.hairline })
+                .a11y_hidden(),
+        )
+        .child(el().w(2.0).h_full().fill(t.stage).a11y_hidden())
 }
 
 const LOG_ROW: f32 = 24.0;
@@ -1074,7 +1117,7 @@ fn log_people(s: &App, t: &Theme, k: &Kit) -> El {
         .key("log-people-menu")
         // Under the search bar, below the splitter and the log's 4 pt gap.
         .absolute(
-            size::SIDEBAR - 24.0 - WIDTH,
+            f32::from(s.sidebar_width) - 24.0 - WIDTH,
             SPLITTER + 4.0 + size::CONTROL + 4.0,
         )
         .w(WIDTH)
@@ -1514,6 +1557,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         .is_some_and(|drag| drag.ids.contains(&member.id)),
                     s.is_streaming(member),
                     s.user_audio(&member.uid).muted,
+                    s.user_audio(&member.uid).volume_percent,
                     private_unread(s, member),
                 )
             })
@@ -1820,7 +1864,8 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
             } else {
                 member.name.clone()
             })
-            .font(ty::BODY)
+            // Someone talking reads in a heavier weight as well as by the ring.
+            .font(if talking { ty::BODY_STRONG } else { ty::BODY })
             .color(t.text)
             .truncate_fade()
             .grow(1.0)
@@ -1850,7 +1895,16 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         entry = entry
             .child(chat::badge(t, unread, t.private).help("Private messages you haven't read"));
     }
-    if !member.is_self && s.user_audio(&member.uid).muted {
+    let audio = s.user_audio(&member.uid);
+    if !member.is_self && !audio.muted && !member.uid.is_empty() && audio.volume_percent != 100 {
+        let help = format!("Volume {}% · set by you", audio.volume_percent);
+        entry = entry.child(
+            el().help(help.clone())
+                .label(help)
+                .child(icon(&icons::VOLUME_2, 13.0).color(t.faint)),
+        );
+    }
+    if !member.is_self && audio.muted {
         entry = entry.child(
             el().help("Muted by you")
                 .label("Muted by you")

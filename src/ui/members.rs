@@ -26,13 +26,10 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
         .role("button")
         .label(member.name.clone())
         .checked(selected)
-        .help(if member.is_self {
-            "Right-click for options · drag onto a channel to join it"
-        } else {
-            "Click to select · ⌘/Ctrl-click to add · right-click for options"
-        });
+        .help(help(s, member));
+    // Selection is outlined, so it never reads as the current channel's tint.
     row = if selected {
-        row.fill(t.accent.alpha(0.16))
+        row.fill(t.wash(0.07)).border(1.0, t.accent.alpha(0.55))
     } else {
         row.hover(t.wash(0.05))
     };
@@ -114,6 +111,28 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
         })
 }
 
+/// A member row's tooltip: the full name, which a long one loses on the row, their volume when
+/// you changed it, then what the row does.
+fn help(s: &App, member: &client::Member) -> String {
+    let mut help = member.name.clone();
+    if member.is_self {
+        help.push_str(" (you)\nRight-click for options · drag onto a channel to join it");
+        return help;
+    }
+    let audio = s.user_audio(&member.uid);
+    if audio.muted {
+        help.push_str("\nMuted by you");
+    } else if !member.uid.is_empty() && audio.volume_percent != 100 {
+        help.push_str(&format!("\nVolume {}%", audio.volume_percent));
+    }
+    help.push_str(if cfg!(target_os = "macos") {
+        "\nClick to select · ⌘-click to add · double-click to message · right-click for options"
+    } else {
+        "\nClick to select · Ctrl-click to add · double-click to message · right-click for options"
+    });
+    help
+}
+
 /// The selection when the pressed member is part of it, else just that member.
 fn dragged_ids(s: &App, id: u16) -> Vec<u16> {
     if s.server().selected_members.contains(&id) && s.server().selected_members.len() > 1 {
@@ -163,7 +182,8 @@ fn server_group_rows(s: &App, ids: &[u16]) -> Vec<MenuEntry> {
                     dispatch(s, tx, Message::ToggleServerGroup(id));
                 });
             if mark == GroupMark::Mixed {
-                item = item.badge("Some");
+                // Plain text, as a menu's trailing detail reads, not a badge.
+                item = item.shortcut("Some");
             }
             MenuEntry::item(item)
         })
@@ -211,10 +231,11 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     } else {
         member.name.clone()
     };
-    // Colour tells the actions apart at a glance; anything unavailable stays grey.
+    // Icons stay neutral, so red is left to kicking and banning; anything unavailable fades.
     let tinted = |glyph: &'static rune::Icon, color: rune::Color, enabled: bool| {
         icon(glyph, 14.0).color(if enabled { color } else { t.faint })
     };
+    let neutral = |glyph: &'static rune::Icon, enabled: bool| tinted(glyph, t.muted, enabled);
     let mut menu = context_menu("member-menu", el(), Some(point))
         .min_width(200.0)
         .on_close(close)
@@ -222,7 +243,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     if ids.len() == 1 && !member.is_self {
         menu = menu.item(
             MenuItem::new("Message")
-                .lead(tinted(&icons::MESSAGE, t.private, true))
+                .lead(neutral(&icons::MESSAGE, true))
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     close(s);
                     dispatch(s, tx, Message::Chat(crate::chat::Action::Message(id)));
@@ -230,14 +251,14 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         );
         let denied = member.can_poke == Some(false);
         let mut poke = MenuItem::new("Poke…")
-            .lead(tinted(&icons::HAND, t.fair, !denied))
+            .lead(neutral(&icons::HAND, !denied))
             .disabled(denied)
             .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                 close(s);
                 dispatch(s, tx, Message::OpenPoke(id));
             });
         if denied {
-            poke = poke.description("The server doesn't let you poke them");
+            poke = poke.description("Not allowed by the server");
         }
         menu = menu.item(poke);
     }
@@ -246,7 +267,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         menu = menu
             .item(
                 MenuItem::new("Volume…")
-                    .lead(tinted(&icons::VOLUME_2, t.accent, true))
+                    .lead(neutral(&icons::VOLUME_2, true))
                     .description(format!("{}%", audio.volume_percent))
                     .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                         close(s);
@@ -256,9 +277,9 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
             .item(
                 MenuItem::new(if audio.muted { "Unmute" } else { "Mute" })
                     .lead(if audio.muted {
-                        tinted(&icons::VOLUME_2, t.good, true)
+                        neutral(&icons::VOLUME_2, true)
                     } else {
-                        tinted(&icons::VOLUME_OFF, t.poor, true)
+                        neutral(&icons::VOLUME_OFF, true)
                     })
                     .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                         close(s);
@@ -287,9 +308,9 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                     channel.name
                 ))
                 .lead(if channel.has_password {
-                    tinted(&icons::LOCK, t.fair, true)
+                    neutral(&icons::LOCK, true)
                 } else {
-                    tinted(&icons::VOLUME, t.muted, true)
+                    neutral(&icons::VOLUME, true)
                 })
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     close(s);
@@ -304,7 +325,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     } else {
         "Move to channel"
     })
-    .lead(tinted(&icons::MOVE, t.cpu, movable))
+    .lead(neutral(&icons::MOVE, movable))
     .disabled(!movable)
     .on_select(|s: &mut App| {
         s.ui.move_menu = !s.ui.move_menu;
@@ -313,7 +334,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     if movable {
         move_to = move_to.submenu(channels, s.ui.move_menu);
     } else if !s.can_move(&ids) {
-        move_to = move_to.description("The server doesn't let you move them");
+        move_to = move_to.description("Not allowed by the server");
     }
     menu = menu.item(move_to);
     menu = menu.separator();
@@ -332,7 +353,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         let group_ids = ids.clone();
         menu = menu.item(
             MenuItem::new(label)
-                .lead(tinted(&icons::SHIELD, t.accent, true))
+                .lead(neutral(&icons::SHIELD, true))
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     s.ui.move_menu = false;
                     s.ui.groups_menu = (s.ui.groups_menu != Some(which)).then_some(which);

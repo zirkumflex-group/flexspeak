@@ -472,7 +472,17 @@ fn moderation(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, draft: &Moderati
             "Ban",
         ),
     };
-    let mut body = col().w_full().px(16.0).pb(16.0).gap(12.0).child(field(
+    let mut body = col().w_full().px(16.0).pb(16.0).gap(12.0);
+    // A dialog for several people names them, so nobody is kicked by surprise.
+    if draft.ids.len() > 1 {
+        let names: Vec<String> = draft
+            .ids
+            .iter()
+            .filter_map(|id| s.find_member(*id).map(|member| member.name.clone()))
+            .collect();
+        body = body.child(muted(t, names.join(", ")).w_full());
+    }
+    body = body.child(field(
         k,
         &s.ui.moderation_reason,
         |s| &mut s.ui.moderation_reason,
@@ -570,9 +580,20 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
             format!("{} more pokes waiting", s.server().pokes.len() - 1),
         ));
     }
+    // Reply opens the private chat with them, as a double-click on their row does.
+    let reachable = s.live()
+        && s.server().state.channels.iter().any(|channel| {
+            channel
+                .members
+                .iter()
+                .any(|member| crate::client::chat_key(&member.uid, member.id) == poke.key)
+        });
     body = body.child(
-        row().w_full().child(el().grow(1.0)).child(
-            button(
+        row()
+            .w_full()
+            .gap(size::GAP)
+            .child(el().grow(1.0))
+            .child(button(
                 t,
                 "dismiss-poke",
                 if s.server().pokes.len() > 1 {
@@ -581,11 +602,20 @@ fn poked(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, poke: &Poke) {
                     "Close"
                 },
                 None,
-                Variant::Primary,
+                Variant::Secondary,
                 Some(Message::DismissPoke),
-            )
-            .default_button(),
-        ),
+            ))
+            .child(
+                button(
+                    t,
+                    "reply-poke",
+                    "Reply",
+                    None,
+                    Variant::Primary,
+                    reachable.then_some(Message::ReplyPoke),
+                )
+                .default_button(),
+            ),
     );
     Dialog::new("poked", format!("{} poked you", poke.from))
         .open(true)

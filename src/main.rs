@@ -179,6 +179,8 @@ struct App {
     footer_hidden: bool,
     /// The server log's size; saved when a resize ends or it folds, like `footer_hidden`.
     log_pane: settings::LogPane,
+    /// The connected sidebar's width in points; saved when a resize ends.
+    sidebar_width: u16,
     /// Saved straight to settings when changed, like `footer_hidden`.
     appearance: settings::Appearance,
     user_audio: BTreeMap<String, settings::UserAudio>,
@@ -510,6 +512,8 @@ impl GroupMark {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Poke {
     from: String,
+    /// What their private conversation is filed under (`chat_key`), for Reply.
+    key: String,
     message: String,
 }
 
@@ -892,6 +896,7 @@ enum Message {
     ToggleLog,
     /// A resize of the server log ended: keep its size.
     SaveLogPane,
+    SaveSidebarWidth,
     SharePreview(
         streaming::publishing::ShareSource,
         Option<streaming::publishing::Still>,
@@ -987,6 +992,8 @@ enum Message {
     SubmitPoke,
     CancelPoke,
     DismissPoke,
+    /// Closes the poke on top and opens the private chat with whoever sent it.
+    ReplyPoke,
     /// Asks to kick or ban these clients; nothing happens until it's confirmed.
     OpenModeration(Vec<u16>, client::Moderation),
     ModerationReason(String),
@@ -1124,6 +1131,7 @@ impl App {
             subscribe_all: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
             log_pane: settings::LogPane::default(),
+            sidebar_width: ui::SIDEBAR_WIDTH,
             appearance: settings::Appearance::default(),
             user_audio: BTreeMap::new(),
             user_gains: client::UserGains::default(),
@@ -2178,6 +2186,7 @@ impl App {
         self.keybind_draft = saved.keybinds;
         self.footer_hidden = saved.footer_hidden;
         self.log_pane = saved.log_pane;
+        self.sidebar_width = ui::sidebar_width(saved.sidebar_width);
         self.updater.auto_download = saved.auto_download_updates;
         self.appearance = saved.appearance;
         self.user_audio = saved.user_audio;
@@ -2221,6 +2230,7 @@ impl App {
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
             log_pane: self.log_pane,
+            sidebar_width: (self.sidebar_width != ui::SIDEBAR_WIDTH).then_some(self.sidebar_width),
             collapsed_channels: self
                 .saved
                 .as_ref()
@@ -3722,6 +3732,23 @@ impl App {
                     self.server_mut().pokes.remove(0);
                 }
             }
+            Message::ReplyPoke => {
+                if self.server().pokes.is_empty() {
+                    return Task::none();
+                }
+                let poke = self.server_mut().pokes.remove(0);
+                let sender = self
+                    .server()
+                    .state
+                    .channels
+                    .iter()
+                    .flat_map(|channel| &channel.members)
+                    .find(|member| client::chat_key(&member.uid, member.id) == poke.key)
+                    .map(|member| member.id);
+                if let Some(id) = sender {
+                    return self.update(Message::Chat(chat::Action::Message(id)));
+                }
+            }
             Message::OpenModeration(ids, action) => {
                 let ids: Vec<u16> = ids
                     .into_iter()
@@ -3968,6 +3995,13 @@ impl App {
                 self.save_log_pane();
             }
             Message::SaveLogPane => self.save_log_pane(),
+            Message::SaveSidebarWidth => {
+                let width = (self.sidebar_width != ui::SIDEBAR_WIDTH).then_some(self.sidebar_width);
+                self.save_preference(
+                    |saved| saved.sidebar_width = width,
+                    "The sidebar's width applies for now but was not saved",
+                );
+            }
             Message::PreviewSound(sound) => self.preview_sound(sound),
             Message::SoundCues(on) => {
                 self.sound_cues = on;
@@ -4286,7 +4320,7 @@ impl App {
                 arrived = session.chat.receive(message, &channel).cloned();
             }
             client::Event::Poked { from, key, message } => {
-                session.chat.poke(key, &from, false, &message);
+                session.chat.poke(key.clone(), &from, false, &message);
                 sounds_due.push(sounds::Sound::Poke);
                 toast = Some((
                     format!("{from} poked you"),
@@ -4299,7 +4333,7 @@ impl App {
                 if session.pokes.len() >= 10 {
                     session.pokes.remove(0);
                 }
-                session.pokes.push(Poke { from, message });
+                session.pokes.push(Poke { from, key, message });
                 if !active {
                     session.unseen_pokes = session.unseen_pokes.saturating_add(1);
                 }
