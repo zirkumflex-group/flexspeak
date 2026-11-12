@@ -2195,3 +2195,77 @@ fn rarity_breakdown(
         .child(group_title(t, "How Often You Got Each Card"))
         .child(cabinet().w_full().padding(16.0).child(wrap))
 }
+
+/// A row in the channel tree lit by the card its person just opened: the rarity's colour
+/// washing in from the left, and the rarity named at the end of the row.
+pub fn unboxed_row(t: &Theme, row_el: El, unboxed: &monster::Unboxed) -> El {
+    let ink = rgb(unboxed.rarity.color());
+    row_el.linear_gradient(
+        90.0,
+        [
+            (0.0, ink.alpha(if t.dark { 0.30 } else { 0.22 })),
+            (0.65, ink.alpha(0.06)),
+            (1.0, ink.alpha(0.0)),
+        ],
+    )
+}
+
+/// The card's can at the end of the row, in the rarity's colour; it names the card on hover.
+pub fn unboxed_chip(_t: &Theme, unboxed: &monster::Unboxed) -> El {
+    let help = format!(
+        "Opened a {} card · {} #{}",
+        unboxed.rarity.name(),
+        unboxed.flavour,
+        unboxed.number
+    );
+    el().key("unboxed-chip")
+        .help(help.clone())
+        .label(help)
+        .child(icon(&icons::CAN, 13.0).color(rgb(unboxed.rarity.color())))
+}
+
+/// An opened card as a chat line shows it, in place of the words it was sent as.
+pub fn unboxed_card(t: &Theme, unboxed: &monster::Unboxed) -> El {
+    let ink = rgb(unboxed.rarity.color());
+    row()
+        .w_full()
+        .mt(3.0)
+        .gap(10.0)
+        .pl(10.0)
+        .pr(12.0)
+        .py(8.0)
+        .center_y()
+        .radius(8.0)
+        .linear_gradient(
+            90.0,
+            [
+                (0.0, ink.alpha(if t.dark { 0.20 } else { 0.14 })),
+                (1.0, ink.alpha(0.04)),
+            ],
+        )
+        .border(1.0, ink.alpha(0.35))
+        .child(
+            el().size(30.0, 30.0)
+                .center()
+                .radius(7.0)
+                .fill(ink.alpha(0.22))
+                .child(icon(&icons::CAN, 18.0).color(ink).a11y_hidden()),
+        )
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(1.0)
+                .child(
+                    text(format!("Opened a {} card", unboxed.rarity.name()))
+                        .font(ty::SMALL_STRONG)
+                        .color(ink),
+                )
+                .child(
+                    text(format!("{} · #{}", unboxed.flavour, unboxed.number))
+                        .font(ty::BODY)
+                        .color(t.text)
+                        .truncate_fade(),
+                ),
+        )
+}

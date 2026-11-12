@@ -61,6 +61,9 @@ pub const SCENES: &[Scene] = &[
     ("settings-sync-off", settings_sync_off),
     ("monster-empty", monster_empty),
     ("monster-board", monster_board),
+    ("monster-connected", monster_connected),
+    ("monster-unboxed", monster_unboxed),
+    ("monster-unboxed-rare", monster_unboxed_rare),
     ("monster-search", monster_search),
     ("monster-search-none", monster_search_none),
     ("monster-rarities", monster_rarities),
@@ -1571,6 +1574,41 @@ fn stocked(s: &mut App) {
 }
 
 fn monster_board(s: &mut App) {
+    stocked(s);
+}
+
+/// Mara opens a Legendary: her row lights up in its colour and the channel gets the card.
+fn monster_unboxed(s: &mut App) {
+    unboxed(s, crate::monster::Rarity::Legendary, "Ultra Gold", 487);
+}
+
+fn monster_unboxed_rare(s: &mut App) {
+    unboxed(s, crate::monster::Rarity::Rare, "Pacific Punch", 212);
+}
+
+fn unboxed(s: &mut App, rarity: crate::monster::Rarity, flavour: &str, number: u32) {
+    connected(s);
+    chat_talk(s);
+    let card = crate::monster::Unboxed {
+        rarity,
+        flavour: flavour.into(),
+        number,
+    };
+    say(
+        s,
+        chat::Scope::Channel,
+        false,
+        "Mara",
+        "Lobby",
+        &card.announcement(),
+        "21:09",
+    );
+    s.server_mut().unboxed.insert(2, card);
+}
+
+/// Connected, the collection takes the stage beside the channels and chat.
+fn monster_connected(s: &mut App) {
+    connected(s);
     stocked(s);
 }
 

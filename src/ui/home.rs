@@ -36,6 +36,8 @@ pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                 .min_w(0.0)
                 .child(statistics::view(s, cx, t, k)),
         ),
+        // Connected, the collection takes the stage and leaves the channels and chat beside it.
+        Tab::Monster if server_window(s) => home(s, cx, t, k, layer),
         Tab::Monster => row().w_full().h_full().child(
             pane(t)
                 .grow(1.0)
@@ -103,6 +105,24 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
     bar = bar
         .child(icon(&icons::FLEXSPEAK, 18.0).color(t.accent).a11y_hidden())
         .child(text(title).font(ty::HEADING).color(ink).truncate());
+    // The Monster page sits beside the name, a page of its own like Statistics.
+    let monster = s.tab == Tab::Monster;
+    bar = bar.child(icon_button(
+        t,
+        "Monster",
+        &icons::CAN,
+        "Monster collection",
+        if monster {
+            Variant::Active
+        } else {
+            Variant::Ghost
+        },
+        Some(Message::ShowTab(if monster {
+            Tab::Home
+        } else {
+            Tab::Monster
+        })),
+    ));
     bar = bar.child(el().grow(1.0));
     let statistics = s.tab == Tab::Statistics;
     bar = bar.child(icon_button(
@@ -145,15 +165,19 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
     bar
 }
 
+/// Whether a server's window (rail, channels, stage, chat) is up rather than the saved list.
+fn server_window(s: &App) -> bool {
+    !s.loopback
+        && s.sessions
+            .iter()
+            .any(|session| session.connected || session.reconnecting)
+}
+
 fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     rail_menu(s, k, layer);
     // A server coming back from a dropped connection keeps its window: only a first connect
     // shows the connecting pane.
-    if !s.loopback
-        && s.sessions
-            .iter()
-            .any(|session| session.connected || session.reconnecting)
-    {
+    if server_window(s) {
         let reconnecting = !s.server().connected && s.server().reconnecting;
         if !s.server().connected && !reconnecting {
             return row()
@@ -179,14 +203,20 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
             .children((!hidden).then(|| server_rail(s, t, k)))
             .child(sidebar(s, cx, t, k, layer))
             .child(sidebar_edge(s, t))
-            .child(
+            .child(if s.tab == Tab::Monster {
+                pane(t)
+                    .key("main-pane")
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(monster::view(s, cx, t, k))
+            } else {
                 pane(t)
                     .fill(t.stage)
                     .key("main-pane")
                     .grow(1.0)
                     .min_w(0.0)
-                    .child(streams::view(s, cx, t, k, layer)),
-            )
+                    .child(streams::view(s, cx, t, k, layer))
+            })
             .children(
                 chat.map(|chat| [vertical_rule(t), chat])
                     .into_iter()
@@ -2001,6 +2031,9 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
             .grow(1.0)
             .min_w(0.0),
         );
+    if let Some(unboxed) = s.server().unboxed.get(&member.id) {
+        entry = monster::unboxed_row(t, entry, unboxed).child(monster::unboxed_chip(t, unboxed));
+    }
     // Connection health only earns a place on the row when something is wrong; your own is
     // also in the footer.
     let (health, detail) = s.member_health(member, current);
