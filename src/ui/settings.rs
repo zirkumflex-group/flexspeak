@@ -1062,7 +1062,7 @@ fn setup_section(s: &App, t: &Theme) -> Section {
                 t,
                 "Run setup again",
                 Some(if idle {
-                    "Walk through username, server, permissions, devices and shortcuts again."
+                    "Walk through nickname, server, permissions, devices and shortcuts again."
                 } else {
                     "Disconnect to run setup again."
                 }),

@@ -1363,7 +1363,22 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El 
         .count() as f32;
     let slider_width = if large { 120.0 } else { 64.0 };
     let name_room = width - 36.0 - buttons * (size::ICON_BUTTON + 8.0) - slider_width - 8.0;
-    let name_width = text_width(&title, 13.0).max(text_width(&subtitle, 11.0));
+    let lines_width =
+        |title: &str, subtitle: &str| text_width(title, 13.0).max(text_width(subtitle, 11.0));
+    let name_width = if large {
+        lines_width(&title, &subtitle)
+    } else {
+        // Tiles in a grid answer together, from the longest name, so neighbours look alike.
+        s.server()
+            .streaming
+            .watching
+            .iter()
+            .map(|other| {
+                let (title, subtitle) = stream_lines(s, &other.stream);
+                lines_width(&title, &subtitle)
+            })
+            .fold(0.0, f32::max)
+    };
     let volume_slider = audio && name_room >= name_width.min(if large { 220.0 } else { 160.0 });
     let mut bar = row()
         .key("controls")
