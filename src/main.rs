@@ -453,7 +453,9 @@ impl ServerSession {
                 .state
                 .channels
                 .iter()
-                .any(|channel| channel.id == id && channel.join_access.can_request())
+                .any(|channel| {
+                    channel.id == id && channel.join_access.can_request() && channel.spacer().is_none()
+                })
     }
 
     fn microphone_off(&self) -> bool {
@@ -1364,6 +1366,7 @@ impl App {
         self.level = 0.0;
         self.ui.open = None;
         self.ui.member_menu = None;
+        self.ui.channel_menu = None;
         self.ui.move_menu = false;
         self.ui.groups_menu = None;
         self.ui.drag = None;

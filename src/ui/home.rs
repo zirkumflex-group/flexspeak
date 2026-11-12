@@ -721,6 +721,7 @@ fn connecting_pane(s: &App, t: &Theme) -> El {
 
 fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     members::menu(s, t, k, layer);
+    channel_menu(s, k, layer);
     members::ghost(s, t, layer);
     let all = s.subscribe_all.load(std::sync::atomic::Ordering::Relaxed);
     let name = s.server().state.server.clone();
@@ -1496,6 +1497,9 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 s.ui.drag.as_ref().and_then(|drag| drag.target),
             ),
             || {
+                if let Some(spacer) = channel.spacer() {
+                    return spacer_row(t, channel.id, &spacer);
+                }
                 let hint = if current {
                     "Current channel"
                 } else {
@@ -1506,10 +1510,14 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                         client::JoinAccess::UnsupportedCodec => {
                             "This channel uses an unsupported audio codec"
                         }
-                        _ if channel.has_password => "Click to join · a password will be requested",
-                        _ => "Click to join this channel",
+                        _ if channel.has_password => {
+                            "Double-click to join · a password will be requested"
+                        }
+                        _ => "Double-click to join · right-click for options",
                     }
                 };
+                // The full name leads, since a long one is cut on the row.
+                let hint = format!("{}\n{hint}", channel.name);
                 let joinable = (!s.server().stopping && current) || s.can_request_join(channel.id);
                 // Where people are reads first: an empty channel steps back, one you can't
                 // join further still.
@@ -1574,13 +1582,31 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 } else if current {
                     name = name.fill(t.accent.alpha(0.16));
                 }
+                // A double-click joins, as in TeamSpeak, so a slip of one click never moves
+                // you mid-conversation; Return joins the focused row.
+                let id = channel.id;
                 if joinable {
                     name = name
                         .focusable(true)
                         .cursor(rune::Cursor::Pointer)
                         .hover(t.wash(0.05))
                         .press(t.wash(0.09))
-                        .on_press_tx(send(Message::Join(channel.id)));
+                        .on_double_press_tx(send(Message::Join(id)))
+                        .on_key(move |s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
+                            if key.key != rune::Key::Enter {
+                                return false;
+                            }
+                            dispatch(s, tx, Message::Join(id));
+                            true
+                        });
+                }
+                if s.server().connected && !s.loopback && !s.server().stopping {
+                    name = name.on_secondary_press(
+                        move |s: &mut App, point: PointerPress, _: &mut Tx| {
+                            s.ui.member_menu = None;
+                            s.ui.channel_menu = Some((id, point));
+                        },
+                    );
                 }
                 // An empty channel keeps the arrow's space, so names stay lined up.
                 let disclosure = if !foldable {
@@ -1649,6 +1675,89 @@ fn channel_tree(s: &App, t: &Theme) -> El {
         tree = tree.child(node);
     }
     tree
+}
+
+/// A spacer channel: a section label across the tree, with nothing to join or click.
+fn spacer_row(t: &Theme, id: u64, spacer: &client::Spacer) -> El {
+    let label = text(match spacer.align {
+        // Enough copies to cross the widest sidebar; the row clips the rest.
+        client::SpacerAlign::Repeat if !spacer.text.is_empty() => {
+            spacer.text.repeat(160 / spacer.text.chars().count().max(1) + 1)
+        }
+        _ => spacer.text.clone(),
+    })
+    .font(ty::SMALL_STRONG)
+    .color(t.faint)
+    .min_w(0.0)
+    .a11y_hidden();
+    let line = row()
+        .key("name")
+        .w_full()
+        .h(size::ROW)
+        .px(8.0)
+        .center_y()
+        .label(spacer.text.clone())
+        .help(spacer.text.clone());
+    let line = match spacer.align {
+        client::SpacerAlign::Left => line.child(label.truncate_fade()),
+        client::SpacerAlign::Center => line.justify_center().child(label.truncate_fade()),
+        client::SpacerAlign::Right => line.justify_end().child(label.truncate_fade()),
+        client::SpacerAlign::Repeat => line.child(label.truncate_fade_width(0.0).grow(1.0)),
+    };
+    // Lined up with the channel names beside the disclosure arrows' column.
+    col()
+        .key(format!("channel-{id}"))
+        .w_full()
+        .pl(20.0)
+        .child(line)
+}
+
+/// Right-clicking a channel: join it, or fold it.
+fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let Some((id, point)) = s.ui.channel_menu else {
+        return;
+    };
+    let channels = &s.server().state.channels;
+    let Some(index) = channels.iter().position(|channel| channel.id == id) else {
+        return;
+    };
+    let channel = &channels[index];
+    let current = s
+        .server()
+        .state
+        .current
+        .as_ref()
+        .is_some_and(|value| value.id == id);
+    let foldable = !channel.members.is_empty()
+        || channels
+            .get(index + 1)
+            .is_some_and(|next| next.depth > channel.depth);
+    let collapsed = s.server().collapsed_channels.contains(&id);
+    let mut join = MenuItem::new("Join")
+        .icon(&icons::CONNECT)
+        .disabled(current || !s.can_request_join(id))
+        .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            s.ui.channel_menu = None;
+            dispatch(s, tx, Message::Join(id));
+        });
+    if current {
+        join = join.description("You're in this channel");
+    }
+    let menu = context_menu("channel-menu", el(), Some(point))
+        .min_width(180.0)
+        .on_close(|s: &mut App| s.ui.channel_menu = None)
+        .group_label(channel.name.clone())
+        .item(join)
+        .item(
+            MenuItem::new(if collapsed { "Expand" } else { "Collapse" })
+                .icon(if collapsed { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT })
+                .disabled(!foldable)
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    s.ui.channel_menu = None;
+                    dispatch(s, tx, Message::ToggleChannel(id));
+                }),
+        );
+    let _ = menu.build(k, layer);
 }
 
 fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El {

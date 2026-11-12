@@ -112,6 +112,8 @@ pub const SCENES: &[Scene] = &[
     ("share-quick-no-game", share_quick_no_game),
     ("share-quick-streams", share_quick_streams),
     ("channel-tree", channel_tree),
+    ("channel-tree-spacers", channel_tree_spacers),
+    ("channel-menu", channel_menu),
     ("sharing", sharing),
     ("sharing-stream-options", sharing_stream_options),
     (
@@ -1863,6 +1865,31 @@ fn channel_tree(s: &mut App) {
     s.server_mut().talking.clear();
 }
 
+/// A server that parts its tree into sections with spacer channels: centred, left, right and
+/// repeated labels and an empty one, none of them joinable.
+fn channel_tree_spacers(s: &mut App) {
+    channel_tree(s);
+    let spacer = |id, name: &str| client::Channel {
+        id,
+        name: name.into(),
+        members_visible: true,
+        join_access: client::JoinAccess::Allowed,
+        ..client::Channel::default()
+    };
+    let channels = &mut s.server_mut().state.channels;
+    channels.insert(1, spacer(101, "[cspacer]━━ Games ━━"));
+    channels.insert(4, spacer(102, "[*spacer1]─"));
+    channels.insert(6, spacer(103, "[lspacer0]Quiet rooms"));
+    channels.push(spacer(104, "[spacer0]"));
+    channels.push(spacer(105, "[rspacer]AFK"));
+}
+
+/// Right-clicking a channel you can join: Join, and fold it away.
+fn channel_menu(s: &mut App) {
+    channel_tree(s);
+    s.ui.channel_menu = Some((3, rune::PointerPress { x: 150.0, y: 170.0 }));
+}
+
 fn share(s: &mut App) {
     connected(s);
     share_sources(s);
@@ -2998,6 +3025,50 @@ mod tests {
         click(&mut rt, "rail-menu-item1");
         assert!(rt.state.ui.rail_menu.is_none());
         assert!(rt.state.session(id).is_none_or(|session| session.stopping));
+    }
+
+    #[test]
+    fn a_channel_joins_on_a_double_click_and_offers_a_menu() {
+        let mut rt = runtime(channel_tree, (900.0, 790.0));
+        settle(&mut rt);
+        let name = "channel-2/name";
+        click(&mut rt, name);
+        assert_eq!(
+            rt.state.server().expected_channel,
+            None,
+            "one click doesn't move you"
+        );
+        let (x, y) = rt.find(name).unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.secondary_down(x, y);
+        rt.secondary_up(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.channel_menu.map(|(open, _)| open), Some(2));
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Escape,
+            mods: rune::Mods::default(),
+        });
+        settle(&mut rt);
+        assert!(rt.state.ui.channel_menu.is_none());
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        settle(&mut rt);
+        assert_eq!(rt.state.server().expected_channel, Some(2));
+        // A spacer is a label: it never joins.
+        let mut rt = runtime(channel_tree_spacers, (900.0, 790.0));
+        settle(&mut rt);
+        let (x, y) = rt.find("channel-101/name").expect("the spacer");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        settle(&mut rt);
+        assert_eq!(rt.state.server().expected_channel, None);
     }
 
     /// Ticking groups keeps the menu open, so several can be picked in a row.

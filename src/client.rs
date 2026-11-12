@@ -182,6 +182,54 @@ pub struct Channel {
     pub members: Vec<Member>,
 }
 
+/// How a spacer channel lays out its text across the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpacerAlign {
+    Left,
+    Center,
+    Right,
+    /// The text repeats across the whole row, as a rule.
+    Repeat,
+}
+
+/// A spacer channel's look: a top-level channel named `[cspacer]Games`, `[lspacer0]Text`,
+/// `[rspacer]Text`, `[*spacer1]─` or `[spacer0]` is a section divider, not a room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spacer {
+    pub align: SpacerAlign,
+    pub text: String,
+}
+
+impl Channel {
+    /// The divider this channel draws instead of a joinable row, as TeamSpeak reads it: only
+    /// top-level channels are spacers.
+    pub fn spacer(&self) -> Option<Spacer> {
+        if self.parent != 0 {
+            return None;
+        }
+        let (tag, text) = self.name.strip_prefix('[')?.split_once(']')?;
+        let (align, rest) = match tag.chars().next()? {
+            'c' | 'C' => (SpacerAlign::Center, &tag[1..]),
+            'l' | 'L' => (SpacerAlign::Left, &tag[1..]),
+            'r' | 'R' => (SpacerAlign::Right, &tag[1..]),
+            '*' => (SpacerAlign::Repeat, &tag[1..]),
+            _ => (SpacerAlign::Left, tag),
+        };
+        let counter = rest
+            .get(..6)
+            .filter(|word| word.eq_ignore_ascii_case("spacer"))
+            .and_then(|_| rest.get(6..))?;
+        // TeamSpeak keeps names unique with a trailing counter: `[spacer0]`, `[cspacer12]`.
+        if !counter.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        Some(Spacer {
+            align,
+            text: text.to_owned(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub server: String,
@@ -1785,6 +1833,48 @@ pub fn probe(address: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spacer_names_become_dividers_only_at_the_top_level() {
+        let spacer = |name: &str, parent| {
+            Channel {
+                name: name.into(),
+                parent,
+                ..Channel::default()
+            }
+            .spacer()
+            .map(|spacer| (spacer.align, spacer.text))
+        };
+        assert_eq!(
+            spacer("[cspacer]━━ Games ━━", 0),
+            Some((SpacerAlign::Center, "━━ Games ━━".into()))
+        );
+        assert_eq!(
+            spacer("[lspacer0]Text", 0),
+            Some((SpacerAlign::Left, "Text".into()))
+        );
+        assert_eq!(
+            spacer("[rspacer]Text", 0),
+            Some((SpacerAlign::Right, "Text".into()))
+        );
+        assert_eq!(
+            spacer("[*spacer1]─", 0),
+            Some((SpacerAlign::Repeat, "─".into()))
+        );
+        assert_eq!(
+            spacer("[spacer0]", 0),
+            Some((SpacerAlign::Left, String::new()))
+        );
+        assert_eq!(
+            spacer("[CSPACER2]Loud", 0),
+            Some((SpacerAlign::Center, "Loud".into()))
+        );
+        // A subchannel keeps its name, as do names that only look a little like one.
+        assert_eq!(spacer("[cspacer]Games", 4), None);
+        assert_eq!(spacer("[clan] Raid", 0), None);
+        assert_eq!(spacer("[spacer-x]Text", 0), None);
+        assert_eq!(spacer("Lobby", 0), None);
+    }
 
     #[test]
     fn speakers_start_on_voice_and_stop_on_end_packet_or_silence() {

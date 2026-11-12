@@ -245,6 +245,8 @@ pub struct UiState {
     pub member_menu: Option<(u16, rune::PointerPress)>,
     /// The server in the rail a context menu is open for, and where it opened.
     pub rail_menu: Option<(crate::hub::SessionId, rune::PointerPress)>,
+    /// The channel a context menu is open for, and where it opened.
+    pub channel_menu: Option<(u64, rune::PointerPress)>,
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
     pub rail_peek: RailPeek,
@@ -331,6 +333,7 @@ impl Default for UiState {
             open: None,
             member_menu: None,
             rail_menu: None,
+            channel_menu: None,
             move_menu: false,
             rail_peek: RailPeek::default(),
             chat_peek: RailPeek::default(),

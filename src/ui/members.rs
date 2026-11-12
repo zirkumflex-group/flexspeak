@@ -53,6 +53,7 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
                 s.server_mut().selected_members.clear();
             }
             s.ui.member_menu = Some((id, point));
+            s.ui.channel_menu = None;
             s.ui.move_menu = false;
             s.ui.groups_menu = None;
             s.server_mut().group_edit = None;
@@ -76,8 +77,16 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
                     if let Some(drag) = &mut s.ui.drag {
                         drag.at = at;
                         tx.element_at(at.0, at.1, |s: &mut App, picked, _tx: &mut Tx| {
+                            // A spacer is a label, not somewhere to go.
+                            let target = picked
+                                .and_then(|p| channel_in_path(p.path()))
+                                .filter(|id| {
+                                    s.server().state.channels.iter().any(|channel| {
+                                        channel.id == *id && channel.spacer().is_none()
+                                    })
+                                });
                             if let Some(drag) = &mut s.ui.drag {
-                                drag.target = picked.and_then(|p| channel_in_path(p.path()));
+                                drag.target = target;
                             }
                         });
                     }
@@ -263,8 +272,10 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         .channels
         .iter()
         .filter(|channel| {
-            !ids.iter()
-                .all(|id| channel.members.iter().any(|member| member.id == *id))
+            channel.spacer().is_none()
+                && !ids
+                    .iter()
+                    .all(|id| channel.members.iter().any(|member| member.id == *id))
         })
         .map(|channel| {
             let ids = ids.clone();
