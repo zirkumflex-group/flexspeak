@@ -68,6 +68,9 @@ enum TraceEvent {
         audio: usize,
         upload: f64,
         download: f64,
+        voice: crate::audio::VoicePlayback,
+        /// Incoming loss in percent: total, voice, keepalive, control.
+        loss_in: [Option<f32>; 4],
     },
 }
 
@@ -246,7 +249,14 @@ impl Drop for Scope {
     }
 }
 
-pub fn record_counters(rss: Option<u64>, audio: usize, upload: f64, download: f64) {
+pub fn record_counters(
+    rss: Option<u64>,
+    audio: usize,
+    upload: f64,
+    download: f64,
+    voice: crate::audio::VoicePlayback,
+    loss_in: [Option<f32>; 4],
+) {
     let Some(recorder) = RECORDER.get() else {
         return;
     };
@@ -262,6 +272,8 @@ pub fn record_counters(rss: Option<u64>, audio: usize, upload: f64, download: f6
         audio,
         upload,
         download,
+        voice,
+        loss_in,
     };
     if recorder.events.push(event).is_err() {
         recorder.dropped.fetch_add(1, Ordering::Relaxed);
@@ -422,6 +434,8 @@ impl Serialize for ExportEvents<'_> {
                     audio,
                     upload,
                     download,
+                    voice,
+                    loss_in,
                     ..
                 } => {
                     let ts = at.saturating_duration_since(self.0.started).as_secs_f64() * 1e6;
@@ -434,6 +448,27 @@ impl Serialize for ExportEvents<'_> {
                         &json!({"name":"Memory","ph":"C","pid":pid,"tid":0,"ts":ts,"args":memory}),
                     )?;
                     events.serialize_element(&json!({"name":"Network","ph":"C","pid":pid,"tid":0,"ts":ts,"args":{"upload_bytes_per_second":upload,"download_bytes_per_second":download}}))?;
+                    // Totals since launch: the change between two samples is what happened
+                    // in that second.
+                    events.serialize_element(
+                        &json!({"name":"Voice playback","ph":"C","pid":pid,"tid":0,"ts":ts,"args":{
+                            "played_packets":voice.played,"filled_in_packets":voice.concealed,
+                            "rebuilt_packets":voice.recovered,"dropped_packets":voice.dropped,
+                            "talker_timeouts":voice.timed_out,"queued_packets":voice.queued
+                        }}),
+                    )?;
+                    let mut loss = serde_json::Map::new();
+                    for (name, value) in ["total", "voice", "keepalive", "control"]
+                        .into_iter()
+                        .zip(loss_in)
+                    {
+                        if let Some(value) = value {
+                            loss.insert(format!("{name}_percent"), json!(value));
+                        }
+                    }
+                    if !loss.is_empty() {
+                        events.serialize_element(&json!({"name":"Packet loss in","ph":"C","pid":pid,"tid":0,"ts":ts,"args":loss}))?;
+                    }
                 }
             }
         }
@@ -502,7 +537,20 @@ mod tests {
             let _scope = scope(Category::AudioProcessing, "audio.test");
             std::thread::sleep(Duration::from_millis(20));
         }
-        record_counters(Some(1234), 64, 12.0, 34.0);
+        let voice = crate::audio::VoicePlayback {
+            played: 500,
+            concealed: 7,
+            queued: 2,
+            ..Default::default()
+        };
+        record_counters(
+            Some(1234),
+            64,
+            12.0,
+            34.0,
+            voice,
+            [Some(5.5), Some(0.5), None, Some(0.0)],
+        );
         for _ in 0..CAPACITY {
             let _scope = scope(Category::Network, "network.test");
         }
@@ -562,6 +610,23 @@ mod tests {
                 .iter()
                 .any(|e| e["ph"] == "C" && e["args"]["resident_bytes"] == 1234)
         );
+        let counter = |name: &str| {
+            events
+                .iter()
+                .find(|e| e["ph"] == "C" && e["name"] == name)
+                .unwrap_or_else(|| panic!("no {name} counter"))["args"]
+                .clone()
+        };
+        let voice = counter("Voice playback");
+        assert_eq!(voice["played_packets"], 500);
+        assert_eq!(voice["filled_in_packets"], 7);
+        assert_eq!(voice["queued_packets"], 2);
+        let loss = counter("Packet loss in");
+        assert_eq!(loss["total_percent"], 5.5);
+        assert_eq!(loss["voice_percent"], 0.5);
+        // An unknown reading is left out, not written as zero.
+        assert!(loss.get("keepalive_percent").is_none());
+        assert_eq!(loss["control_percent"], 0.0);
         let next = Recording::start()?.finish();
         assert_eq!(next.summary.event_count, 0);
         Ok(())

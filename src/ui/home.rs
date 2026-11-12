@@ -105,7 +105,8 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
     bar = bar
         .child(icon(&icons::FLEXSPEAK, 18.0).color(t.accent).a11y_hidden())
         .child(text(title).font(ty::HEADING).color(ink).truncate());
-    // The Monster page sits beside the name, a page of its own like Statistics.
+    bar = bar.child(el().grow(1.0));
+    // The Monster page leads the buttons on the right, a page of its own like Statistics.
     let monster = s.tab == Tab::Monster;
     bar = bar.child(icon_button(
         t,
@@ -123,7 +124,6 @@ fn header(s: &App, cx: &mut Cx<App>, t: &Theme, _k: &Kit) -> El {
             Tab::Monster
         })),
     ));
-    bar = bar.child(el().grow(1.0));
     let statistics = s.tab == Tab::Statistics;
     bar = bar.child(icon_button(
         t,

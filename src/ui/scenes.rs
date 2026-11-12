@@ -1400,6 +1400,19 @@ fn statistics(s: &mut App) {
             .push(at, Some(92e6 + 4e6 * (x * 0.02).sin() + x * 2e4));
     }
     s.process_usage.cpu_percent = Some(2.4);
+    s.server_mut().connection_usage.loss_in = usage::LossIn {
+        voice: Some(0.2),
+        keepalive: Some(0.0),
+        control: Some(0.0),
+    };
+    s.voice_playback = crate::audio::VoicePlayback {
+        played: 184_302,
+        concealed: 412,
+        recovered: 38,
+        dropped: 6,
+        timed_out: 1,
+        queued: 2,
+    };
 }
 
 fn settings_wip(s: &mut App) {

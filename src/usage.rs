@@ -290,11 +290,24 @@ impl NetworkUsage {
     }
 }
 
+/// Incoming loss by the kind of packet it was counted on, in percent. The total mixes all
+/// three, so a figure that voice alone does not explain shows up here.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LossIn {
+    pub voice: Option<f32>,
+    /// Pings and their answers.
+    pub keepalive: Option<f32>,
+    /// Acknowledgements of commands.
+    pub control: Option<f32>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConnectionUsage {
     pub ping_ms: Option<f64>,
     pub ping_deviation_ms: Option<f64>,
     pub packet_loss_in: Option<f32>,
+    /// Known for our own connection only.
+    pub loss_in: LossIn,
     pub packet_loss_out: Option<f32>,
     pub idle_seconds: Option<u64>,
     pub file_upload_per_second: Option<u64>,
@@ -326,6 +339,7 @@ impl ServerUsage {
                     .server_to_client_packetloss_total
                     .and_then(loss_percent),
                 packet_loss_out: loss_percent(data.client_to_server_packetloss_total),
+                loss_in: LossIn::default(),
                 idle_seconds: Some(data.idle_time.whole_seconds().max(0) as u64),
                 file_upload_per_second: data.filetransfer_bandwidth_sent,
                 file_download_per_second: data.filetransfer_bandwidth_received,
@@ -361,6 +375,11 @@ pub fn connection_usage(
         ping_ms: (!stats.rtt.is_zero()).then_some(stats.rtt.as_secs_f64() * 1000.0),
         ping_deviation_ms: (!stats.rtt.is_zero()).then_some(stats.rtt_dev.as_secs_f64() * 1000.0),
         packet_loss_in: loss_percent(stats.get_packetloss_s2c_total()),
+        loss_in: LossIn {
+            voice: loss_percent(stats.get_packetloss_s2c_speech()),
+            keepalive: loss_percent(stats.get_packetloss_s2c_keepalive()),
+            control: loss_percent(stats.get_packetloss_s2c_control()),
+        },
         ..server.map_or_else(ConnectionUsage::default, |server| server.sample(now))
     };
     if let Some(server) = server {

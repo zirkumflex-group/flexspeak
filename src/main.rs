@@ -306,6 +306,8 @@ struct App {
     settings_query: String,
     heap_usage: memory::HeapUsage,
     audio_buffer_bytes: usize,
+    /// What became of incoming voice, refreshed with the other usage figures.
+    voice_playback: audio::VoicePlayback,
     recording: Option<profiler::Recording>,
     trace_summary: Option<profiler::TraceSummary>,
     trace_path: Option<PathBuf>,
@@ -1381,6 +1383,7 @@ impl App {
             settings_query: String::new(),
             heap_usage: memory::snapshot(),
             audio_buffer_bytes: 0,
+            voice_playback: Default::default(),
             recording: None,
             trace_summary: None,
             trace_path: None,
@@ -4318,11 +4321,20 @@ impl App {
                         sum.1 + session.network_usage.download_per_second,
                     )
                 });
+                self.voice_playback = audio::voice_playback();
+                let quality = self.server().connection_usage;
                 profiler::record_counters(
                     self.process_usage.memory_bytes,
                     self.audio_buffer_bytes,
                     upload,
                     download,
+                    self.voice_playback,
+                    [
+                        quality.packet_loss_in,
+                        quality.loss_in.voice,
+                        quality.loss_in.keepalive,
+                        quality.loss_in.control,
+                    ],
                 );
                 let sync = self.with_settings_sync(|sync, ctx| sync.tick(now, ctx));
                 if self

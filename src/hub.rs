@@ -743,6 +743,19 @@ impl Core {
             }
             surfaces.mix_audio(stereo);
         })?;
+        let mut heard = tsclientlib::audio::VoiceStats::default();
+        let mut queued = 0;
+        for line in lines.iter() {
+            let mut incoming = line.incoming.lock().unwrap();
+            let stats = incoming.take_stats();
+            heard.played += stats.played;
+            heard.concealed += stats.concealed;
+            heard.recovered += stats.recovered;
+            heard.dropped += stats.dropped;
+            heard.timed_out += stats.timed_out;
+            queued = queued.max(incoming.queued_packets());
+        }
+        crate::audio::count_voice(heard, queued);
         if let Some(line) = active {
             for data in packets {
                 self.deliver(line, data);
