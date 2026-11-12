@@ -383,9 +383,15 @@ def enabled_platforms(everything=False):
 
 def platform_outputs(everything=False):
     """GitHub Actions job outputs: the matrix the checks and builds run, where the release's
-    test runs, and whether Homebrew gets a cask."""
+    test runs, and whether Homebrew gets a cask. `FLEXSPEAK_WINDOWS_RUNNER` names the
+    self-hosted runner Windows moves to; the workflows set it only for trusted runs
+    (.github/runner/README.md), and without it Windows stays on GitHub's runner."""
     names = enabled_platforms(everything)
     include = [{key: PLATFORMS[name][key] for key in ("os", "platform", "cache")} for name in names]
+    runner = os.environ.get("FLEXSPEAK_WINDOWS_RUNNER", "").strip()
+    for entry in include:
+        if entry["platform"] == "windows-x64" and runner:
+            entry["os"] = runner
     return {
         "matrix": json.dumps({"include": include}, separators=(",", ":")),
         "test-os": include[0]["os"],

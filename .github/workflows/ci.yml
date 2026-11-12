@@ -43,6 +43,14 @@ jobs:
       - id: platforms
         env:
           ALL: ${{ inputs.all-platforms && '--all' || '' }}
+          # The Beelink's Windows runner (.github/runner/README.md), named in the repo variable
+          # WINDOWS_RUNNER, takes runs by the people it trusts and never a fork's pull request;
+          # everything else stays on GitHub's runner. The runner's own job hook checks again.
+          FLEXSPEAK_WINDOWS_RUNNER: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+            && contains(fromJSON('["yungtristxn","Jan-GJ"]'), github.actor)
+            && contains(fromJSON('["yungtristxn","Jan-GJ"]'), github.triggering_actor)
+            && vars.WINDOWS_RUNNER || '' }}
         run: python3 scripts/release.py platforms $ALL | tee -a "$GITHUB_OUTPUT"
 
   # Formatting is the same everywhere, so it is checked once, whichever platforms are on. It
@@ -81,7 +89,7 @@ jobs:
           persist-credentials: false
       # As in the release build: Windows is slow with the many small files Cargo writes.
       - name: Windows Dev Drive
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment == 'github-hosted'
         uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
         with:
           drive-size: 20GB
@@ -105,10 +113,18 @@ jobs:
           if command -v python3 > /dev/null; then python=python3; else python=python; fi
           "$python" -m unittest discover -s scripts -p 'test_*.py'
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: runner.environment == 'github-hosted'
         with:
           workspaces: ${{ env.DEV_DRIVE_WORKSPACE || '.' }}
           shared-key: ${{ matrix.cache }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The self-hosted runner keeps Cargo's output between jobs instead of restoring a cache
+      # (the Dev Drive and rust-cache steps are GitHub's runner only).
+      - name: Self-hosted build directory
+        if: runner.environment == 'self-hosted'
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$env:FLEXSPEAK_CI_DIR/target/checks" >> $env:GITHUB_ENV
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libopus-dev libxkbcommon-dev libwayland-dev

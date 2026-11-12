@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep the flexspeak CI VM off the LAN and the host
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/srv/flexspeak-ci/firewall.sh
+
+[Install]
+WantedBy=multi-user.target

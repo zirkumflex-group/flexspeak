@@ -19,6 +19,8 @@ on:
       - '!server/**'
       - '!.dockerignore'
       - '!.github/workflows/server.yml'
+      # The Beelink runner's setup lives on the Beelink, not in the app.
+      - '!.github/runner/**'
   workflow_dispatch:
 
 permissions:
@@ -49,6 +51,15 @@ jobs:
             scripts/
           sparse-checkout-cone-mode: false
       - id: platforms
+        env:
+          # The Beelink's Windows runner (.github/runner/README.md), named in the repo variable
+          # WINDOWS_RUNNER, takes runs by the people it trusts and never a fork's pull request;
+          # everything else stays on GitHub's runner. The runner's own job hook checks again.
+          FLEXSPEAK_WINDOWS_RUNNER: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+            && contains(fromJSON('["yungtristxn","Jan-GJ"]'), github.actor)
+            && contains(fromJSON('["yungtristxn","Jan-GJ"]'), github.triggering_actor)
+            && vars.WINDOWS_RUNNER || '' }}
         run: python3 scripts/release.py platforms | tee -a "$GITHUB_OUTPUT"
 
   # The platforms are checked on every PR before it merges (ci.yml), so a release does not
@@ -71,7 +82,7 @@ jobs:
           persist-credentials: false
       # The checks' own setup on each platform (ci.yml), or their cache isn't found.
       - name: Windows Dev Drive
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment == 'github-hosted'
         uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
         with:
           drive-size: 20GB
@@ -85,11 +96,19 @@ jobs:
         run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: runner.environment == 'github-hosted'
         with:
           workspaces: ${{ env.DEV_DRIVE_WORKSPACE || '.' }}
           shared-key: ${{ needs.platforms.outputs.test-cache }}
           # Saved by the checks on main, which also build Clippy's half of it.
           save-if: false
+      # The self-hosted runner keeps Cargo's output between jobs instead of restoring a cache
+      # (the Dev Drive and rust-cache steps are GitHub's runner only).
+      - name: Self-hosted build directory
+        if: runner.environment == 'self-hosted'
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$env:FLEXSPEAK_CI_DIR/target/test" >> $env:GITHUB_ENV
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libopus-dev libxkbcommon-dev libwayland-dev
@@ -127,7 +146,7 @@ jobs:
       # the toolchain, Cargo's home and a copy of the checkout live on a ReFS Dev Drive. The
       # drive is not marked trusted, so Defender still scans it.
       - name: Windows Dev Drive
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment == 'github-hosted'
         uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
         with:
           drive-size: 20GB
@@ -137,6 +156,7 @@ jobs:
             RUSTUP_HOME,{{ DEV_DRIVE }}/.rustup
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: runner.environment == 'github-hosted'
         with:
           workspaces: ${{ env.DEV_DRIVE_WORKSPACE || '.' }}
           # A Mac cache from another image holds that image's Xcode paths and won't link.
@@ -145,12 +165,21 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # rust-cache prunes unknown directories under target/, so Opus lives (and is cached) elsewhere.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: runner.environment == 'github-hosted'
         with:
           path: |
             ${{ runner.temp }}/opus
             !${{ runner.temp }}/opus/build
           # The build's own stamp also catches changed CMake options.
           key: opus-${{ matrix.platform }}-${{ hashFiles('scripts/opus.json') }}
+      # The self-hosted runner keeps Cargo's output between jobs instead of restoring a cache
+      # (the Dev Drive and rust-cache steps are GitHub's runner only).
+      - name: Self-hosted build directory
+        if: runner.environment == 'self-hosted'
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$env:FLEXSPEAK_CI_DIR/target/release" >> $env:GITHUB_ENV
+          "FLEXSPEAK_OPUS_DIR=$env:FLEXSPEAK_CI_DIR/opus" >> $env:GITHUB_ENV
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake pkg-config libasound2-dev libxkbcommon-dev libwayland-dev desktop-file-utils
@@ -178,7 +207,7 @@ jobs:
       - name: Build and package
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         env:
-          FLEXSPEAK_OPUS_DIR: ${{ runner.temp }}/opus
+          FLEXSPEAK_OPUS_DIR: ${{ env.FLEXSPEAK_OPUS_DIR || format('{0}/opus', runner.temp) }}
           # Nothing may reach the network after the fetch (build scripts' own downloads,
           # such as the prebuilt libwebrtc, are not Cargo's and still work).
           CARGO_NET_OFFLINE: 'true'

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs a command in the CI VM over SSH (PowerShell), e.g. /srv/flexspeak-ci/vm hostname
+exec ssh -i /srv/flexspeak-ci/ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=/srv/flexspeak-ci/ssh/known_hosts -p 2222 ci@127.0.0.1 "$@"
