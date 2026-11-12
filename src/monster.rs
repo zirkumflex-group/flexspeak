@@ -621,6 +621,8 @@ pub struct Tracker {
     pub cans: Vec<Can>,
     /// What the flavour search holds.
     pub query: String,
+    /// The flavour picked to add, waiting for a yes: a can, once added, stays.
+    pub confirming: Option<usize>,
     /// The card being opened, while one is.
     pub reveal: Option<Reveal>,
     reveals: u64,

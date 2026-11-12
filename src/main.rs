@@ -1068,6 +1068,8 @@ enum Message {
     ShowTab(Tab),
     OpenSettings(SettingsPage),
     /// Records a can of this flavour, by its place in `FLAVOURS`, drunk just now.
+    /// Asks before adding a can of this flavour; `None` closes the question.
+    MonsterConfirm(Option<usize>),
     MonsterAdd(usize),
     MonsterSearch(String),
     MonsterRevealTick(u64),
@@ -3753,7 +3755,13 @@ impl App {
             }
             Message::CloseSettings => self.close_settings(),
             Message::MonsterSearch(query) => self.monster.query = query,
+            Message::MonsterConfirm(flavour) => {
+                // Nothing is asked while a can is being added or opened.
+                let busy = self.monster.reveal.is_some() || self.monster.adding;
+                self.monster.confirming = flavour.filter(|_| !busy);
+            }
             Message::MonsterAdd(flavour) => {
+                self.monster.confirming = None;
                 // A can tapped while another is being opened waits for it to finish.
                 if self.monster.reveal.is_some() {
                     return Task::none();

@@ -1310,7 +1310,7 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
                 order
                     .first()
                     .filter(|_| searching && open)
-                    .map(|(index, _)| Message::MonsterAdd(*index)),
+                    .map(|(index, _)| Message::MonsterConfirm(Some(*index))),
             )),
         );
     if !favourites.is_empty() {
@@ -1395,7 +1395,7 @@ fn flavour_buttons(t: &Theme, flavours: &[(usize, u32)], open: bool) -> El {
                 .hover(t.wash(0.06))
                 .press_scale(0.97)
                 .motion(motion::QUICK)
-                .on_press_tx(send(Message::MonsterAdd(index)))
+                .on_press_tx(send(Message::MonsterConfirm(Some(index))))
         } else {
             button.disabled(true).dim(0.5)
         };

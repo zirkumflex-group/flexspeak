@@ -57,6 +57,7 @@ pub const SCENES: &[Scene] = &[
     ("monster-sync-offline", settings_sync_offline),
     ("monster-empty", monster_empty),
     ("monster-board", monster_board),
+    ("monster-add-confirm", monster_add_confirm),
     ("monster-connected", monster_connected),
     ("monster-unboxed", monster_unboxed),
     ("monster-unboxed-rare", monster_unboxed_rare),
@@ -1573,6 +1574,13 @@ fn stocked(s: &mut App) {
 
 fn monster_board(s: &mut App) {
     stocked(s);
+}
+
+/// A flavour picked: the page asks before the can is added, since it can't be taken back.
+fn monster_add_confirm(s: &mut App) {
+    stocked(s);
+    let (khaotic, _) = crate::monster::flavour_by_id("khaotic").unwrap();
+    s.monster.confirming = Some(khaotic);
 }
 
 /// Mara opens a Legendary: her row lights up in its colour and the channel gets the card.
@@ -4486,6 +4494,9 @@ mod tests {
         let before = rt.state.monster.cans.len();
         click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
+        assert!(rt.state.monster.sent.is_empty(), "it asks first");
+        click(&mut rt, "add-can-confirm");
+        settle(&mut rt);
         let [Effect::Add(add)] = &rt.state.monster.sent[..] else {
             panic!("{:?}", rt.state.monster.sent)
         };
@@ -4518,6 +4529,8 @@ mod tests {
         let mut rt = runtime(monster_signed_in, (1100.0, 1500.0));
         settle(&mut rt);
         click(&mut rt, "monster-flavour-khaotic");
+        settle(&mut rt);
+        click(&mut rt, "add-can-confirm");
         settle(&mut rt);
         deliver(
             &mut rt,
@@ -4984,20 +4997,40 @@ mod tests {
     }
 
     #[test]
+    fn a_flavour_picked_and_then_cancelled_adds_nothing() {
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let before = rt.state.monster.cans.len();
+        click(&mut rt, "monster-flavour-khaotic");
+        settle(&mut rt);
+        click(&mut rt, "add-can-cancel");
+        settle(&mut rt);
+        assert!(rt.find("add-can-confirm").is_none());
+        assert_eq!(rt.state.monster.cans.len(), before);
+        assert!(rt.state.monster.reveal.is_none());
+    }
+
+    #[test]
     fn tapping_a_flavour_adds_a_can_of_it_and_opens_its_card() {
         let mut rt = runtime(monster_board, (1100.0, 1500.0));
         settle(&mut rt);
         let before = rt.state.monster.cans.len();
         click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
+        assert_eq!(rt.state.monster.cans.len(), before, "it asks first");
+        assert!(rt.find("add-can-confirm").is_some());
+        click(&mut rt, "add-can-confirm");
+        settle(&mut rt);
+        assert!(rt.find("add-can-confirm").is_none());
         assert_eq!(rt.state.monster.cans.len(), before + 1);
         let added = rt.state.monster.cans.last().unwrap().clone();
         assert_eq!(added.flavour, "khaotic");
         assert!(added.at > 0, "saved with when it was drunk");
         assert!(rt.state.monster.reveal.is_some(), "it opens");
-        // While it opens, another tap waits.
+        // While it opens, another tap waits, and asks nothing.
         click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
+        assert!(rt.find("add-can-confirm").is_none());
         assert_eq!(rt.state.monster.cans.len(), before + 1);
         // Skipped here, since a test has no timers to carry it through its beats.
         let shown = format!("showcase-{}", added.identity());
@@ -5040,6 +5073,9 @@ mod tests {
         let before = rt.state.monster.cans.len();
         click(&mut rt, "monster-search");
         key(&mut rt, rune::Key::Enter, false);
+        settle(&mut rt);
+        assert_eq!(rt.state.monster.confirming, Some(first), "it asks first");
+        click(&mut rt, "add-can-confirm");
         settle(&mut rt);
         assert_eq!(rt.state.monster.cans.len(), before + 1);
         assert_eq!(
