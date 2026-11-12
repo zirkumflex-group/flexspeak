@@ -28,10 +28,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
             .child(muted(
                 t,
                 format!(
-                    "Voice packets · sent {} · received {} · playback gaps {}",
+                    "Voice packets · sent {} · received {}",
                     s.server().sent,
-                    s.server().received,
-                    crate::audio::playback_gaps()
+                    s.server().received
                 ),
             ))
             .child(faint(t, s.server().detail.clone()))
@@ -160,6 +159,7 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
     let rate = |value: f64| format!("{}/s", usage::format_bytes(value));
     let file_rate =
         |value: Option<u64>| value.map_or_else(|| "—".into(), |value| rate(value as f64));
+    let voice = s.voice_playback;
     col()
         .w_full()
         .gap(20.0)
@@ -208,6 +208,9 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                         ("Upload", rate(network.upload_per_second)),
                         ("Download", rate(network.download_per_second)),
                         ("Packet loss in", percent(quality.packet_loss_in)),
+                        ("Loss in · voice", percent(quality.loss_in.voice)),
+                        ("Loss in · keepalive", percent(quality.loss_in.keepalive)),
+                        ("Loss in · control", percent(quality.loss_in.control)),
                         ("Packet loss out", percent(quality.packet_loss_out)),
                         ("Ping", quality.ping_text()),
                         (
@@ -240,11 +243,25 @@ fn usage_view(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                             usage::format_bytes(network.downloaded as f64),
                         ),
                     ],
+                ))
+                .child(readings(
+                    t,
+                    "voice-readings",
+                    "Voice playback",
+                    vec![
+                        ("Played", voice.played.to_string()),
+                        ("Filled in · lost or late", voice.concealed.to_string()),
+                        ("Rebuilt from the next packet", voice.recovered.to_string()),
+                        ("Dropped · too late", voice.dropped.to_string()),
+                        ("Talkers timed out", voice.timed_out.to_string()),
+                        ("Buffered", format!("{} packets", voice.queued)),
+                        ("Playback gaps", crate::audio::playback_gaps().to_string()),
+                    ],
                 )),
         )
         .child(faint(
             t,
-            "CPU: 100% = one core · Memory counters overlap; do not add them · Traffic: TeamSpeak estimate · Local: 1 s / server: 5 s · — unavailable",
+            "CPU: 100% = one core · Memory counters overlap; do not add them · Traffic: TeamSpeak estimate · Local: 1 s / server: 5 s · Voice playback: packets since launch, all servers · — unavailable",
         ))
 }
 

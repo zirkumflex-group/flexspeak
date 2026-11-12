@@ -24,8 +24,12 @@ use crate::ClientId;
 const SAMPLE_RATE: SampleRate = SampleRate::Hz48000;
 const CHANNELS: Channels = Channels::Stereo;
 const CHANNEL_NUM: usize = 2;
-/// If this amount of packets is lost consecutively, we assume the stream stopped.
-const MAX_PACKET_LOSSES: usize = 3;
+/// After this many samples with nothing real to play, we assume the stream stopped: 500 ms.
+///
+/// Counted in time, not packets. A burst of three lost or late packets is 60 ms, and a talker
+/// taken away for that loses what is queued and waits for a new buffer in the middle of a
+/// sentence or a song.
+const MAX_CONCEALED_SAMPLES: usize = 48_000 / 2;
 /// Store the buffer sizes for the last `LAST_BUFFER_SIZE_COUNT` packets.
 const LAST_BUFFER_SIZE_COUNT: u8 = 255;
 /// The amount of samples to maximally buffer. Equivalent to 0.5 s.
@@ -119,8 +123,13 @@ pub struct AudioQueue {
 	decoded_pos: usize,
 	/// The number of samples in the last packet.
 	last_packet_samples: usize,
-	/// The last `packet_loss_num` packet decodes were a loss.
-	packet_loss_num: usize,
+	/// The amount of samples filled in since the last packet that decoded as itself.
+	concealed_samples: usize,
+	/// The amount of samples filled in while no packet was queued. The ids that turn out to
+	/// be lost in that time were due then, so they are not filled in a second time.
+	stalled_samples: usize,
+	/// Decodes since the handler last collected them.
+	stats: VoiceStats,
 	/// The amount of samples to buffer until this queue is ready to play.
 	buffering_samples: usize,
 	/// The amount of packets in the buffer when a packet was decoded.
@@ -133,9 +142,35 @@ pub struct AudioQueue {
 	buffered_for_samples: usize,
 }
 
+/// What became of incoming voice, counted in packets.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VoiceStats {
+	/// Decoded and played as received.
+	pub played: u64,
+	/// Missing when due and filled in by the decoder.
+	pub concealed: u64,
+	/// Missing when due and rebuilt from the packet after it.
+	pub recovered: u64,
+	/// Received but not played: too late, a duplicate, or the queue was full.
+	pub dropped: u64,
+	/// Talkers taken away because nothing arrived for too long.
+	pub timed_out: u64,
+}
+
+impl VoiceStats {
+	fn add(&mut self, other: Self) {
+		self.played += other.played;
+		self.concealed += other.concealed;
+		self.recovered += other.recovered;
+		self.dropped += other.dropped;
+		self.timed_out += other.timed_out;
+	}
+}
+
 /// Handles incoming audio, has one [`AudioQueue`] per sending client.
 pub struct AudioHandler<Id: Clone + Debug + Eq + Hash + PartialEq = ClientId> {
 	queues: HashMap<Id, AudioQueue>,
+	stats: VoiceStats,
 }
 
 impl<T: Copy + Default + Ord> SlidingWindowMinimum<T> {
@@ -200,7 +235,9 @@ impl AudioQueue {
 			decoded_buffer: Default::default(),
 			decoded_pos: 0,
 			last_packet_samples,
-			packet_loss_num: 0,
+			concealed_samples: 0,
+			stalled_samples: 0,
+			stats: Default::default(),
 			buffering_samples: 0,
 			last_buffer_size_min: SlidingWindowMinimum::new(LAST_BUFFER_SIZE_COUNT),
 			last_buffer_size_max: SlidingWindowMinimum::<Reverse<u8>>::new(LAST_BUFFER_SIZE_COUNT),
@@ -307,7 +344,8 @@ impl AudioQueue {
 			packet_data = None;
 			len = self.last_packet_samples;
 		}
-		self.packet_loss_num += 1;
+		// Counted before decoding, so a talker whose packets fail to decode goes away too.
+		self.concealed_samples += if len == 0 { USUAL_FRAME_SIZE } else { len };
 
 		let orig_buffer_len = self.decoded_buffer.len();
 		self.decoded_buffer.resize(orig_buffer_len + len * CHANNEL_NUM, 0.0);
@@ -327,9 +365,14 @@ impl AudioQueue {
 		self.last_packet_samples = len;
 		self.decoded_buffer.truncate(orig_buffer_len + len * CHANNEL_NUM);
 
-		// Update packet_loss_num
 		if packet.is_some() && !fec {
-			self.packet_loss_num = 0;
+			self.concealed_samples = 0;
+			self.stalled_samples = 0;
+			self.stats.played += 1;
+		} else if fec {
+			self.stats.recovered += 1;
+		} else {
+			self.stats.concealed += 1;
 		}
 
 		// Update last_buffer_size
@@ -391,8 +434,13 @@ impl AudioQueue {
 				}
 
 				self.packet_buffer_samples -= packet.samples;
-				let cur_id = self.next_id;
-				self.next_id = self.next_id.wrapping_add(1);
+				// Ids lost while the queue was empty were filled in as they fell due.
+				let frame = self.last_packet_samples.max(1);
+				let covered = (self.stalled_samples / frame)
+					.min(usize::from(packet.id.wrapping_sub(self.next_id)));
+				self.stalled_samples -= covered * frame;
+				let cur_id = self.next_id.wrapping_add(covered as u16);
+				self.next_id = cur_id.wrapping_add(1);
 				if packet.id != cur_id {
 					debug_assert!(
 						packet.id.wrapping_sub(cur_id) < MAX_BUFFER_PACKETS as u16,
@@ -417,6 +465,7 @@ impl AudioQueue {
 				debug!("No packets in queue");
 				// Packet loss or end of stream
 				self.decode_packet(None, false)?;
+				self.stalled_samples += self.last_packet_samples;
 			}
 
 			if self.last_packet_samples == 0 {
@@ -551,7 +600,7 @@ fn catch_up_leaves_no_steps_in_a_tone() {
 
 impl<Id: Clone + Debug + Eq + Hash + PartialEq> Default for AudioHandler<Id> {
 	fn default() -> Self {
-		Self { queues: Default::default() }
+		Self { queues: Default::default(), stats: Default::default() }
 	}
 }
 
@@ -570,6 +619,16 @@ impl<Id: Clone + Debug + Eq + Hash + PartialEq> AudioHandler<Id> {
 	}
 	pub fn get_mut_queues(&mut self) -> &mut HashMap<Id, AudioQueue> {
 		&mut self.queues
+	}
+
+	/// What became of incoming voice since this was last called.
+	pub fn take_stats(&mut self) -> VoiceStats {
+		std::mem::take(&mut self.stats)
+	}
+
+	/// The most packets any talker has waiting to be played.
+	pub fn queued_packets(&self) -> usize {
+		self.queues.values().map(|queue| queue.packet_buffer.len()).max().unwrap_or(0)
 	}
 
 	/// `buf` is not cleared before filling it.
@@ -593,8 +652,9 @@ impl<Id: Clone + Debug + Eq + Hash + PartialEq> AudioHandler<Id> {
 		trace!(len = buf.len(), "Filling audio buffer");
 		let mut to_remove = Vec::new();
 		for (id, queue) in self.queues.iter_mut() {
-			if queue.packet_loss_num >= MAX_PACKET_LOSSES {
-				debug!(packet_loss_num = queue.packet_loss_num, "Removing talker");
+			if queue.concealed_samples >= MAX_CONCEALED_SAMPLES {
+				debug!(concealed_samples = queue.concealed_samples, "Removing talker");
+				self.stats.timed_out += 1;
 				to_remove.push(id.clone());
 				continue;
 			}
@@ -614,6 +674,7 @@ impl<Id: Clone + Debug + Eq + Hash + PartialEq> AudioHandler<Id> {
 					}
 				}
 			}
+			self.stats.add(std::mem::take(&mut queue.stats));
 		}
 
 		for id in &to_remove {
@@ -633,7 +694,12 @@ impl<Id: Clone + Debug + Eq + Hash + PartialEq> AudioHandler<Id> {
 		}
 
 		if let Some(queue) = self.queues.get_mut(&id) {
-			queue.add_packet(packet)?;
+			if let Err(error) = queue.add_packet(packet) {
+				if matches!(error, Error::TooLate { .. } | Error::Duplicate(_) | Error::QueueFull) {
+					self.stats.dropped += 1;
+				}
+				return Err(error);
+			}
 			Ok(None)
 		} else {
 			if empty {
@@ -658,6 +724,9 @@ mod test {
 
 	use super::*;
 	use crate::tests::create_logger;
+
+	/// Fills of one usual frame until a talker with nothing to play is taken away.
+	const SILENT_FILLS: usize = MAX_CONCEALED_SAMPLES / USUAL_FRAME_SIZE + 2;
 
 	enum SimulateAction {
 		CreateEncoder,
@@ -870,7 +939,7 @@ mod test {
 			a.push(SimulateAction::ReceivePacket(i, true));
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(i)));
 		}
-		for _ in 0..4 {
+		for _ in 0..SILENT_FILLS {
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
 		}
 		a.push(SimulateAction::Check(Box::new(|h| assert!(h.queues.is_empty()))));
@@ -895,7 +964,7 @@ mod test {
 		}
 		a.push(SimulateAction::ReceivePacket(4, false));
 		a.push(SimulateAction::ReceivePacket(3, false));
-		for _ in 0..4 {
+		for _ in 0..SILENT_FILLS {
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
 		}
 		a.push(SimulateAction::Check(Box::new(|h| assert!(h.queues.is_empty()))));
@@ -928,7 +997,7 @@ mod test {
 			a.push(SimulateAction::ReceivePacket(i, true));
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
 		}
-		for _ in 0..4 {
+		for _ in 0..SILENT_FILLS {
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
 		}
 		a.push(SimulateAction::Check(Box::new(|h| assert!(h.queues.is_empty()))));
@@ -943,7 +1012,7 @@ mod test {
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(i)));
 		}
 		a.push(SimulateAction::ReceiveRaw(10, vec![]));
-		for _ in 0..4 {
+		for _ in 0..SILENT_FILLS {
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
 		}
 		a.push(SimulateAction::Check(Box::new(|h| assert!(h.queues.is_empty()))));
@@ -1020,7 +1089,7 @@ mod test {
 		let mut a = vec![SimulateAction::CreateEncoder];
 		a.push(SimulateAction::ReceivePacket(50, true));
 		a.push(SimulateAction::ReceivePacket(53, true));
-		for _ in 0..8 {
+		for _ in 0..4 + SILENT_FILLS {
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
 		}
 		a.push(SimulateAction::Check(Box::new(|h| assert!(h.queues.is_empty()))));
@@ -1032,10 +1101,85 @@ mod test {
 		let mut a = vec![SimulateAction::CreateEncoder];
 		a.push(SimulateAction::ReceivePacket(65534, true));
 		a.push(SimulateAction::ReceivePacket(0, true));
-		for _ in 0..7 {
+		for _ in 0..3 + SILENT_FILLS {
 			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
 		}
 		a.push(SimulateAction::Check(Box::new(|h| assert!(h.queues.is_empty()))));
+		simulate(a)
+	}
+
+	#[test]
+	fn a_burst_of_loss_keeps_the_talker_and_its_queue() -> Result<()> {
+		// 51 to 53 are lost. The old limit of three concealed packets took the talker away
+		// here, with 54 and 55 still queued.
+		let mut a = vec![SimulateAction::CreateEncoder];
+		for id in [50, 54, 55] {
+			a.push(SimulateAction::ReceivePacket(id, true));
+		}
+		for _ in 0..4 {
+			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
+		}
+		a.push(SimulateAction::Check(Box::new(|h| {
+			let queue = &h.queues[&ClientId(0)];
+			assert_eq!(queue.packet_buffer.iter().map(|p| p.id).collect::<Vec<_>>(), [54, 55]);
+			assert_eq!(
+				h.stats,
+				VoiceStats { played: 1, concealed: 2, recovered: 1, ..Default::default() }
+			);
+		})));
+		a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(54)));
+		a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(55)));
+		a.push(SimulateAction::Check(Box::new(|h| {
+			assert_eq!(h.queues[&ClientId(0)].concealed_samples, 0);
+			assert_eq!(h.stats.timed_out, 0);
+		})));
+		simulate(a)
+	}
+
+	#[test]
+	fn loss_while_nothing_was_queued_is_not_filled_in_twice() -> Result<()> {
+		// 51 to 53 never arrive, and the queue is empty while they are due.
+		let mut a = vec![SimulateAction::CreateEncoder];
+		a.push(SimulateAction::ReceivePacket(50, true));
+		for _ in 0..4 {
+			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
+		}
+		a.push(SimulateAction::ReceivePacket(54, true));
+		// Their time has passed, so 54 plays next instead of three more filled-in frames.
+		a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(54)));
+		a.push(SimulateAction::Check(Box::new(|h| {
+			assert_eq!(h.stats, VoiceStats { played: 2, concealed: 3, ..Default::default() });
+		})));
+		simulate(a)
+	}
+
+	#[test]
+	fn late_packets_after_a_stall_all_play() -> Result<()> {
+		// Nothing is lost: 51 and 52 are only late, and arrive together.
+		let mut a = vec![SimulateAction::CreateEncoder];
+		a.push(SimulateAction::ReceivePacket(50, true));
+		for _ in 0..3 {
+			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, None));
+		}
+		a.push(SimulateAction::ReceivePacket(51, true));
+		a.push(SimulateAction::ReceivePacket(52, true));
+		a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(51)));
+		a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(52)));
+		a.push(SimulateAction::Check(Box::new(|h| {
+			assert_eq!(h.stats, VoiceStats { played: 3, concealed: 2, ..Default::default() });
+		})));
+		simulate(a)
+	}
+
+	#[test]
+	fn a_late_packet_counts_as_dropped() -> Result<()> {
+		let mut a = vec![SimulateAction::CreateEncoder];
+		for id in 0..3 {
+			a.push(SimulateAction::ReceivePacket(id, true));
+			a.push(SimulateAction::FillBuffer(USUAL_FRAME_SIZE, Some(id)));
+		}
+		a.push(SimulateAction::ReceivePacket(1, false));
+		a.push(SimulateAction::Check(Box::new(|h| assert_eq!(h.stats.dropped, 1))));
 		simulate(a)
 	}
 }
