@@ -6,8 +6,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::prelude::*;
-use generic_array::typenum::consts::U16;
-use generic_array::GenericArray;
 use num_traits::ToPrimitive;
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
@@ -37,8 +35,8 @@ pub trait Socket {
 #[derive(Debug)]
 pub struct CachedKey {
 	pub generation_id: u32,
-	pub key: GenericArray<u8, U16>,
-	pub nonce: GenericArray<u8, U16>,
+	pub key: [u8; 16],
+	pub nonce: [u8; 16],
 }
 
 /// Data that has to be stored for a connection when it is connected.
@@ -138,7 +136,7 @@ impl Socket for UdpSocket {
 
 impl Default for CachedKey {
 	fn default() -> Self {
-		CachedKey { generation_id: u32::MAX, key: [0; 16].into(), nonce: [0; 16].into() }
+		CachedKey { generation_id: u32::MAX, key: [0; 16], nonce: [0; 16] }
 	}
 }
 
