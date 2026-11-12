@@ -1129,7 +1129,7 @@ impl App {
             transmitting: false,
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
-            footer_hidden: false,
+            footer_hidden: true,
             log_pane: settings::LogPane::default(),
             sidebar_width: ui::SIDEBAR_WIDTH,
             appearance: settings::Appearance::default(),
@@ -5749,7 +5749,7 @@ mod tests {
     }
 
     #[test]
-    fn hiding_the_footer_saves_only_that_choice_and_survives_a_restart() {
+    fn expanding_the_footer_saves_only_that_choice_and_survives_a_restart() {
         let (mut app, root) = setup_fixture("footer");
         let path = root.join("settings.json");
         let saved = settings::Settings {
@@ -5758,16 +5758,17 @@ mod tests {
         };
         settings::save(&path, &saved).unwrap();
         app.load_settings(path.clone());
+        assert!(app.footer_hidden, "the footer starts compact");
         let _ = app.update(Message::ToggleFooter);
-        assert!(app.footer_hidden);
+        assert!(!app.footer_hidden);
         let stored = settings::load(&path).unwrap().unwrap();
-        assert!(stored.footer_hidden);
+        assert!(!stored.footer_hidden);
         assert_eq!(stored.nickname, "Saved name", "the rest of the file is untouched");
         let (mut restarted, _) = setup_fixture("footer-restart");
         restarted.load_settings(path.clone());
-        assert!(restarted.footer_hidden);
+        assert!(!restarted.footer_hidden);
         let _ = restarted.update(Message::ToggleFooter);
-        assert!(!settings::load(&path).unwrap().unwrap().footer_hidden);
+        assert!(settings::load(&path).unwrap().unwrap().footer_hidden);
         std::fs::remove_dir_all(root).unwrap();
     }
 

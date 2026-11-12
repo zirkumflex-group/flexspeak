@@ -54,21 +54,12 @@ pub fn format_mib(bytes: Option<u64>) -> String {
     )
 }
 
+/// A CPU share to one decimal, which is as fine as a reading taken each second means anything.
 pub fn format_cpu_percent(value: f64) -> String {
-    if value > 0.0 && value < 0.001 {
-        return "<0.001%".into();
-    }
-    let value = format!("{value:.3}");
-    format!("{}%", value.trim_end_matches('0').trim_end_matches('.'))
-}
-
-/// The live CPU figure, in whole percent so small changes don't keep redrawing it. The
-/// tooltip and charts keep the exact value.
-pub fn format_cpu_whole(value: f64) -> String {
-    if value > 0.0 && value < 0.5 {
-        "<1%".into()
+    if value > 0.0 && value < 0.05 {
+        "<0.1%".into()
     } else {
-        format!("{value:.0}%")
+        format!("{value:.1}%")
     }
 }
 
@@ -540,7 +531,7 @@ impl ConnectionUsage {
 
     pub fn ping_text(self) -> String {
         match (self.ping_ms, self.ping_deviation_ms) {
-            (Some(ping), Some(deviation)) => format!("{ping:.0} ms ± {deviation:.1}"),
+            (Some(ping), Some(deviation)) => format!("{ping:.0} ± {deviation:.1} ms"),
             (Some(ping), None) => format!("{ping:.0} ms"),
             _ => "—".into(),
         }
@@ -655,32 +646,18 @@ mod tests {
     }
 
     #[test]
-    fn cpu_display_preserves_small_readings_without_trailing_zeroes() {
+    fn cpu_shows_one_decimal_and_marks_tiny_readings() {
         for (value, expected) in [
-            (0.0, "0%"),
-            (0.0001, "<0.001%"),
-            (f64::from(0.001_f32), "0.001%"),
-            (f64::from(0.02_f32), "0.02%"),
+            (0.0, "0.0%"),
+            (0.0001, "<0.1%"),
+            (f64::from(0.02_f32), "<0.1%"),
             (0.2, "0.2%"),
-            (1.23456, "1.235%"),
-            (100.0, "100%"),
-            (201.125, "201.125%"),
+            (1.23456, "1.2%"),
+            (26.562, "26.6%"),
+            (100.0, "100.0%"),
+            (201.125, "201.1%"),
         ] {
             assert_eq!(format_cpu_percent(value), expected);
-        }
-    }
-
-    #[test]
-    fn live_cpu_is_whole_percent() {
-        for (value, expected) in [
-            (0.0, "0%"),
-            (0.2, "<1%"),
-            (0.6, "1%"),
-            (23.415, "23%"),
-            (26.562, "27%"),
-            (201.125, "201%"),
-        ] {
-            assert_eq!(format_cpu_whole(value), expected);
         }
     }
 
@@ -901,7 +878,7 @@ mod tests {
             sample.sample(now + Duration::from_secs(5)).idle_seconds,
             Some(60)
         );
-        assert_eq!(sample.sample(now).ping_text(), "23 ms ± 11.2");
+        assert_eq!(sample.sample(now).ping_text(), "23 ± 11.2 ms");
         let expired = sample.sample(now + Duration::from_secs(16));
         assert_eq!(expired.health(), Health::Unknown);
         assert!(

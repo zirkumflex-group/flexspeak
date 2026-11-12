@@ -43,6 +43,7 @@ pub const SCENES: &[Scene] = &[
     ("own-channel-only", own_channel_only),
     ("limited", limited),
     ("footer-hidden", footer_hidden),
+    ("footer-expanded", footer_expanded),
     ("statistics", statistics),
     ("settings", settings_page),
     ("settings-nickname-empty", settings_nickname_empty),
@@ -1218,8 +1219,8 @@ fn streaming_elsewhere(s: &mut App) {
     s.server_mut().streaming.streamers = [4].into_iter().collect();
 }
 
-/// Deafened with the microphone left unmuted: the mute button shows the mic as on, since
-/// that is what undeafening brings back. The CPU reads in whole percent.
+/// Deafened with the microphone left unmuted: the mute button shows the mic as off, since
+/// nothing is sent, and its tooltip says why. The CPU reads to one decimal.
 fn connected_deafened(s: &mut App) {
     connected_quiet(s);
     s.server_mut().muted = false;
@@ -1230,13 +1231,20 @@ fn connected_deafened(s: &mut App) {
     s.process_usage.cpu_percent = Some(23.415);
 }
 
-/// The hidden footer under load: CPU red, footprint amber.
+/// The compact footer, the usual one, under load: health and ping only.
 fn footer_hidden(s: &mut App) {
     connected(s);
     s.footer_hidden = true;
     s.process_usage.cpu_percent = Some(64.0);
     s.process_usage.memory_bytes = Some(812 * 1024 * 1024);
     s.process_usage.memory_detail_bytes = Some(590 * 1024 * 1024);
+}
+
+/// The footer expanded: packet loss and ping with their sparklines, then CPU (one decimal,
+/// red under load) and RAM (amber).
+fn footer_expanded(s: &mut App) {
+    footer_hidden(s);
+    s.footer_hidden = false;
 }
 
 fn statistics(s: &mut App) {

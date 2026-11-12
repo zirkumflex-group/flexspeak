@@ -84,7 +84,7 @@ pub(super) fn resources(s: &App) -> Resources {
         cpu: (
             usage.cpu_percent.map_or_else(
                 || "…".into(),
-                |value| usage::format_cpu_whole(f64::from(value)),
+                |value| usage::format_cpu_percent(f64::from(value)),
             ),
             usage::cpu_health(usage.cpu_percent),
         ),
@@ -113,36 +113,28 @@ fn readings(s: &App, t: &Theme) -> El {
         ))
 }
 
-/// The hidden footer's resources: icons only, coloured by load, the figure in the tooltip.
-fn resource_icons(s: &App, t: &Theme) -> El {
-    let r = resources(s);
-    let mut icons_row = row().key("resource-icons").gap(2.0).center_y();
-    for (key, glyph, label, (value, health), help) in [
-        ("cpu", &icons::CPU, "CPU", r.cpu, r.cpu_help),
-        (
-            "ram",
-            &icons::MEMORY,
-            "RAM",
-            r.ram.clone(),
-            format!("RAM {}", r.ram.0),
-        ),
-    ] {
-        icons_row = icons_row.child(
-            el().key(key)
-                .size(22.0, 22.0)
-                .center()
-                .radius(6.0)
-                .help(help)
-                .label(format!("{label} {value}"))
-                .child(
-                    icon(glyph, 14.0)
-                        .color(t.health(health))
-                        .motion(super::theme::motion::READING)
-                        .a11y_hidden(),
-                ),
-        );
-    }
-    icons_row
+/// The compact footer's one reading: ping, in its health colour.
+fn ping(s: &App, t: &Theme) -> El {
+    let quality = s.server().connection_usage;
+    let health = usage::Health::ping(quality.ping_ms, quality.ping_deviation_ms);
+    let value = quality.ping_text();
+    row()
+        .key("footer-ping")
+        .gap(8.0)
+        .center_y()
+        .help(format!(
+            "Ping {value} · round trip to the server, ± its variation
+{} connection",
+            health.label()
+        ))
+        .label(format!("Ping {value}"))
+        .child(text("Ping").font(ty::SMALL).color(t.muted).a11y_hidden())
+        .child(
+            text(value)
+                .font(ty::NUMERIC)
+                .color(t.health(health))
+                .a11y_hidden(),
+        )
 }
 
 fn toggle(t: &Theme, hidden: bool) -> El {
@@ -155,9 +147,9 @@ fn toggle(t: &Theme, hidden: bool) -> El {
             &icons::CHEVRON_DOWN
         },
         if hidden {
-            "Show connection charts and resources"
+            "Show packet loss, charts, CPU and RAM"
         } else {
-            "Hide connection charts and resources"
+            "Show only connection health and ping"
         },
         Variant::Ghost,
         Some(Message::ToggleFooter),
@@ -170,12 +162,14 @@ pub fn view(s: &App, t: &Theme) -> El {
         && !s.server().stopping
         && s.server().state.current.is_some();
     let content = if s.footer_hidden {
+        // The usual footer: how your connection is, and its ping. The rest waits behind the
+        // chevron.
         row()
             .w_full()
-            .gap(8.0)
+            .gap(16.0)
             .center_y()
             .child(status_pill(s, t))
-            .child(resource_icons(s, t))
+            .children(show_connection.then(|| ping(s, t)))
             .child(el().grow(1.0))
             .child(toggle(t, true))
     } else if show_connection {
