@@ -157,6 +157,7 @@ pub const SCENES: &[Scene] = &[
     ("push-to-talk", push_to_talk_page),
     ("push-to-talk-connected", push_to_talk_connected),
     ("member-menu", member_menu),
+    ("member-menu-auto-join", member_menu_auto_join),
     ("member-menu-restricted", member_menu_restricted),
     ("member-groups", member_groups),
     ("member-groups-selection", member_groups_selection),
@@ -2350,6 +2351,12 @@ fn member_menu(s: &mut App) {
     s.ui.member_menu = Some((2, rune::PointerPress { x: 150.0, y: 200.0 }));
 }
 
+/// The person is picked to have their streams joined by themselves.
+fn member_menu_auto_join(s: &mut App) {
+    member_menu(s);
+    s.auto_watch.insert("uid-2".into());
+}
+
 fn member_menu_restricted(s: &mut App) {
     connected(s);
     s.ui.member_menu = Some((3, rune::PointerPress { x: 150.0, y: 220.0 }));
@@ -3886,7 +3893,7 @@ mod tests {
             .unwrap()
             .wanted
             .clear();
-        let row = "member-menu-item7-sub-item";
+        let row = "member-menu-item8-sub-item";
         click(&mut rt, &format!("{row}1"));
         settle(&mut rt);
         click(&mut rt, &format!("{row}4"));

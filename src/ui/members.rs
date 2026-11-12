@@ -284,6 +284,15 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                         close(s);
                         dispatch(s, tx, Message::ToggleUserMute(id));
                     }),
+            )
+            .item(
+                MenuItem::new("Auto-join streams")
+                    .lead(neutral(&icons::MONITOR_PLAY, true))
+                    .checked(s.auto_watch.contains(&member.uid))
+                    .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                        close(s);
+                        dispatch(s, tx, Message::ToggleAutoWatch(id));
+                    }),
             );
     }
     let channels: Vec<MenuEntry> = s
