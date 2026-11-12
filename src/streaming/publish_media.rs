@@ -222,7 +222,7 @@ mod native {
         rtp_parameters::{DegradationPreference, RtpCodecCapability},
         rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
         session_description::{SdpType, SessionDescription},
-        video_frame::{I420Buffer, VideoFrame, VideoRotation},
+        video_frame::{BoxVideoFrame, I420Buffer, VideoFrame, VideoRotation},
         video_source::{VideoResolution, native::NativeVideoSource},
         video_track::RtcVideoTrack,
     };
@@ -1134,7 +1134,13 @@ mod native {
                 _ => None,
             };
             if let Some(target) = target {
-                match crate::streaming::wgc::Capture::open(target, max_size, first_interval) {
+                // NVENC takes NV12 as the GPU made it. Without it, frames stay I420.
+                match crate::streaming::wgc::Capture::open(
+                    target,
+                    max_size,
+                    first_interval,
+                    hardware_av1,
+                ) {
                     Ok(started) => fast = Some(started),
                     Err(error) => {
                         tracing::warn!(
@@ -1150,7 +1156,7 @@ mod native {
         // but encoders expect one every tick (a viewer who joins needs one to start from),
         // so it is sent again until a newer one arrives, as the standard capture does.
         #[cfg(target_os = "windows")]
-        let mut fast_frame: Option<VideoFrame<I420Buffer>> = None;
+        let mut fast_frame: Option<BoxVideoFrame> = None;
         #[cfg(not(target_os = "windows"))]
         let fast_started = false;
         if let SourceKind::Camera(id) = &options.source.kind {
@@ -1623,8 +1629,19 @@ a=rtpmap:45 AV1/90000
                         _ = tick.tick() => {
                             count += 1;
                             if count.is_multiple_of(3) {
-                                let mut buffer = I420Buffer::new(320,180);
-                                let (y,u,v) = buffer.data_mut(); y.fill(60+(count%100) as u8); u.fill(90); v.fill(220);
+                                // The same red picture in both layouts, turn about: the standard
+                                // capture and cameras send I420, fast capture sends NV12 to NVENC.
+                                let luma = 60+(count%100) as u8;
+                                let buffer: libwebrtc::video_frame::BoxVideoBuffer = if count.is_multiple_of(2) {
+                                    let mut buffer = I420Buffer::new(320,180);
+                                    let (y,u,v) = buffer.data_mut(); y.fill(luma); u.fill(90); v.fill(220);
+                                    Box::new(buffer)
+                                } else {
+                                    let mut buffer = libwebrtc::video_frame::NV12Buffer::new(320,180);
+                                    let (y,uv) = buffer.data_mut(); y.fill(luma);
+                                    for pair in uv.as_chunks_mut::<2>().0 { *pair = [90,220]; }
+                                    Box::new(buffer)
+                                };
                                 let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer); frame.timestamp_us = start.elapsed().as_micros() as i64;
                                 video.capture_frame(&frame);
                             }
@@ -1633,6 +1650,9 @@ a=rtpmap:45 AV1/90000
                             audio.capture_frame(&AudioFrame {data:Cow::Owned(data),sample_rate:48000,num_channels:2,samples_per_channel:480}).await?;
                             if let Some(crate::streaming::Image { pixels, .. }) = surface.take() {
                                 let pixels: &[u8] = pixels.as_ref(); distinct.insert(pixels[(90*320+160)*4],()); decoded_video += 1;
+                                // Swapped or misplaced chroma would turn the red blue or green.
+                                let [r, g, b] = [0, 1, 2].map(|c| i32::from(pixels[(90*320+160)*4+c]));
+                                ensure!(r > g + 60 && r > b + 60, "The picture must stay red, got {r} {g} {b}");
                             }
                             let mut pcm = [0.0_f32;960]; surface.mix_audio(&mut pcm);
                             let block_peak = pcm.iter().map(|v| v.abs()).fold(0.0_f32,f32::max);
