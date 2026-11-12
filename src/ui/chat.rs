@@ -10,7 +10,7 @@ use rune::{
     Color, El, Icon, Link, ScrollSpec, Span, TextStyle, Transition, Tx, col, el, icon, rich, row,
     text,
 };
-use rune_kit::Kit;
+use rune_kit::{Kit, MenuItem, context_menu};
 
 use super::home::tile_colour;
 use super::theme::{Theme, motion, radius, shadow, size, ty};
@@ -127,7 +127,7 @@ fn body(t: &Theme, content: &str, color: Color) -> El {
         return body;
     }
     for range in found {
-        body = body.link(Link::new(range.clone(), content[range].to_owned()));
+        body = body.link(Link::new(range.clone(), chat::address(&content[range])));
     }
     body.on_link(|_: &mut App, url: &str, tx: &mut Tx| {
         // Anything but a web address is refused there, and nothing opens.
@@ -244,20 +244,38 @@ fn line(t: &Theme, entry: &Entry, layout: Layout, here: u64) -> El {
     if entry.kind == Kind::Poke {
         return poke_line(t, entry);
     }
-    let mut meta = row().w_full().gap(6.0).center_y().child(
-        text(entry.from.clone())
-            .font(ty::BODY_STRONG)
-            .color(t.text)
-            .truncate_fade()
-            .min_w(0.0),
-    );
+    // Your own lines are told apart quietly: the name in `muted`, then "you".
+    let mut name = text(entry.from.clone())
+        .font(ty::BODY_STRONG)
+        .color(if entry.own { t.muted } else { t.text })
+        .truncate_fade()
+        .min_w(0.0);
+    // Someone else's name opens the private chat with them.
+    if !entry.own {
+        let help = format!("Message {}", entry.from);
+        name = name
+            .key(format!("chat-{}-from", entry.id))
+            .role("button")
+            .label(help.clone())
+            .help(help)
+            .cursor(rune::Cursor::Pointer)
+            .on_press_tx(send(Message::Chat(Action::MessageFrom(entry.id))));
+    }
+    let mut meta = row().w_full().gap(6.0).center_y().child(name);
+    if entry.own {
+        meta = meta.child(text("you").font(ty::CAPTION).color(t.faint));
+    }
     if layout == Layout::Feed {
         meta = meta.child(place_tag(t, entry, here));
     }
     meta = meta.child(time(t, entry));
+    let id = entry.id;
     let mut line =
         row()
             .key(format!("chat-{}", entry.id))
+            .on_secondary_press(move |s: &mut App, point: rune::PointerPress, _: &mut Tx| {
+                s.ui.chat_line_menu = Some((id, point));
+            })
             .role("listitem")
             .w_full()
             .gap(9.0)
@@ -277,6 +295,40 @@ fn line(t: &Theme, entry: &Entry, layout: Layout, here: u64) -> El {
             .fill(t.private.alpha(if t.dark { 0.10 } else { 0.07 }));
     }
     line
+}
+
+/// Right-clicking a message line: write to its sender, copy its text or its link.
+fn line_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let Some((id, point)) = s.ui.chat_line_menu else {
+        return;
+    };
+    let Some(entry) = s.server().chat.entries().find(|entry| entry.id == id) else {
+        return;
+    };
+    let mut menu = context_menu("chat-line-menu", el(), Some(point))
+        .min_width(180.0)
+        .on_close(|s: &mut App| s.ui.chat_line_menu = None);
+    if s.chat_sender(entry).is_some() {
+        menu = menu.item(
+            MenuItem::new(format!("Message {}", entry.from))
+                .icon(&icons::MESSAGE)
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    s.ui.chat_line_menu = None;
+                    dispatch(s, tx, Message::Chat(Action::MessageFrom(id)));
+                }),
+        );
+    }
+    let copy = |label: &str, value: String| {
+        MenuItem::new(label.to_owned()).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            s.ui.chat_line_menu = None;
+            tx.copy(value.clone());
+        })
+    };
+    menu = menu.item(copy("Copy text", entry.text.clone()));
+    if let Some(link) = chat::links(&entry.text).into_iter().next() {
+        menu = menu.item(copy("Copy link", chat::address(&entry.text[link])));
+    }
+    let _ = menu.build(k, layer);
 }
 
 /// The lists that open under a pointer: the channel group, the people group, and the message
@@ -1695,6 +1747,7 @@ fn fresh(s: &App, t: &Theme, layout: Layout) -> Option<El> {
 pub fn column(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Option<El> {
     s.chat_docked().then(|| {
         lists(s, t, layer);
+        line_menu(s, k, layer);
         panel(s, t, k, true).w(width(s)).fill(t.surface)
     })
 }
@@ -1783,6 +1836,7 @@ pub fn edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                 .child(peek.w_full()),
         );
         lists(s, t, layer);
+        line_menu(s, k, layer);
     }
 }
 

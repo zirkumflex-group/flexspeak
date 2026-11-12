@@ -251,6 +251,8 @@ pub struct UiState {
     /// The chat column while it hides behind the right edge, as the rail does behind the left.
     pub chat_peek: RailPeek,
     pub chat_input: TextEdit,
+    /// A message line's menu is open: the line's id, and where it was right-clicked.
+    pub chat_line_menu: Option<(u64, rune::PointerPress)>,
     /// The history is scrolled back from its newest line, so new lines stay unread.
     pub chat_back: bool,
     /// Where the side-by-side bar and its tabs lie, to find tabs scrolled out of sight.
@@ -339,6 +341,7 @@ impl Default for UiState {
             rail_peek: RailPeek::default(),
             chat_peek: RailPeek::default(),
             chat_input: TextEdit::new(""),
+            chat_line_menu: None,
             chat_back: false,
             chat_strip: ChatStrip::default(),
             chat_toast: None,

@@ -4642,6 +4642,24 @@ impl App {
             .find(|member| !member.is_self && client::chat_key(&member.uid, member.id) == key)
     }
 
+    /// Who wrote a line, while they're still on the server: a private line's peer, else the
+    /// person with that name (names are unique on a server). None for your own lines.
+    pub(crate) fn chat_sender(&self, entry: &chat::Entry) -> Option<u16> {
+        if entry.own {
+            return None;
+        }
+        if let chat::Scope::Private(key) = &entry.scope {
+            return self.chat_member(key).map(|member| member.id);
+        }
+        self.server()
+            .state
+            .channels
+            .iter()
+            .flat_map(|channel| &channel.members)
+            .find(|member| !member.is_self && member.name == entry.from)
+            .map(|member| member.id)
+    }
+
     /// Shows a conversation and points the message box at it.
     fn chat_open(&mut self, scope: chat::Scope) {
         let name = match &scope {
@@ -4766,6 +4784,17 @@ impl App {
                     self.chat_reveal();
                     self.chat_seen();
                     self.ui.chat_input.focused = true;
+                }
+            }
+            Action::MessageFrom(entry) => {
+                let sender = self
+                    .server()
+                    .chat
+                    .entries()
+                    .find(|line| line.id == entry)
+                    .and_then(|line| self.chat_sender(line));
+                if let Some(id) = sender {
+                    return self.chat_action(Action::Message(id));
                 }
             }
             Action::ClosePeer(key) => {
