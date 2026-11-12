@@ -31,6 +31,8 @@ pub enum Source {
     Trace,
     StreamDiscovery,
     StreamWatch,
+    /// A stream you watched ended for a reason other than you or its publisher stopping it.
+    StreamEnded,
     StreamFrame,
     StreamPublish,
     Poke,
@@ -73,6 +75,7 @@ impl Source {
                 | Self::Groups
                 | Self::StreamDiscovery
                 | Self::StreamWatch
+                | Self::StreamEnded
                 | Self::StreamFrame
                 | Self::StreamPublish
         )
@@ -98,7 +101,7 @@ impl Source {
     pub fn severity(self) -> Severity {
         match self {
             Self::Connection | Self::Dropped | Self::Audio => Severity::Error,
-            Self::AudioFallback | Self::Flood => Severity::Notice,
+            Self::AudioFallback | Self::Flood | Self::StreamEnded => Severity::Notice,
             _ => Severity::Warning,
         }
     }
@@ -120,6 +123,7 @@ impl Source {
             Self::Trace => "Trace not saved",
             Self::StreamDiscovery => "Couldn't list streams",
             Self::StreamWatch => "Couldn't watch stream",
+            Self::StreamEnded => "Stream ended",
             Self::StreamFrame => "Video frame dropped",
             Self::StreamPublish => "Screen sharing stopped",
             Self::Poke => "Poke not sent",

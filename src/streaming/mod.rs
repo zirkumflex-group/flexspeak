@@ -18,7 +18,7 @@ pub use publish_media::sources as share_sources;
 pub use publish_media::still as share_still;
 
 pub(crate) use rtc::Output as MediaEvent;
-pub use session::Session;
+pub use session::{Session, ended_as_expected};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},

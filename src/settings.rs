@@ -55,6 +55,9 @@ pub struct Settings {
     /// Settings > Streaming. Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Streaming::is_default")]
     pub streaming: Streaming,
+    /// Where the other streams go and whether stream details show.
+    #[serde(skip_serializing_if = "StreamView::is_default")]
+    pub stream_view: StreamView,
     /// Kept as written, so one bad entry can't stop the settings from loading.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_themes: Vec<serde_json::Value>,
@@ -120,6 +123,22 @@ pub struct Streaming {
 }
 
 impl Streaming {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// How watched streams are laid out. Saved straight away when changed, like `footer_hidden`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StreamView {
+    /// The other streams line up beside the large one rather than below it.
+    pub beside: bool,
+    /// Codec, resolution, frame rate and transport show over each stream.
+    pub details: bool,
+}
+
+impl StreamView {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -347,6 +366,7 @@ impl Default for Settings {
             sounds: crate::sounds::Settings::default(),
             share: Default::default(),
             streaming: Streaming::default(),
+            stream_view: StreamView::default(),
             custom_themes: Vec::new(),
             skip_install_prompt: false,
             chat: Chat::default(),

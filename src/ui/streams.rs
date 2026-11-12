@@ -12,8 +12,8 @@ use rune_kit::{Checkbox, Dialog, Kit, SegmentedControl};
 
 use super::theme::{Theme, motion, radius, size, ty};
 use super::widgets::{
-    Range, Variant, button, choice, divider, faint, icon_button, lit_dot, meter, muted, picker,
-    pulse, scroll_page, slider,
+    Range, Variant, button, choice, choice_with_help, divider, faint, icon_button, lit_dot, meter,
+    muted, picker, pulse, scroll_page, slider, slider_with_home,
 };
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
@@ -135,6 +135,23 @@ pub fn quick_sources(s: &App) -> &[ShareSource] {
     };
     &sources[..sources.len().min(3)]
 }
+
+/// What one click on a quick source does, with its full name, which the button may cut short.
+/// A quick share is always public, and takes system audio along when the dialog has it on.
+pub fn quick_share_help(s: &App, source: &ShareSource) -> String {
+    let mut help = format!(
+        "Go live with {}. Public: anyone in the channel can watch.",
+        source.name
+    );
+    if s.server().streaming.sharing.audio {
+        help.push_str(" Shares system audio: ");
+        help.push_str(SYSTEM_AUDIO_NOTE);
+    }
+    help
+}
+
+/// What "Share system audio" sends.
+const SYSTEM_AUDIO_NOTE: &str = "Everything your PC plays, except Flexspeak.";
 
 /// A quick source's icon: a game is a window, the main screen a screen.
 pub fn quick_icon(source: &ShareSource) -> &'static rune::Icon {
@@ -336,7 +353,7 @@ fn go_live(s: &App, t: &Theme) -> El {
                 },
                 Some(Message::QuickShare(source.clone())),
             )
-            .help(format!("Go live publicly: {}", source.name)),
+            .help(quick_share_help(s, source)),
         );
     }
     let only = quick.is_empty();
@@ -441,7 +458,11 @@ fn share_summary_text(s: &App) -> String {
         0 => "No one watching yet".to_owned(),
         count => format!("{count} of {} watching", streaming::publishing::MAX_VIEWERS),
     };
-    format!("{watching} · {}", status.access.label())
+    if status.source.is_empty() {
+        format!("{watching} · {}", status.access.label())
+    } else {
+        format!("{} · {watching} · {}", status.source, status.access.label())
+    }
 }
 
 /// A note on the main pane, recessed into it.
@@ -449,8 +470,8 @@ fn notice(t: &Theme) -> El {
     super::widgets::well(t).padding(size::CARD_PAD)
 }
 
-/// Your own share while it runs, for the voice panel: viewers, requests to watch, and the way to
-/// stop. The source comes last so a narrow sidebar only loses the end of it.
+/// Your own share while it runs, for the voice panel: what it shows and who watches, requests
+/// to watch, and the way to stop. Who may watch comes last, so a narrow sidebar loses that.
 pub fn sharing_status(s: &App, t: &Theme) -> El {
     let sharing = &s.server().streaming.sharing;
     let status = &sharing.status;
@@ -639,7 +660,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
                     .map(|stream| preview(s, t, stream, supported, Mode::Grid)),
             )
             .collect::<Vec<_>>();
-        return area.child(grid(k, cells, columns));
+        return area.child(grid(k, cells, columns, width));
     };
     let others: Vec<&Watching> = watching
         .iter()
@@ -807,8 +828,9 @@ fn grid_columns(count: usize, pane: (f32, f32)) -> Option<usize> {
     (picture_width(count, best, pane) >= MIN_PICTURE_WIDTH).then_some(best)
 }
 
-/// Rows of equal boxes; a short last row is centred. `None` columns means a scrolling list.
-fn grid(k: &Kit, cells: Vec<El>, columns: Option<usize>) -> El {
+/// Rows of equal boxes `cell` wide; a short last row is centred. `None` columns means a
+/// scrolling list.
+fn grid(k: &Kit, cells: Vec<El>, columns: Option<usize>, cell: f32) -> El {
     let fitted = columns.is_some();
     let columns = columns.unwrap_or(2);
     let mut grid = col().key("grid").w_full().gap(GRID_GAP);
@@ -819,7 +841,10 @@ fn grid(k: &Kit, cells: Vec<El>, columns: Option<usize>) -> El {
     let mut index = 0;
     while cells.peek().is_some() {
         let boxes: Vec<El> = cells.by_ref().take(columns).collect();
+        // A short row's spacers take the missing boxes' room less the gap each adds, so its
+        // boxes come out as wide as a full row's.
         let margin = (columns - boxes.len()) as f32 / 2.0;
+        let spacer = (margin * (cell + GRID_GAP) - GRID_GAP).max(0.0);
         let mut line = row()
             .key(format!("grid-row-{index}"))
             .w_full()
@@ -830,11 +855,11 @@ fn grid(k: &Kit, cells: Vec<El>, columns: Option<usize>) -> El {
             line.h(SCROLLED_ROW_HEIGHT)
         };
         if margin > 0.0 {
-            line = line.child(el().grow(margin).min_w(0.0));
+            line = line.child(el().w(spacer).min_w(0.0));
         }
         line = line.children(boxes);
         if margin > 0.0 {
-            line = line.child(el().grow(margin).min_w(0.0));
+            line = line.child(el().w(spacer).min_w(0.0));
         }
         grid = grid.child(line);
         index += 1;
@@ -1232,6 +1257,7 @@ fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, 
     } else {
         "No audio"
     };
+    let (title, subtitle) = stream_lines(s, stream);
     frame.child(
         row()
             .key("controls")
@@ -1243,20 +1269,23 @@ fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, 
             .child(lit_dot(t.live))
             .child(
                 col()
+                    .key("stream-name")
                     .grow(1.0)
                     .min_w(0.0)
                     .gap(1.0)
+                    .help(format!(
+                        "{} · {}",
+                        stream.name,
+                        publisher_name(s, stream.publisher)
+                    ))
                     .child(
-                        text(stream.name.clone())
+                        text(title)
                             .font(ty::BODY_STRONG)
                             .color(t.text)
                             .truncate_fade(),
                     )
                     .child(
-                        text(format!(
-                            "{} · {viewers} · {audio}",
-                            publisher_name(s, stream.publisher)
-                        ))
+                        text(format!("{subtitle} · {viewers} · {audio}"))
                         .font(ty::CAPTION)
                         .color(t.faint)
                         .truncate_fade(),
@@ -1382,13 +1411,14 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El 
         if volume_slider {
             bar = bar.child(
                 el().w(slider_width).child(
-                    slider(
+                    slider_with_home(
                         t,
                         "stream-volume",
                         "Stream volume",
                         i32::from(volume),
                         format!("{volume}%"),
                         STREAM_VOLUME,
+                        Some(100),
                         move |s: &App| i32::from(s.server().streaming.volume(publisher)),
                         move |value| {
                             Message::StreamVolume(
@@ -1398,7 +1428,7 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El 
                         },
                     )
                     .help(format!(
-                        "Stream volume: {volume}%. Above 100% it is amplified."
+                        "Stream volume: {volume}%. Above 100% it is amplified; double-click for 100%."
                     )),
                 ),
             );
@@ -1819,13 +1849,24 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
             .center_y()
             .child(lit_dot(t.live))
             .child(
-                text(format!(
-                    "{} / {} watching",
-                    status.viewers.len(),
-                    streaming::publishing::MAX_VIEWERS
-                ))
+                text(if status.source.is_empty() {
+                    format!(
+                        "{} / {} watching",
+                        status.viewers.len(),
+                        streaming::publishing::MAX_VIEWERS
+                    )
+                } else {
+                    format!(
+                        "{} · {} / {} watching",
+                        status.source,
+                        status.viewers.len(),
+                        streaming::publishing::MAX_VIEWERS
+                    )
+                })
                 .font(ty::BODY_STRONG)
-                .color(t.text),
+                .color(t.text)
+                .min_w(0.0)
+                .truncate_fade(),
             );
         if !status.detail.is_empty() {
             summary = summary.child(
@@ -1966,11 +2007,11 @@ fn quality_fields(s: &App, t: &Theme, k: &Kit, body: El, privacy: bool, menus: &
     let quality = sharing.quality;
     let preset = quality.preset();
     let advanced = s.ui.share_advanced;
-    let mut choices = row().w_full().gap(16.0).items_end().child(
+    let choices = row().w_full().gap(16.0).items_end().child(
         col()
             .gap(10.0)
             .child(field_label(t, "Preset"))
-            .child(choice(
+            .child(choice_with_help(
                 t,
                 "share-preset",
                 "Preset",
@@ -1979,43 +2020,58 @@ fn quality_fields(s: &App, t: &Theme, k: &Kit, body: El, privacy: bool, menus: &
                     .map(|p| {
                         let glyph = match p {
                             Preset::Performance => &icons::GAUGE,
+                            Preset::Smooth => &icons::GAMEPAD,
                             Preset::Quality => &icons::SPARKLES,
                         };
-                        (glyph, p.label(), Message::ShareQuality(p.quality()))
+                        (glyph, p.label(), p.help(), Message::ShareQuality(p.quality()))
                     })
                     .collect(),
                 Preset::ALL.iter().position(|p| Some(*p) == preset),
             )),
     );
-    if privacy {
-        // Set once and left alone, so it sits at the far end.
-        choices = choices.child(el().grow(1.0)).child(
-            col()
-                .gap(10.0)
-                .child(field_label(t, "Privacy"))
-                .child(choice(
-                    t,
-                    "share-privacy",
-                    "Privacy",
-                    Access::ALL
-                        .iter()
-                        .map(|access| {
-                            let glyph = match access {
-                                Access::Public => &icons::GLOBE,
-                                Access::Private => &icons::LOCK,
-                            };
-                            (glyph, access.label(), Message::ShareAccess(*access))
-                        })
-                        .collect(),
-                    Access::ALL.iter().position(|a| *a == sharing.access),
-                )),
-        );
-    }
+    // Set once and left alone, so it comes after the preset, with what it means beside it.
+    let privacy = privacy.then(|| {
+        col()
+            .key("share-privacy-field")
+            .w_full()
+            .gap(10.0)
+            .child(field_label(t, "Privacy"))
+            .child(
+                row()
+                    .w_full()
+                    .gap(12.0)
+                    .center_y()
+                    .child(choice(
+                        t,
+                        "share-privacy",
+                        "Privacy",
+                        Access::ALL
+                            .iter()
+                            .map(|access| {
+                                let glyph = match access {
+                                    Access::Public => &icons::GLOBE,
+                                    Access::Private => &icons::LOCK,
+                                };
+                                (glyph, access.label(), Message::ShareAccess(*access))
+                            })
+                            .collect(),
+                        Access::ALL.iter().position(|a| *a == sharing.access),
+                    ))
+                    .child(
+                        faint(t, sharing.access.help())
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .truncate_fade(),
+                    ),
+            )
+    });
     let mut line = format!(
-        "{} · {} fps · up to {:.1} Mbit/s per viewer",
+        "{} · {} fps · up to {:.1} Mbit/s per viewer, {:.0} Mbit/s with {} watching",
         quality.resolution.label(),
         quality.frame_rate,
-        quality.upload_mbps()
+        quality.upload_mbps(),
+        quality.upload_mbps() * streaming::publishing::MAX_VIEWERS as f64,
+        streaming::publishing::MAX_VIEWERS
     );
     if preset.is_none() {
         line = format!("Custom · {line}");
@@ -2040,6 +2096,7 @@ fn quality_fields(s: &App, t: &Theme, k: &Kit, body: El, privacy: bool, menus: &
                 Some(Message::ShareAdvanced(!advanced)),
             )),
     );
+    let body = body.children(privacy);
     if advanced {
         advanced_fields(s, t, k, body, menus)
     } else {
@@ -2156,6 +2213,7 @@ fn audio_field(s: &App, k: &Kit, body: El) -> El {
     body.child(
         Checkbox::new(sharing.audio)
             .label("Share system audio")
+            .description(SYSTEM_AUDIO_NOTE)
             .on_toggle_tx(move |s: &mut App, tx| {
                 let next = !s.server().streaming.sharing.audio;
                 dispatch(s, tx, Message::ShareAudio(next));

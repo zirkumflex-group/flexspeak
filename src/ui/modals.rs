@@ -8,7 +8,7 @@ use rune_kit::{Dialog, Kit, SegmentedControl};
 use super::UserVolumeTarget;
 use super::icons;
 use super::theme::{Theme, size, ty};
-use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider};
+use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider_with_home};
 use crate::client::Moderation;
 use crate::{App, Message, ModerationDraft, Poke};
 
@@ -206,13 +206,14 @@ fn user_volume(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, target: &UserVo
                 .w_full()
                 .gap(12.0)
                 .center_y()
-                .child(el().grow(1.0).min_w(0.0).child(slider(
+                .child(el().grow(1.0).min_w(0.0).child(slider_with_home(
                     t,
                     "user-volume",
                     "Volume",
                     i32::from(percent),
                     format!("{percent}%"),
                     USER_VOLUME,
+                    Some(100),
                     |s: &App| {
                         s.ui.user_volume.as_ref().map_or(100, |target| {
                             i32::from(s.user_audio(&target.uid).volume_percent)

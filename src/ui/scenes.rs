@@ -119,6 +119,7 @@ pub const SCENES: &[Scene] = &[
     ("watching", watching),
     ("watching-solo", watching_solo),
     ("watching-solo-hover", watching_solo_hover),
+    ("watching-fullscreen", watching_fullscreen),
     ("watching-others-hidden", watching_others_hidden),
     ("watching-others-hidden-hover", watching_others_hidden_hover),
     ("watching-toolbar", watching_toolbar),
@@ -2007,6 +2008,7 @@ fn sharing(s: &mut App) {
     status.active = true;
     status.live = true;
     status.detail = "Private · Fast capture".into();
+    status.source = "Counter-Strike 2".into();
     status.viewers = vec![(2, "Mara".into(), true)];
     status.requests = vec![(4, "Ines".into())];
 }
@@ -2076,7 +2078,8 @@ fn watching_five(s: &mut App) {
         &[
             ("s1", 2, "Mara’s screen", Phase::Receiving),
             ("s2", 3, "Theo’s game", Phase::Receiving),
-            ("s3", 5, "Kai’s window", Phase::Receiving),
+            // An older client's name says only what kind of share it is: Kai's name leads.
+            ("s3", 5, "Screen share", Phase::Receiving),
             ("s4", 6, "Noor’s old capture", Phase::Receiving),
             ("s5", 7, "Lin’s second monitor", Phase::Negotiating),
         ],
@@ -2138,6 +2141,13 @@ fn watching_solo(s: &mut App) {
 fn watching_solo_hover(s: &mut App) {
     watching_solo(s);
     s.ui.streams_hover = true;
+}
+
+/// The stream fills the screen: no header, sidebar, chat or status bar, its bar on hover.
+fn watching_fullscreen(s: &mut App) {
+    watching_solo_hover(s);
+    s.ui.fullscreen = Some(false);
+    s.ui.window_fullscreen = true;
 }
 
 /// The other stream tucked away: the watched one fills the pane, a tab brings the other back.

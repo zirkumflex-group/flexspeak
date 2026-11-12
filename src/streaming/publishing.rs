@@ -87,6 +87,13 @@ impl Access {
             Self::Private => "Private",
         }
     }
+    /// One line on what the choice means for viewers.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Public => "Anyone in the channel can watch without asking.",
+            Self::Private => "Viewers ask, and you let each one in.",
+        }
+    }
     pub fn wire_value(self) -> u8 {
         match self {
             Self::Public => 1,
@@ -712,27 +719,40 @@ impl Quality {
 pub enum Preset {
     /// Light on the computer and the connection; stays smooth when either struggles.
     Performance,
+    /// 1080p at 60 fps, for games and fast motion.
+    Smooth,
     /// The source's own size up to 1440p, sharp enough for small text.
     Quality,
 }
 impl Preset {
-    pub const ALL: [Self; 2] = [Self::Performance, Self::Quality];
+    pub const ALL: [Self; 3] = [Self::Performance, Self::Smooth, Self::Quality];
     pub fn label(self) -> &'static str {
         match self {
             Self::Performance => "Performance",
+            Self::Smooth => "Smooth",
             Self::Quality => "Quality",
+        }
+    }
+    /// One line on what the preset is for, for its tooltip.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Performance => "720p at 30 fps: light on your computer and connection",
+            Self::Smooth => "1080p at 60 fps: fluid motion for games",
+            Self::Quality => "Up to 1440p at 30 fps: sharp enough for small text",
         }
     }
     pub fn quality(self) -> Quality {
         // Generous for their size: a screen share at 30 fps is mostly text and sharp edges,
         // which VP8 needs bits for. Hardware AV1 makes the same bitrate look better still.
-        let (resolution, video_kbps, struggle) = match self {
-            Self::Performance => (Resolution::P720, 3000, Struggle::Smoothness),
-            Self::Quality => (Resolution::P1440, 8000, Struggle::Sharpness),
+        let (resolution, frame_rate, video_kbps, struggle) = match self {
+            Self::Performance => (Resolution::P720, 30, 3000, Struggle::Smoothness),
+            // Twice the frames need nearly twice the bits to look the same.
+            Self::Smooth => (Resolution::P1080, 60, 7000, Struggle::Smoothness),
+            Self::Quality => (Resolution::P1440, 30, 8000, Struggle::Sharpness),
         };
         Quality {
             resolution,
-            frame_rate: 30,
+            frame_rate,
             video_kbps,
             audio_kbps: 128,
             struggle,

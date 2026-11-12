@@ -177,6 +177,8 @@ struct App {
     share_defaults: streaming::publishing::ShareDefaults,
     /// Settings > Streaming, applied when a share starts.
     stream_options: settings::Streaming,
+    /// The streams' layout and details toggle, saved straight away and shared by every server.
+    stream_view: settings::StreamView,
     /// Settings > Chat. Saved straight to settings when changed, like `footer_hidden`.
     chat_options: settings::Chat,
     /// The chat history on disk, opened the first time it is needed.
@@ -693,6 +695,16 @@ fn stream_changes(
         .collect()
 }
 
+/// Lays a server's streams out as saved: where the others go and whether details show.
+fn apply_stream_view(streaming: &mut streaming::View, view: settings::StreamView) {
+    streaming.strip = if view.beside {
+        streaming::Strip::Beside
+    } else {
+        streaming::Strip::Below
+    };
+    streaming.show_stats = view.details;
+}
+
 /// Your share going live or ending, then one sound for each viewer who arrived or left.
 fn viewer_sounds(
     before: &streaming::publishing::Status,
@@ -1034,6 +1046,7 @@ impl App {
             sounds: sounds::Settings::default(),
             share_defaults: Default::default(),
             stream_options: settings::Streaming::default(),
+            stream_view: settings::StreamView::default(),
             chat_options: settings::Chat::default(),
             chat_store: None,
             chat_store_failed: false,
@@ -1187,17 +1200,14 @@ impl App {
         if self.active == id {
             return;
         }
-        let (strip, others_hidden, show_stats) = {
+        let others_hidden = {
             let old = self.server_mut();
             // The session stops these streams itself; this clears them from the screen now.
             old.streaming.clear_picture();
             old.streaming.share_open = false;
-            (
-                old.streaming.strip,
-                old.streaming.others_hidden,
-                old.streaming.show_stats,
-            )
+            old.streaming.others_hidden
         };
+        let view = self.stream_view;
         self.active = id;
         self.hub.set_active(id);
         self.transmitting = false;
@@ -1210,9 +1220,8 @@ impl App {
         self.ui.tile_drag = None;
         self.ui.server_picker = false;
         let new = self.server_mut();
-        new.streaming.strip = strip;
+        apply_stream_view(&mut new.streaming, view);
         new.streaming.others_hidden = others_hidden;
-        new.streaming.show_stats = show_stats;
         new.unseen_pokes = 0;
         new.activate_on_connect = false;
         self.ui.chat_toast = None;
@@ -1534,6 +1543,22 @@ impl App {
             self.user_audio.insert(uid, audio);
         }
         self.sync_user_gains();
+    }
+
+    /// Saves the streams' layout and details toggle as they are on screen now.
+    fn save_stream_view(&mut self) {
+        let view = settings::StreamView {
+            beside: self.server().streaming.strip == streaming::Strip::Beside,
+            details: self.server().streaming.show_stats,
+        };
+        if view == self.stream_view {
+            return;
+        }
+        self.stream_view = view;
+        self.save_preference(
+            |saved| saved.stream_view = view,
+            "That stream layout applies for now but was not saved",
+        );
     }
 
     fn save_stream_volumes(&mut self) {
@@ -1867,6 +1892,10 @@ impl App {
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
         self.stream_options = saved.streaming;
+        self.stream_view = saved.stream_view;
+        for session in &mut self.sessions {
+            apply_stream_view(&mut session.streaming, saved.stream_view);
+        }
         self.chat_options = saved.chat;
         self.share_defaults = if saved.share.quality.validate().is_ok() {
             saved.share.upgraded()
@@ -1907,6 +1936,7 @@ impl App {
             sounds: self.sounds.clone(),
             share: self.share_defaults,
             streaming: self.stream_options,
+            stream_view: self.stream_view,
             chat: self.chat_options,
             skip_install_prompt: self
                 .saved
@@ -2344,6 +2374,7 @@ impl App {
                 session.activate_on_connect = self.active.is_some();
                 self.loopback = loopback;
                 session.streaming.sharing.apply(self.share_defaults);
+                apply_stream_view(&mut session.streaming, self.stream_view);
                 self.sessions.push(session);
                 if self.active.is_none() {
                     self.activate(Some(id));
@@ -2680,6 +2711,7 @@ impl App {
                 // Choosing where the others go means showing them.
                 self.server_mut().streaming.others_hidden = false;
                 self.server_mut().streaming.strip = strip;
+                self.save_stream_view();
                 if self.server().streaming.stage().is_none() {
                     self.server_mut().streaming.focused = self
                         .server()
@@ -2712,7 +2744,8 @@ impl App {
                 self.server_mut().streaming.toggle_mute(publisher)
             }
             Message::ToggleStreamStats => {
-                self.server_mut().streaming.show_stats = !self.server().streaming.show_stats
+                self.server_mut().streaming.show_stats = !self.server().streaming.show_stats;
+                self.save_stream_view();
             }
             Message::OpenShare => {
                 if self.live() && self.tab == Tab::Home {
@@ -3867,10 +3900,19 @@ impl App {
                 {
                     session.streaming.volumes.insert(stream.publisher, *volume);
                 }
+                // Your own Stop forgets the stream first, so only an end you didn't ask for
+                // finds it still on screen.
+                let on_screen = matches!(&event, streaming::Event::State { generation, .. }
+                    if session.streaming.watching.iter().any(|w| w.generation == *generation));
                 session.streaming.update(event.clone());
                 match &event {
                     streaming::Event::State { phase, detail, .. } => match phase {
                         streaming::Phase::Failed => self.raise_for(id, Source::StreamWatch, detail),
+                        streaming::Phase::Stopped
+                            if on_screen && !streaming::ended_as_expected(detail) =>
+                        {
+                            self.raise_for(id, Source::StreamEnded, detail)
+                        }
                         streaming::Phase::Receiving => {
                             self.alerts.recover_in(id.0, Source::StreamWatch)
                         }
