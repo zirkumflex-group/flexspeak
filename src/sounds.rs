@@ -376,22 +376,24 @@ impl Sound {
         )
     }
 
-    /// TeamSpeak has no sound for people watching your stream. Its pack gets one made to sit
-    /// beside its stream sounds: the same plain, swelling tone, stepping up to the note
-    /// "stream started" ends on when someone arrives and back down when they leave.
-    fn matched(self) -> Option<SoftCue> {
-        let notes: &'static [u8] = match self {
-            Self::ViewerJoined => &[82, 87],
-            Self::ViewerLeft => &[87, 82],
-            _ => return None,
-        };
-        Some(SoftCue {
-            voice: Voice::Swell,
-            notes,
-            step_ms: 120,
-            glide: 0.0,
-            gain: 0.2,
-        })
+    /// How far under the other sounds this one plays, in dB, whatever the pack. People come
+    /// and go from a stream often, so their sounds are smaller than the news of it starting.
+    fn under_db(self) -> f32 {
+        match self {
+            Self::ViewerJoined | Self::ViewerLeft => 6.0,
+            _ => 0.0,
+        }
+    }
+
+    /// TeamSpeak has no sound for people watching your stream. Its pack plays its own stream
+    /// sounds for them, a little higher: "stream started" a whole tone up as someone arrives,
+    /// "stream stopped" a semitone up as they leave, so both begin on the same note.
+    fn stream_source(self) -> Option<(Self, f32)> {
+        match self {
+            Self::ViewerJoined => Some((Self::StreamStarted, 2_f32.powf(2.0 / 12.0))),
+            Self::ViewerLeft => Some((Self::StreamStopped, 2_f32.powf(1.0 / 12.0))),
+            _ => None,
+        }
     }
 
     /// This event's file in TeamSpeak's sound folder, if TeamSpeak has a sound for it.
@@ -481,11 +483,11 @@ impl Pack {
 /// installed.
 pub fn samples(pack: Pack, sound: Sound, bank: &Bank) -> Vec<f32> {
     let (mut samples, made_by) = match (pack, bank.get(sound)) {
-        (Pack::TeamSpeak, Some(samples)) => return samples.to_vec(),
+        (Pack::TeamSpeak, Some(samples)) => (samples.to_vec(), Pack::TeamSpeak),
         (Pack::Soft, _) => (soft_samples(sound.soft()), Pack::Soft),
         _ => (cue_samples(sound.cue()), Pack::Flexspeak),
     };
-    let gain = made_by.gain();
+    let gain = made_by.gain() * 10_f32.powf(-sound.under_db() / 20.0);
     samples.iter_mut().for_each(|sample| *sample *= gain);
     samples
 }
@@ -772,27 +774,33 @@ impl Bank {
     }
 
     /// Whatever can be read; a missing or unreadable file only loses that one sound. Every sound
-    /// comes out equally loud, and an install also gets the sounds made to match it.
+    /// comes out equally loud, and the viewer sounds are made from the stream sounds.
     fn from_folder(folder: &Path) -> Self {
         // Some events share a file, which is read and kept once.
-        let mut files: HashMap<&str, Option<Arc<[f32]>>> = HashMap::new();
-        let mut sounds: HashMap<Sound, Arc<[f32]>> = Sound::ALL
-            .into_iter()
-            .filter_map(|sound| {
-                let name = sound.file_name()?;
-                let samples = files.entry(name).or_insert_with(|| {
-                    let bytes = std::fs::read(folder.join(name)).ok()?;
-                    Some(leveled(decode(&bytes)?).into())
-                });
-                Some((sound, samples.clone()?))
-            })
-            .collect();
-        if !sounds.is_empty() {
-            for sound in Sound::ALL {
-                if let Some(cue) = sound.matched() {
-                    sounds.insert(sound, leveled(crate::audio::soft_samples(cue)).into());
-                }
-            }
+        let mut read: HashMap<&str, Option<Vec<f32>>> = HashMap::new();
+        let mut file = |name: &'static str| {
+            read.entry(name)
+                .or_insert_with(|| decode(&std::fs::read(folder.join(name)).ok()?))
+                .clone()
+        };
+        let mut levelled: HashMap<&str, Arc<[f32]>> = HashMap::new();
+        let mut sounds = HashMap::new();
+        for sound in Sound::ALL {
+            let samples = if let Some(name) = sound.file_name() {
+                let Some(raw) = file(name) else { continue };
+                levelled
+                    .entry(name)
+                    .or_insert_with(|| leveled(raw).into())
+                    .clone()
+            } else if let Some((stream, higher)) = sound.stream_source() {
+                let Some(raw) = stream.file_name().and_then(&mut file) else {
+                    continue;
+                };
+                settled(leveled(resampled(&raw, higher))).into()
+            } else {
+                continue;
+            };
+            sounds.insert(sound, samples);
         }
         Self { sounds }
     }
@@ -900,6 +908,84 @@ fn leveled(mut samples: Vec<f32>) -> Vec<f32> {
         .min(PEAK / peak);
     samples.iter_mut().for_each(|sample| *sample *= gain);
     samples
+}
+
+/// The sound played `ratio` times as fast: higher by that much and shorter by the same, as a
+/// recording sped up. A windowed-sinc filter takes out what would otherwise fold back down as
+/// distortion.
+fn resampled(samples: &[f32], ratio: f32) -> Vec<f32> {
+    const WIDTH: isize = 24;
+    let cutoff = 0.5 / ratio.max(1.0);
+    let length = (samples.len().saturating_sub(1) as f32 / ratio).ceil() as usize;
+    (0..length)
+        .map(|index| {
+            let position = index as f32 * ratio;
+            let centre = position as isize;
+            let (mut sum, mut weights) = (0.0_f32, 0.0_f32);
+            for at in (centre - WIDTH + 1)..=(centre + WIDTH) {
+                let Some(&sample) = usize::try_from(at).ok().and_then(|at| samples.get(at)) else {
+                    continue;
+                };
+                let distance = position - at as f32;
+                if distance.abs() >= WIDTH as f32 {
+                    continue;
+                }
+                let x = 2.0 * cutoff * distance;
+                let sinc = if x.abs() < 1e-6 {
+                    1.0
+                } else {
+                    (std::f32::consts::PI * x).sin() / (std::f32::consts::PI * x)
+                };
+                let window = 0.5 + 0.5 * (std::f32::consts::PI * distance / WIDTH as f32).cos();
+                sum += sample * sinc * window;
+                weights += sinc * window;
+            }
+            if weights == 0.0 { 0.0 } else { sum / weights }
+        })
+        .collect()
+}
+
+/// A sound whose notes are left whole and whose room is cut short after them: once it has
+/// fallen 20 dB from its loudest it dies away 50 dB a second faster, and it ends where that is
+/// too quiet to hear, so it doesn't hold up the sound after it.
+fn settled(samples: Vec<f32>) -> Vec<f32> {
+    const WINDOW: usize = RATE / 100;
+    const AFTER_DB: f32 = -20.0;
+    const RATE_DB: f32 = 50.0;
+    const FLOOR_DB: f32 = -45.0;
+    let levels: Vec<f32> = samples
+        .as_chunks::<WINDOW>()
+        .0
+        .iter()
+        .map(|chunk| (chunk.iter().map(|s| s * s).sum::<f32>() / WINDOW as f32).sqrt())
+        .collect();
+    let Some(top) = levels.iter().copied().reduce(f32::max) else {
+        return samples;
+    };
+    let loudest = levels.iter().position(|level| *level == top).unwrap_or(0);
+    let threshold = top * 10_f32.powf(AFTER_DB / 20.0);
+    let fallen = levels[loudest..]
+        .iter()
+        .position(|level| *level <= threshold)
+        .map_or(levels.len(), |after| loudest + after);
+    let start = (fallen * WINDOW).min(samples.len());
+    let peak = samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+    let mut out = samples;
+    for (index, sample) in out[start..].iter_mut().enumerate() {
+        *sample *= 10_f32.powf(-RATE_DB * index as f32 / RATE as f32 / 20.0);
+    }
+    let floor = peak * 10_f32.powf(FLOOR_DB / 20.0);
+    let end = out[start..]
+        .iter()
+        .rposition(|sample| sample.abs() >= floor)
+        .map_or(start, |last| start + last + 1);
+    out.truncate(end);
+    let fade = (RATE / 50).min(out.len() - start);
+    let length = out.len();
+    for (index, sample) in out[length - fade..].iter_mut().enumerate() {
+        *sample *= 1.0 - (index + 1) as f32 / fade as f32;
+    }
+    out
 }
 
 /// PCM WAV to mono samples at the app's rate. `None` for anything else.
@@ -1076,21 +1162,33 @@ mod tests {
         assert!(leveled(Vec::new()).is_empty());
     }
 
-    #[test]
-    fn a_teamspeak_install_gets_viewer_sounds_made_to_match_it() {
-        let folder = std::env::temp_dir().join(format!("flexspeak-viewers-{}", std::process::id()));
-        std::fs::create_dir_all(&folder).unwrap();
-        let file: Vec<i16> = tone(0.2, 622.0, RATE / 4)
+    /// Cycles a second, from the crossings of zero going up.
+    fn pitch(samples: &[f32]) -> f32 {
+        let crossings = samples
+            .windows(2)
+            .filter(|pair| pair[0] < 0.0 && pair[1] >= 0.0)
+            .count();
+        crossings as f32 * RATE as f32 / samples.len() as f32
+    }
+
+    fn wav_file(folder: &Path, sound: Sound, hertz: f32) {
+        let samples: Vec<i16> = tone(0.2, hertz, RATE / 2)
             .iter()
             .map(|sample| (sample * 32767.0) as i16)
             .collect();
-        for sound in [Sound::StreamStarted, Sound::StreamStopped] {
-            std::fs::write(
-                folder.join(sound.file_name().unwrap()),
-                wav(1, RATE as u32, &file),
-            )
-            .unwrap();
-        }
+        std::fs::write(
+            folder.join(sound.file_name().unwrap()),
+            wav(1, RATE as u32, &samples),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn viewers_hear_teamspeaks_stream_sounds_a_little_higher() {
+        let folder = std::env::temp_dir().join(format!("flexspeak-viewers-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        wav_file(&folder, Sound::StreamStarted, 622.0);
+        wav_file(&folder, Sound::StreamStopped, 659.0);
         let bank = Bank::from_folder(&folder);
         std::fs::remove_dir_all(&folder).unwrap();
 
@@ -1099,24 +1197,63 @@ mod tests {
             bank.get(Sound::PersonStreamStarted),
             bank.get(Sound::StreamStarted)
         );
-        assert!(bank.get(Sound::PersonStreamStopped).is_some());
-        // It has none for viewers, and the files named like one are never played by it.
+        // It has no sound for viewers, so they get its stream sounds raised.
         assert!(Sound::ViewerJoined.file_name().is_none());
-        let joined = bank.get(Sound::ViewerJoined).expect("made to match");
-        let left = bank.get(Sound::ViewerLeft).expect("made to match");
-        assert_ne!(joined, left);
-        let stream = loudness(bank.get(Sound::StreamStarted).unwrap()).unwrap();
+        let joined = bank.get(Sound::ViewerJoined).expect("from stream started");
+        let left = bank.get(Sound::ViewerLeft).expect("from stream stopped");
+        let tone_up = 622.0 * 2_f32.powf(2.0 / 12.0);
+        let semitone_up = 659.0 * 2_f32.powf(1.0 / 12.0);
+        assert!((pitch(joined) - tone_up).abs() < 8.0, "{}", pitch(joined));
+        assert!((pitch(left) - semitone_up).abs() < 8.0, "{}", pitch(left));
+        // Shorter by as much as it is higher, and as loud as the rest before the volume.
+        let stream = bank.get(Sound::StreamStarted).unwrap();
+        assert!(joined.len() < stream.len() * 9 / 10);
+        assert!((loudness(joined).unwrap() - LEVEL_DB).abs() < 0.3);
         for viewer in [joined, left] {
-            assert!(viewer.len() < RATE / 2, "a short sound, it happens often");
-            assert!((loudness(viewer).unwrap() - stream).abs() < 0.5);
             assert!(viewer[0].abs() < 0.01 && viewer[viewer.len() - 1].abs() < 0.01);
         }
-        assert!(
-            Bank::from_folder(Path::new("/no/such/folder"))
-                .get(Sound::ViewerJoined)
-                .is_none(),
-            "only beside TeamSpeak's own"
-        );
+
+        // Without the stream sound there is nothing to make it from.
+        let folder = std::env::temp_dir().join(format!("flexspeak-viewer-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        wav_file(&folder, Sound::StreamStarted, 622.0);
+        let bank = Bank::from_folder(&folder);
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert!(bank.get(Sound::ViewerJoined).is_some());
+        assert!(bank.get(Sound::ViewerLeft).is_none());
+        assert!(Bank::from_folder(Path::new("/no/such/folder")).is_empty());
+    }
+
+    #[test]
+    fn a_sped_up_sound_keeps_its_level_and_nothing_folds_back() {
+        let sped = resampled(&tone(0.5, 1000.0, RATE / 2), 1.5);
+        assert!((pitch(&sped) - 1500.0).abs() < 8.0, "{}", pitch(&sped));
+        assert!((peak(&sped[100..sped.len() - 100]) - 0.5).abs() < 0.02);
+        assert!(sped.len().abs_diff(RATE / 3) <= 1);
+        // A tone above what the higher speed can hold is filtered out, not folded back down.
+        let high = resampled(&tone(0.5, 20_000.0, RATE / 2), 1.5);
+        assert!(peak(&high[100..high.len() - 100]) < 0.05, "{}", peak(&high));
+    }
+
+    #[test]
+    fn the_room_is_cut_short_after_the_notes_and_the_notes_are_left_whole() {
+        // A note, then a room ringing on 30 dB down for a second.
+        let note = tone(0.5, 600.0, RATE / 4);
+        let room: Vec<f32> = tone(0.016, 600.0, RATE)
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| sample * (-(index as f32) / RATE as f32 * 2.0).exp())
+            .collect();
+        let sound = [note.clone(), room].concat();
+        let settled = settled(sound.clone());
+        assert_eq!(settled[..note.len()], note[..], "the note is untouched");
+        let after = settled.len() - note.len();
+        assert!(after > RATE / 50 && after < RATE / 3, "{after}");
+        assert!(settled[settled.len() - 1].abs() < 1e-4, "it ends faded out");
+        // A sound that never falls away is left as it is.
+        let steady = tone(0.5, 600.0, RATE / 4);
+        assert_eq!(super::settled(steady.clone()).len(), steady.len());
+        assert!(super::settled(Vec::new()).is_empty());
     }
 
     #[test]
@@ -1127,9 +1264,10 @@ mod tests {
                 .into_iter()
                 .map(|sound| {
                     let made = samples(pack, sound, &bank);
-                    assert!(peak(&made) > 0.1, "{pack:?} {sound:?} is too quiet");
+                    assert!(peak(&made) > 0.05, "{pack:?} {sound:?} is too quiet");
                     assert!(peak(&made) <= 0.9, "{pack:?} {sound:?} is too loud");
-                    loudness(&made).unwrap()
+                    // As loud as the rest, but for the sounds meant to be quieter.
+                    loudness(&made).unwrap() + sound.under_db()
                 })
                 .collect();
             levels.sort_by(f32::total_cmp);
@@ -1151,6 +1289,19 @@ mod tests {
         );
         let installed = Bank::with(Sound::Poke, vec![0.25]);
         assert_eq!(samples(Pack::TeamSpeak, Sound::Poke, &installed), [0.25]);
+        // Viewers are 6 dB under the rest in every pack.
+        let viewer = Bank::with(Sound::ViewerJoined, vec![0.25]);
+        let under = samples(Pack::TeamSpeak, Sound::ViewerJoined, &viewer)[0];
+        assert!((20.0 * (under / 0.25).log10() + 6.0).abs() < 1e-3);
+        for pack in [Pack::Flexspeak, Pack::Soft] {
+            let quieter = loudness(&samples(pack, Sound::ViewerJoined, &bank)).unwrap();
+            let made = match pack {
+                Pack::Soft => soft_samples(Sound::ViewerJoined.soft()),
+                _ => cue_samples(Sound::ViewerJoined.cue()),
+            };
+            let full = loudness(&made).unwrap() + 20.0 * pack.gain().log10();
+            assert!((full - quieter - 6.0).abs() < 0.01, "{pack:?}");
+        }
         assert_eq!(
             samples(Pack::TeamSpeak, Sound::MicOn, &installed),
             samples(Pack::Flexspeak, Sound::MicOn, &bank)
