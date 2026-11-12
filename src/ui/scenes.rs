@@ -51,16 +51,13 @@ pub const SCENES: &[Scene] = &[
     ("settings-appearance", settings_appearance),
     ("settings-general", settings_general),
     ("settings-omarchy", settings_omarchy),
-    ("settings-wip", settings_wip),
-    ("settings-wip-server", settings_wip_server),
-    ("settings-sync-signed-out", settings_wip_server),
-    ("settings-sync-syncing", settings_sync_syncing),
-    ("settings-sync-up-to-date", settings_sync_up_to_date),
-    ("settings-sync-choose", settings_sync_choose),
-    ("settings-sync-offline", settings_sync_offline),
-    ("settings-sync-off", settings_sync_off),
+    ("monster-sync-syncing", settings_sync_syncing),
+    ("monster-sync-up-to-date", settings_sync_up_to_date),
+    ("monster-sync-choose", settings_sync_choose),
+    ("monster-sync-offline", settings_sync_offline),
     ("monster-empty", monster_empty),
     ("monster-board", monster_board),
+    ("monster-add-confirm", monster_add_confirm),
     ("monster-connected", monster_connected),
     ("monster-unboxed", monster_unboxed),
     ("monster-unboxed-rare", monster_unboxed_rare),
@@ -325,6 +322,9 @@ fn saved(s: &mut App) {
     // Previews start from the default log, whatever this machine last left it at.
     s.log_pane = Default::default();
     s.chat_options = Default::default();
+    // And without the collection server built in: the online scenes set their own.
+    s.monster.server = None;
+    s.monster.session = None;
     let servers = vec![
         settings::Server {
             name: "Zirkumflex".into(),
@@ -1420,27 +1420,11 @@ fn statistics(s: &mut App) {
     };
 }
 
-fn settings_wip(s: &mut App) {
-    settings_at(s, SettingsPage::Wip);
-}
-
-/// A collection server set, and kept: the address in use is the one typed.
-fn settings_wip_server(s: &mut App) {
-    settings_wip(s);
-    use_scene_server(s);
-    s.sync_fields();
-}
-
-/// Signed in to the collection server with settings sync on and its first check out. The
-/// steps run on their own, so no request goes anywhere and nothing is saved.
+/// Signed in to the collection server on the Monster page, settings sync's first check out.
+/// The steps run on their own, so no request goes anywhere and nothing is saved.
 fn settings_sync_started(s: &mut App, seen: i64) -> crate::settings_sync::SettingsSync {
-    settings_wip_server(s);
-    if let Some(saved) = &mut s.saved {
-        saved.monster_server = s.monster.server.clone();
-    }
-    s.monster.session = Some("scene".into());
-    s.monster.session_read = true;
-    let mut sync = crate::settings_sync::SettingsSync::new(true, seen);
+    signed_in(s);
+    let mut sync = crate::settings_sync::SettingsSync::new(seen);
     let _ = sync.signed_in(Instant::now(), settings_sync_context(s));
     sync
 }
@@ -1513,11 +1497,6 @@ fn settings_sync_offline(s: &mut App) {
         tries_left: None,
     };
     settings_sync_answer(s, sync, Instant::now(), Err(problem));
-}
-
-fn settings_sync_off(s: &mut App) {
-    settings_sync_up_to_date(s);
-    s.settings_sync.enabled = false;
 }
 
 fn monster_empty(s: &mut App) {
@@ -1595,6 +1574,13 @@ fn stocked(s: &mut App) {
 
 fn monster_board(s: &mut App) {
     stocked(s);
+}
+
+/// A flavour picked: the page asks before the can is added, since it can't be taken back.
+fn monster_add_confirm(s: &mut App) {
+    stocked(s);
+    let (khaotic, _) = crate::monster::flavour_by_id("khaotic").unwrap();
+    s.monster.confirming = Some(khaotic);
 }
 
 /// Mara opens a Legendary: her row lights up in its colour and the channel gets the card.
@@ -1712,10 +1698,9 @@ fn sample_cans(seed: u32, busy: u32) -> Vec<crate::monster::Can> {
 /// The collection server the online scenes use. Nothing contacts it: scenes only draw.
 const SCENE_SERVER: &str = "https://collection.example.com";
 
-/// The scene server, set in Settings as it would be: the field holds what's in use.
+/// The scene server, standing in for the one built into the app.
 fn use_scene_server(s: &mut App) {
     s.monster.server = Some(SCENE_SERVER.into());
-    s.monster_server_draft = SCENE_SERVER.into();
 }
 
 /// Signed in to the collection server as Sam, with the collection the other scenes show.
@@ -4509,6 +4494,9 @@ mod tests {
         let before = rt.state.monster.cans.len();
         click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
+        assert!(rt.state.monster.sent.is_empty(), "it asks first");
+        click(&mut rt, "add-can-confirm");
+        settle(&mut rt);
         let [Effect::Add(add)] = &rt.state.monster.sent[..] else {
             panic!("{:?}", rt.state.monster.sent)
         };
@@ -4542,6 +4530,8 @@ mod tests {
         settle(&mut rt);
         click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
+        click(&mut rt, "add-can-confirm");
+        settle(&mut rt);
         deliver(
             &mut rt,
             crate::Message::MonsterAnswer(Answer::Added(Err(api::Problem {
@@ -4570,42 +4560,6 @@ mod tests {
         assert_eq!(rt.state.monster.gate, Some(Gate::Email));
         assert!(rt.find("monster-sign-in").is_some());
         assert!(rt.state.monster.cans.is_empty());
-    }
-
-    #[test]
-    fn the_collection_server_is_kept_when_its_field_is_left() {
-        let root =
-            std::env::temp_dir().join(format!("flexspeak-monster-server-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let path = root.join("settings.json");
-        let mut rt = runtime(settings_wip, (900.0, 790.0));
-        settle(&mut rt);
-        rt.state.settings_path = Some(path.clone());
-        deliver(
-            &mut rt,
-            crate::Message::MonsterServer("collection.example.com".into()),
-        );
-        deliver(&mut rt, crate::Message::CommitMonsterServer);
-        settle(&mut rt);
-        assert!(
-            rt.find("monster-server-error").is_some(),
-            "not a web address"
-        );
-        assert_eq!(rt.state.monster.server, None);
-        deliver(
-            &mut rt,
-            crate::Message::MonsterServer(format!("{SCENE_SERVER}/")),
-        );
-        deliver(&mut rt, crate::Message::CommitMonsterServer);
-        settle(&mut rt);
-        assert_eq!(rt.state.monster.server.as_deref(), Some(SCENE_SERVER));
-        let saved = crate::settings::load(&path).unwrap().unwrap();
-        assert_eq!(saved.monster_server.as_deref(), Some(SCENE_SERVER));
-        // Emptied, the page is back on this computer only.
-        deliver(&mut rt, crate::Message::MonsterServer(String::new()));
-        deliver(&mut rt, crate::Message::CommitMonsterServer);
-        assert_eq!(rt.state.monster.server, None);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Hands the app a message from outside the view, as a finished task does, and redraws.
@@ -5039,38 +4993,21 @@ mod tests {
         );
         assert_eq!(rt.state.saved.as_ref(), Some(&current));
         assert!(rt.state.settings_sync_sent.is_empty());
-        // Turned off, the choice is saved and the row says so.
-        click(&mut rt, "settings-sync");
-        settle(&mut rt);
-        assert!(!crate::settings::load(&path).unwrap().unwrap().settings_sync);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn the_secret_page_opens_from_the_wip_section_and_hides_from_search() {
-        let mut rt = runtime(settings_wip, (900.0, 790.0));
+    fn a_flavour_picked_and_then_cancelled_adds_nothing() {
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
         settle(&mut rt);
-        // The scene names a made-up folder, and opening the page would create a database there.
-        rt.state.settings_path = None;
-        click(&mut rt, "open-secret");
+        let before = rt.state.monster.cans.len();
+        click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
-        assert_eq!(rt.state.tab, Tab::Monster);
-        assert!(rt.state.settings_page.is_none());
-        assert!(rt.find("monster-showcase").is_some());
-
-        fn found(scene: fn(&mut App)) -> bool {
-            let mut rt = runtime(scene, (900.0, 790.0));
-            settle(&mut rt);
-            rt.find("found-wip-secret-page").is_some()
-        }
-        assert!(!found(|s| {
-            settings_wip(s);
-            s.settings_query = "monster".into();
-        }));
-        assert!(found(|s| {
-            settings_wip(s);
-            s.settings_query = "wip".into();
-        }));
+        click(&mut rt, "add-can-cancel");
+        settle(&mut rt);
+        assert!(rt.find("add-can-confirm").is_none());
+        assert_eq!(rt.state.monster.cans.len(), before);
+        assert!(rt.state.monster.reveal.is_none());
     }
 
     #[test]
@@ -5080,14 +5017,20 @@ mod tests {
         let before = rt.state.monster.cans.len();
         click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
+        assert_eq!(rt.state.monster.cans.len(), before, "it asks first");
+        assert!(rt.find("add-can-confirm").is_some());
+        click(&mut rt, "add-can-confirm");
+        settle(&mut rt);
+        assert!(rt.find("add-can-confirm").is_none());
         assert_eq!(rt.state.monster.cans.len(), before + 1);
         let added = rt.state.monster.cans.last().unwrap().clone();
         assert_eq!(added.flavour, "khaotic");
         assert!(added.at > 0, "saved with when it was drunk");
         assert!(rt.state.monster.reveal.is_some(), "it opens");
-        // While it opens, another tap waits.
+        // While it opens, another tap waits, and asks nothing.
         click(&mut rt, "monster-flavour-khaotic");
         settle(&mut rt);
+        assert!(rt.find("add-can-confirm").is_none());
         assert_eq!(rt.state.monster.cans.len(), before + 1);
         // Skipped here, since a test has no timers to carry it through its beats.
         let shown = format!("showcase-{}", added.identity());
@@ -5131,6 +5074,9 @@ mod tests {
         click(&mut rt, "monster-search");
         key(&mut rt, rune::Key::Enter, false);
         settle(&mut rt);
+        assert_eq!(rt.state.monster.confirming, Some(first), "it asks first");
+        click(&mut rt, "add-can-confirm");
+        settle(&mut rt);
         assert_eq!(rt.state.monster.cans.len(), before + 1);
         assert_eq!(
             rt.state.monster.cans.last().unwrap().flavour,
@@ -5154,14 +5100,12 @@ mod tests {
             rt.find("monster-notice").is_none(),
             "no 'Legendary card added'"
         );
-        assert!(rt.find("monster-featured").is_none());
         assert!(rt.find(&format!("card-{id}")).is_none(), "not in the grid");
 
         let mut rt = runtime(monster_reveal_hit, (1100.0, 1500.0));
         settle(&mut rt);
         assert!(rt.find("reveal-face").is_some());
         assert!(rt.find("monster-notice").is_some());
-        assert!(rt.find("monster-featured").is_some());
     }
 
     #[test]
@@ -5172,17 +5116,6 @@ mod tests {
         settle(&mut rt);
         assert!(rt.state.monster.reveal.is_none());
         assert_eq!(rt.state.tab, Tab::Monster);
-    }
-
-    #[test]
-    fn a_card_can_be_opened_again_without_another_can() {
-        let mut rt = runtime(monster_board, (1100.0, 1500.0));
-        settle(&mut rt);
-        let before = rt.state.monster.cans.len();
-        click(&mut rt, "monster-replay");
-        settle(&mut rt);
-        assert!(rt.state.monster.reveal.is_some());
-        assert_eq!(rt.state.monster.cans.len(), before);
     }
 
     #[test]

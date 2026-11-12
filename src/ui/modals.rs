@@ -10,6 +10,7 @@ use super::icons;
 use super::theme::{Theme, size, ty};
 use super::widgets::{Range, Variant, button, error_text, faint, field, muted, slider_with_home};
 use crate::client::Moderation;
+use crate::monster::{FLAVOURS, Flavour};
 use crate::{App, Message, ModerationDraft, Poke, ServerPasswordPrompt};
 
 /// Offers to copy a release that runs from Downloads or a disk image to where apps live.
@@ -290,6 +291,54 @@ fn disconnect_prompt(t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         .fit()
         .width(420.0)
         .on_close(|s: &mut App| s.disconnect_prompt = false)
+        .child(body)
+        .build(k, layer);
+}
+
+/// A flavour picked on the Monster page: a can, once added, can't be taken back.
+fn add_can_prompt(t: &Theme, k: &Kit, layer: &mut Vec<El>, (index, flavour): (usize, &Flavour)) {
+    let body = col()
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(14.0)
+        .child(
+            text("It's saved with today's date and time, and its card opens right away. A can can't be removed once it's added.")
+                .font(ty::BODY)
+                .color(t.text)
+                .w_full()
+                .wrap(),
+        )
+        .child(
+            row()
+                .w_full()
+                .gap(size::GAP)
+                .child(el().grow(1.0))
+                .child(button(
+                    t,
+                    "add-can-cancel",
+                    "Cancel",
+                    None,
+                    Variant::Secondary,
+                    Some(Message::MonsterConfirm(None)),
+                ))
+                .child(
+                    button(
+                        t,
+                        "add-can-confirm",
+                        "Add Can",
+                        None,
+                        Variant::Primary,
+                        Some(Message::MonsterAdd(index)),
+                    )
+                    .default_button(),
+                ),
+        );
+    Dialog::new("add-can-prompt", format!("Add a can of {}?", flavour.name))
+        .open(true)
+        .fit()
+        .width(420.0)
+        .on_close(|s: &mut App| s.monster.confirming = None)
         .child(body)
         .build(k, layer);
 }
@@ -725,6 +774,14 @@ pub fn build(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     }
     if s.disconnect_prompt {
         disconnect_prompt(t, k, layer);
+        return;
+    }
+    if let Some(flavour) = s
+        .monster
+        .confirming
+        .and_then(|index| FLAVOURS.get(index).map(|f| (index, f)))
+    {
+        add_can_prompt(t, k, layer, flavour);
         return;
     }
     if let Some(target) = &s.ui.user_volume {

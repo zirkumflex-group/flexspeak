@@ -199,11 +199,6 @@ impl Server {
         self.call(Method::POST, "/v1/cans", Some(can)).await
     }
 
-    pub async fn remove_can(&self, id: i64) -> Result<(), Problem> {
-        self.call_empty(Method::DELETE, &format!("/v1/cans/{id}"), None::<&()>)
-            .await
-    }
-
     pub async fn import(&self, cans: &Import) -> Result<Imported, Problem> {
         self.call(Method::POST, "/v1/cans/import", Some(cans)).await
     }
@@ -295,9 +290,7 @@ fn offline(detail: String) -> Problem {
     tracing::debug!("Collection server: {detail}");
     Problem {
         error: OFFLINE.into(),
-        message: "Can't reach the collection server. Check your connection and the address in \
-                  Settings › WIP."
-            .into(),
+        message: "Can't reach the collection server. Check your connection.".into(),
         tries_left: None,
     }
 }

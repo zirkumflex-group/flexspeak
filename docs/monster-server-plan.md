@@ -4,7 +4,7 @@ Date: **2026-11-12**. The design the server in `server/` was built from. The sha
 
 ## Status
 
-**Built:** the server (`server/`, see its README), the rules shared with the app (`crates/monster-core`, whose `api` module is the contract and wins where this document differs), and the app's side: a Collection Server address under Settings › WIP, sign-in by email code, a passkey made on a page the server hosts while the app waits, linking Flexspeak's own identity, the collection, the one-time upload of cans kept on the computer, the leaderboard and other people's boards.
+**Built:** the server (`server/`, see its README), the rules shared with the app (`crates/monster-core`, whose `api` module is the contract and wins where this document differs), and the app's side: a collection server address built into the app (`FLEXSPEAK_COLLECTION_SERVER` in `.cargo/config.toml`), sign-in by email code, a passkey made on a page the server hosts while the app waits, linking Flexspeak's own identity, the collection, the one-time upload of cans kept on the computer, the leaderboard and other people's boards.
 
 **Not built yet:** the sign-in link in the email (the code only), invites, review flags and the events table, the offline queue and "unopened" cans, finding TeamSpeak 3 and 6 identities, removing a passkey or unlinking an identity from the page, the nightly backup, and a deployment. Passkeys go through the browser on every system; the system dialogs described under Passkey are not used.
 

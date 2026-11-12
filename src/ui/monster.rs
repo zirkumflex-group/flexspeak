@@ -11,8 +11,8 @@ use super::can3d::{self, HOVERED, REDUCED, SHOWCASE};
 use super::fx::{CardFx, card_fx, card_layers};
 use super::theme::{Theme, motion, radius, rgb, size, ty};
 use super::widgets::{
-    Variant, button, error_text, faint, field, group_note, group_title, heading, icon_button,
-    muted, scroll_page, title, well,
+    Variant, button, error_text, faint, field, group_note, group_title, heading, muted,
+    scroll_page, title, well,
 };
 use super::{icons, send};
 use crate::monster::{
@@ -66,12 +66,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         .self_center()
         .padding(size::PAGE)
         .gap(20.0)
-        // Nothing covers it on the leaderboard, and no reveal starts from there.
-        .children(
-            (s.ui.warm_cards && !matches!(section, Section::Leaderboard | Section::Person(_)))
-                .then(|| warm_up(reduced)),
-        )
         .child(tabs(s, t, section))
+        .children(sync_choice(s, t))
         .children(sections);
     // Keyed by section, so each one opens at its top.
     scroll_page(k, &format!("monster-scroll-{key}"), content)
@@ -563,18 +559,10 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
                 .child(
                     muted(
                         t,
-                        "The leaderboard needs a collection server. Set one in Settings › WIP.",
+                        "This build has no collection server, so there is no leaderboard.",
                     )
                     .grow(1.0),
-                )
-                .child(button(
-                    t,
-                    "monster-open-wip",
-                    "Open Settings",
-                    None,
-                    Variant::Secondary,
-                    Some(Message::OpenSettings(crate::SettingsPage::Wip)),
-                )),
+                ),
         ];
     }
     let ranking = tracker.ranking;
@@ -919,6 +907,7 @@ fn tabs(s: &App, t: &Theme, section: Section) -> El {
                 .key("monster-account")
                 .gap(size::GAP)
                 .center_y()
+                .children(sync_status(s).map(|line| faint(t, line).key("monster-sync-status")))
                 .child(icon(&icons::USER, 14.0).color(t.faint).a11y_hidden())
                 .child(faint(t, me.email.clone()).truncate())
                 .child(button(
@@ -932,6 +921,66 @@ fn tabs(s: &App, t: &Theme, section: Section) -> El {
         );
     }
     bar
+}
+
+/// How settings sync stands, beside the account; nothing while signed out or choosing.
+fn sync_status(s: &App) -> Option<String> {
+    use crate::settings_sync::{Status, ago};
+    let signed_in = s.monster.online() && s.monster.session.is_some();
+    Some(match s.settings_sync.status(signed_in) {
+        Status::SignedOut | Status::Choose => return None,
+        Status::Syncing => "Syncing settings…".into(),
+        Status::UpToDate(Some(at)) => format!("Settings synced {}", ago(at.elapsed())),
+        Status::UpToDate(None) => "Settings synced".into(),
+        Status::Offline => "Settings sync can't reach the server".into(),
+    })
+}
+
+/// Settings sync is on whenever you're signed in. The first time this computer and the account
+/// have different settings, nothing changes until you pick which to keep, here under the tabs.
+fn sync_choice(s: &App, t: &Theme) -> Option<El> {
+    use crate::settings_sync::{Choice, Status};
+    let signed_in = s.monster.online() && s.monster.session.is_some();
+    if s.settings_sync.status(signed_in) != Status::Choose {
+        return None;
+    }
+    Some(
+        well(t)
+            .key("settings-sync-choice")
+            .padding(size::GAP * 2.0)
+            .gap(size::GAP)
+            .child(
+                text("Your account has other settings")
+                    .font(ty::HEADING)
+                    .color(t.text),
+            )
+            .child(muted(
+                t,
+                "Your servers, nickname and preferences on this account differ from this \
+                 computer's. Nothing changes until you choose.",
+            ))
+            .child(
+                row()
+                    .gap(size::GAP)
+                    .flex_wrap()
+                    .child(button(
+                        t,
+                        "settings-sync-account",
+                        "Use My Account's Settings",
+                        None,
+                        Variant::Primary,
+                        Some(Message::SettingsSyncChoice(Choice::Account)),
+                    ))
+                    .child(button(
+                        t,
+                        "settings-sync-computer",
+                        "Keep This Computer's",
+                        None,
+                        Variant::Secondary,
+                        Some(Message::SettingsSyncChoice(Choice::ThisComputer)),
+                    )),
+            ),
+    )
 }
 
 fn overview(s: &App, t: &Theme, k: &Kit, today: NaiveDate, reduced: bool) -> Vec<El> {
@@ -1067,38 +1116,6 @@ fn showcase(s: &App, reduced: bool) -> El {
         s.monster.reveal.as_ref(),
         "Your first card lands here",
         reduced,
-    )
-}
-
-/// A one-point speck of every effect a reveal uses. Shaders compile the first time they draw,
-/// and without this the first Legendary would stutter at the worst possible moment. Drawn once:
-/// its layers move, and left in place they kept the window drawing at the display's rate.
-fn warm_up(reduced: bool) -> El {
-    // Clipped, because glow and fire reach well outside their box.
-    // Placed where every section's cabinet, drawn after it, covers it.
-    let mut speck = el()
-        .absolute(size::PAGE + 40.0, 150.0)
-        .size(1.0, 1.0)
-        .clip_rounded(0.0)
-        .a11y_hidden();
-    for part in [
-        CardFx::Back,
-        CardFx::RevealGlow,
-        CardFx::RevealSparkles,
-        CardFx::RevealElectric,
-        CardFx::RevealFire,
-        CardFx::Ripple,
-    ] {
-        speck = speck.child(
-            card_fx(part, 0, Rarity::Legendary, 100, reduced)
-                .absolute(0.0, 0.0)
-                .size(1.0, 1.0),
-        );
-    }
-    speck.child(
-        can3d::mystery(None, 0.0, reduced)
-            .absolute(0.0, 0.0)
-            .size(1.0, 1.0),
     )
 }
 
@@ -1293,7 +1310,7 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
                 order
                     .first()
                     .filter(|_| searching && open)
-                    .map(|(index, _)| Message::MonsterAdd(*index)),
+                    .map(|(index, _)| Message::MonsterConfirm(Some(*index))),
             )),
         );
     if !favourites.is_empty() {
@@ -1323,10 +1340,6 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
             t,
             format!("{error}. Fix or remove the file to add cans."),
         ));
-    }
-    let face_down = tracker.hidden_can().is_some();
-    if let Some(can) = tracker.featured().filter(|_| !face_down) {
-        panel = panel.child(featured(t, can));
     }
     panel.child(odds(s, t))
 }
@@ -1382,7 +1395,7 @@ fn flavour_buttons(t: &Theme, flavours: &[(usize, u32)], open: bool) -> El {
                 .hover(t.wash(0.06))
                 .press_scale(0.97)
                 .motion(motion::QUICK)
-                .on_press_tx(send(Message::MonsterAdd(index)))
+                .on_press_tx(send(Message::MonsterConfirm(Some(index))))
         } else {
             button.disabled(true).dim(0.5)
         };
@@ -1410,59 +1423,11 @@ fn notice(s: &App, t: &Theme) -> El {
                     .font(ty::SMALL)
                     .color(t.text),
             ),
-        Notice::Removed => muted(t, "Can removed").key("monster-notice"),
         Notice::Failed(error) => error_text(t, error.clone()).key("monster-notice"),
     }
 }
 
 /// Facts about the card on show, and the way to take a mistyped can back out.
-fn featured(t: &Theme, can: &Can) -> El {
-    let rarity = can.rarity();
-    row()
-        .key("monster-featured")
-        .w_full()
-        .mt(6.0)
-        .pt(10.0)
-        .border_sides([1.0, 0.0, 0.0, 0.0], t.hairline)
-        .gap(size::GAP)
-        .center_y()
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(2.0)
-                .child(
-                    row()
-                        .gap(6.0)
-                        .center_y()
-                        .child(dot(rgb(rarity.color()), 8.0))
-                        .child(
-                            text(format!("{} {}", rarity.name(), can.flavour().name))
-                                .font(ty::BODY_STRONG)
-                                .color(t.text)
-                                .truncate(),
-                        ),
-                )
-                .child(faint(t, format!("{} · {}", can.number(), when(can.at))).truncate()),
-        )
-        .child(icon_button(
-            t,
-            "monster-replay",
-            &icons::PLAY,
-            "Replay the reveal",
-            Variant::Ghost,
-            Some(Message::MonsterReplay(can.identity())),
-        ))
-        .child(icon_button(
-            t,
-            "monster-remove",
-            &icons::TRASH,
-            "Remove this can",
-            Variant::Ghost,
-            Some(Message::MonsterRemove(can.identity())),
-        ))
-}
-
 fn dot(color: Color, diameter: f32) -> El {
     el().size(diameter, diameter)
         .radius(diameter / 2.0)
@@ -1559,20 +1524,6 @@ fn stats(t: &Theme, board: &Board) -> El {
 
 fn format_date(date: NaiveDate) -> String {
     date.format("%b %-d, %Y").to_string()
-}
-
-/// When a can was drunk, as people say it: "today at 14:32", or a date and time.
-fn when(at: i64) -> String {
-    let Some(moment) = Local.timestamp_opt(at, 0).single() else {
-        return String::new();
-    };
-    let today = Local::now().date_naive();
-    let time = moment.format("%H:%M");
-    match (today - moment.date_naive()).num_days() {
-        0 => format!("today at {time}"),
-        1 => format!("yesterday at {time}"),
-        _ => format!("{} at {time}", format_date(moment.date_naive())),
-    }
 }
 
 /// A year of squares, one for each day, as on a GitHub profile: weeks run left to right,
@@ -2040,16 +1991,13 @@ fn flavour_page(s: &App, t: &Theme, index: usize, today: NaiveDate, reduced: boo
     let selected = hero.map(Can::identity);
     let selected = selected.as_deref();
 
-    let mut facts = col()
+    let facts = col()
         .key("flavour-facts")
         .grow(1.0)
         .min_w(320.0)
         .gap(14.0)
         .child(muted(t, flavour.line))
         .child(flavour_stats(t, s, &cans, &board));
-    if let Some(can) = hero {
-        facts = facts.child(featured(t, can));
-    }
 
     let mut all = col()
         .key("flavour-cards")

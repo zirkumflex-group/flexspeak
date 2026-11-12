@@ -4,7 +4,7 @@
 //! it later. The roll mixes a random key kept in the database with the flavour, the time and
 //! the can's number. The collection lives in `monster.sqlite` beside `settings.json`.
 //!
-//! With a collection server set (Settings › WIP), the server keeps the collection and rolls the
+//! With a collection server built in ([`built_in_server`]), the server keeps the collection and rolls the
 //! cards instead, and the page needs an account; `online` decides what each answer changes.
 
 use std::{
@@ -23,7 +23,7 @@ pub use monster_core::{
     CARDS, FLAVOURS, Flavour, Ranking, Rarity, Standing, api, draw, flavour_by_id,
     flavour_or_other, from_hash,
 };
-pub use online::{Action, Answer, Effect, OWN_SOURCE, Visit, server_address};
+pub use online::{Action, Answer, Effect, OWN_SOURCE, Visit, built_in_server};
 
 mod online;
 /// How many more cards the collection shows at a time. Every card is several shader layers.
@@ -522,11 +522,10 @@ impl Reveal {
     }
 }
 
-/// What the last try at adding or removing a can came to.
+/// What the last try at adding a can came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     Added(Rarity),
-    Removed,
     Failed(String),
 }
 
@@ -622,6 +621,8 @@ pub struct Tracker {
     pub cans: Vec<Can>,
     /// What the flavour search holds.
     pub query: String,
+    /// The flavour picked to add, waiting for a yes: a can, once added, stays.
+    pub confirming: Option<usize>,
     /// The card being opened, while one is.
     pub reveal: Option<Reveal>,
     reveals: u64,
@@ -781,27 +782,6 @@ impl Tracker {
             .as_ref()
             .filter(|reveal| !reveal.beat().face_up())
             .map(|reveal| reveal.identity.as_str())
-    }
-
-    /// Takes a can out, for one added by mistake.
-    pub fn remove(&mut self, identity: &str) {
-        let Some(index) = self.cans.iter().position(|can| can.identity() == identity) else {
-            return;
-        };
-        if let Some(db) = &self.db
-            && let Err(error) = db
-                .execute(
-                    "DELETE FROM drinks WHERE id = ?1",
-                    params![self.cans[index].id],
-                )
-                .context("Can't save monster.sqlite")
-        {
-            self.notice = Some(Notice::Failed(format!("{error:#}")));
-            return;
-        }
-        self.cans.remove(index);
-        self.selected = None;
-        self.notice = Some(Notice::Removed);
     }
 
     /// One flavour's cans, oldest first.
@@ -1127,20 +1107,6 @@ mod tests {
         t.add(0, 100);
         assert!(t.cans.is_empty());
         assert!(matches!(t.notice, Some(Notice::Failed(_))));
-    }
-
-    #[test]
-    fn a_removed_can_is_gone_for_good_and_its_number_isnt_reused() {
-        let dir = temp_dir("remove");
-        let mut t = tracker(&dir);
-        t.add(0, 100);
-        t.add(0, 200);
-        let first = t.cans[0].identity();
-        t.remove(&first);
-        assert_eq!(t.notice, Some(Notice::Removed));
-        assert_eq!(tracker(&dir).cans.len(), 1);
-        t.add(0, 300);
-        assert_ne!(t.cans.last().unwrap().identity(), first);
     }
 
     #[test]

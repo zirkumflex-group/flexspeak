@@ -3,14 +3,17 @@
 //! view marks an element with [`card_fx`]; the compositor finds the marked instances each frame
 //! and draws the matching layer there.
 
+use std::sync::mpsc::{Sender, channel};
+use std::thread::JoinHandle;
+
 use rune::El;
 use rune::compose::{Compositor, DeviceKey, Frame};
 use rune::render::{EffectPhase, EffectSite, KIND_EFFECT};
 use rune_fx::{
-    AuroraParams, ElectricParams, FillAnchor, FireParams, FireStyle, Fx, FxBlend, FxFrame, FxLayer,
-    FxOptions, FxRenderer, FxSlot, GlowParams, GlowStyle, GrainParams, LiquidMetalParams,
-    MeshGradientParams, MetaballParams, PulseParams, PulseStyle, Shape, ShimmerParams,
-    SparkleParams, Stops, SwirlParams, VoronoiParams, WaveParams, rgb,
+    AuroraParams, ElectricParams, FireParams, FireStyle, Fx, FxBlend, FxFrame, FxLayer, FxOptions,
+    FxRenderer, FxSlot, GlowParams, GlowStyle, GrainParams, MeshGradientParams, MetaballParams,
+    PlasticParams, PulseParams, PulseStyle, Shape, ShimmerParams, SparkleParams, Stops,
+    SwirlParams, VoronoiParams, WaveParams, rgb,
 };
 
 use crate::App;
@@ -23,8 +26,6 @@ const CARD_MARKS: u32 = 16;
 /// how each is tuned, depends on its rarity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardFx {
-    /// Light spilling out behind the card.
-    Glow,
     /// Flames around the card, behind it.
     Fire,
     /// The card's painted background, a different style for each rarity.
@@ -34,7 +35,7 @@ pub enum CardFx {
     Shimmer,
     Sparkles,
     Electric,
-    /// The card's metal frame.
+    /// The card's plastic frame, in its rarity's colour.
     Frame,
     /// The face-down card a reveal starts from.
     Back,
@@ -48,8 +49,7 @@ pub enum CardFx {
 }
 
 impl CardFx {
-    const ALL: [Self; 16] = [
-        Self::Glow,
+    const ALL: [Self; 15] = [
         Self::Fire,
         Self::Art,
         Self::Aurora,
@@ -84,13 +84,10 @@ pub fn card_layers(rarity: Rarity) -> (&'static [CardFx], &'static [CardFx]) {
     match rarity {
         Rarity::Common => (&[Art, Grain], &[]),
         Rarity::Uncommon => (&[Art, Grain], &[Shimmer, Frame]),
-        Rarity::Rare => (&[Glow, Art, Aurora, Grain], &[Shimmer, Sparkles, Frame]),
-        Rarity::Mythic => (
-            &[Glow, Art, Aurora, Grain],
-            &[Shimmer, Sparkles, Frame, Electric],
-        ),
+        Rarity::Rare => (&[Art, Aurora, Grain], &[Shimmer, Sparkles, Frame]),
+        Rarity::Mythic => (&[Art, Aurora, Grain], &[Shimmer, Sparkles, Frame, Electric]),
         Rarity::Legendary => (
-            &[Glow, Fire, Art, Aurora, Grain],
+            &[Fire, Art, Aurora, Grain],
             &[Shimmer, Sparkles, Frame, Electric],
         ),
     }
@@ -109,6 +106,24 @@ pub fn card_fx(part: CardFx, art: usize, rarity: Rarity, seed: u16, reduced: boo
 
 /// The card width the layers below are tuned at; other sizes scale from it.
 const CARD_WIDTH: f32 = 236.0;
+
+/// The card's frame: a glossy plastic rim in the colour of its rarity, which still reads as
+/// that colour when the card is small.
+fn frame(rarity: Rarity, k: f32) -> Fx {
+    let width = match rarity {
+        Rarity::Legendary => 5.0,
+        Rarity::Mythic => 4.5,
+        Rarity::Rare => 4.0,
+        _ => 3.5,
+    };
+    Fx::fill(
+        PlasticParams {
+            color: rgb(rarity.color()),
+            ..PlasticParams::glossy()
+        }
+        .border(width * k),
+    )
+}
 
 /// A layer of a card being opened. `level` is how lit it is, 1 at full and lower in the hush.
 fn reveal_layer(part: CardFx, rarity: Rarity, level: f32, shape: Shape, k: f32) -> Option<Fx> {
@@ -231,21 +246,6 @@ fn card_layer(
     let rarity = *Rarity::ALL.get(data[1] as usize)?;
     let seed = data[2] as u32;
     let fx = match part {
-        CardFx::Glow => Fx::glow(GlowParams {
-            style: if rarity == Rarity::Rare {
-                GlowStyle::Soft
-            } else {
-                GlowStyle::Aura
-            },
-            color: rgb(main),
-            core: rgb(high),
-            third: rgb(second),
-            radius: 20.0 * k,
-            intensity: if rarity == Rarity::Rare { 0.8 } else { 1.3 },
-            breathe: 0.3,
-            aura_speed: 0.2,
-            ..Default::default()
-        }),
         CardFx::Fire => Fx::fire(FireParams {
             style: FireStyle::Border,
             low: rgb(second),
@@ -336,22 +336,7 @@ fn card_layer(
                 })
             }
         }
-        CardFx::Frame => {
-            let (metal, width) = match rarity {
-                Rarity::Legendary => (LiquidMetalParams::gold(), 4.5),
-                Rarity::Mythic => (LiquidMetalParams::rose(), 3.5),
-                Rarity::Rare => (LiquidMetalParams::chrome(), 3.0),
-                _ => (LiquidMetalParams::gunmetal(), 2.5),
-            };
-            Fx::fill(
-                LiquidMetalParams {
-                    iridescence: if rarity >= Rarity::Mythic { 0.6 } else { 0.0 },
-                    anchor: FillAnchor::Element,
-                    ..metal
-                }
-                .border(width * k),
-            )
-        }
+        CardFx::Frame => frame(rarity, k),
         // Drawn by `reveal_layer` above.
         CardFx::Back
         | CardFx::RevealGlow
@@ -427,15 +412,98 @@ fn new_renderer(device: &wgpu::Device, format: wgpu::TextureFormat) -> FxRendere
     FxRenderer::new(device, format, FxOptions { dither: true })
 }
 
+/// What a card takes to draw, as `warm` builds it.
+type Warmed = (FxRenderer, super::can3d::Warm);
+
+/// Builds every card shader and the cans' pipelines for targets of `format`. Done on another
+/// thread from the window's first frame, because built when the first card showed they held
+/// that frame for 300 to 400 ms on a MacBook. Isolated layers draw into `Rgba16Float`, and
+/// `set_srgb_blend` moves the target to the other sRGB variant of `format`, as `prepare` does.
+fn warm(device: &wgpu::Device, format: wgpu::TextureFormat, srgb: bool) -> Warmed {
+    let mut fx = new_renderer(device, format);
+    let blended = if srgb {
+        format.remove_srgb_suffix()
+    } else {
+        format.add_srgb_suffix()
+    };
+    fx.add_format(device, blended);
+    fx.add_format(device, wgpu::TextureFormat::Rgba16Float);
+    fx.build_every_pipeline();
+    let cans = super::can3d::warm(device, &[format, wgpu::TextureFormat::Rgba16Float]);
+    (fx, cans)
+}
+
+/// How long after the window's first frame the card shaders start building, so they don't
+/// compete with launch. A card shown sooner starts them at once and waits for them.
+const WARM_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether this frame shows a card layer or a can.
+fn cards_shown(f: &Frame<'_, App>) -> bool {
+    f.rt.instances.iter().enumerate().any(|(n, instance)| {
+        let kind = f.rt.marks.get(n).copied().unwrap_or(0) & 0xff;
+        instance.params[1] == KIND_EFFECT
+            && (kind == super::can3d::CAN || CardFx::from_mark(kind).is_some())
+    })
+}
+
 #[derive(Default)]
 pub struct Effects {
     videos: super::video::Videos,
     cans: super::can3d::Cans,
     renderer: Option<(DeviceKey, FxRenderer)>,
+    /// The card shaders being built ahead on another thread, for the device of that key, and
+    /// the way to tell it to start at once.
+    warming: Option<(DeviceKey, Sender<()>, JoinHandle<Warmed>)>,
+    /// The device they were last built for, so each GPU the window lands on builds them once.
+    warmed_for: Option<DeviceKey>,
     /// Whether a layer drawn last frame moves on its own, so the window keeps drawing.
     moving: bool,
     /// The reveal that last landed, and when, for effects that run once from that moment.
     landed: Option<(u64, f32)>,
+}
+
+impl Effects {
+    /// Starts building the card shaders for this frame's device, and takes them once they're
+    /// built, or as soon as a card is on screen, waiting for the rest then if it must.
+    fn warm(&mut self, f: &Frame<'_, App>) {
+        let key = f.device_key();
+        if self.warmed_for != Some(key) {
+            self.warmed_for = Some(key);
+            let (device, format, srgb) = (f.device.clone(), f.format, f.srgb_blend());
+            let (start, started) = channel();
+            match std::thread::Builder::new()
+                .name("card shaders".to_owned())
+                .spawn(move || {
+                    // Compiled alongside launch's own first frame, they doubled it.
+                    let _ = started.recv_timeout(WARM_AFTER);
+                    warm(&device, format, srgb)
+                }) {
+                Ok(thread) => self.warming = Some((key, start, thread)),
+                Err(error) => tracing::warn!("Card shaders aren't built ahead: {error}"),
+            }
+        }
+        let Some((_, start, thread)) = &self.warming else {
+            return;
+        };
+        if !thread.is_finished() {
+            if !cards_shown(f) {
+                return;
+            }
+            let _ = start.send(());
+        }
+        let (built_for, _, thread) = self.warming.take().expect("checked above");
+        match thread.join() {
+            // The window moved to another GPU meanwhile: what it builds there is used.
+            Ok(_) if built_for != key => {}
+            Ok((fx, cans)) => {
+                if self.renderer.as_ref().is_none_or(|(k, _)| *k != key) {
+                    self.renderer = Some((key, fx));
+                }
+                self.cans.adopt(key, cans);
+            }
+            Err(_) => tracing::warn!("Building the card shaders ahead failed"),
+        }
+    }
 }
 
 impl Compositor<App> for Effects {
@@ -446,6 +514,7 @@ impl Compositor<App> for Effects {
     fn render(&mut self, f: &mut Frame<'_, App>) {
         // The first frame built the frosted backdrop's pipelines; the next can drop the speck.
         f.rt.state.ui.warm_blur = false;
+        self.warm(f);
         let video_visible = self.videos.prepare(f);
         let cans = self.cans.prepare(f);
         let key = f.device_key();
@@ -461,7 +530,6 @@ impl Compositor<App> for Effects {
         let mut at = Vec::new();
         let mut layers = Vec::new();
         let mut slots = Vec::new();
-        let mut warmed = false;
         for (n, instance) in f.rt.instances.iter().enumerate() {
             if instance.params[1] != KIND_EFFECT {
                 continue;
@@ -479,8 +547,6 @@ impl Compositor<App> for Effects {
             ) else {
                 continue;
             };
-            // Only the Monster page's warm-up speck is a point across.
-            warmed |= w <= 1.5 && h <= 1.5;
             at.push(n as u32);
             layers.push(layer);
             slots.push(
@@ -491,23 +557,13 @@ impl Compositor<App> for Effects {
             );
         }
         self.moving = layers.iter().any(FxLayer::is_animating) || cans.moving;
-        // This frame builds the reveal's shaders; the next view can leave the speck out.
-        if warmed && f.rt.state.ui.warm_cards {
-            f.rt.state.ui.warm_cards = false;
-            f.rt.invalidate();
-        }
         if layers.is_empty() && !video_visible && !cans.visible {
             f.draw_ui();
             return;
         }
-        // Built the first time a card is on screen, so nobody else pays for its pipelines.
-        // Resources belong to one device; a window shown again on another GPU makes them anew.
+        // Normally `warm` built it already. Resources belong to one device, so a renderer
+        // that couldn't be built ahead, or was built for another GPU, is made here.
         if !layers.is_empty() && self.renderer.as_ref().is_none_or(|(k, _)| *k != key) {
-            // Another GPU has built none of the shaders: the speck draws there once more.
-            if self.renderer.is_some() && !warmed {
-                f.rt.state.ui.warm_cards = true;
-                f.rt.invalidate();
-            }
             self.renderer = Some((key, new_renderer(device, f.format)));
         }
         let mut fx = self

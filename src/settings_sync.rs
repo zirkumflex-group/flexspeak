@@ -34,7 +34,7 @@ pub enum Effect {
 }
 
 /// What the server answered. Each carries the [`SettingsSync::generation`] the request was
-/// sent in, so an answer to a request from before signing out or turning sync off is dropped.
+/// sent in, so an answer to a request from before signing out is dropped.
 #[derive(Debug, Clone)]
 pub enum Answer {
     /// The account's copy; `None` if nothing was saved yet.
@@ -51,11 +51,10 @@ pub enum Choice {
     ThisComputer,
 }
 
-/// What Settings › WIP says about it.
+/// Where it stands, for the Monster page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     SignedOut,
-    Off,
     Syncing,
     /// With when this computer last agreed with the server, if it has since launch.
     UpToDate(Option<Instant>),
@@ -89,14 +88,12 @@ enum Request {
 
 #[derive(Debug, Default)]
 pub struct SettingsSync {
-    /// The switch in Settings › WIP, as saved.
-    pub enabled: bool,
     /// The version this computer last saw, as saved; 0 for none.
     pub seen: i64,
     /// Moves on whenever answers on their way should be dropped.
     generation: u64,
     busy: Option<Request>,
-    /// The server answered since launch, signing in or turning sync on; nothing is saved
+    /// The server answered since launch or signing in; nothing is saved
     /// before, since this computer doesn't know yet what the server has.
     fetched: bool,
     /// When the next check is due; `None` checks at once.
@@ -117,9 +114,8 @@ pub struct SettingsSync {
 }
 
 impl SettingsSync {
-    pub fn new(enabled: bool, seen: i64) -> Self {
+    pub fn new(seen: i64) -> Self {
         Self {
-            enabled,
             seen,
             ..Self::default()
         }
@@ -132,8 +128,6 @@ impl SettingsSync {
     pub fn status(&self, signed_in: bool) -> Status {
         if !signed_in {
             Status::SignedOut
-        } else if !self.enabled {
-            Status::Off
         } else if self.choice.is_some() {
             Status::Choose
         } else if self.offline {
@@ -161,7 +155,7 @@ impl SettingsSync {
 
     /// Runs every second or so: notices changes, and sends or checks when one is due.
     pub fn tick(&mut self, now: Instant, ctx: Context) -> Vec<Effect> {
-        if !self.enabled || !ctx.active() {
+        if !ctx.active() {
             return Vec::new();
         }
         let Some(local) = ctx.local else {
@@ -229,19 +223,12 @@ impl SettingsSync {
         vec![Effect::Remember(0)]
     }
 
-    /// The switch. Turned on, it checks the server straight away.
-    pub fn set_enabled(&mut self, on: bool, now: Instant, ctx: Context) -> Vec<Effect> {
-        self.enabled = on;
-        self.restart();
-        self.tick(now, ctx)
-    }
-
     /// What the server answered.
     pub fn answer(&mut self, now: Instant, answer: Answer, ctx: Context) -> Vec<Effect> {
         let generation = match &answer {
             Answer::Fetched(generation, _) | Answer::Saved(generation, _) => *generation,
         };
-        if generation != self.generation || !self.enabled || !ctx.active() {
+        if generation != self.generation || !ctx.active() {
             return Vec::new();
         }
         let Some(local) = ctx.local else {
@@ -353,7 +340,7 @@ impl SettingsSync {
 
     /// One of the two buttons shown while waiting for a choice.
     pub fn choose(&mut self, choice: Choice, now: Instant, ctx: Context) -> Vec<Effect> {
-        if !self.enabled || !ctx.active() || self.busy.is_some() {
+        if !ctx.active() || self.busy.is_some() {
             return Vec::new();
         }
         let (Some(copy), Some(local)) = (self.choice.take(), ctx.local) else {
@@ -417,9 +404,9 @@ mod tests {
         }
     }
 
-    /// Signed in with sync on, and the first check sent.
+    /// Signed in, and the first check sent.
     fn started(seen: i64, now: Instant, local: &Settings) -> SettingsSync {
-        let mut sync = SettingsSync::new(true, seen);
+        let mut sync = SettingsSync::new(seen);
         assert_eq!(sync.signed_in(now, ctx(local)), [Effect::Fetch]);
         sync
     }
@@ -717,30 +704,10 @@ mod tests {
     }
 
     #[test]
-    fn switched_off_nothing_happens_and_late_answers_are_dropped() {
-        let now = Instant::now();
-        let local = renamed("Sam");
-        let mut sync = started(3, now, &local);
-        let generation = sync.generation();
-        assert!(sync.set_enabled(false, now, ctx(&local)).is_empty());
-        assert_eq!(sync.status(true), Status::Off);
-        let late = Answer::Fetched(generation, Ok(Some(copy(9, &renamed("Robin")))));
-        assert!(sync.answer(now, late, ctx(&local)).is_empty());
-        let mine = renamed("Sam B");
-        for second in 0..10 {
-            let at = now + FETCH_EVERY + Duration::from_secs(second);
-            assert!(sync.tick(at, ctx(&mine)).is_empty());
-        }
-        assert_eq!(sync.seen, 3, "the version is kept");
-        // On again, it checks at once.
-        assert_eq!(sync.set_enabled(true, now, ctx(&mine)), [Effect::Fetch]);
-    }
-
-    #[test]
     fn not_during_first_run_setup() {
         let now = Instant::now();
         let local = renamed("Sam");
-        let mut sync = SettingsSync::new(true, 3);
+        let mut sync = SettingsSync::new(3);
         let setup = Context {
             onboarding: true,
             ..ctx(&local)

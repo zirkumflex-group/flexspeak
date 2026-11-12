@@ -245,7 +245,6 @@ pub struct UiState {
     pub monster_search: TextEdit,
     pub monster_email: TextEdit,
     pub monster_login_code: TextEdit,
-    pub monster_server: TextEdit,
     /// Where dragging has left the large can on the Monster page.
     pub can_spin: can3d::Spin,
     /// The card the pointer is over there, by its key, whose can leans toward it.
@@ -331,9 +330,6 @@ pub struct UiState {
     pub log_search: TextEdit,
     /// The first frame still has to build the frosted backdrop's pipelines.
     pub warm_blur: bool,
-    /// The Monster page still has to draw its speck of reveal effects once, so their shaders
-    /// are built before the first reveal. Set again when the window moves to another GPU.
-    pub warm_cards: bool,
     /// Nobody could see the window at the last poll: hidden in the tray, or minimized.
     pub unseen: bool,
     /// Settings → Updates lists every release, not only the latest.
@@ -362,7 +358,6 @@ impl Default for UiState {
             monster_search: TextEdit::new(""),
             monster_email: TextEdit::new(""),
             monster_login_code: TextEdit::new(""),
-            monster_server: TextEdit::new(""),
             can_spin: can3d::Spin::default(),
             can_hover: None,
             server_name: TextEdit::new(""),
@@ -411,7 +406,6 @@ impl Default for UiState {
             log_people: false,
             log_search: TextEdit::new(""),
             warm_blur: true,
-            warm_cards: true,
             unseen: false,
             changelog_open: false,
             sound_groups: std::collections::BTreeSet::new(),
@@ -482,7 +476,6 @@ impl App {
         mirror(&mut self.ui.key_capture, "");
         mirror(&mut self.ui.settings_search, &self.settings_query);
         mirror(&mut self.ui.monster_search, &self.monster.query);
-        mirror(&mut self.ui.monster_server, &self.monster_server_draft);
         let log_query = self.server().log.query().to_owned();
         mirror(&mut self.ui.log_search, &log_query);
         let editor = self.server_editor.clone().unwrap_or_default();

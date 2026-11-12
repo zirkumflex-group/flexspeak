@@ -99,6 +99,13 @@ webrtc-sys-build = "=0.3.21"
 # zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.53 (based on webrtc-sys v0.3.53).
 # The rev is also tagged flexspeak/webrtc-sys-v0.3.53-nvenc.2 there, so it stays fetchable.
 [patch.crates-io]
+# Rune's own patched copies of these, from the same rev as rune above. A dependency's [patch]
+# doesn't reach the app that builds it, so each app repeats them; without winit's, macOS doesn't
+# build at all. Keep the rev in step with rune's when it is bumped.
+winit = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
 webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "1f542d7bc61cb00270849632415485490f9e52e5" }
 webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "1f542d7bc61cb00270849632415485490f9e52e5" }
 # cpal 0.18.2 with one change: the macOS loopback tap leaves the app's own sound out, so
