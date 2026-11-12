@@ -1807,7 +1807,7 @@ pub fn edge(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     let mut strip = el()
         .key("chat-edge")
         .role("button")
-        .label(label)
+        .label(label.clone())
         .help(label)
         .pin(None, Some(size::HEADER), Some(0.0), None)
         .size(EDGE, height)
