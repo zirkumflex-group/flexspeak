@@ -838,6 +838,8 @@ enum Message {
     StreamLayout(Option<streaming::Strip>),
     /// Tuck the streams around the stage away, or bring them back.
     HideOtherStreams(bool),
+    /// The large stream fills the screen, or comes back into the window.
+    StreamFullscreen(bool),
     /// Trades two watched streams' places.
     SwapStreams(String, String),
     /// A publisher's stream volume, in percent, up to `streaming::MAX_VOLUME`.
@@ -2649,6 +2651,24 @@ impl App {
             }
             Message::HideOtherStreams(hidden) => {
                 self.server_mut().streaming.others_hidden = hidden;
+            }
+            // The large stream, or the first one, takes the whole screen with the others
+            // tucked away; leaving puts them back as they were.
+            Message::StreamFullscreen(true) => {
+                if self.ui.fullscreen.is_none() && ui::fullscreen_allowed(self) {
+                    let streaming = &mut self.server_mut().streaming;
+                    if streaming.stage().is_none() {
+                        streaming.focused =
+                            streaming.watching.first().map(|watch| watch.stream.id.clone());
+                    }
+                    let hidden = std::mem::replace(&mut streaming.others_hidden, true);
+                    self.ui.fullscreen = Some(hidden);
+                }
+            }
+            Message::StreamFullscreen(false) => {
+                if let Some(hidden) = self.ui.fullscreen.take() {
+                    self.server_mut().streaming.others_hidden = hidden;
+                }
             }
             Message::StreamLayout(None) => {
                 // The grid shows every stream, so nothing stays tucked away.

@@ -17,7 +17,7 @@ use super::widgets::{
 };
 use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
-    self, Strip, Watching, health,
+    self, Strip, Watching, health, publishing,
     publishing::{
         Access, Preset, PreviewState, Resolution, ShareSource, SourceGroup, SourceKind, Struggle,
     },
@@ -39,12 +39,19 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .on_hover_change(|s: &mut App, hovering, _| s.ui.streams_hover = hovering)
+                .on_hover_change(|s: &mut App, hovering, _| {
+                    s.ui.streams_hover = hovering;
+                    s.ui.streams_moved = std::time::Instant::now();
+                    s.ui.streams_idle = false;
+                })
+                .on_pointer_move_local(|s: &mut App, _, tx: &mut Tx| {
+                    s.ui.streams_moved = std::time::Instant::now();
+                    if !std::mem::take(&mut s.ui.streams_idle) {
+                        tx.live_only();
+                    }
+                })
                 .child(stage(s, t, k, supported, room))
-                .children(
-                    s.ui.streams_hover
-                        .then(|| stage_tools(s, t, supported, watching)),
-                ),
+                .children(overlays(s).then(|| stage_tools(s, t, supported, watching))),
         );
     } else {
         pane = pane
@@ -67,6 +74,48 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
 /// Whether streams fill the pane: one you watch, or one in the channel you could.
 pub fn on_stage(s: &App) -> bool {
     s.server().streaming.active() || !unwatched(s).is_empty()
+}
+
+/// How long the pointer rests on the streams before their toolbar and bar step aside.
+pub const OVERLAY_IDLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether the overlays over the streams show: the pointer is over them and has moved lately.
+fn overlays(s: &App) -> bool {
+    s.ui.streams_hover && (!s.ui.streams_idle || s.ui.streams_bar_hover)
+}
+
+/// Keeps the overlays up while the pointer is on one of them, even resting.
+fn holds_overlays(bar: El) -> El {
+    bar.on_hover_change(|s: &mut App, hovering, _| s.ui.streams_bar_hover = hovering)
+}
+
+/// Whether a stream could fill the screen: you watch one, on the server's own page.
+pub fn fullscreen_allowed(s: &App) -> bool {
+    s.tab == crate::Tab::Home
+        && s.onboarding.is_none()
+        && s.server().connected
+        && !s.server().streaming.watching.is_empty()
+}
+
+/// Whether the stream pane is all the window shows.
+pub fn fullscreen(s: &App) -> bool {
+    s.ui.fullscreen.is_some() && fullscreen_allowed(s)
+}
+
+fn fullscreen_button(s: &App, t: &Theme) -> El {
+    let on = fullscreen(s);
+    icon_button(
+        t,
+        "fullscreen",
+        if on { &icons::MINIMIZE } else { &icons::MAXIMIZE },
+        if on {
+            "Leave full screen (Esc)"
+        } else {
+            "Full screen (F)"
+        },
+        Variant::Ghost,
+        Some(Message::StreamFullscreen(!on)),
+    )
 }
 
 /// What can go live with one click right now: your main screen, then the game you're playing.
@@ -106,7 +155,7 @@ fn stage_tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
         .px(STAGE_PAD + 8.0)
         .child(el().grow(1.0))
         .child(
-            tools(s, t, supported, watching)
+            holds_overlays(tools(s, t, supported, watching))
                 .padding(4.0)
                 .radius(radius::CARD)
                 .fill(t.surface.alpha(0.86))
@@ -575,14 +624,15 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
             .streaming
             .stage()
             .expect("a lone watched stream is on the stage");
-        return area.padding(0.0).child(tile(s, t, main, Mode::Solo, true));
+        let width = space.0 + 2.0 * STAGE_PAD;
+        return area.padding(0.0).child(tile(s, t, main, Mode::Solo, width));
     }
     let Some(main) = s.server().streaming.stage() else {
         let columns = grid_columns(watching.len() + available.len(), space);
-        let volume_slider = cell_width(space, columns.unwrap_or(2)) >= MIN_CELL_WITH_SLIDER;
+        let width = cell_width(space, columns.unwrap_or(2));
         let cells = watching
             .iter()
-            .map(|watch| tile(s, t, watch, Mode::Grid, volume_slider))
+            .map(|watch| tile(s, t, watch, Mode::Grid, width))
             .chain(
                 available
                     .iter()
@@ -599,7 +649,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
     let (previews, overflow) = available.split_at(room);
     let thumbnails: Vec<El> = others
         .into_iter()
-        .map(|watch| tile(s, t, watch, Mode::Thumbnail, false))
+        .map(|watch| tile(s, t, watch, Mode::Thumbnail, 0.0))
         .chain(
             previews
                 .iter()
@@ -611,13 +661,7 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32)) -> El 
         Strip::Beside if !thumbnails.is_empty() => space.0 - strip_width - GRID_GAP,
         _ => space.0,
     };
-    let main = tile(
-        s,
-        t,
-        main,
-        Mode::Stage,
-        stage_width >= MIN_STAGE_WITH_SLIDER,
-    );
+    let main = tile(s, t, main, Mode::Stage, stage_width);
     area = match s.server().streaming.strip {
         Strip::Below if thumbnails.is_empty() => area.child(main),
         Strip::Below => area.child(main).child(
@@ -727,9 +771,6 @@ const TILE_BAR: f32 = 46.0;
 const MIN_PICTURE_WIDTH: f32 = 200.0;
 /// Everything around the stage in the window: header, footer and margins.
 const CHROME_HEIGHT: f32 = 150.0;
-const MIN_CELL_WITH_SLIDER: f32 = 260.0;
-/// The stage's slider is wider, and it has a button more.
-const MIN_STAGE_WITH_SLIDER: f32 = 360.0;
 
 /// The room inside the stage. Reading its layout re-runs the view when the window resizes;
 /// until it has been laid out, estimate from the window.
@@ -821,8 +862,10 @@ fn watched_in_path(s: &App, path: &str) -> Option<String> {
         .cloned()
 }
 
-/// A click puts the stream on the stage, a double-click on the stage goes back to the grid, and
-/// a drag onto another stream trades their places.
+/// A click puts the stream on the stage, a double-click on the stage takes it full screen (or
+/// back), and a drag onto another stream trades their places. The second click of a
+/// double-click on a grid tile lands on the stage it just moved to, so it counts there only
+/// when the first click did too.
 fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
     let id = stream.id.clone();
     let on_stage = matches!(mode, Mode::Stage | Mode::Solo);
@@ -830,7 +873,7 @@ fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
         .role("button")
         .label(format!("Move or focus {}", stream.name))
         .help(if on_stage {
-            "Drag onto another stream to swap · double-click to show every stream"
+            "Drag onto another stream to swap · double-click for full screen"
         } else {
             "Click to make this the large stream · drag onto another stream to swap"
         })
@@ -874,13 +917,33 @@ fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
                         }) => dispatch(s, tx, Message::SwapStreams(from, to)),
                         Some(_) => {}
                         None if !on_stage => {
+                            s.ui.focused_at = Some(std::time::Instant::now());
                             dispatch(s, tx, Message::FocusStream(Some(id.clone())))
                         }
-                        None if d.clicks >= 2 => dispatch(s, tx, Message::FocusStream(None)),
+                        None if d.clicks >= 2 && !just_focused(s) => {
+                            let on = s.ui.fullscreen.is_none();
+                            dispatch(s, tx, Message::StreamFullscreen(on));
+                        }
                         None => {}
                     }
                 }
             }
+        })
+}
+
+/// Whether a click just moved a stream onto the stage, so a second click there belongs to it.
+fn just_focused(s: &App) -> bool {
+    s.ui.focused_at
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(700))
+}
+
+/// A double-click on a lone stream takes it full screen, or back.
+fn double_click_fullscreen(video: El) -> El {
+    video
+        .help("Double-click for full screen")
+        .on_double_press_tx(|s: &mut App, tx: &mut Tx| {
+            let on = s.ui.fullscreen.is_none();
+            dispatch(s, tx, Message::StreamFullscreen(on));
         })
 }
 
@@ -930,7 +993,8 @@ enum Mode {
     Thumbnail,
 }
 
-fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -> El {
+/// `width` is the tile's, which decides whether its volume slider fits beside the name.
+fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
     let id = watch.stream.id.clone();
     let several = s.server().streaming.watching.len() > 1;
     let receiving = watch.phase == streaming::Phase::Receiving;
@@ -963,6 +1027,8 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
     };
     if several {
         video = movable(video, &watch.stream, mode);
+    } else {
+        video = double_click_fullscreen(video);
     }
     if s.server().streaming.show_stats && mode != Mode::Thumbnail {
         video = video.child(stats(s, watch).absolute(10.0, 10.0));
@@ -975,7 +1041,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
                 .w_full()
                 .padding(if mode == Mode::Thumbnail { 6.0 } else { 10.0 })
                 // Below the toolbar that floats over the top right while the pointer is here.
-                .pt(if s.ui.streams_hover && mode != Mode::Thumbnail {
+                .pt(if overlays(s) && mode != Mode::Thumbnail {
                     TOOLS_CLEARANCE
                 } else if mode == Mode::Thumbnail {
                     6.0
@@ -996,7 +1062,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
                 .child(icon_button(
                     t,
                     "focus",
-                    &icons::MAXIMIZE,
+                    &icons::ZOOM_IN,
                     "Make this the large stream",
                     Variant::Secondary,
                     Some(Message::FocusStream(Some(id.clone()))),
@@ -1025,7 +1091,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
         // Tucked-away streams leave a small tab above the bar, shown with it while the pointer is
         // over the stream, so nothing covers the picture otherwise.
         let hidden = others(s);
-        let bar = s.ui.streams_hover || !receiving;
+        let bar = overlays(s) || !receiving;
         let overlay = bar.then(|| {
             col()
                 .key("solo-overlay")
@@ -1037,7 +1103,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
                 .padding(STAGE_PAD)
                 .children((hidden > 0).then(|| show_others(t, hidden).self_center()))
                 .child(
-                    controls(s, t, watch, mode, volume_slider)
+                    holds_overlays(controls(s, t, watch, mode, width))
                         .key("solo-bar")
                         .radius(radius::CARD)
                         .fill(t.surface.alpha(0.86))
@@ -1072,9 +1138,14 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -
         } else {
             pulse(t.fair)
         };
-        frame.child(thumbnail_label(s, t, watch.stream.publisher, dot))
+        frame.child(thumbnail_label(s, t, watch.stream.publisher, dot).child(mute_button(
+            s,
+            t,
+            watch,
+            Variant::Ghost,
+        )))
     } else {
-        frame.child(controls(s, t, watch, mode, volume_slider))
+        frame.child(controls(s, t, watch, mode, width))
     }
 }
 
@@ -1098,8 +1169,10 @@ fn tile_frame(t: &Theme, id: &str, edge: Color, video: El) -> El {
 fn thumbnail_label(s: &App, t: &Theme, publisher: u16, dot: El) -> El {
     row()
         .w_full()
-        .px(8.0)
-        .py(5.0)
+        .pl(8.0)
+        .pr(2.0)
+        .py(2.0)
+        .min_h(32.0)
         .gap(6.0)
         .center_y()
         .child(dot)
@@ -1201,11 +1274,67 @@ const STREAM_VOLUME: Range = Range {
 };
 
 /// Under a stream: who and what, its volume, focus and stop.
-fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: bool) -> El {
+/// A stream's two lines: what it shows over who shares it, or the publisher first when the
+/// stream's own name only says it is a screen share.
+fn stream_lines(s: &App, stream: &streaming::StreamInfo) -> (String, String) {
+    let publisher = publisher_name(s, stream.publisher);
+    if publishing::generic_name(&stream.name) {
+        (publisher, stream.name.clone())
+    } else {
+        (stream.name.clone(), publisher)
+    }
+}
+
+/// Mutes a stream's sound, or brings it back; a stream without sound gets nothing.
+fn mute_button(s: &App, t: &Theme, watch: &Watching, variant: Variant) -> El {
+    let publisher = watch.stream.publisher;
+    if !(watch.stream.has_audio || watch.stats.audio) {
+        return el();
+    }
+    let muted = s.server().streaming.volume(publisher) == 0;
+    icon_button(
+        t,
+        "stream-mute",
+        if muted {
+            &icons::VOLUME_OFF
+        } else {
+            &icons::VOLUME_2
+        },
+        if muted {
+            "Unmute stream"
+        } else {
+            "Mute stream"
+        },
+        variant,
+        Some(Message::ToggleStreamMute(publisher)),
+    )
+}
+
+/// Roughly how wide a line of text is set, in points, for deciding what fits beside it.
+fn text_width(line: &str, points: f32) -> f32 {
+    line.chars().count() as f32 * points * 0.56
+}
+
+fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
     let id = watch.stream.id.clone();
     let publisher = watch.stream.publisher;
     let volume = s.server().streaming.volume(publisher);
     let receiving = watch.phase == streaming::Phase::Receiving;
+    let (title, subtitle) = stream_lines(s, &watch.stream);
+    let audio = watch.stream.has_audio || watch.stats.audio;
+    let large = matches!(mode, Mode::Stage | Mode::Solo);
+    let hide_others = mode == Mode::Stage && others(s) > 0;
+    let unfocus = mode == Mode::Stage && s.server().streaming.watching.len() > 1;
+    // The name matters more than the slider: the slider shows only where the name still fits
+    // beside it, or where a large stream leaves the name ample room anyway.
+    let buttons = [audio, hide_others, unfocus, large, true]
+        .into_iter()
+        .filter(|on| *on)
+        .count() as f32;
+    let slider_width = if large { 120.0 } else { 64.0 };
+    let name_room = width - 36.0 - buttons * (size::ICON_BUTTON + 8.0) - slider_width - 8.0;
+    let name_width = text_width(&title, 13.0).max(text_width(&subtitle, 11.0));
+    let volume_slider = audio && name_room >= name_width.min(if large { 220.0 } else { 160.0 });
     let mut bar = row()
         .key("controls")
         .w_full()
@@ -1220,20 +1349,26 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
         })
         .child(
             col()
+                .key("stream-name")
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(1.0)
+                .help(format!(
+                    "{} · {}",
+                    watch.stream.name,
+                    publisher_name(s, publisher)
+                ))
                 .child(
-                    text(watch.stream.name.clone())
+                    text(title)
                         .font(ty::BODY_STRONG)
                         .color(t.text)
                         .truncate_fade(),
                 )
                 .child(
                     text(if receiving {
-                        publisher_name(s, publisher)
+                        subtitle
                     } else {
-                        format!("{} · {}", publisher_name(s, publisher), watch.phase.label())
+                        format!("{subtitle} · {}", watch.phase.label())
                     })
                     .font(ty::CAPTION)
                     .color(t.faint)
@@ -1241,32 +1376,12 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
                 ),
         );
     // A share can turn its audio on after it was announced without; audio arriving counts.
-    if watch.stream.has_audio || watch.stats.audio {
-        bar = bar.child(icon_button(
-            t,
-            "stream-mute",
-            if volume == 0 {
-                &icons::VOLUME_OFF
-            } else {
-                &icons::VOLUME_2
-            },
-            if volume == 0 {
-                "Unmute stream"
-            } else {
-                "Mute stream"
-            },
-            Variant::Ghost,
-            Some(Message::ToggleStreamMute(publisher)),
-        ));
-        // In a narrow box the name matters more; maximizing brings the slider back.
+    if audio {
+        bar = bar.child(mute_button(s, t, watch, Variant::Ghost));
+        // In a narrow box the name matters more; the large stream brings the slider back.
         if volume_slider {
             bar = bar.child(
-                el().w(if matches!(mode, Mode::Stage | Mode::Solo) {
-                    120.0
-                } else {
-                    64.0
-                })
-                .child(
+                el().w(slider_width).child(
                     slider(
                         t,
                         "stream-volume",
@@ -1289,7 +1404,7 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
             );
         }
     }
-    if mode == Mode::Stage && others(s) > 0 {
+    if hide_others {
         let beside = s.server().streaming.strip == Strip::Beside;
         bar = bar.child(icon_button(
             t,
@@ -1304,7 +1419,7 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
             Some(Message::HideOtherStreams(true)),
         ));
     }
-    if mode == Mode::Stage && s.server().streaming.watching.len() > 1 {
+    if unfocus {
         bar = bar.child(icon_button(
             t,
             "unfocus",
@@ -1313,6 +1428,9 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, volume_slider: boo
             Variant::Ghost,
             Some(Message::FocusStream(None)),
         ));
+    }
+    if large {
+        bar = bar.child(fullscreen_button(s, t));
     }
     bar.child(icon_button(
         t,

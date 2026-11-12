@@ -740,6 +740,31 @@ impl Preset {
     }
 }
 
+/// The name a share goes out under: what it shows ("Counter-Strike 2", "Main screen"), or
+/// what kind of share it is when the source has no name.
+fn announced_name(source: &ShareSource) -> String {
+    let name: String = source.name.trim().chars().take(MAX_ANNOUNCED_NAME).collect();
+    if !name.is_empty() {
+        name
+    } else if source.kind.is_camera() {
+        "Camera".into()
+    } else {
+        "Screen share".into()
+    }
+}
+
+/// Long window titles are cut to this many characters before they go out.
+const MAX_ANNOUNCED_NAME: usize = 60;
+
+/// Whether a stream's name says only what kind of share it is, as older Flexspeak builds and
+/// other clients announce, so the publisher's name should lead instead.
+pub fn generic_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "" | "screen share" | "screenshare" | "screen" | "camera" | "stream" | "window"
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Status {
     pub stop: Option<publish_media::Stop>,
@@ -748,6 +773,8 @@ pub struct Status {
     pub detail: String,
     /// Who may watch the running share. A quick share is public whatever the dialog says.
     pub access: Access,
+    /// What the running share shows: a screen's, window's or camera's name.
+    pub source: String,
     pub requests: Vec<(u16, String)>,
     pub viewers: Vec<(u16, String, bool)>,
     pub video_frames: u64,
@@ -1066,6 +1093,11 @@ impl Publisher {
             .options
             .as_ref()
             .map_or_else(Access::default, |o| o.access);
+        self.status.source = self
+            .options
+            .as_ref()
+            .map(|o| o.source.name.clone())
+            .unwrap_or_default();
         self.status.requests = self
             .requests
             .iter()
@@ -1527,11 +1559,7 @@ impl Publisher {
                     .as_ref()
                     .ok_or_else(|| anyhow!("Sharing was cancelled"))?;
                 let packet = protocol::setup(
-                    if options.source.kind.is_camera() {
-                        "Camera"
-                    } else {
-                        "Screen share"
-                    },
+                    &announced_name(&options.source),
                     &options.source.kind,
                     options.audio.is_some(),
                     options.quality,
