@@ -532,6 +532,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "az"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be5eb007b7cacc6c660343e96f650fedf4b5a77512399eb952ca6642cf8d13f7"
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2007,6 +2013,16 @@ dependencies = [
  "windows-sys 0.59.0",
  "x11rb",
  "xkeysym",
+]
+
+[[package]]
+name = "gmp-mpfr-sys"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7db155b537cb791b133341f99f68371d86ee7fa4c79aacfbc376d72d23c70531"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4570,6 +4586,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rug"
+version = "1.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07a8857882aec59d27254b02481c709327c13de6fad1da60bfc4f9783eaaa61e"
+dependencies = [
+ "az",
+ "gmp-mpfr-sys",
+ "libc",
+ "libm",
+]
+
+[[package]]
 name = "rune"
 version = "0.0.1"
 source = "git+https://github.com/anomalyco/rune?rev=2ceefd2418b63cf33adb51ef83383c68bc0ffea5#2ceefd2418b63cf33adb51ef83383c68bc0ffea5"
@@ -5988,9 +6016,9 @@ dependencies = [
 [[package]]
 name = "tsproto"
 version = "0.2.0"
-source = "git+https://github.com/ReSpeak/tsclientlib?rev=ee3bc6f45a7137db7793ba5593a321df400d53e5#ee3bc6f45a7137db7793ba5593a321df400d53e5"
 dependencies = [
  "aes",
+ "anyhow",
  "base64 0.22.1",
  "curve25519-dalek-ng",
  "eax",
@@ -6001,9 +6029,11 @@ dependencies = [
  "num-derive",
  "num-traits",
  "omnom",
+ "once_cell",
  "pin-project-lite",
  "quicklz",
  "rand 0.10.3",
+ "rug",
  "serde",
  "sha-1",
  "sha2",
@@ -6011,6 +6041,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "tsproto-packets",
  "tsproto-types",
 ]

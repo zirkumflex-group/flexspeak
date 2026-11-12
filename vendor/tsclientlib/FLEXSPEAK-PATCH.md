@@ -7,6 +7,8 @@ pinned to that revision. Original MIT/Apache notices are included.
 Local changes:
 
 - Replace sibling path dependencies with the original pinned Git dependencies.
+- `tsproto` is the patched copy in `vendor/tsproto`, from the same revision; see its
+  `FLEXSPEAK-PATCH.md`.
 - Expose TS6 stream notifications and client streaming-flag updates through
   `StreamItem::StreamCommand` and the synchronous equivalent. UTF-8 payloads are
   capped at 128 KiB. Ordinary client updates still pass through bookkeeping.
