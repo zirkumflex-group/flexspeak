@@ -1,10 +1,12 @@
 //! The Settings window, and the sections onboarding reuses: audio, permissions and shortcuts.
 //!
 //! Settings floats over the window as a modal panel: categories and search lead, the chosen
-//! category's sections trail. Every section is a list of rows with search terms, so a query
-//! narrows the panel to the rows that match across all categories.
+//! category's sections trail. Every section is a list of rows with a title and search terms, so
+//! a query lists the rows it finds across all categories in place of the categories, and
+//! choosing one opens its category at that row.
 
 use std::f32::consts::FRAC_PI_2;
+use std::rc::Rc;
 
 use rune::{Color, Cx, El, Icon, Tx, col, el, icon, row, text};
 use rune_kit::{Kit, Switch, TextInput};
@@ -12,7 +14,7 @@ use rune_kit::{Kit, Switch, TextInput};
 use super::theme::{Theme, motion, radius, shadow, size, ty};
 use super::widgets::{
     Range, Variant, button, divider, faint, field, form_row, group, group_note, group_title,
-    icon_button, labelled, meter, muted, percent_slider, picker, scroll_page, slider,
+    icon_button, labelled, meter, percent_slider, picker, scroll_page, slider,
 };
 use super::{dispatch, icons, send, updates};
 use crate::settings::{Appearance, ColorScheme, ThemeName};
@@ -35,17 +37,64 @@ fn actions(buttons: impl IntoIterator<Item = El>) -> El {
         .children(buttons)
 }
 
-/// One row of a section and the words that find it.
+/// One row of a section, what a search result calls it and the words that find it.
 struct Row {
+    /// Empty for a row with no name of its own: finding it offers its section.
+    title: String,
     terms: String,
-    el: El,
+    /// `None` for what search finds by its own name without a row of its own: a sound
+    /// folded away inside `group`, or a theme, which is a card inside the row at `at`.
+    el: Option<El>,
+    /// The sound group that has to be open for the row to show.
+    group: Option<crate::sounds::Group>,
+    /// The key a result opens at, when that isn't this row.
+    at: Option<String>,
 }
 
-fn item(terms: impl Into<String>, el: El) -> Row {
+fn item(title: impl Into<String>, terms: impl Into<String>, el: El) -> Row {
     Row {
+        title: title.into(),
         terms: terms.into(),
-        el,
+        el: Some(el),
+        group: None,
+        at: None,
     }
+}
+
+/// Something search finds by `title` alone, opening at the key `at`.
+fn found_at(title: impl Into<String>, at: impl Into<String>) -> Row {
+    Row {
+        title: title.into(),
+        terms: String::new(),
+        el: None,
+        group: None,
+        at: Some(at.into()),
+    }
+}
+
+/// `words` as part of a key: lower case, with a dash for whatever isn't a letter or digit.
+fn slug(words: &str) -> String {
+    words
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// The key of the row called `title` in the section keyed `section`, which a search result
+/// scrolls to.
+fn row_key(section: &str, title: &str) -> String {
+    format!("row-{section}-{}", slug(title))
+}
+
+/// The key of a section's title, where a result for the section opens.
+fn title_key(section: &str) -> String {
+    format!("{section}-title")
 }
 
 /// A titled run of rows. Boxed sections sit in one grouped card; open ones (the appearance
@@ -84,24 +133,83 @@ impl Section {
         self
     }
 
-    /// The section with only the rows `query` finds; `None` when it finds none. A query that
-    /// names the section keeps every row.
-    fn render(self, t: &Theme, query: &str) -> Option<El> {
-        let whole = matches(&format!("{} {}", self.title, self.terms), query);
+    /// What `query` finds here on `page`: the section when it is named or one of its untitled
+    /// rows is, and every titled row. The words may be spread over a row, its section and its
+    /// category, so "audio output" finds Output.
+    fn find(&self, page: SettingsPage, query: &str, hits: &mut Vec<Hit>) {
+        let around = format!("{} {} {}", page.title(), self.title, self.terms);
+        let mut whole = matches(&around, query);
+        let mut rows = Vec::new();
+        for row in &self.rows {
+            // What has no row of its own is found by its name alone, so naming the section
+            // lists its rows and not every sound or theme in them.
+            let found = match row.el {
+                Some(_) => matches(&format!("{around} {} {}", row.title, row.terms), query),
+                None => matches(&row.title, query),
+            };
+            if !found {
+                continue;
+            }
+            if row.title.is_empty() {
+                whole = true;
+            } else {
+                rows.push(Hit {
+                    page,
+                    rank: rank(&row.title, &row.terms, query),
+                    key: row
+                        .at
+                        .clone()
+                        .unwrap_or_else(|| row_key(self.key, &row.title)),
+                    title: row.title.clone(),
+                    group: row.group,
+                });
+            }
+        }
+        if whole {
+            hits.push(Hit {
+                page,
+                rank: rank(self.title, &around, query),
+                key: title_key(self.key),
+                title: self.title.to_owned(),
+                group: None,
+            });
+        }
+        hits.extend(rows);
+    }
+
+    /// The section on its page. `target` is the key of the row or section a search result
+    /// opened, which is marked until the mark fades.
+    fn render(self, t: &Theme, target: Option<&str>) -> El {
+        let mark = |key: &str, e: El| {
+            let found = target == Some(key);
+            col()
+                .key(key.to_owned())
+                .w_full()
+                .radius(if found { radius::CONTROL } else { 0.0 })
+                .fill(if found {
+                    t.accent.alpha(if t.dark { 0.16 } else { 0.12 })
+                } else {
+                    Color::TRANSPARENT
+                })
+                .motion(motion::READING)
+                .child(e)
+        };
+        let keys: Vec<String> = self
+            .rows
+            .iter()
+            .map(|row| row_key(self.key, &row.title))
+            .collect();
         let rows: Vec<El> = self
             .rows
             .into_iter()
-            .filter(|row| whole || matches(&row.terms, query))
-            .map(|row| row.el)
+            .zip(keys)
+            .filter_map(|(row, key)| row.el.map(|e| mark(&key, e)))
             .collect();
-        if rows.is_empty() {
-            return None;
-        }
         let mut e = col()
             .key(self.key)
             .w_full()
             .gap(8.0)
-            .child(group_title(t, self.title));
+            .child(mark(&title_key(self.key), group_title(t, self.title)));
         e = if self.boxed {
             e.child(group(t, rows))
         } else {
@@ -110,8 +218,20 @@ impl Section {
         if let Some(note) = self.note {
             e = e.child(note);
         }
-        Some(e)
+        e
     }
+}
+
+/// One search result: a row or a section, and where it is.
+#[derive(Clone)]
+struct Hit {
+    page: SettingsPage,
+    title: String,
+    /// The key of what it opens on the page.
+    key: String,
+    group: Option<crate::sounds::Group>,
+    /// How well the title answers the query; higher leads.
+    rank: u8,
 }
 
 /// Whether every word of `query` appears in `haystack`, ignoring case. An empty query finds all.
@@ -121,6 +241,65 @@ fn matches(haystack: &str, query: &str) -> bool {
         .split_whitespace()
         .all(|word| haystack.contains(&word.to_lowercase()))
 }
+
+/// A title that is the query leads, then one that starts with it, holds it, or holds its words;
+/// after those come the results found by their other words.
+fn rank(title: &str, terms: &str, query: &str) -> u8 {
+    let title = title.to_lowercase();
+    let query = query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if title == query {
+        5
+    } else if title.starts_with(&query) {
+        4
+    } else if title.contains(&query) {
+        3
+    } else if matches(&title, &query) {
+        2
+    } else {
+        u8::from(terms.to_lowercase().contains(&query))
+    }
+}
+
+/// Everything `query` finds in Settings, best first and otherwise in the categories' order.
+fn search(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, query: &str) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    // The sections are built only to be read, so the menus they open go nowhere.
+    let mut menus = Vec::new();
+    for page in SettingsPage::ALL {
+        for section in sections(s, cx, t, k, &mut menus, page) {
+            section.find(page, query, &mut hits);
+        }
+    }
+    hits.sort_by_key(|hit| std::cmp::Reverse(hit.rank));
+    hits
+}
+
+/// Opens a result's category at its row and marks the row for a moment.
+fn open_hit(s: &mut App, tx: &mut Tx, hit: &Hit) {
+    if let Some(group) = hit.group {
+        s.ui.sound_groups.insert(group);
+    }
+    dispatch(s, tx, Message::OpenSettings(hit.page));
+    s.ui.settings_jumps += 1;
+    let jump = s.ui.settings_jumps;
+    s.ui.settings_target = Some((hit.key.clone(), jump));
+    tx.scroll_center_in("settings-scroll", hit.key.clone());
+    super::execute(
+        s,
+        tx,
+        super::Task::Perform(Box::new(move || {
+            std::thread::sleep(TARGET_MARK);
+            Message::SettingsTargetSeen(jump)
+        })),
+    );
+}
+
+/// How long the row a search result opened stays marked.
+const TARGET_MARK: std::time::Duration = std::time::Duration::from_millis(1800);
 
 fn page_icon(page: SettingsPage) -> &'static Icon {
     match page {
@@ -217,7 +396,7 @@ fn sections(
                 "updates",
                 "Updates",
                 "update upgrade version release download install restart automatic",
-                vec![item("", updates::settings(s, t, k))],
+                vec![item("", "", updates::settings(s, t, k))],
             )
             .note(updates::note(t)),
             install_section(s, t),
@@ -227,7 +406,7 @@ fn sections(
                 "changelog changes release notes version build earlier",
                 updates::changelog(s, t)
                     .into_iter()
-                    .map(|row| item("", row))
+                    .map(|row| item("", "", row))
                     .collect(),
             ),
         ],
@@ -260,6 +439,7 @@ fn error_log_section(s: &App, t: &Theme) -> Section {
             any.then_some(Message::CopyErrorLog),
         ));
     let mut rows = vec![item(
+        "Since Flexspeak started",
         "copy clear errors problems",
         form_row(
             t,
@@ -274,6 +454,7 @@ fn error_log_section(s: &App, t: &Theme) -> Section {
     )];
     rows.extend(s.alerts.history().enumerate().map(|(index, entry)| {
         item(
+            entry.heading.clone(),
             format!("{} {}", entry.heading, entry.detail),
             logged_row(t, index, entry),
         )
@@ -355,58 +536,24 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
     let query = s.settings_query.trim();
     let searching = !query.is_empty();
     let mut menus = Vec::new();
-    // Which categories have a row the query finds, for the sidebar to dim the rest.
-    let mut found = [true; SettingsPage::ALL.len()];
-    let mut content = col()
-        .key(if searching { "results" } else { "page" })
+    let hits: Rc<[Hit]> = if searching {
+        search(s, cx, t, k, query).into()
+    } else {
+        Rc::from([])
+    };
+    let target = s.ui.settings_target.as_ref().map(|(key, _)| key.as_str());
+    let content = col()
+        .key("page")
         .w_full()
         .max_w(700.0)
         .self_center()
         .padding(size::PAGE)
-        .gap(18.0);
-    if searching {
-        let mut any = false;
-        for (i, page) in SettingsPage::ALL.into_iter().enumerate() {
-            let rendered: Vec<El> = sections(s, cx, t, k, &mut menus, page)
-                .into_iter()
-                .filter_map(|section| section.render(t, query))
-                .collect();
-            found[i] = !rendered.is_empty();
-            any |= found[i];
-            // Results from several pages read as one list, so each page's results say whose
-            // they are.
-            if found[i] {
-                content = content.child(
-                    super::widgets::overline(t, page.title())
-                        .key(format!("results-{}", page.title())),
-                );
-            }
-            content = content.children(rendered);
-        }
-        if !any {
-            content = content.child(
-                col()
-                    .key("no-results")
-                    .w_full()
-                    .pt(48.0)
-                    .gap(6.0)
-                    .center()
-                    .child(icon(&icons::SEARCH, 22.0).color(t.faint).a11y_hidden())
-                    .child(
-                        text(format!("No settings match “{query}”"))
-                            .font(ty::BODY_STRONG)
-                            .color(t.text),
-                    )
-                    .child(muted(t, "Try a device, a shortcut or a theme name.")),
-            );
-        }
-    } else {
-        content = content.children(
+        .gap(18.0)
+        .children(
             sections(s, cx, t, k, &mut menus, page)
                 .into_iter()
-                .filter_map(|section| section.render(t, "")),
+                .map(|section| section.render(t, target)),
         );
-    }
     // Below the default width, the panel keeps a smaller margin and a narrower sidebar.
     let narrow = s.window_size.0 < 900.0;
     let corner = 12.0;
@@ -416,14 +563,11 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
         .min_w(0.0)
         .h_full()
         .fill(t.canvas)
-        .child(window_header(s, t, page, searching))
+        .child(window_header(s, t, page))
         .child(divider(t))
         .child(
             col()
-                .key(format!(
-                    "settings-body-{}",
-                    if searching { "search" } else { page.title() }
-                ))
+                .key(format!("settings-body-{}", page.title()))
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
@@ -466,10 +610,12 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
         })
         .child(sidebar(
             t,
-            search_field(s, t, k),
-            page,
-            searching,
-            &found,
+            search_field(s, t, k, hits.clone()),
+            if searching {
+                results(s, t, k, query, &hits)
+            } else {
+                nav(t, page)
+            },
             narrow,
         ))
         .child(el().w(1.0).h_full().fill(t.hairline).a11y_hidden())
@@ -534,7 +680,7 @@ fn wip_section(s: &App, t: &Theme, k: &Kit) -> Section {
         "Work in Progress",
         "wip unfinished",
         [
-            item(
+            item("Secret Page", 
                 "wip secret",
                 form_row(
                     t,
@@ -550,7 +696,7 @@ fn wip_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     ),
                 ),
             ),
-            item(
+            item("Collection Server", 
                 "wip server address",
                 form_row(
                     t,
@@ -588,6 +734,7 @@ fn settings_sync_rows(s: &App, t: &Theme, k: &Kit) -> Vec<Row> {
         Status::Choose => "Waiting for your choice below.".to_owned(),
     };
     let mut rows = vec![item(
+        "Sync Settings and Servers",
         "wip sync settings servers account computers same",
         form_row(
             t,
@@ -606,6 +753,7 @@ fn settings_sync_rows(s: &App, t: &Theme, k: &Kit) -> Vec<Row> {
     )];
     if status == Status::Choose {
         rows.push(item(
+            "Your account has other settings",
             "wip sync settings choose account computer",
             form_row(
                 t,
@@ -637,14 +785,20 @@ fn settings_sync_rows(s: &App, t: &Theme, k: &Kit) -> Vec<Row> {
     rows
 }
 
-fn sidebar(
-    t: &Theme,
-    search: El,
-    page: SettingsPage,
-    searching: bool,
-    found: &[bool],
-    narrow: bool,
-) -> El {
+fn sidebar(t: &Theme, search: El, list: El, narrow: bool) -> El {
+    col()
+        .key("settings-sidebar")
+        .w(if narrow { 204.0 } else { 232.0 })
+        .h_full()
+        .fill(t.chrome)
+        .padding(10.0)
+        .gap(6.0)
+        .child(search)
+        .child(list)
+}
+
+/// The categories under their headings.
+fn nav(t: &Theme, page: SettingsPage) -> El {
     let mut nav = col()
         .key("settings-nav")
         .w_full()
@@ -663,23 +817,123 @@ fn sidebar(
             );
         }
         for &p in *pages {
-            let index = SettingsPage::ALL.iter().position(|&q| q == p).unwrap_or(0);
-            nav = nav.child(nav_item(t, p, !searching && p == page, found[index]));
+            nav = nav.child(nav_item(t, p, p == page));
         }
     }
-    col()
-        .key("settings-sidebar")
-        .w(if narrow { 204.0 } else { 232.0 })
-        .h_full()
-        .fill(t.chrome)
-        .padding(10.0)
-        .gap(6.0)
-        .child(search)
-        .child(nav)
+    nav
 }
 
-/// The search field, styled like every other text field.
-fn search_field(s: &App, t: &Theme, k: &Kit) -> El {
+/// What a search found, in the categories' place: each result names a setting and its
+/// category, and opens the category at that setting.
+fn results(s: &App, t: &Theme, k: &Kit, query: &str, hits: &Rc<[Hit]>) -> El {
+    if hits.is_empty() {
+        return col()
+            .key("no-results")
+            .w_full()
+            .px(10.0)
+            .pt(28.0)
+            .gap(6.0)
+            .items_center()
+            .live_region(rune::LiveRegion::Polite)
+            .child(icon(&icons::SEARCH, 18.0).color(t.faint).a11y_hidden())
+            .child(
+                text(format!("No settings match “{query}”"))
+                    .font(ty::BODY_STRONG)
+                    .color(t.text)
+                    .align(rune::Align::Center)
+                    .wrap()
+                    .w_full(),
+            )
+            .child(
+                faint(t, "Try a device, a shortcut or a theme name.")
+                    .align(rune::Align::Center)
+                    .wrap()
+                    .w_full(),
+            );
+    }
+    let picked = s.ui.settings_pick.min(hits.len() - 1);
+    let list = col()
+        .key("settings-results-list")
+        .w_full()
+        .gap(2.0)
+        .role("listbox")
+        .label("Search results")
+        .children(
+            hits.iter()
+                .enumerate()
+                .map(|(index, hit)| result(t, hits, index, hit, index == picked)),
+        );
+    el().key("settings-results-pane")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(scroll_page(k, "settings-results", list))
+}
+
+fn result(t: &Theme, hits: &Rc<[Hit]>, index: usize, hit: &Hit, picked: bool) -> El {
+    let hits = hits.clone();
+    row()
+        .key(format!("result-{index}"))
+        .role("option")
+        .label(format!("{}, {}", hit.title, hit.page.title()))
+        .checked(picked)
+        .w_full()
+        .min_h(40.0)
+        .px(10.0)
+        .py(5.0)
+        .gap(10.0)
+        .center_y()
+        .radius(radius::CONTROL)
+        // The same selection as a category's, moved by the arrow keys and the pointer.
+        .fill(match (picked, t.dark) {
+            (false, _) => Color::TRANSPARENT,
+            (true, true) => t.raised,
+            (true, false) => t.wash(0.10),
+        })
+        .cursor(rune::Cursor::Pointer)
+        .press(t.wash(0.09))
+        .motion(motion::QUICK)
+        .on_hover(move |s: &mut App| s.ui.settings_pick = index)
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            if let Some(hit) = hits.get(index) {
+                open_hit(s, tx, hit);
+            }
+        })
+        .child(
+            icon(page_icon(hit.page), 15.0)
+                .color(if picked { t.text } else { t.muted })
+                .a11y_hidden(),
+        )
+        .child(
+            col()
+                // Named for what it finds, where the row's own key is only its place.
+                .key(format!(
+                    "found-{}",
+                    slug(&format!("{} {}", hit.page.title(), hit.title))
+                ))
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(1.0)
+                .child(
+                    text(hit.title.clone())
+                        .font(ty::BODY)
+                        .color(t.text)
+                        .truncate()
+                        .a11y_hidden(),
+                )
+                .child(
+                    text(hit.page.title())
+                        .font(ty::CAPTION)
+                        .color(t.faint)
+                        .truncate()
+                        .a11y_hidden(),
+                ),
+        )
+}
+
+/// The search field, styled like every other text field. The arrow keys move through `hits`
+/// and Enter opens the chosen one.
+fn search_field(s: &App, t: &Theme, k: &Kit, hits: Rc<[Hit]>) -> El {
     let mut input = TextInput::new(&s.ui.settings_search)
         .placeholder("Search")
         .label("Search settings")
@@ -691,13 +945,29 @@ fn search_field(s: &App, t: &Theme, k: &Kit) -> El {
             let value = s.ui.settings_search.text.clone();
             dispatch(s, tx, Message::SettingsSearch(value));
         })
-        // Escape empties a search before it closes the window.
-        .on_key(|s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
+        .on_key(move |s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
+            // Escape empties a search before it closes the window.
             if key.key == rune::Key::Escape && !s.settings_query.is_empty() {
                 dispatch(s, tx, Message::SettingsSearch(String::new()));
                 return true;
             }
-            false
+            if hits.is_empty() {
+                return false;
+            }
+            let picked = s.ui.settings_pick.min(hits.len() - 1);
+            let step = match key.key {
+                rune::Key::Down => 1,
+                rune::Key::Up => hits.len() - 1,
+                rune::Key::Enter => {
+                    open_hit(s, tx, &hits[picked]);
+                    return true;
+                }
+                _ => return false,
+            };
+            // Past either end comes round to the other.
+            s.ui.settings_pick = (picked + step) % hits.len();
+            tx.scroll_into_view_in("settings-results", format!("result-{}", s.ui.settings_pick));
+            true
         });
     if s.settings_query.is_empty() {
         input = input.trailing(
@@ -716,9 +986,9 @@ fn search_field(s: &App, t: &Theme, k: &Kit) -> El {
         .child(input.build(k))
 }
 
-fn nav_item(t: &Theme, page: SettingsPage, active: bool, found: bool) -> El {
+fn nav_item(t: &Theme, page: SettingsPage, active: bool) -> El {
     let ink = if active { t.text } else { t.muted };
-    let mut e = row()
+    row()
         .key(format!("nav-{}", page.title()))
         .role("tab")
         .label(page.title())
@@ -749,15 +1019,11 @@ fn nav_item(t: &Theme, page: SettingsPage, active: bool, found: bool) -> El {
                 .color(ink)
                 .truncate()
                 .a11y_hidden(),
-        );
-    if !found {
-        e = e.dim(0.45);
-    }
-    e
+        )
 }
 
-fn window_header(s: &App, t: &Theme, page: SettingsPage, searching: bool) -> El {
-    let current = if searching { "Search" } else { page.title() };
+fn window_header(s: &App, t: &Theme, page: SettingsPage) -> El {
+    let current = page.title();
     let mut bar = row()
         .key("settings-header")
         .h(size::HEADER)
@@ -895,6 +1161,7 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     .help(format!("Edit {}", server.title())),
                 );
             item(
+                server.title(),
                 format!(
                     "server {} {} auto connect launch startup password",
                     server.name, server.address
@@ -904,6 +1171,7 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
         })
         .collect();
     rows.push(item(
+        "Add Server",
         "add server new",
         actions([button(
             t,
@@ -949,6 +1217,7 @@ fn identity_section(s: &App, t: &Theme, k: &Kit) -> Section {
         "Identity",
         "you profile",
         vec![item(
+            "Nickname",
             "nickname name username identity",
             form_row(t, "Nickname", Some("Your name on every server."), control),
         )],
@@ -1125,6 +1394,7 @@ fn file_section(s: &App, t: &Theme) -> Section {
         .unwrap_or_else(|| "Unavailable".into());
     let rows = vec![
         item(
+            "Location",
             "settings file location path copy json portable",
             form_row(
                 t,
@@ -1141,6 +1411,7 @@ fn file_section(s: &App, t: &Theme) -> Section {
             ),
         ),
         item(
+            "Reload",
             "reload settings file disk",
             form_row(
                 t,
@@ -1187,6 +1458,7 @@ fn setup_section(s: &App, t: &Theme) -> Section {
         "Setup",
         "onboarding welcome first run wizard again redo restart",
         vec![item(
+            "Run setup again",
             "run setup again onboarding redo",
             form_row(
                 t,
@@ -1247,7 +1519,7 @@ fn install_section(s: &App, t: &Theme) -> Section {
         "installation",
         "Installation",
         "install location applications program files folder portable",
-        vec![item("install installed location", row)],
+        vec![item("", "install installed location", row)],
     )
 }
 
@@ -1276,23 +1548,25 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
                 .map(|name| theme_card(t, current, name)),
         )
         .child(theme_cell().key("spacer").py(0.0).h(0.0).a11y_hidden());
-    let theme_names: String = ThemeName::ALL
-        .iter()
-        .map(|name| name.title())
-        .collect::<Vec<_>>()
-        .join(" ");
     let mut sections = vec![
         Section::open(
             "scheme",
             "Color Scheme",
             "appearance light dark system mode",
-            vec![item("", schemes)],
+            vec![item("", "", schemes)],
         ),
         Section::open(
             "themes",
             "Themes",
             "appearance theme accent colour color palette",
-            vec![item(theme_names, themes)],
+            // Each theme is found by name and opens at the section.
+            std::iter::once(item("", "", themes))
+                .chain(
+                    ThemeName::ALL
+                        .into_iter()
+                        .map(|name| found_at(name.title(), title_key("themes"))),
+                )
+                .collect(),
         )
         .note(group_note(
             t,
@@ -1303,7 +1577,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             "motion",
             "Motion",
             "animation animations motion effects reduce",
-            vec![item(
+            vec![item("Disable animations", 
                 "disable animations",
                 form_row(
                     t,
@@ -1340,7 +1614,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             "chat-layout",
             "Chat Layout",
             "chat messages text tabs feed layout conversation private channel server",
-            vec![item("tabs one feed", super::chat::layout_choice(s, t, k))],
+            vec![item("", "tabs one feed", super::chat::layout_choice(s, t, k))],
         )
         .note(group_note(
             t,
@@ -1350,7 +1624,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             "chat-tabs",
             "Conversations",
             "chat tabs bar scroll group grouped channels people history conversations",
-            vec![item(
+            vec![item("Conversations in the bar", 
                 "conversations in the bar side by side grouped",
                 form_row(
                     t,
@@ -1397,7 +1671,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             "History",
             "chat history keep save store saved messages restart clear delete forget private database",
             vec![
-                item(
+                item("Keep chat history", 
                     "keep chat history save messages restart",
                     form_row(
                         t,
@@ -1418,7 +1692,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
                         ),
                     ),
                 ),
-                item(
+                item("Saved conversations", 
                     "clear chat history delete forget messages",
                     form_row(
                         t,
@@ -1453,7 +1727,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             "While Chat Is Hidden",
             "chat messages hide hidden popup pop-up notification toast stream",
             vec![
-                item(
+                item("Show new messages", 
                     "show new messages popup pop-up notification",
                     form_row(
                         t,
@@ -1474,7 +1748,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
                         ),
                     ),
                 ),
-                item(
+                item("Only private messages", 
                     "only private messages popup pop-up",
                     form_row(
                         t,
@@ -1495,7 +1769,7 @@ fn chat_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
                         ),
                     ),
                 ),
-                item(
+                item("Hide chat while watching a stream", 
                     "hide chat while watching a stream",
                     form_row(
                         t,
@@ -1549,6 +1823,7 @@ fn tray_section(s: &App, t: &Theme, k: &Kit) -> Section {
         title,
         "tray icon notification area system tray menu bar taskbar status mute talking",
         vec![item(
+            label,
             "tray icon notification area menu bar",
             form_row(
                 t,
@@ -1592,6 +1867,7 @@ fn window_section(s: &App, t: &Theme, k: &Kit) -> Section {
     .build(k)
     .key("close-button");
     let mut rows = vec![item(
+        "Close button",
         "close button quit hide tray minimize exit x window",
         form_row(
             t,
@@ -1603,6 +1879,7 @@ fn window_section(s: &App, t: &Theme, k: &Kit) -> Section {
     if crate::autostart::SUPPORTED {
         let on = s.autostart;
         rows.push(item(
+            "Start with Windows",
             "start with windows sign in login startup boot autostart",
             form_row(
                 t,
@@ -1624,6 +1901,7 @@ fn window_section(s: &App, t: &Theme, k: &Kit) -> Section {
             ),
         ));
         rows.push(item(
+            "Start minimized",
             "start minimized tray notification area hidden startup",
             form_row(
                 t,
@@ -1666,6 +1944,7 @@ fn omarchy_section(s: &App, t: &Theme, k: &Kit, name: &str) -> Section {
         "Omarchy",
         "omarchy desktop follow match theme",
         vec![item(
+            "Match Omarchy theme",
             "match omarchy theme",
             form_row(
                 t,
@@ -1694,7 +1973,7 @@ fn more_themes(s: &App, t: &Theme) -> Section {
     let groups = s.theme_library.collections();
     let rows = groups
         .iter()
-        .map(|(name, themes)| {
+        .flat_map(|(name, themes)| {
             let grid = row()
                 .w_full()
                 .gap(10.0)
@@ -1717,16 +1996,23 @@ fn more_themes(s: &App, t: &Theme) -> Section {
                         .h(0.0)
                         .a11y_hidden(),
                 );
-            let labels: Vec<&str> = themes.iter().map(|theme| theme.label.as_str()).collect();
-            item(
-                format!("{name} {}", labels.join(" ")),
+            let collection = item(
+                name.to_string(),
+                "",
                 col()
                     .key(format!("collection-{name}"))
                     .w_full()
                     .gap(8.0)
                     .child(super::widgets::faint(t, (*name).to_owned()))
                     .child(grid),
-            )
+            );
+            // Each theme is found by name and opens at its collection.
+            let at = row_key("more-themes", name);
+            let themes: Vec<Row> = themes
+                .iter()
+                .map(|theme| found_at(format!("{name} {}", theme.label), at.clone()))
+                .collect();
+            std::iter::once(collection).chain(themes)
         })
         .collect();
     let mut note = col().w_full().gap(4.0).child(
@@ -2057,7 +2343,7 @@ fn orb(t: &Theme, current: &Appearance, name: ThemeName, dark: bool) -> El {
 
 /// Devices and the microphone test, then processing and transmission. Onboarding shows it.
 pub fn audio(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
-    let rows = |rows: Vec<Row>| rows.into_iter().map(|row| row.el);
+    let rows = |rows: Vec<Row>| rows.into_iter().filter_map(|row| row.el);
     col()
         .w_full()
         .gap(8.0)
@@ -2085,6 +2371,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
     };
     vec![
         item(
+            "Microphone",
             "microphone input device mic",
             form_row(
                 t,
@@ -2112,6 +2399,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
             ),
         ),
         item(
+            "Input level",
             "input level meter microphone",
             form_row(
                 t,
@@ -2121,6 +2409,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
             ),
         ),
         item(
+            "Output",
             "output playback device speakers headphones",
             form_row(
                 t,
@@ -2148,6 +2437,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
             ),
         ),
         item(
+            "Output volume",
             "output playback volume loudness",
             form_row(
                 t,
@@ -2164,6 +2454,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
             ),
         ),
         item(
+            "Refresh and Test Devices",
             "refresh devices test microphone loopback",
             actions([
                 button(
@@ -2261,6 +2552,7 @@ fn streaming_section(s: &App, t: &Theme, k: &Kit) -> Section {
     let available = cfg!(windows);
     let rows = vec![
         item(
+            "Hardware AV1 encoding",
             "hardware av1 encoding nvidia nvenc gpu graphics card codec vp8 cpu",
             form_row(
                 t,
@@ -2279,6 +2571,7 @@ fn streaming_section(s: &App, t: &Theme, k: &Kit) -> Section {
             ),
         ),
         item(
+            "Fast capture (experimental)",
             "fast capture experimental gpu game stall screen window",
             form_row(
                 t,
@@ -2313,6 +2606,7 @@ fn streaming_section(s: &App, t: &Theme, k: &Kit) -> Section {
 
 fn sound_cues_row(s: &App, t: &Theme, k: &Kit) -> Row {
     item(
+        "Play sounds",
         "sound cues beep notification enable",
         form_row(
             t,
@@ -2475,6 +2769,7 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
     let mut rows = vec![
         sound_cues_row(s, t, k),
         item(
+            "Sound volume",
             "sound cues volume loudness",
             form_row(
                 t,
@@ -2491,6 +2786,7 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
             ),
         ),
         item(
+            "Sound pack",
             "sound pack cues soft flexspeak teamspeak",
             form_row(
                 t,
@@ -2500,21 +2796,21 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
             ),
         ),
     ];
-    // A search for one sound shows it under its group without the group being opened.
-    let query = s.settings_query.trim();
-    let hunting = !query.is_empty() && !matches(&format!("{TITLE} {TERMS}"), query);
     for group in Group::ALL {
         let open = s.ui.sound_groups.contains(&group);
         let titles: Vec<&str> = group.sounds().map(|sound| sound.title()).collect();
         rows.push(item(
+            group.title(),
             format!("sound cues {} {}", group.title(), titles.join(" ")).to_lowercase(),
             sound_group_row(s, t, k, group, open),
         ));
+        // A sound in a closed group is still found by search, which opens the group for it.
         for sound in group.sounds() {
-            let terms = format!("sound cues {}", sound.title().to_lowercase());
-            if open || (hunting && matches(&terms, query)) {
-                rows.push(item(terms, sound_row(s, t, k, sound)));
-            }
+            rows.push(Row {
+                el: open.then(|| sound_row(s, t, k, sound)),
+                group: Some(group),
+                ..item(sound.title(), "sound cues", el())
+            });
         }
     }
     let note = if s.sound_bank.is_empty() {
@@ -2528,6 +2824,7 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
 
 fn typing_row(s: &App, t: &Theme, k: &Kit) -> Row {
     item(
+        "Typing suppression",
         "typing suppression keyboard clicks clatter rnnoise noise",
         form_row(
             t,
@@ -2550,6 +2847,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
     if !audio_processing::AVAILABLE {
         return vec![
             item(
+                "Noise suppression and echo cancellation",
                 "noise suppression echo cancellation gain",
                 form_row(
                     t,
@@ -2633,16 +2931,16 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
         )
         .key("echo-cancellation"),
     ];
-    let terms = [
-        "noise suppression background fans hum",
-        "noise suppression level strength",
-        "automatic gain control volume loudness",
-        "echo cancellation playback feedback",
+    let names = [
+        ("Noise suppression", "background fans hum"),
+        ("Suppression level", "noise strength"),
+        ("Automatic gain", "control volume loudness"),
+        ("Echo cancellation", "playback feedback"),
     ];
     let mut rows: Vec<Row> = rows
         .into_iter()
-        .zip(terms)
-        .map(|(e, terms)| item(terms, e))
+        .zip(names)
+        .map(|(e, (title, terms))| item(title, terms, e))
         .collect();
     // After noise suppression: it is the second, stronger pass.
     rows.insert(2, typing_row(s, t, k));
@@ -2670,7 +2968,8 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
             "Sends when speech is detected above the threshold.".into()
         }
     };
-    let mut rows = vec![
+    let mut rows = vec![(
+        "Transmission",
         form_row(
             t,
             "Transmission",
@@ -2694,10 +2993,11 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
             ),
         )
         .key("transmission-mode"),
-    ];
+    )];
     // The key itself, so push-to-talk is set up in one place.
     if settings.mode == transmission::Mode::PushToTalk && shortcuts::supported() {
-        rows.push(
+        rows.push((
+            "Push-to-talk key",
             shortcut_row(
                 s,
                 t,
@@ -2707,11 +3007,12 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
                 None,
             )
             .key("transmission-ptt-key"),
-        );
+        ));
     }
     match settings.mode {
         transmission::Mode::Continuous => {}
-        transmission::Mode::PushToTalk => rows.push(
+        transmission::Mode::PushToTalk => rows.push((
+            "Release delay",
             form_row(
                 t,
                 format!("Release delay · {} ms", settings.ptt_release_ms),
@@ -2738,8 +3039,9 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
                 )),
             )
             .key("ptt-release"),
-        ),
-        transmission::Mode::VoiceActivation => rows.push(
+        )),
+        transmission::Mode::VoiceActivation => rows.push((
+            "Voice threshold",
             form_row(
                 t,
                 format!("Voice threshold · {} dBFS", settings.voice_threshold_db),
@@ -2766,12 +3068,13 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
                 )),
             )
             .key("voice-threshold"),
-        ),
+        )),
     }
     rows.into_iter()
-        .map(|e| {
+        .map(|(title, e)| {
             item(
-                "transmission mode push to talk voice activation threshold release delay continuous",
+                title,
+                "transmission mode push to talk voice activation continuous",
                 e,
             )
         })
@@ -2786,7 +3089,7 @@ pub fn permissions(s: &App, t: &Theme) -> El {
         .key(section.key)
         .w_full()
         .gap(8.0)
-        .child(group(t, section.rows.into_iter().map(|row| row.el)))
+        .child(group(t, section.rows.into_iter().filter_map(|row| row.el)))
         .children(section.note)
 }
 
@@ -2833,6 +3136,7 @@ fn permission_section(s: &App, t: &Theme) -> Section {
             ));
         }
         rows.push(item(
+            kind.title(),
             format!(
                 "{} {detail} {} access privacy",
                 kind.title(),
@@ -2953,7 +3257,7 @@ fn shortcut_row(
 
 /// The mute, deafen and push-to-talk shortcuts. Onboarding shows it too.
 pub fn shortcut_settings(s: &App, t: &Theme, k: &Kit) -> El {
-    shortcut_section(s, t, k).render(t, "").unwrap_or_else(el)
+    shortcut_section(s, t, k).render(t, None)
 }
 
 fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
@@ -2963,14 +3267,17 @@ fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
         "hotkeys keybinds keys",
         vec![
             item(
+                "Toggle microphone",
                 "toggle microphone mute unmute",
                 shortcut_row(s, t, k, shortcuts::Binding::Mute, "Toggle microphone", None),
             ),
             item(
+                "Toggle deafen",
                 "toggle deafen undeafen",
                 shortcut_row(s, t, k, shortcuts::Binding::Deafen, "Toggle deafen", None),
             ),
             item(
+                "Push to talk",
                 "push to talk ptt hold transmit",
                 shortcut_row(
                     s,
