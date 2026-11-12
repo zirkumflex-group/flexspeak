@@ -1085,6 +1085,8 @@ enum Message {
     SettingsSyncAnswer(settings_sync::Answer),
     CloseSettings,
     SettingsSearch(String),
+    /// The mark on the row a search result opened has been up long enough.
+    SettingsTargetSeen(u64),
     RefreshStreams,
     WatchStream(String),
     /// Stops one stream by ID, or all of them.
@@ -2178,6 +2180,8 @@ impl App {
         self.settings_page = Some(page);
         self.settings_recent = page;
         self.settings_query.clear();
+        self.ui.settings_pick = 0;
+        self.ui.settings_target = None;
         self.ui.open = None;
     }
 
@@ -2192,6 +2196,7 @@ impl App {
         }
         self.settings_page = None;
         self.settings_query.clear();
+        self.ui.settings_target = None;
         self.server_editor = None;
         self.ui.open = None;
         self.ui.chat_clear_armed = false;
@@ -3804,6 +3809,13 @@ impl App {
             Message::SettingsSearch(query) => {
                 if self.settings_page.is_some() {
                     self.settings_query = query;
+                    self.ui.settings_pick = 0;
+                    self.ui.settings_target = None;
+                }
+            }
+            Message::SettingsTargetSeen(jump) => {
+                if matches!(self.ui.settings_target, Some((_, current)) if current == jump) {
+                    self.ui.settings_target = None;
                 }
             }
             Message::RefreshStreams => {

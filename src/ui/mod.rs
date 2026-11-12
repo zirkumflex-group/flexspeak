@@ -236,6 +236,12 @@ pub struct UiState {
     pub channel_password: TextEdit,
     pub key_capture: TextEdit,
     pub settings_search: TextEdit,
+    /// Which Settings search result the arrow keys and the pointer are on.
+    pub settings_pick: usize,
+    /// The row a search result opened, by its key, marked until that jump's timer clears it.
+    pub settings_target: Option<(String, u64)>,
+    /// How many search results have been opened, which tells their timers apart.
+    pub settings_jumps: u64,
     pub monster_search: TextEdit,
     pub monster_email: TextEdit,
     pub monster_login_code: TextEdit,
@@ -345,6 +351,9 @@ impl Default for UiState {
             channel_password: TextEdit::new("").secure(),
             key_capture: TextEdit::new(""),
             settings_search: TextEdit::new(""),
+            settings_pick: 0,
+            settings_target: None,
+            settings_jumps: 0,
             monster_search: TextEdit::new(""),
             monster_email: TextEdit::new(""),
             monster_login_code: TextEdit::new(""),

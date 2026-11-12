@@ -149,6 +149,8 @@ pub const SCENES: &[Scene] = &[
     ("settings-search", settings_search),
     ("settings-tray", settings_tray),
     ("settings-empty-search", settings_empty_search),
+    ("settings-search-opened", settings_search_opened),
+    ("settings-search-picked", settings_search_picked),
     ("settings-connected", settings_connected),
     ("settings-light", settings_light),
     ("themes", themes),
@@ -1082,12 +1084,11 @@ fn chat_restored_feed(s: &mut App) {
     s.chat_options.layout = chat::Layout::Feed;
 }
 
-/// Settings › Chat scrolled to History, with Clear History pressed once.
+/// Settings › Chat with Clear History pressed once. History is low on the page; at
+/// `--size 1180x1300` the armed button shows at the panel's foot.
 fn settings_chat_history(s: &mut App) {
     settings_chat(s);
-    s.settings_query = "history".into();
     s.ui.chat_clear_armed = true;
-    s.sync_fields();
 }
 
 fn settings_chat(s: &mut App) {
@@ -2027,7 +2028,7 @@ fn settings_at(s: &mut App, page: SettingsPage) {
     s.open_settings(page);
 }
 
-/// Searching brings the long theme list and its note into view.
+/// Searching for a theme by name, with the long theme list further down the page.
 fn settings_more_themes(s: &mut App) {
     settings_appearance(s);
     s.settings_path = Some("/home/jan/.config/flexspeak/settings.json".into());
@@ -2133,7 +2134,7 @@ fn settings_sounds_open(s: &mut App) {
     s.sounds.set_group(Group::Channel, false);
 }
 
-/// Searching for one sound finds it inside its group without opening the rest.
+/// Searching for one sound lists it while its group is still closed.
 fn settings_sounds_search(s: &mut App) {
     settings_sounds(s);
     s.settings_query = "whisper".into();
@@ -2273,7 +2274,7 @@ fn settings_file(s: &mut App) {
     s.settings_message = Some("Settings reloaded".into());
 }
 
-/// A query that finds rows in several categories.
+/// A query that finds rows in several categories, listed in the categories' place.
 fn settings_search(s: &mut App) {
     settings_at(s, SettingsPage::Server);
     s.settings_query = "mic".into();
@@ -2291,6 +2292,18 @@ fn settings_empty_search(s: &mut App) {
     settings_at(s, SettingsPage::Server);
     s.settings_query = "bluetooth".into();
     s.sync_fields();
+}
+
+/// A search result just opened: its category, with the row it names marked.
+fn settings_search_opened(s: &mut App) {
+    settings_at(s, SettingsPage::Audio);
+    s.ui.settings_target = Some(("row-processing-noise-suppression".into(), 1));
+}
+
+/// The arrow keys have moved down the results.
+fn settings_search_picked(s: &mut App) {
+    settings_search(s);
+    s.ui.settings_pick = 2;
 }
 
 /// Settings over the connected server, with the server fields locked.
@@ -3982,12 +3995,24 @@ mod tests {
     }
 
     #[test]
-    fn searching_narrows_more_themes_to_one_collection_and_keeps_open_folder() {
+    fn searching_names_a_theme_and_opens_its_collection() {
         let mut rt = runtime(settings_more_themes, (1000.0, 1500.0));
         settle(&mut rt);
-        assert!(rt.find("extra-catppuccin-mocha").is_some());
-        assert!(rt.find("extra-tokyo-night-night").is_none());
+        assert!(rt.find("found-appearance-catppuccin-mocha").is_some());
+        assert!(rt.find("found-appearance-tokyo-night-night").is_none());
+        // The page under the results is whole: nothing is filtered out of it.
+        assert!(rt.find("extra-tokyo-night-night").is_some());
         assert!(rt.find("open-settings-folder").is_some());
+        click(&mut rt, "result-0");
+        assert_eq!(rt.state.settings_query, "");
+        assert_eq!(
+            rt.state
+                .ui
+                .settings_target
+                .as_ref()
+                .map(|(key, _)| key.as_str()),
+            Some("row-more-themes-catppuccin")
+        );
     }
 
     #[test]
@@ -4995,7 +5020,7 @@ mod tests {
         fn found(scene: fn(&mut App)) -> bool {
             let mut rt = runtime(scene, (900.0, 790.0));
             settle(&mut rt);
-            rt.find("open-secret").is_some()
+            rt.find("found-wip-secret-page").is_some()
         }
         assert!(!found(|s| {
             settings_wip(s);
@@ -5440,7 +5465,7 @@ mod tests {
     }
 
     #[test]
-    fn search_narrows_to_matching_rows_and_escape_clears_it_before_closing() {
+    fn search_lists_results_for_the_categories_and_escape_clears_it_before_closing() {
         let mut rt = runtime(settings_page, (900.0, 790.0));
         press(&mut rt, "nav-Shortcuts");
         // `/` jumps to the search field from anywhere in the window.
@@ -5450,15 +5475,21 @@ mod tests {
             key(&mut rt, rune::Key::Text(c.into()), false);
         }
         assert_eq!(rt.state.settings_query, "deaf");
-        assert!(rt.find("results").is_some());
+        assert!(rt.find("settings-nav").is_none(), "results take its place");
         assert!(
-            rt.find("shortcuts").is_some(),
+            rt.find("found-shortcuts-toggle-deafen").is_some(),
             "the deafen shortcut matches"
         );
-        assert!(rt.find("connection").is_none(), "server rows don't");
+        assert!(
+            rt.find("found-server-nickname").is_none(),
+            "server rows don't"
+        );
+        // The page stays as it was while results are listed.
+        assert!(rt.find("shortcuts").is_some());
         key(&mut rt, rune::Key::Escape, false);
         assert_eq!(rt.state.settings_query, "");
         assert_eq!(rt.state.settings_page, Some(SettingsPage::Shortcuts));
+        assert!(rt.find("settings-nav").is_some());
         key(&mut rt, rune::Key::Escape, false);
         assert_eq!(rt.state.settings_page, None);
     }
@@ -5478,22 +5509,91 @@ mod tests {
             assert_eq!(rt.state.settings_query, query);
         };
         search(&mut rt, "ember");
-        assert!(rt.find("themes").is_some());
-        assert!(rt.find("Ember-dark").is_some());
+        assert!(rt.find("found-appearance-ember").is_some());
         search(&mut rt, "permissions");
-        assert!(rt.find("permission-0").is_some());
+        assert!(rt.find("found-permissions-microphone").is_some());
         search(&mut rt, "bluetooth");
         assert!(rt.find("no-results").is_some());
-        // Each page's results are headed by its name.
+        // A saved server is found by what its row holds, and says which category it is in.
         search(&mut rt, "password");
-        assert!(rt.find("edit-server-0").is_some());
-        assert!(rt.find("results-Server").is_some());
+        assert!(rt.find("found-server-zirkumflex").is_some());
         search(&mut rt, "auto connect");
-        assert!(rt.find("edit-server-0").is_some());
+        assert!(rt.find("found-server-zirkumflex").is_some());
+        // The words may be spread over a row and its category.
+        search(&mut rt, "audio output");
+        assert!(rt.find("found-audio-output").is_some());
+        assert!(rt.find("found-audio-microphone").is_none());
         // History is the chat's, not the changelog's or the error log's.
         search(&mut rt, "history");
-        assert!(rt.find("chat-history-clear").is_some());
-        assert!(rt.find("results-Updates").is_none() && rt.find("results-Error Log").is_none());
+        assert!(rt.find("found-chat-keep-chat-history").is_some());
+        assert!(
+            rt.find("found-updates-what-s-new").is_none()
+                && rt.find("found-error-log-error-log").is_none()
+        );
+    }
+
+    #[test]
+    fn choosing_a_result_opens_its_category_at_that_row() {
+        let mut rt = runtime(settings_page, (900.0, 790.0));
+        let target = |rt: &Runtime<App>| rt.state.ui.settings_target.clone().map(|(key, _)| key);
+        let shown = |rt: &Runtime<App>, body: &str, key: &str| {
+            let ([_, top, _, height], _) = rt.presented(body).unwrap();
+            let ([_, y, _, h], _) = rt.presented(key).unwrap();
+            y >= top && y + h <= top + height
+        };
+        if !rt.state.ui.settings_search.focused {
+            key(&mut rt, rune::Key::Text("/".into()), false);
+        }
+        // The best title leads: the microphone itself before what only mentions it.
+        key(&mut rt, rune::Key::Text("mic".into()), false);
+        assert!(rt.find("found-audio-microphone").is_some());
+        key(&mut rt, rune::Key::Enter, false);
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Audio));
+        assert_eq!(rt.state.settings_query, "");
+        assert_eq!(target(&rt).as_deref(), Some("row-audio-microphone"));
+        // A row far down its page is brought into view.
+        key(&mut rt, rune::Key::Text("echo".into()), false);
+        key(&mut rt, rune::Key::Enter, false);
+        settle(&mut rt);
+        assert_eq!(
+            target(&rt).as_deref(),
+            Some("row-processing-echo-cancellation")
+        );
+        assert!(shown(
+            &rt,
+            "settings-body-Audio",
+            "row-processing-echo-cancellation"
+        ));
+        // The mark goes when its own timer says so, not an earlier jump's.
+        let (_, jump) = rt.state.ui.settings_target.clone().unwrap();
+        let _ = rt
+            .state
+            .update(crate::Message::SettingsTargetSeen(jump - 1));
+        assert!(rt.state.ui.settings_target.is_some());
+        let _ = rt.state.update(crate::Message::SettingsTargetSeen(jump));
+        assert!(rt.state.ui.settings_target.is_none());
+        // The arrow keys move through the results and come round at the ends.
+        key(&mut rt, rune::Key::Text("suppression".into()), false);
+        assert_eq!(rt.state.ui.settings_pick, 0);
+        key(&mut rt, rune::Key::Down, false);
+        assert_eq!(rt.state.ui.settings_pick, 1);
+        key(&mut rt, rune::Key::Up, false);
+        key(&mut rt, rune::Key::Up, false);
+        assert!(
+            rt.state.ui.settings_pick > 1,
+            "up from the first is the last"
+        );
+        key(&mut rt, rune::Key::Down, false);
+        assert_eq!(rt.state.ui.settings_pick, 0);
+        key(&mut rt, rune::Key::Escape, false);
+        // A sound inside a closed group is found too, and its group opens for it.
+        key(&mut rt, rune::Key::Text("whisper to".into()), false);
+        click(&mut rt, "result-0");
+        settle(&mut rt);
+        assert_eq!(rt.state.settings_page, Some(SettingsPage::Sounds));
+        let key_of = target(&rt).unwrap();
+        assert_eq!(key_of, "row-sounds-someone-is-whispering-to-you");
+        assert!(shown(&rt, "settings-body-Sounds", &key_of));
     }
 
     #[test]
