@@ -1703,7 +1703,12 @@ fn channel_tree(s: &App, t: &Theme) -> El {
             .members
             .iter()
             .map(|member| {
-                let (health, detail) = s.member_health(member, current);
+                // Elsewhere the reading is one fixed sentence: nothing to compare, or allocate.
+                let (health, detail) = if current {
+                    s.member_health(member, current)
+                } else {
+                    (usage::Health::Unknown, String::new())
+                };
                 (
                     health as u8,
                     detail,
@@ -1719,6 +1724,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 )
             })
             .collect();
+        let can_join = s.server().can_request_join_channel(s.loopback, channel);
         let node = rune::memo(
             // The memo keys what it returns, so its id is the channel's own key.
             format!("channel-{}", channel.id),
@@ -1728,7 +1734,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 current,
                 member_versions,
                 t,
-                s.can_request_join(channel.id),
+                can_join,
                 s.server().stopping,
                 s.server().connected,
                 s.loopback,
@@ -1758,7 +1764,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 };
                 // The full name leads, since a long one is cut on the row.
                 let hint = format!("{}\n{hint}", channel.name);
-                let joinable = (!s.server().stopping && current) || s.can_request_join(channel.id);
+                let joinable = (!s.server().stopping && current) || can_join;
                 // Where people are reads first: an empty channel steps back, one you can't
                 // join further still.
                 let ink = if current {

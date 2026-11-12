@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::io;
-use std::mem;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -224,13 +223,9 @@ impl Connection {
 		}
 	}
 
-	pub fn hand_back_buffer(&mut self, buffer: Vec<u8>) {
-		if self.udp_buffer.capacity() < MAX_UDP_PACKET_LENGTH
-			&& buffer.capacity() >= MAX_UDP_PACKET_LENGTH
-		{
-			self.udp_buffer = buffer;
-		}
-	}
+	/// Kept for callers; the receive buffer is no longer handed out, so a
+	/// returned buffer is simply dropped.
+	pub fn hand_back_buffer(&mut self, _buffer: Vec<u8>) {}
 
 	fn poll_send_acks(&mut self, cx: &mut Context) -> Result<()> {
 		// Poll acks_to_send
@@ -261,9 +256,9 @@ impl Connection {
 			let mut read_buf = ReadBuf::new(&mut self.udp_buffer);
 			match self.udp_socket.poll_recv_from(cx, &mut read_buf) {
 				Poll::Ready(Ok(addr)) => {
-					let size = read_buf.filled().len();
-					let mut udp_buffer = mem::take(&mut self.udp_buffer);
-					udp_buffer.truncate(size);
+					// Keep the receive buffer and hand on an exact-size copy, so a
+					// packet held in a queue does not pin a whole receive buffer.
+					let udp_buffer = read_buf.filled().to_vec();
 					match self.handle_udp_packet(cx, udp_buffer, addr) {
 						Ok(()) => {
 							if let Some(item) = self.stream_items.pop_front() {

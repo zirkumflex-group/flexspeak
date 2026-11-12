@@ -497,6 +497,21 @@ impl ServerSession {
             })
     }
 
+    /// `can_request_join` for a channel of this server already in hand, as the tree has for
+    /// every row: the same answer without looking the channel up again.
+    fn can_request_join_channel(&self, loopback: bool, channel: &client::Channel) -> bool {
+        self.connected
+            && !loopback
+            && !self.stopping
+            && self
+                .state
+                .current
+                .as_ref()
+                .is_none_or(|current| current.id != channel.id)
+            && channel.join_access.can_request()
+            && channel.spacer().is_none()
+    }
+
     fn microphone_off(&self) -> bool {
         self.muted || self.deafened || !self.connected || !self.state.can_talk
     }
@@ -1848,7 +1863,8 @@ impl App {
                 voice_output: self.output.clone(),
                 quality,
                 access,
-                fast_capture,
+                // Windows only: elsewhere it isn't asked for, so the dialog doesn't report it.
+                fast_capture: fast_capture && cfg!(windows),
                 hardware_av1,
             },
         )) {

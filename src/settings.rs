@@ -185,13 +185,23 @@ impl Chat {
 
 /// How screen sharing encodes and captures (Settings > Streaming). Both apply to the next
 /// share, and both are Windows only.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Streaming {
     /// Offer AV1 from the NVIDIA hardware encoder before VP8.
     pub hardware_av1: bool,
-    /// Experimental capture that never waits for the GPU (`streaming/wgc.rs`).
+    /// Capture that never waits for the GPU (`streaming/wgc.rs`). On unless turned off; a
+    /// share it cannot serve uses the standard capture.
     pub fast_capture: bool,
+}
+
+impl Default for Streaming {
+    fn default() -> Self {
+        Self {
+            hardware_av1: false,
+            fast_capture: true,
+        }
+    }
 }
 
 impl Streaming {
@@ -835,20 +845,26 @@ mod tests {
     }
 
     #[test]
-    fn streaming_options_round_trip_and_stay_out_of_the_file_when_off() {
-        let off = serde_json::to_string(&Settings::default()).unwrap();
-        assert!(!off.contains("streaming"), "{off}");
+    fn streaming_options_round_trip_and_stay_out_of_the_file_when_untouched() {
+        let untouched = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!untouched.contains("streaming"), "{untouched}");
+        // Fast capture is on until someone turns it off.
+        assert!(Streaming::default().fast_capture && !Streaming::default().hardware_av1);
         let settings = Settings {
             streaming: Streaming {
                 hardware_av1: true,
-                fast_capture: true,
+                fast_capture: false,
             },
             ..Settings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains("\"hardware_av1\":true"), "{json}");
+        assert!(json.contains("\"fast_capture\":false"), "{json}");
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.streaming, settings.streaming);
+        // A file from before the default changed that only names the other option.
+        let older: Streaming = serde_json::from_str(r#"{"hardware_av1":true}"#).unwrap();
+        assert!(older.fast_capture);
     }
 
     #[test]
@@ -1137,7 +1153,7 @@ mod tests {
             collapsed_channels: BTreeMap::from([("voice.example".into(), BTreeSet::from([4]))]),
             streaming: Streaming {
                 hardware_av1: true,
-                fast_capture: true,
+                fast_capture: false,
             },
             skip_install_prompt: true,
             monster_server: Some("https://collection.example.com".into()),

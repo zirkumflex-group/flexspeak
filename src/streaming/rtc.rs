@@ -110,7 +110,7 @@ mod native {
         rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
         session_description::{SdpType, SessionDescription},
         stats::{IceCandidatePairState, RtcStats},
-        video_frame::BoxVideoFrame,
+        video_frame::{BoxVideoBuffer, BoxVideoFrame},
         video_stream::native::NativeVideoStream,
     };
     use serde_json::json;
@@ -352,24 +352,38 @@ mod native {
             width >= 2 && height >= 2 && width <= 7680 && height <= 4320,
             "Unsupported video frame dimensions"
         );
-        let converted;
-        let buffer = if let Some(buffer) = frame.buffer.as_i420() {
-            buffer
-        } else {
-            converted = frame.buffer.to_i420();
-            &converted
-        };
+        let rotation = (frame.rotation as i32 as f32).to_radians();
         // The decoded size, every frame: the GPU scales and converts it where it is drawn.
-        let (y, u, v) = buffer.data();
-        let (sy, su, sv) = buffer.strides();
-        surface.publish_i420(
+        surface.publish_planes(
             generation,
             (width, height),
-            [y, u, v],
-            [sy as usize, su as usize, sv as usize],
-            (frame.rotation as i32 as f32).to_radians(),
+            Arc::new(Decoded::new(frame.buffer)),
+            rotation,
         );
         Ok(())
+    }
+
+    /// A decoded picture, held as the decoder made it until a newer one replaces it and the
+    /// painter is done uploading it. Always I420: other formats are converted once here.
+    struct Decoded(BoxVideoBuffer);
+
+    impl Decoded {
+        fn new(buffer: BoxVideoBuffer) -> Self {
+            if buffer.as_i420().is_some() {
+                Self(buffer)
+            } else {
+                Self(Box::new(buffer.to_i420()))
+            }
+        }
+    }
+
+    impl crate::streaming::Planes for Decoded {
+        fn planes(&self) -> [(&[u8], usize); 3] {
+            let buffer = self.0.as_i420().expect("Decoded holds an I420 buffer");
+            let (y, u, v) = buffer.data();
+            let (sy, su, sv) = buffer.strides();
+            [(y, sy as usize), (u, su as usize), (v, sv as usize)]
+        }
     }
 
     #[test]

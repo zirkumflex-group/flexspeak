@@ -461,6 +461,7 @@ impl Compositor<App> for Effects {
         let mut at = Vec::new();
         let mut layers = Vec::new();
         let mut slots = Vec::new();
+        let mut warmed = false;
         for (n, instance) in f.rt.instances.iter().enumerate() {
             if instance.params[1] != KIND_EFFECT {
                 continue;
@@ -478,6 +479,8 @@ impl Compositor<App> for Effects {
             ) else {
                 continue;
             };
+            // Only the Monster page's warm-up speck is a point across.
+            warmed |= w <= 1.5 && h <= 1.5;
             at.push(n as u32);
             layers.push(layer);
             slots.push(
@@ -488,6 +491,11 @@ impl Compositor<App> for Effects {
             );
         }
         self.moving = layers.iter().any(FxLayer::is_animating) || cans.moving;
+        // This frame builds the reveal's shaders; the next view can leave the speck out.
+        if warmed && f.rt.state.ui.warm_cards {
+            f.rt.state.ui.warm_cards = false;
+            f.rt.invalidate();
+        }
         if layers.is_empty() && !video_visible && !cans.visible {
             f.draw_ui();
             return;
@@ -495,6 +503,11 @@ impl Compositor<App> for Effects {
         // Built the first time a card is on screen, so nobody else pays for its pipelines.
         // Resources belong to one device; a window shown again on another GPU makes them anew.
         if !layers.is_empty() && self.renderer.as_ref().is_none_or(|(k, _)| *k != key) {
+            // Another GPU has built none of the shaders: the speck draws there once more.
+            if self.renderer.is_some() && !warmed {
+                f.rt.state.ui.warm_cards = true;
+                f.rt.invalidate();
+            }
             self.renderer = Some((key, new_renderer(device, f.format)));
         }
         let mut fx = self

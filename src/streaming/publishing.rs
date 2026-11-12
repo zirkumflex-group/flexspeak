@@ -583,8 +583,9 @@ pub struct Options {
     pub voice_output: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
-    /// Settings > Streaming, experimental: capture screens and windows on the GPU without
-    /// waiting for it (Windows only; see `streaming/wgc.rs`). Falls back to the standard capture.
+    /// Settings > Streaming, on by default: capture screens and windows on the GPU without
+    /// waiting for it (Windows only; see `streaming/wgc.rs`). Falls back to the standard
+    /// capture, at the start or during the share.
     pub fast_capture: bool,
     /// Settings > Streaming: offer AV1 from the NVIDIA hardware encoder before VP8 (Windows,
     /// RTX 40 series and newer). Without such a GPU, VP8 is used as before.
@@ -1035,7 +1036,7 @@ pub struct Publisher {
     own: Option<u16>,
     started: Instant,
     status: Status,
-    /// Whether the experimental fast capture is the one running, once capture started.
+    /// Whether fast capture is the one running, once capture started.
     fast_capture: bool,
     /// Whether hardware AV1 is offered to viewers, once capture started.
     hardware_av1: bool,
@@ -1071,9 +1072,8 @@ impl Publisher {
     pub fn active(&self) -> bool {
         self.worker.is_some()
     }
-    /// Says whether the experimental options that were asked for are the ones running.
-    /// The running share in a few words: who may watch, then the experimental options that
-    /// were asked for and whether they run ("Public · Hardware AV1 · Fast capture").
+    /// The running share in a few words: who may watch, then the capture and encoding
+    /// options that were asked for and whether they run ("Public · Hardware AV1 · Fast capture").
     fn running_note(&self) -> String {
         let asked = |f: fn(&Options) -> bool| self.options.as_ref().is_some_and(f);
         let access = self
@@ -1636,6 +1636,14 @@ impl Publisher {
                 self.emit();
             }
             publish_media::Output::Warning(detail) => self.warn(detail),
+            publish_media::Output::StandardCapture(detail) => {
+                self.fast_capture = false;
+                let _ = self.events.try_send(client::Event::Warning {
+                    source: Source::StreamCapture,
+                    detail,
+                });
+                self.emit();
+            }
             publish_media::Output::Failed(error) => return Err(anyhow!(error)),
         }
         Ok(())

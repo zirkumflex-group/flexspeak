@@ -426,13 +426,34 @@ pub struct Frame {
     pub height: u32,
 }
 
+/// A picture's three I420 planes, each with its row stride in bytes. Rows may run past the
+/// visible width (decoders pad them); only `width` bytes of each row are pixels. Each slice
+/// holds at least `stride * (rows - 1) + width` bytes.
+pub(crate) trait Planes: Send + Sync {
+    fn planes(&self) -> [(&[u8], usize); 3];
+}
+
+/// Tightly packed planes, built from a synthetic scene picture.
+struct Packed {
+    planes: [Vec<u8>; 3],
+    strides: [usize; 3],
+}
+
+impl Planes for Packed {
+    fn planes(&self) -> [(&[u8], usize); 3] {
+        std::array::from_fn(|n| (self.planes[n].as_slice(), self.strides[n]))
+    }
+}
+
 #[derive(Default)]
 struct SurfaceState {
     generation: u64,
     active: bool,
     sequence: u64,
     frame: Option<Frame>,
-    planes: [Vec<u8>; 3],
+    /// The newest picture's planes, shared with the painter uploading them. Received video
+    /// keeps the decoder's own buffer here, so publishing swaps a pointer instead of copying.
+    picture: Option<Arc<dyn Planes>>,
     #[cfg(test)]
     image: Option<Image>,
 }
@@ -492,12 +513,15 @@ impl Surface {
         state.active = true;
         state.sequence = 0;
         state.frame = None;
+        // The previous session's picture may still hold one of its decoder's buffers.
+        let previous = state.picture.take();
         #[cfg(test)]
         {
             state.image = None;
         }
         let generation = state.generation;
         drop(state);
+        drop(previous);
         let mut audio = self.audio.lock().unwrap();
         audio.generation = generation;
         audio.active = true;
@@ -508,17 +532,19 @@ impl Surface {
     }
     pub fn end(&self, generation: u64) {
         let mut state = self.state.lock().unwrap();
+        let mut previous = None;
         if state.generation == generation {
             state.active = false;
             state.frame = None;
             // A stopped 4K stream would otherwise keep its 12 MiB of planes.
-            state.planes = Default::default();
+            previous = state.picture.take();
             #[cfg(test)]
             {
                 state.image = None;
             }
         }
         drop(state);
+        drop(previous);
         let mut audio = self.audio.lock().unwrap();
         if audio.generation == generation {
             audio.active = false;
@@ -536,14 +562,13 @@ impl Surface {
     pub fn presented(&self) -> u64 {
         self.presented.load(Ordering::Relaxed)
     }
-    /// Copies tightly packed planes into a reusable latest-frame mailbox. The decoder may
-    /// immediately reuse its borrowed buffers after this call returns.
-    pub fn publish_i420(
+    /// Puts a picture in the latest-frame mailbox: a pointer swap under the lock, never a
+    /// copy. The previous picture goes once the painter, if it is uploading it, lets go.
+    pub(crate) fn publish_planes(
         &self,
         generation: u64,
         size: (u32, u32),
-        planes: [&[u8]; 3],
-        strides: [usize; 3],
+        picture: Arc<dyn Planes>,
         rotation: f32,
     ) {
         let mut state = self.state.lock().unwrap();
@@ -551,29 +576,17 @@ impl Surface {
             return;
         }
         let (width, height) = size;
-        for (n, source) in planes.into_iter().enumerate() {
-            let w = if n == 0 { width } else { width.div_ceil(2) } as usize;
-            let h = if n == 0 { height } else { height.div_ceil(2) } as usize;
-            state.planes[n].resize(w * h, 0);
-            // After a large drop in size (4K to 1080p), keep only what the new size needs.
-            if state.planes[n].capacity() > 2 * w * h {
-                state.planes[n].shrink_to_fit();
-            }
-            for row in 0..h {
-                state.planes[n][row * w..(row + 1) * w]
-                    .copy_from_slice(&source[row * strides[n]..row * strides[n] + w]);
-            }
-        }
         #[cfg(test)]
         {
+            let [(y, sy), (u, su), (v, sv)] = picture.planes();
             let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-            for y in 0..height as usize {
+            for row in 0..height as usize {
                 for x in 0..width as usize {
-                    let chroma = (y / 2) * width.div_ceil(2) as usize + x / 2;
+                    let chroma = row / 2;
                     pixels.extend(i601_pixel(
-                        state.planes[0][y * width as usize + x],
-                        state.planes[1][chroma],
-                        state.planes[2][chroma],
+                        y[row * sy + x],
+                        u[chroma * su + x / 2],
+                        v[chroma * sv + x / 2],
                     ));
                 }
             }
@@ -583,6 +596,7 @@ impl Surface {
                 pixels,
             });
         }
+        let previous = state.picture.replace(picture);
         state.sequence += 1;
         let reshaped = state
             .frame
@@ -595,6 +609,8 @@ impl Surface {
             height,
         });
         drop(state);
+        // Released outside the lock: a decoder buffer goes back to its pool from here.
+        drop(previous);
         // A new shape changes the view, so it wakes the window even while nothing draws it.
         if (reshaped || !self.hidden.load(Ordering::Relaxed))
             && let Some(waker) = self.waker.lock().unwrap().as_ref()
@@ -602,11 +618,11 @@ impl Surface {
             waker();
         }
     }
-    pub(crate) fn with_planes(&self, f: impl FnOnce(Frame, &[Vec<u8>; 3])) {
+    /// The newest frame and a handle to its planes. Only the clone happens under the lock;
+    /// the caller reads the planes after it is released.
+    pub(crate) fn picture(&self) -> Option<(Frame, Arc<dyn Planes>)> {
         let state = self.state.lock().unwrap();
-        if let Some(frame) = state.frame {
-            f(frame, &state.planes);
-        }
+        Some((state.frame?, state.picture.clone()?))
     }
     /// Synthetic scene pictures take the same GPU path as received video.
     pub fn publish(&self, generation: u64, image: Image, rotation: f32) {
@@ -645,11 +661,13 @@ impl Surface {
                 planes[2][i] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
             }
         }
-        self.publish_i420(
+        self.publish_planes(
             generation,
             (image.width, image.height),
-            [&planes[0], &planes[1], &planes[2]],
-            [w, cw, cw],
+            Arc::new(Packed {
+                planes,
+                strides: [w, cw, cw],
+            }),
             rotation,
         );
         #[cfg(test)]
@@ -811,15 +829,7 @@ mod tests {
         view.clear_picture();
         assert!(view.watching.is_empty());
         assert_eq!(surface.latest(), None);
-        assert!(
-            surface
-                .state
-                .lock()
-                .unwrap()
-                .planes
-                .iter()
-                .all(|p| p.capacity() == 0)
-        );
+        assert!(surface.state.lock().unwrap().picture.is_none());
         surface.publish(generation, image(4, 2), 0.0);
         assert!(
             !view.sync_frame(),

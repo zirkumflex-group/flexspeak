@@ -85,34 +85,41 @@ impl PacketCodec {
 					return Ok(());
 				}
 
+				// The content is decrypted in place in packet_data. A failed
+				// attempt leaves it untouched, so the real key can follow the
+				// fake one.
 				// If it is the first ack packet of a client, try to fake
 				// decrypt it.
-				let new_content = if (p_type == PacketType::Ack && id <= 1 && con.is_client)
-					|| con.params.is_none()
-				{
-					match algs::decrypt_fake(&packet).or_else(|_| {
+				if (p_type == PacketType::Ack && id <= 1 && con.is_client) || con.params.is_none() {
+					if let Err(e) = algs::decrypt_fake(dir, &mut packet_data).or_else(|_| {
 						if let Some(params) = &mut con.params {
 							// Decrypt the packet
-							algs::decrypt(&packet, gen_id, &params.shared_iv, &mut params.key_cache)
+							algs::decrypt(
+								dir,
+								&mut packet_data,
+								gen_id,
+								&params.shared_iv,
+								&mut params.key_cache,
+							)
 						} else {
 							// Failed to fake decrypt the packet
 							Err(Error::WrongMac { p_type, generation_id: gen_id, packet_id: id })
 						}
 					}) {
-						Ok(r) => r,
-						Err(e) => {
-							con.stream_items.push_back(StreamItem::Error(e));
-							return Ok(());
-						}
+						con.stream_items.push_back(StreamItem::Error(e));
+						return Ok(());
 					}
 				} else if let Some(params) = &mut con.params {
 					// Decrypt the packet
-					match algs::decrypt(&packet, gen_id, &params.shared_iv, &mut params.key_cache) {
-						Ok(r) => r,
-						Err(e) => {
-							con.stream_items.push_back(StreamItem::Error(e));
-							return Ok(());
-						}
+					if let Err(e) = algs::decrypt(
+						dir,
+						&mut packet_data,
+						gen_id,
+						&params.shared_iv,
+						&mut params.key_cache,
+					) {
+						con.stream_items.push_back(StreamItem::Error(e));
+						return Ok(());
 					}
 				} else {
 					// Failed to fake decrypt the packet
@@ -122,10 +129,7 @@ impl PacketCodec {
 						packet_id: id,
 					}));
 					return Ok(());
-				};
-
-				let start = packet.header().data().len();
-				packet_data[start..].copy_from_slice(&new_content);
+				}
 			} else if algs::must_encrypt(p_type) {
 				// Check if it is ok for the packet to be unencrypted
 				con.stream_items.push_back(StreamItem::Error(Error::UnallowedUnencryptedPacket));

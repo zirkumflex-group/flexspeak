@@ -16,7 +16,10 @@
 //! (NVENC AV1 and VP8) are unaffected.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use libwebrtc::{native::yuv_helper, video_frame::I420Buffer};
+use libwebrtc::{
+    native::yuv_helper,
+    video_frame::{BoxVideoBuffer, I420Buffer, NV12Buffer},
+};
 use std::{
     collections::VecDeque,
     sync::{
@@ -140,14 +143,23 @@ pub struct Capture {
     max_size: (u32, u32),
     pipeline: Pipeline,
     closed: Arc<AtomicBool>,
+    /// Frames are handed on as NV12, as the GPU made them, for an encoder that takes NV12
+    /// (NVENC). Otherwise they are split into I420, which every encoder takes.
+    nv12: bool,
     /// Ticks on which a converted frame waited because every slot was still on the GPU.
     pub skipped: u64,
 }
 
 impl Capture {
     /// Starts capturing `target`. Fails if Windows Graphics Capture or the GPU video processor
-    /// is unavailable; the caller then uses the standard capture.
-    pub fn open(target: Target, max_size: (u32, u32), frame_interval: Duration) -> Result<Self> {
+    /// is unavailable; the caller then uses the standard capture. With `nv12`, frames come
+    /// back as NV12 rather than I420: one plain copy each, where I420 costs a conversion.
+    pub fn open(
+        target: Target,
+        max_size: (u32, u32),
+        frame_interval: Duration,
+        nv12: bool,
+    ) -> Result<Self> {
         // SAFETY: each call below is a plain COM/WinRT call with valid arguments; the
         // interfaces they return are reference counted by the `windows` crate.
         unsafe {
@@ -248,6 +260,7 @@ impl Capture {
                 max_size,
                 pipeline,
                 closed,
+                nv12,
                 skipped: 0,
             })
         }
@@ -277,18 +290,19 @@ impl Capture {
     /// last call, if any, and converts the newest captured frame for a later call. Never
     /// waits for the GPU. Windows only sends frames when the picture changes, so the caller
     /// sends its last frame again on ticks that return `None`.
-    pub fn poll(&mut self) -> Result<Option<I420Buffer>> {
+    pub fn poll(&mut self) -> Result<Option<BoxVideoBuffer>> {
         if self.closed.load(Ordering::Acquire) {
             bail!("Screen capture stopped. Check permission or select another window.");
         }
-        self.step().map_err(|error| {
-            anyhow!(
-                "Fast capture stopped working ({error:#}). Turn off Fast capture in Settings > Streaming and share again."
-            )
-        })
+        self.step()
     }
 
-    fn step(&mut self) -> Result<Option<I420Buffer>> {
+    /// The screen or window being captured is gone, which no other capture gets around.
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn step(&mut self) -> Result<Option<BoxVideoBuffer>> {
         let ready = self.collect()?;
         self.submit()?;
         self.queue_readback();
@@ -297,7 +311,7 @@ impl Capture {
 
     /// Reads back the newest queued frame the GPU has finished; older finished ones are only
     /// released.
-    fn collect(&mut self) -> Result<Option<I420Buffer>> {
+    fn collect(&mut self) -> Result<Option<BoxVideoBuffer>> {
         let pipeline = &mut self.pipeline;
         let mut finished: Vec<(usize, D3D11_MAPPED_SUBRESOURCE)> = Vec::new();
         while let Some(&index) = pipeline.queued.front() {
@@ -346,9 +360,13 @@ impl Capture {
         let last = finished.len().saturating_sub(1);
         for (position, (index, mapped)) in finished.into_iter().enumerate() {
             if position == last {
-                newest = Some(nv12_frame(&mapped, width, height));
+                newest = Some(if self.nv12 {
+                    nv12_frame(&mapped, width, height).map(|b| Box::new(b) as BoxVideoBuffer)
+                } else {
+                    i420_frame(&mapped, width, height).map(|b| Box::new(b) as BoxVideoBuffer)
+                });
             }
-            // SAFETY: mapped above; `nv12_frame` has finished with the memory.
+            // SAFETY: mapped above; the frame copy has finished with the memory.
             unsafe { self.context.Unmap(&pipeline.slots[index].staging, 0) };
             pipeline.slots[index].queued_at = None;
             pipeline.slots[index].busy = None;
@@ -633,8 +651,12 @@ fn build_pipeline(
     }
 }
 
-/// Copies a mapped NV12 staging texture into a new I420 frame.
-fn nv12_frame(mapped: &D3D11_MAPPED_SUBRESOURCE, width: u32, height: u32) -> Result<I420Buffer> {
+/// The luma and chroma planes of a mapped NV12 staging texture, each `RowPitch` bytes a row.
+fn mapped_planes(
+    mapped: &D3D11_MAPPED_SUBRESOURCE,
+    width: u32,
+    height: u32,
+) -> Result<(&[u8], &[u8])> {
     let pitch = mapped.RowPitch as usize;
     let luma_len = pitch * height as usize;
     let chroma_len = pitch * (height as usize / 2);
@@ -647,13 +669,46 @@ fn nv12_frame(mapped: &D3D11_MAPPED_SUBRESOURCE, width: u32, height: u32) -> Res
         mapped.DepthPitch
     );
     // SAFETY: checked above that `DepthPitch` bytes, which cover both planes, are mapped.
-    let (luma, chroma) = unsafe {
+    // The caller unmaps only after it is done with the slices.
+    Ok(unsafe {
         let base = mapped.pData as *const u8;
         (
             std::slice::from_raw_parts(base, luma_len),
             std::slice::from_raw_parts(base.add(luma_len), chroma_len),
         )
-    };
+    })
+}
+
+/// Copies a mapped NV12 staging texture into a new NV12 frame: the same bytes, row by row,
+/// without the texture's row padding.
+fn nv12_frame(mapped: &D3D11_MAPPED_SUBRESOURCE, width: u32, height: u32) -> Result<NV12Buffer> {
+    let (luma, chroma) = mapped_planes(mapped, width, height)?;
+    let pitch = mapped.RowPitch as usize;
+    let mut buffer = NV12Buffer::new(width, height);
+    let (sy, suv) = buffer.strides();
+    let (y, uv) = buffer.data_mut();
+    // A row of chroma is a U and a V for each pair of columns.
+    let chroma_row = width.div_ceil(2) as usize * 2;
+    for (to, to_stride, from, row, rows) in [
+        (y, sy as usize, luma, width as usize, height as usize),
+        (uv, suv as usize, chroma, chroma_row, height as usize / 2),
+    ] {
+        ensure!(
+            to_stride >= row
+                && pitch >= row
+                && to.len() >= to_stride * rows.saturating_sub(1) + row,
+            "Unexpected NV12 frame layout"
+        );
+        for line in 0..rows {
+            to[line * to_stride..][..row].copy_from_slice(&from[line * pitch..][..row]);
+        }
+    }
+    Ok(buffer)
+}
+
+/// Copies a mapped NV12 staging texture into a new I420 frame.
+fn i420_frame(mapped: &D3D11_MAPPED_SUBRESOURCE, width: u32, height: u32) -> Result<I420Buffer> {
+    let (luma, chroma) = mapped_planes(mapped, width, height)?;
     let mut buffer = I420Buffer::new(width, height);
     let (sy, su, sv) = buffer.strides();
     let (y, u, v) = buffer.data_mut();
@@ -738,6 +793,62 @@ mod tests {
     use super::*;
     use windows::Win32::Graphics::Gdi::DISPLAY_DEVICE_PRIMARY_DEVICE;
 
+    /// Both ways of reading a staging texture give the same picture: NV12 as it is, and I420
+    /// with the chroma split, neither including the texture's row padding.
+    #[test]
+    fn a_mapped_texture_reads_back_the_same_as_nv12_and_i420() -> Result<()> {
+        use libwebrtc::video_frame::VideoBuffer;
+        // 6×4 in rows of 8: luma counts up, chroma is (U, V) pairs; padding is 255.
+        const PITCH: usize = 8;
+        let mut bytes = vec![255_u8; PITCH * 6];
+        for row in 0..4 {
+            for column in 0..6 {
+                bytes[row * PITCH + column] = (row * 6 + column) as u8;
+            }
+        }
+        for row in 0..2 {
+            for pair in 0..3 {
+                bytes[(4 + row) * PITCH + pair * 2] = 100 + (row * 3 + pair) as u8;
+                bytes[(4 + row) * PITCH + pair * 2 + 1] = 200 + (row * 3 + pair) as u8;
+            }
+        }
+        let mapped = D3D11_MAPPED_SUBRESOURCE {
+            pData: bytes.as_mut_ptr().cast(),
+            RowPitch: PITCH as u32,
+            DepthPitch: bytes.len() as u32,
+        };
+        let nv12 = nv12_frame(&mapped, 6, 4)?;
+        assert_eq!((nv12.width(), nv12.height()), (6, 4));
+        let (sy, suv) = nv12.strides();
+        let (y, uv) = nv12.data();
+        for row in 0..4 {
+            let want: Vec<u8> = (0..6).map(|c| (row * 6 + c) as u8).collect();
+            assert_eq!(&y[row * sy as usize..][..6], want);
+        }
+        for row in 0..2 {
+            let want: Vec<u8> = (0..3)
+                .flat_map(|p| [100 + (row * 3 + p) as u8, 200 + (row * 3 + p) as u8])
+                .collect();
+            assert_eq!(&uv[row * suv as usize..][..6], want);
+        }
+        let i420 = i420_frame(&mapped, 6, 4)?;
+        let (_, su, sv) = i420.strides();
+        let (_, u, v) = i420.data();
+        for row in 0..2 {
+            for pair in 0..3 {
+                assert_eq!(u[row * su as usize + pair], 100 + (row * 3 + pair) as u8);
+                assert_eq!(v[row * sv as usize + pair], 200 + (row * 3 + pair) as u8);
+            }
+        }
+        // A mapping too small for both planes is refused, not read past.
+        let short = D3D11_MAPPED_SUBRESOURCE {
+            DepthPitch: (PITCH * 5) as u32,
+            ..mapped
+        };
+        assert!(nv12_frame(&short, 6, 4).is_err());
+        Ok(())
+    }
+
     #[test]
     fn fit_scales_down_to_even_sizes_and_never_up() {
         assert_eq!(fit(2560, 1440, (1920, 1080)), (1920, 1080));
@@ -770,6 +881,7 @@ mod tests {
             Target::Screen(primary()),
             (1920, 1080),
             Duration::from_millis(33),
+            false,
         )?;
         let start = std::time::Instant::now();
         let mut frames = 0;
@@ -778,7 +890,6 @@ mod tests {
         while start.elapsed() < Duration::from_secs(3) {
             let tick = std::time::Instant::now();
             if let Some(frame) = capture.poll()? {
-                use libwebrtc::video_frame::VideoBuffer;
                 size = Some((frame.width(), frame.height()));
                 frames += 1;
             }
@@ -804,6 +915,7 @@ mod tests {
                 Target::Screen(primary()),
                 (1920, 1080),
                 Duration::from_millis(33),
+                false,
             )?;
             let start = std::time::Instant::now();
             while capture.pipeline.queued.is_empty() {
@@ -834,6 +946,7 @@ mod tests {
                 Target::Screen(primary()),
                 (1920, 1080),
                 Duration::from_millis(33),
+                false,
             )?;
             for _ in 0..5 {
                 capture.poll()?;

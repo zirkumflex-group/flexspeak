@@ -1313,6 +1313,8 @@ async fn run_connection(
                 Step::Command(Some(command)) => {
                     if !connected { continue; }
                     let state = connection.get_state()?;
+                    // These only queue a packet: nothing the tree shows can have changed yet.
+                    let tree_unchanged = matches!(command, Command::Chat(..) | Command::Poke(..) | Command::RequestGroups | Command::Retune(_));
                     match command {
                         Command::Mute(value) => {
                             controls.desired.muted = value;
@@ -1446,7 +1448,9 @@ async fn run_connection(
                         Command::Retune(_) => {}
                         Command::Stop => break,
                     }
-                    let _ = events.try_send(Event::State(snapshot(&connection)?));
+                    if !tree_unchanged {
+                        let _ = events.try_send(Event::State(snapshot(&connection)?));
+                    }
                 },
                 Step::Network(Some(Ok(event))) => match event {
                     StreamItem::BookEvents(changes) => {
@@ -1482,7 +1486,10 @@ async fn run_connection(
                             }
                         }
                         // Deliver membership first so new-channel samples cannot populate the old view.
-                        let _ = events.try_send(Event::State(snapshot(&connection)?));
+                        // A batch of nothing but chat lines leaves the tree as it was.
+                        if first_batch || !changes.iter().all(|change| matches!(change, BookEvent::Message { .. })) {
+                            let _ = events.try_send(Event::State(snapshot(&connection)?));
+                        }
                         for change in &changes {
                             if let BookEvent::Message { target, invoker, message } = change {
                                 let clean = |text: &str, limit: usize| text.chars().filter(|c| !c.is_control()).take(limit).collect::<String>();

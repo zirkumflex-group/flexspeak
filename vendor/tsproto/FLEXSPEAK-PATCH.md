@@ -24,5 +24,11 @@ Local changes:
   apply the stable formatting options; application lints remain strict.
 - `src/resend.rs`: a test-only reader for the incoming voice counters.
 - `src/client.rs`: tests for voice in order, swapped pairs and a packet that is missing.
+- Fewer allocations per packet, same bytes on the wire. `src/connection.rs` keeps its
+  1500-byte receive buffer and hands on an exact-size copy of each packet, so a packet in a
+  queue no longer pins a whole buffer; `hand_back_buffer` is now a no-op kept for
+  `tsclientlib`. `src/algorithms.rs` decrypts in place in the packet buffer (EAX checks the
+  MAC first, so a failed attempt leaves the buffer as it was and the real key can follow the
+  fake one) and keeps the header meta on the stack when encrypting.
 
 The tests are not part of the app's CI. Run them here with `cargo test --lib`.

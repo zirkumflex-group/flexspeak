@@ -160,7 +160,8 @@ pub fn glyph(source: Source) -> &'static Icon {
         | Source::StreamWatch
         | Source::StreamEnded
         | Source::StreamFrame
-        | Source::StreamPublish => &icons::SCREEN_SHARE,
+        | Source::StreamPublish
+        | Source::StreamCapture => &icons::SCREEN_SHARE,
         Source::Install => &icons::DOWNLOAD,
         _ => &icons::TRIANGLE_ALERT,
     }
