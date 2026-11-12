@@ -152,8 +152,9 @@ struct App {
     onboarding_error: Option<String>,
     permissions: permissions::Permissions,
     saved: Option<settings::Settings>,
-    last_shortcut: Option<shortcuts::Action>,
     shortcuts: Option<shortcuts::Shortcuts>,
+    /// The shortcuts another app holds, named on their rows in Settings.
+    taken_shortcuts: Vec<shortcuts::Binding>,
     keybinds: shortcuts::Keybinds,
     keybind_draft: shortcuts::Keybinds,
     /// The shortcut being recorded, if Change was pressed.
@@ -204,6 +205,10 @@ struct App {
     sound_bank: sounds::Bank,
     /// The sound volume moved and hasn't been saved yet.
     sounds_unsaved: bool,
+    /// The playback volume, threshold or release delay moved and hasn't been saved yet.
+    audio_unsaved: bool,
+    /// Why the nickname typed in Settings wasn't kept, shown under its field.
+    nickname_error: Option<String>,
     #[cfg(test)]
     played_sounds: Vec<sounds::Sound>,
     /// System notifications shown, by title.
@@ -520,6 +525,10 @@ struct ServerEditor {
     address: String,
     password: String,
     error: Option<String>,
+    /// Remove was pressed once; the second press removes the server.
+    remove_armed: bool,
+    /// Settings opened only to hold this dialog, from Home or the rail, and closes with it.
+    alone: bool,
 }
 
 /// A category of the Settings window, in sidebar order.
@@ -530,22 +539,26 @@ enum SettingsPage {
     Chat,
     Streaming,
     Audio,
+    Sounds,
     Shortcuts,
     Permissions,
+    General,
     Updates,
     Errors,
     File,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 12] = [
         Self::Server,
         Self::Appearance,
         Self::Chat,
         Self::Streaming,
         Self::Audio,
+        Self::Sounds,
         Self::Shortcuts,
         Self::Permissions,
+        Self::General,
         Self::Updates,
         Self::Errors,
         Self::File,
@@ -558,8 +571,10 @@ impl SettingsPage {
             Self::Chat => "Chat",
             Self::Streaming => "Streaming",
             Self::Audio => "Audio",
+            Self::Sounds => "Sounds",
             Self::Shortcuts => "Shortcuts",
             Self::Permissions => "Permissions",
+            Self::General => "General",
             Self::Updates => "Updates",
             Self::Errors => "Error Log",
             Self::File => "Settings File",
@@ -792,7 +807,6 @@ pub struct KeyCapture {
 enum Message {
     SetupNext,
     SetupBack,
-    TestHotkeys,
     RequestPermission(permissions::Kind),
     PermissionDone(permissions::Kind, Result<String, String>),
     OpenPermissionSettings(permissions::Kind),
@@ -807,7 +821,6 @@ enum Message {
     RecordShortcut(shortcuts::Binding),
     CancelRecording,
     Recorded(shortcuts::Recorded),
-    SaveSettings,
     ReloadSettings,
     CopySettingsPath,
     /// Copies the error log as text, for a bug report.
@@ -818,6 +831,8 @@ enum Message {
     Transmission(transmission::Settings),
     Address(String),
     Nickname(String),
+    /// Enter in the nickname field, or the field losing the keyboard: keeps what was typed.
+    CommitNickname,
     Password(String),
     ChannelPassword(String),
     SubmitChannelPassword,
@@ -1086,8 +1101,8 @@ impl App {
             onboarding_error: None,
             permissions: permissions::Permissions::default(),
             saved: None,
-            last_shortcut: None,
             shortcuts: None,
+            taken_shortcuts: Vec::new(),
             keybinds: shortcuts::Keybinds::default(),
             keybind_draft: shortcuts::Keybinds::default(),
             key_capture: None,
@@ -1126,6 +1141,8 @@ impl App {
                 sounds::Bank::installed()
             },
             sounds_unsaved: false,
+            audio_unsaved: false,
+            nickname_error: None,
             #[cfg(test)]
             played_sounds: Vec::new(),
             #[cfg(test)]
@@ -1509,9 +1526,23 @@ impl App {
         }
     }
 
-    /// Plays the sound now, for hearing it in Settings, whether or not it is switched on.
+    /// Plays the sound now, for hearing it in Settings, whether or not it is switched on. With
+    /// no server's devices open, it plays on its own.
     fn preview_sound(&self, sound: sounds::Sound) {
-        self.send_sound(sound, true);
+        if !self.loopback && self.sessions.iter().any(|session| session.connected) {
+            self.send_sound(sound, true);
+            return;
+        }
+        let gain = self.sounds.gain();
+        let Some(output) = self.output.clone().or_else(|| self.devices.output.clone()) else {
+            return;
+        };
+        if gain == 0.0 || cfg!(test) {
+            return;
+        }
+        let mut samples = sounds::samples(self.sounds.pack, sound, &self.sound_bank);
+        samples.iter_mut().for_each(|sample| *sample *= gain);
+        audio::play_alone(output, samples, self.playback_volume.clone());
     }
 
     /// Hands the sound, from the chosen pack, to the output at the chosen volume.
@@ -1681,6 +1712,86 @@ impl App {
         );
     }
 
+    /// Stores the devices, playback volume and voice settings, and hands them to the devices
+    /// that are open, so a change applies during a session too.
+    fn save_audio(&mut self) {
+        self.audio_unsaved = false;
+        let input = self.input.as_ref().map(|device| device.id.clone());
+        let output = self.output.as_ref().map(|device| device.id.clone());
+        let volume = self.playback_volume.percent();
+        let (processing, transmission) = (self.audio_processing, self.transmission);
+        self.save_preference(
+            |saved| {
+                saved.input_device_id = input;
+                saved.output_device_id = output;
+                saved.playback_volume_percent = volume;
+                saved.audio_processing = processing;
+                saved.transmission = transmission;
+            },
+            "That audio choice applies for now but was not saved",
+        );
+        self.retune_audio();
+    }
+
+    /// Reopens whatever audio is running, a server's or the microphone test's, with the
+    /// devices and voice settings chosen now.
+    fn retune_audio(&mut self) {
+        let (Some(input), Some(output)) = (self.input.clone(), self.output.clone()) else {
+            return;
+        };
+        let retune = hub::Retune {
+            input,
+            output,
+            processing: self.audio_processing,
+            transmission: self.transmission,
+        };
+        if self.loopback {
+            if let Some(id) = self.active {
+                self.send_to(id, client::Command::Retune(retune));
+            }
+        } else {
+            self.hub.retune(retune);
+        }
+    }
+
+    /// The nickname typed in Settings differs from the saved one.
+    fn nickname_edited(&self) -> bool {
+        self.onboarding.is_none()
+            && self
+                .saved
+                .as_ref()
+                .is_some_and(|saved| saved.nickname != self.nickname.trim())
+    }
+
+    /// Saves the nickname typed in Settings, or says under its field why it can't be kept.
+    fn commit_nickname(&mut self) {
+        if !self.nickname_edited() {
+            self.nickname_error = None;
+            return;
+        }
+        let nickname = self.nickname.trim().to_owned();
+        if nickname.is_empty() {
+            self.nickname_error = Some("Enter a nickname.".into());
+            return;
+        }
+        self.nickname_error = None;
+        self.save_preference(
+            |saved| saved.nickname = nickname,
+            "Your nickname applies for now but was not saved",
+        );
+    }
+
+    /// Saves what sliders and the nickname field held back while they were being changed.
+    fn flush_unsaved(&mut self) {
+        if std::mem::take(&mut self.sounds_unsaved) {
+            self.save_sounds();
+        }
+        if self.audio_unsaved {
+            self.save_audio();
+        }
+        self.commit_nickname();
+    }
+
     /// What the voice threads play each person at. Everyone unset stays out of the map.
     fn sync_user_gains(&self) {
         *self.user_gains.lock().unwrap() = self
@@ -1845,8 +1956,12 @@ impl App {
 
     fn close_settings(&mut self) {
         self.end_recording();
-        if std::mem::take(&mut self.sounds_unsaved) {
-            self.save_sounds();
+        self.flush_unsaved();
+        // An empty nickname isn't kept: the saved one comes back.
+        if self.nickname_error.take().is_some()
+            && let Some(saved) = &self.saved
+        {
+            self.nickname = saved.nickname.clone();
         }
         self.settings_page = None;
         self.settings_query.clear();
@@ -1921,7 +2036,14 @@ impl App {
             self.server_passwords.insert(address, editor.password);
         }
         self.set_servers(servers);
-        self.server_editor = None;
+        self.close_server_editor();
+    }
+
+    /// Closes the Add or Edit Server dialog, and Settings with it if it opened only for it.
+    fn close_server_editor(&mut self) {
+        if self.server_editor.take().is_some_and(|editor| editor.alone) {
+            self.close_settings();
+        }
     }
 
     /// Removes the dialog's server, unless it is the last one or in use.
@@ -1932,11 +2054,17 @@ impl App {
         if self.servers.len() <= 1 || self.server_in_use(index) {
             return;
         }
+        // The first press only asks, as Clear History does.
+        if let Some(editor) = &mut self.server_editor
+            && !std::mem::replace(&mut editor.remove_armed, true)
+        {
+            return;
+        }
         let mut servers = self.servers.clone();
         let removed = servers.remove(index);
         self.server_passwords.remove(removed.address.trim());
         self.set_servers(servers);
-        self.server_editor = None;
+        self.close_server_editor();
     }
 
     /// Connects to the servers set to connect at launch; the first one is shown.
@@ -2377,7 +2505,6 @@ impl App {
                 self.apply_settings(saved);
                 self.alerts.recover(Source::SettingsSave);
                 self.alerts.recover(Source::SettingsLoad);
-                self.settings_message = Some("Settings saved".into());
                 true
             }
             Err(error) => {
@@ -2390,10 +2517,29 @@ impl App {
         }
     }
 
+    /// Applies the shortcuts as recorded and stores only them.
+    fn save_keybinds(&mut self) {
+        self.alerts.begin(Source::Shortcuts);
+        let keys = shortcuts::Keybinds {
+            toggle_mute: self.keybind_draft.toggle_mute.trim().into(),
+            toggle_deafen: self.keybind_draft.toggle_deafen.trim().into(),
+            push_to_talk: self.keybind_draft.push_to_talk.trim().into(),
+        };
+        if let Err(error) = keys.parse().and_then(|_| self.configure_shortcuts(&keys)) {
+            self.alerts.raise(Source::Shortcuts, format!("{error:#}"));
+            return;
+        }
+        self.keybinds = keys.clone();
+        self.save_preference(
+            |saved| saved.keybinds = keys,
+            "That shortcut applies for now but was not saved",
+        );
+    }
+
     fn configure_shortcuts(&mut self, keys: &shortcuts::Keybinds) -> anyhow::Result<()> {
         if !shortcuts::supported() {
             self.shortcut_error =
-                Some("Global shortcuts require X11; native Wayland is not supported.".into());
+                Some("Global shortcuts need X11; native Wayland is not supported.".into());
         }
         if let Some(shortcuts) = &mut self.shortcuts
             && shortcuts::supported()
@@ -2418,6 +2564,7 @@ impl App {
             .as_ref()
             .map(shortcuts::Shortcuts::taken)
             .unwrap_or_default();
+        self.taken_shortcuts = taken.clone();
         if taken.is_empty() {
             self.alerts.recover(Source::Shortcuts);
             return;
@@ -2468,7 +2615,14 @@ impl App {
                     .as_ref()
                     .is_some_and(shortcuts::Shortcuts::has_ptt))
         {
-            self.alerts.raise(Source::Shortcuts, "Push-to-talk needs a working global shortcut. Apply one in Settings, or choose another transmission mode. Native Wayland is not supported.");
+            self.alerts.raise(
+                Source::Shortcuts,
+                if shortcuts::supported() {
+                    "Push-to-talk needs a working global shortcut. Set one in Settings, or choose another transmission mode."
+                } else {
+                    "Push-to-talk needs a global shortcut, which native Wayland doesn't allow. Choose another transmission mode."
+                },
+            );
             return Task::none();
         }
         if self.transmission.mode == transmission::Mode::VoiceActivation
@@ -2557,6 +2711,10 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task {
+        // The nickname field keeps its text when it loses the keyboard.
+        if !self.ui.nickname.focused && self.nickname_edited() && self.nickname_error.is_none() {
+            self.commit_nickname();
+        }
         let task = self.update_inner(message);
         // Whatever the message added to a conversation goes to the history on disk.
         self.chat_persist();
@@ -2627,17 +2785,6 @@ impl App {
                     self.refresh_visible_permissions();
                 }
             }
-            Message::TestHotkeys => {
-                self.alerts.begin(Source::Shortcuts);
-                let keys = self.edited_settings().keybinds;
-                match keys.parse().and_then(|_| self.configure_shortcuts(&keys)) {
-                    Ok(()) => {
-                        self.keybinds = keys;
-                        self.last_shortcut = None;
-                    }
-                    Err(error) => self.alerts.raise(Source::Shortcuts, format!("{error:#}")),
-                }
-            }
             Message::RequestPermission(kind) => {
                 if self.idle() && self.permissions.pending.is_none() {
                     self.permissions.pending = Some(kind);
@@ -2684,7 +2831,6 @@ impl App {
             }
             Message::DismissAlert(id) => self.alerts.dismiss(id),
             Message::Shortcut(action) => {
-                self.last_shortcut = Some(action);
                 match action {
                     shortcuts::Action::Mute => self.toggle_mute(),
                     shortcuts::Action::Deafen => self.toggle_deafen(),
@@ -2693,19 +2839,27 @@ impl App {
             }
             Message::PlaybackVolume(percent) => {
                 self.playback_volume.set_percent(percent);
-                self.settings_message = None;
+                // Saved as Settings closes or the app quits, not at every step of the slider.
+                self.audio_unsaved = true;
             }
             Message::AudioProcessing(options) => {
                 // Without WebRTC only typing suppression applies; refuse the other effects.
-                if self.idle() && options.for_session(false) == options {
+                if options.for_session(false) == options {
                     self.audio_processing = options;
-                    self.settings_message = None;
+                    self.save_audio();
                 }
             }
             Message::Transmission(settings) => {
-                if self.idle() && settings.validate().is_ok() {
+                if settings.validate().is_ok() {
+                    let mode_changed = settings.mode != self.transmission.mode;
                     self.transmission = settings;
-                    self.settings_message = None;
+                    if mode_changed {
+                        self.save_audio();
+                    } else {
+                        // A slider: the running audio follows it, the file waits for the end.
+                        self.audio_unsaved = true;
+                        self.retune_audio();
+                    }
                 }
             }
             Message::RecordShortcut(binding) => {
@@ -2733,13 +2887,8 @@ impl App {
                         self.end_recording();
                         return Task::none();
                     }
-                    shortcuts::Recorded::Clear if binding == shortcuts::Binding::PushToTalk => {
-                        String::new()
-                    }
-                    shortcuts::Recorded::Clear => {
-                        capture.error = Some("This shortcut can't be empty.".into());
-                        return Task::none();
-                    }
+                    // Any shortcut may be left unset.
+                    shortcuts::Recorded::Clear => String::new(),
                     shortcuts::Recorded::Shortcut(shortcut) => shortcut,
                 };
                 let next = self.keybind_draft.with(binding, shortcut);
@@ -2751,12 +2900,7 @@ impl App {
                 self.end_recording();
                 // Setup saves everything together at its last step.
                 if self.onboarding.is_none() {
-                    self.save_settings();
-                }
-            }
-            Message::SaveSettings => {
-                if self.onboarding.is_none() {
-                    self.save_settings();
+                    self.save_keybinds();
                 }
             }
             Message::ReloadSettings => {
@@ -3246,47 +3390,49 @@ impl App {
             Message::Nickname(value) => {
                 if self.idle() {
                     self.nickname = value;
-                    self.settings_message = None;
+                    self.nickname_error = None;
                 }
             }
+            Message::CommitNickname => self.commit_nickname(),
             Message::Password(value) => self.password = value,
             Message::ChannelPassword(value) => self.server_mut().channel_password = value,
             Message::Input(value) => {
-                if self.idle() {
-                    self.input = Some(value);
-                }
+                self.input = Some(value);
+                self.save_audio();
             }
             Message::Output(value) => {
-                if self.idle() {
-                    self.output = Some(value);
-                }
+                self.output = Some(value);
+                self.save_audio();
             }
             Message::Refresh => {
                 self.alerts.begin(Source::Audio);
-                if self.idle() {
-                    match audio::devices() {
-                        Ok(devices) => {
-                            if !self
+                match audio::devices() {
+                    Ok(devices) => {
+                        // A chosen device that's unplugged stays chosen while connected: the
+                        // hub stands in for it and goes back to it once it returns.
+                        let keep = !self.idle();
+                        if !keep
+                            && !self
                                 .input
                                 .as_ref()
                                 .is_some_and(|d| devices.inputs.contains(d))
-                            {
-                                self.input = devices.input.clone();
-                            }
-                            if !self
+                        {
+                            self.input = devices.input.clone();
+                        }
+                        if !keep
+                            && !self
                                 .output
                                 .as_ref()
                                 .is_some_and(|d| devices.outputs.contains(d))
-                            {
-                                self.output = devices.output.clone();
-                            }
-                            self.devices = devices;
-                            self.alerts.recover(Source::Audio);
+                        {
+                            self.output = devices.output.clone();
                         }
-                        Err(error) => self
-                            .alerts
-                            .raise(Source::Audio, format!("Device detection failed: {error:#}")),
+                        self.devices = devices;
+                        self.alerts.recover(Source::Audio);
                     }
+                    Err(error) => self
+                        .alerts
+                        .raise(Source::Audio, format!("Device detection failed: {error:#}")),
                 }
             }
             Message::Connect(index) => {
@@ -3307,7 +3453,11 @@ impl App {
                     .cloned()
                     .unwrap_or_default();
                 self.address = address;
-                if let Some(saved) = &self.saved {
+                // An edited nickname is kept; one that can't be falls back to the saved one.
+                self.commit_nickname();
+                if self.nickname_error.take().is_some()
+                    && let Some(saved) = &self.saved
+                {
                     self.nickname = saved.nickname.clone();
                 }
                 self.alerts.begin(Source::Connection);
@@ -3318,10 +3468,14 @@ impl App {
             Message::AddServer => {
                 self.ui.server_picker = false;
                 if self.onboarding.is_none() {
-                    if self.settings_page.is_none() {
+                    let alone = self.settings_page.is_none();
+                    if alone {
                         self.open_settings(SettingsPage::Server);
                     }
-                    self.server_editor = Some(ServerEditor::default());
+                    self.server_editor = Some(ServerEditor {
+                        alone,
+                        ..ServerEditor::default()
+                    });
                 }
             }
             Message::EditServer(index) => {
@@ -3335,7 +3489,7 @@ impl App {
                             .get(server.address.trim())
                             .cloned()
                             .unwrap_or_default(),
-                        error: None,
+                        ..ServerEditor::default()
                     });
                 }
             }
@@ -3364,7 +3518,7 @@ impl App {
             }
             Message::AutoConnect => return self.auto_connect(),
             Message::SubmitServer => self.submit_server(),
-            Message::CancelServer => self.server_editor = None,
+            Message::CancelServer => self.close_server_editor(),
             Message::RemoveServer => self.remove_server(),
             Message::TestAudio => {
                 self.alerts.begin(Source::Audio);
@@ -3858,6 +4012,7 @@ impl App {
                 if self.stream_volumes_changed.is_some() {
                     self.save_stream_volumes();
                 }
+                self.flush_unsaved();
                 if self.idle() {
                     return Task::Exit;
                 }
@@ -5042,7 +5197,6 @@ mod tests {
     fn servers_are_added_edited_and_removed_and_save_at_once() {
         let (mut app, root) = saved_fixture("servers");
         let path = root.join("settings.json");
-        app.nickname = "Unsaved draft".into();
         add_server(&mut app, "Friends", " two.example:9988 ", "secret");
         assert!(app.server_editor.is_none());
         let stored = settings::load(&path).unwrap().unwrap();
@@ -5057,7 +5211,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(stored.nickname, "Alex", "other drafts stay unsaved");
+        assert_eq!(stored.nickname, "Alex", "the rest of the file is untouched");
         assert!(!std::fs::read_to_string(&path).unwrap().contains("secret"));
         // Empty and repeated addresses keep the dialog open with a reason.
         add_server(&mut app, "", "  ", "");
@@ -5077,6 +5231,9 @@ mod tests {
             "Squad"
         );
         let _ = app.update(Message::EditServer(0));
+        let _ = app.update(Message::RemoveServer);
+        assert_eq!(app.servers.len(), 2, "the first press only asks");
+        assert!(app.server_editor.as_ref().unwrap().remove_armed);
         let _ = app.update(Message::RemoveServer);
         assert_eq!(app.servers.len(), 1);
         assert_eq!(app.servers[0].address, "two.example:9988");
@@ -5522,12 +5679,11 @@ mod tests {
         };
         settings::save(&path, &saved).unwrap();
         app.load_settings(path.clone());
-        app.nickname = "Unsaved draft".into();
         let _ = app.update(Message::ToggleFooter);
         assert!(app.footer_hidden);
         let stored = settings::load(&path).unwrap().unwrap();
         assert!(stored.footer_hidden);
-        assert_eq!(stored.nickname, "Saved name", "drafts stay unsaved");
+        assert_eq!(stored.nickname, "Saved name", "the rest of the file is untouched");
         let (mut restarted, _) = setup_fixture("footer-restart");
         restarted.load_settings(path.clone());
         assert!(restarted.footer_hidden);
@@ -5543,12 +5699,11 @@ mod tests {
         settings::save(&path, &settings::Settings::default()).unwrap();
         app.load_settings(path.clone());
         assert!(app.updater.auto_download, "on by default");
-        app.nickname = "Unsaved draft".into();
         let _ = app.update(Message::Updater(updater::Event::AutoDownload(false)));
         assert!(!app.updater.auto_download);
         let stored = settings::load(&path).unwrap().unwrap();
         assert!(!stored.auto_download_updates);
-        assert_eq!(stored.nickname, "Flexspeak", "drafts stay unsaved");
+        assert_eq!(stored.nickname, "Flexspeak", "the rest of the file is untouched");
         let (mut restarted, _) = setup_fixture("auto-update-restart");
         restarted.load_settings(path.clone());
         assert!(!restarted.updater.auto_download);
@@ -5569,7 +5724,6 @@ mod tests {
         let path = root.join("settings.json");
         settings::save(&path, &settings::Settings::default()).unwrap();
         app.load_settings(path.clone());
-        app.nickname = "Unsaved draft".into();
         let chosen = settings::Appearance {
             scheme: settings::ColorScheme::Light,
             light_theme: settings::ThemeName::Ocean,
@@ -6924,12 +7078,91 @@ mod tests {
         let _ = app.update(warning());
         assert_eq!(app.alerts.current().unwrap().reports, 1);
         let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
-        app.keybind_draft.toggle_mute.clear();
-        let _ = app.update(Message::SaveSettings);
-        assert_eq!(app.alerts.current().unwrap().source, Source::SettingsSave);
+        app.keybind_draft.toggle_mute = "Nonsense+Key".into();
+        app.save_keybinds();
+        assert_eq!(app.alerts.current().unwrap().source, Source::Shortcuts);
         let _ = app.update(Message::DismissAlert(app.alerts.current().unwrap().id));
-        let _ = app.update(Message::SaveSettings);
-        assert_eq!(app.alerts.current().unwrap().source, Source::SettingsSave);
+        app.save_keybinds();
+        assert_eq!(app.alerts.current().unwrap().source, Source::Shortcuts);
+    }
+
+    /// An app with a valid saved profile written to a temporary settings file.
+    fn saved_app(name: &str) -> (App, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "flexspeak-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let saved = settings::Settings {
+            servers: vec![settings::Server::new("ts.example")],
+            nickname: "Ada".into(),
+            ..settings::Settings::default()
+        };
+        app.settings_path = Some(root.join("settings.json"));
+        settings::save(app.settings_path.as_deref().unwrap(), &saved).unwrap();
+        app.apply_settings(saved);
+        (app, root)
+    }
+
+    fn on_disk(app: &App) -> settings::Settings {
+        settings::load(app.settings_path.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn settings_save_as_they_change_without_a_save_button() {
+        let (mut app, root) = saved_app("save-on-change");
+        let _ = app.update(Message::Transmission(transmission::Settings {
+            mode: transmission::Mode::PushToTalk,
+            ..app.transmission
+        }));
+        assert_eq!(on_disk(&app).transmission.mode, transmission::Mode::PushToTalk);
+        // Sliders wait for Settings to close, or the app to quit, before writing the file.
+        let _ = app.update(Message::PlaybackVolume(40));
+        let _ = app.update(Message::SoundVolume(30));
+        assert_ne!(on_disk(&app).playback_volume_percent, 40);
+        let _ = app.update(Message::Close);
+        let saved = on_disk(&app);
+        assert_eq!(saved.playback_volume_percent, 40);
+        assert_eq!(saved.sounds.volume, 30);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_nickname_saves_on_enter_and_an_empty_one_is_explained_under_its_field() {
+        let (mut app, root) = saved_app("nickname");
+        app.open_settings(SettingsPage::Server);
+        let _ = app.update(Message::Nickname("  ".into()));
+        let _ = app.update(Message::CommitNickname);
+        assert_eq!(app.nickname_error.as_deref(), Some("Enter a nickname."));
+        assert!(app.alerts.current().is_none(), "no corner notice for it");
+        assert_eq!(on_disk(&app).nickname, "Ada");
+        // Closing Settings brings the saved name back.
+        app.close_settings();
+        assert_eq!((app.nickname.as_str(), app.nickname_error.as_deref()), ("Ada", None));
+
+        app.open_settings(SettingsPage::Server);
+        let _ = app.update(Message::Nickname("Grace".into()));
+        let _ = app.update(Message::CommitNickname);
+        assert_eq!(on_disk(&app).nickname, "Grace");
+        // An edit not yet committed is kept when Settings closes, too.
+        let _ = app.update(Message::Nickname("Hopper".into()));
+        app.close_settings();
+        assert_eq!(on_disk(&app).nickname, "Hopper");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn connecting_keeps_an_edited_nickname() {
+        let (mut app, root) = saved_app("nickname-connect");
+        let _ = app.update(Message::Nickname("Grace".into()));
+        let _ = app.update(Message::Connect(0));
+        assert_eq!(app.nickname, "Grace");
+        assert_eq!(on_disk(&app).nickname, "Grace");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -7234,7 +7467,6 @@ mod tests {
         let (sender, mut commands) = mpsc::channel(16);
         live(&mut app, sender);
         let _ = app.update(Message::Shortcut(shortcuts::Action::Mute));
-        assert_eq!(app.last_shortcut, Some(shortcuts::Action::Mute));
         assert!(commands.try_recv().is_err());
         app.server_mut().connected = true;
         let _ = app.update(Message::Shortcut(shortcuts::Action::Deafen));
@@ -7307,7 +7539,7 @@ mod tests {
     }
 
     #[test]
-    fn processing_settings_are_saved_but_cannot_change_under_an_active_session() {
+    fn processing_settings_are_saved_and_reach_the_devices_of_an_active_session() {
         let mut app = App::with_devices(audio::Devices::default(), None);
         let chosen = audio_processing::Settings {
             noise_suppression: true,
@@ -7333,10 +7565,21 @@ mod tests {
         live(&mut app, sender);
         app.server_mut().muted = true;
         app.server_mut().deafened = true;
+        let device = audio::DeviceChoice {
+            id: "speakers".into(),
+            name: "Speakers".into(),
+        };
+        app.input = Some(device.clone());
+        app.output = Some(device);
         let _ = app.update(Message::AudioProcessing(
             audio_processing::Settings::default(),
         ));
-        assert_eq!(app.audio_processing, chosen);
+        assert_eq!(app.audio_processing, audio_processing::Settings::default());
+        assert_eq!(
+            app.hub.pending_retune().map(|retune| retune.processing),
+            Some(audio_processing::Settings::default()),
+            "the open devices take the change"
+        );
         assert!(app.server().muted && app.server().deafened);
     }
 
@@ -7371,8 +7614,9 @@ mod tests {
         assert_eq!(app.microphone_status(), "Waiting for push-to-talk");
         app.server_mut().muted = true;
         assert_eq!(app.microphone_status(), "Muted");
+        // The mode can change during a session too.
         let _ = app.update(Message::Transmission(transmission::Settings::default()));
-        assert_eq!(app.transmission, settings);
+        assert_eq!(app.transmission, transmission::Settings::default());
     }
 
     #[test]

@@ -88,6 +88,8 @@ pub enum Command {
     SetGroups(Vec<u16>, GroupEdit),
     /// Asks for the group lists, for servers that haven't sent them.
     RequestGroups,
+    /// New devices or voice settings for the microphone test; a server takes them from the hub.
+    Retune(hub::Retune),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1319,6 +1321,8 @@ async fn run_connection(
                         Command::DecideViewer(id, allow) => if let Err(error) = streams.publisher.decide(id,allow) {
                             let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() });
                         },
+                        // The shared devices take new settings from the hub, not from here.
+                        Command::Retune(_) => {}
                         Command::Stop => break,
                     }
                     let _ = events.try_send(Event::State(snapshot(&connection)?));
@@ -1680,6 +1684,13 @@ async fn run_loopback(
     )
     .map_err(AudioFailure)?;
     let mut ptt_gate = crate::transmission::PttGate::default();
+    let mut opened = hub::Retune {
+        input: config.input.clone(),
+        output: config.output.clone(),
+        processing: config.audio_processing,
+        transmission: config.transmission,
+    };
+    let mut transmission = config.transmission;
     let mut reported_transmission = false;
     let _ = events.try_send(Event::Connected(audio.description.clone()));
     let mut tick = tokio::time::interval(Duration::from_millis(10));
@@ -1688,10 +1699,36 @@ async fn run_loopback(
     let mut meter = MeterDelivery::default();
     loop {
         tokio::select! {
-            command = commands.recv() => if matches!(command, None | Some(Command::Stop)) { break; },
+            command = commands.recv() => match command {
+                None | Some(Command::Stop) => break,
+                // The test hears itself with the new choices straight away.
+                Some(Command::Retune(retune)) => {
+                    let same_devices = retune.input == opened.input
+                        && retune.output == opened.output
+                        && retune.processing == opened.processing;
+                    transmission = retune.transmission;
+                    if !(same_devices && audio.tune_transmission(transmission)) {
+                        // Let the old streams go before the same devices open again.
+                        drop(audio);
+                        audio = AudioEngine::open(
+                            &retune.input,
+                            &retune.output,
+                            config.playback_volume.clone(),
+                            retune.processing.for_session(true),
+                            transmission,
+                        )
+                        .map_err(AudioFailure)?;
+                        let _ = events.try_send(Event::Connected(audio.description.clone()));
+                    }
+                    opened = retune;
+                }
+
+                Some(_) => {}
+            },
             _ = tick.tick() => {
                 if events.is_closed() { break; }
-                let capture = ptt_gate.allows(true, config.ptt.load(Ordering::Acquire), Instant::now(), config.transmission);
+                let capture = ptt_gate.allows(true, config.ptt.load(Ordering::Acquire), Instant::now(), transmission);
+
                 audio.set_capture(capture).map_err(AudioFailure)?;
                 audio.tick(true, |_| {}).map_err(AudioFailure)?;
                 report_transmission(events, &mut reported_transmission, audio.transmitting());

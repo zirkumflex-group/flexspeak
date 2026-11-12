@@ -129,8 +129,10 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
         SettingsPage::Chat => &icons::MESSAGE,
         SettingsPage::Streaming => &icons::MONITOR_UP,
         SettingsPage::Audio => &icons::AUDIO_LINES,
+        SettingsPage::Sounds => &icons::VOLUME_2,
         SettingsPage::Shortcuts => &icons::KEYBOARD,
         SettingsPage::Permissions => &icons::SHIELD,
+        SettingsPage::General => &icons::SETTINGS,
         SettingsPage::Updates => &icons::DOWNLOAD,
         SettingsPage::Errors => &icons::TRIANGLE_ALERT,
         SettingsPage::File => &icons::FILE_TEXT,
@@ -152,6 +154,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
         Some("Voice"),
         &[
             SettingsPage::Audio,
+            SettingsPage::Sounds,
             SettingsPage::Shortcuts,
             SettingsPage::Permissions,
         ],
@@ -159,6 +162,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
     (
         Some("App"),
         &[
+            SettingsPage::General,
             SettingsPage::Updates,
             SettingsPage::Errors,
             SettingsPage::File,
@@ -188,7 +192,7 @@ fn sections(
             )
             .note(group_note(
                 t,
-                "Disconnect to change devices; volume applies immediately. Use headphones for the microphone test.",
+                "Changes apply straight away, during a call too. Use headphones for the microphone test.",
             )),
             Section::boxed(
                 "processing",
@@ -201,13 +205,9 @@ fn sections(
                 "Voice Transmission",
                 "audio talk send",
                 transmission_rows(s, t, k, layer),
-            )
-            .note(group_note(
-                t,
-                "Stop the microphone test or disconnect from every server to change processing and transmission. Save to keep them.",
-            )),
-            sound_section(s, t, k, layer),
+            ),
         ],
+        SettingsPage::Sounds => vec![sound_section(s, t, k, layer)],
         SettingsPage::Shortcuts => vec![shortcut_section(s, t, k)],
         SettingsPage::Permissions => vec![permission_section(s, t)],
         SettingsPage::Updates => vec![
@@ -222,15 +222,16 @@ fn sections(
             Section::boxed(
                 "changelog",
                 "What's New",
-                "changelog changes release notes history version build earlier",
+                "changelog changes release notes version build earlier",
                 updates::changelog(s, t)
                     .into_iter()
                     .map(|row| item("", row))
                     .collect(),
             ),
         ],
+        SettingsPage::General => general_sections(s, t, k),
         SettingsPage::Errors => vec![error_log_section(s, t)],
-        SettingsPage::File => vec![file_section(s, t), setup_section(s, t)],
+        SettingsPage::File => vec![file_section(s, t)],
     }
 }
 
@@ -277,7 +278,7 @@ fn error_log_section(s: &App, t: &Theme) -> Section {
     Section::boxed(
         "error-log",
         "Error Log",
-        "errors problems failures warnings crash history log",
+        "errors problems failures warnings crash log",
         rows,
     )
     .note(group_note(
@@ -369,6 +370,14 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                 .collect();
             found[i] = !rendered.is_empty();
             any |= found[i];
+            // Results from several pages read as one list, so each page's results say whose
+            // they are.
+            if found[i] {
+                content = content.child(
+                    super::widgets::overline(t, page.title())
+                        .key(format!("results-{}", page.title())),
+                );
+            }
             content = content.children(rendered);
         }
         if !any {
@@ -444,14 +453,10 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
             Color::BLACK.alpha(if t.dark { 0.3 } else { 0.08 }),
         ))
         .token_motion(k.motion.overlay)
-        .on_key(|s: &mut App, key: &rune::KeyEvent, tx: &mut Tx| {
-            // `/` jumps to search, as in the browser; ⌘S saves without leaving the window.
+        .on_key(|s: &mut App, key: &rune::KeyEvent, _tx: &mut Tx| {
+            // `/` jumps to search, as in the browser.
             if key.key == rune::Key::Text("/".into()) && !s.ui.settings_search.focused {
                 s.ui.settings_search.focused = true;
-                return true;
-            }
-            if key.is_command('s') {
-                dispatch(s, tx, Message::SaveSettings);
                 return true;
             }
             false
@@ -643,15 +648,7 @@ fn window_header(s: &App, t: &Theme, page: SettingsPage, searching: bool) -> El 
                 .transition(rune::Transition::opacity()),
         );
     }
-    bar.child(button(
-        t,
-        "save",
-        "Save",
-        None,
-        Variant::Primary,
-        Some(Message::SaveSettings),
-    ))
-    .child(icon_button(
+    bar.child(icon_button(
         t,
         "close-settings",
         &icons::CLOSE,
@@ -748,7 +745,13 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     )
                     .help(format!("Edit {}", server.title())),
                 );
-            item(format!("server {} {}", server.name, server.address), e)
+            item(
+                format!(
+                    "server {} {} auto connect launch startup password",
+                    server.name, server.address
+                ),
+                e,
+            )
         })
         .collect();
     rows.push(item(
@@ -765,52 +768,42 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
     Section::boxed("servers", "Servers", "saved servers list bookmarks address hostname", rows)
         .note(group_note(
             t,
-            "Save as many servers as you like and connect to several at once. Changes here save straight away.",
+            "Save as many servers as you like and connect to several at once.",
         ))
 }
 
-/// A small pill beside a name: the server in use.
+/// A word beside a name in the accent colour: the server in use.
 fn badge(t: &Theme, label: &str) -> El {
-    text(label.to_owned())
-        .font(ty::CAPTION)
-        .color(t.accent)
-        .px(6.0)
-        .py(1.0)
-        .radius(radius::PILL)
-        .fill(t.accent.alpha(0.14))
+    text(label.to_owned()).font(ty::CAPTION).color(t.accent)
 }
 
 fn identity_section(s: &App, t: &Theme, k: &Kit) -> Section {
     let idle = s.idle();
-    Section::boxed(
+    let mut control = col().w(size::FORM_CONTROL).gap(4.0).child(field(
+        k,
+        &s.ui.nickname,
+        |s| &mut s.ui.nickname,
+        "Nickname",
+        idle.then_some(Message::Nickname as fn(String) -> Message),
+        Some(Message::CommitNickname),
+    ));
+    if let Some(error) = &s.nickname_error {
+        control = control.child(super::widgets::error_text(t, error.clone()).key("nickname-error"));
+    }
+    let section = Section::boxed(
         "identity",
         "Identity",
         "you profile",
         vec![item(
             "nickname name username identity",
-            form_row(
-                t,
-                "Nickname",
-                Some("Your name on every server."),
-                trailing(field(
-                    k,
-                    &s.ui.nickname,
-                    |s| &mut s.ui.nickname,
-                    "Nickname",
-                    idle.then_some(Message::Nickname as fn(String) -> Message),
-                    None,
-                )),
-            ),
+            form_row(t, "Nickname", Some("Your name on every server."), control),
         )],
-    )
-    .note(group_note(
-        t,
-        if idle {
-            "Save keeps your nickname."
-        } else {
-            "Disconnect to change your nickname."
-        },
-    ))
+    );
+    if idle {
+        section
+    } else {
+        section.note(group_note(t, "Disconnect to change your nickname."))
+    }
 }
 
 /// The Add or Edit Server dialog, above the Settings window.
@@ -887,7 +880,11 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
             button(
                 t,
                 "remove-server",
-                "Remove",
+                if s.server_editor.as_ref().is_some_and(|editor| editor.remove_armed) {
+                    "Press Again to Remove"
+                } else {
+                    "Remove"
+                },
                 Some(&icons::TRASH),
                 Variant::Danger,
                 removable.then_some(Message::RemoveServer),
@@ -935,7 +932,7 @@ fn server_dialog(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     .description(if editing.is_some() {
         "Changes save as soon as you choose Save."
     } else {
-        "Add it to your saved servers, then connect to it from the home screen or the rail."
+        "Save a server to connect to it from Home or the rail."
     })
     .open(true)
     .fit()
@@ -995,8 +992,20 @@ fn file_section(s: &App, t: &Theme) -> Section {
     ];
     Section::boxed("settings-file", "Settings File", "storage save", rows).note(group_note(
         t,
-        "Save writes your portable settings file. Appearance applies and saves as soon as you choose it.",
+        "Every change is written to this portable file as you make it.",
     ))
+}
+
+/// How the app sits on the desktop, then setup. The tray-icon section is where rows about the
+/// window and starting with the system belong.
+fn general_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
+    let mut sections = Vec::new();
+    if crate::tray::SUPPORTED {
+        sections.push(tray_section(s, t, k));
+    }
+    sections.push(window_section(s, t, k));
+    sections.push(setup_section(s, t));
+    sections
 }
 
 /// Running setup again over the saved profile; Cancel in setup keeps everything as it was.
@@ -1118,6 +1127,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
             t,
             "Pick one theme for light and one for dark. System switches between them with your computer.",
         )),
+        more_themes(s, t),
         Section::boxed(
             "motion",
             "Motion",
@@ -1144,12 +1154,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
                 ),
             )],
         ),
-        more_themes(s, t),
     ];
-    if crate::tray::SUPPORTED {
-        sections.insert(sections.len() - 1, tray_section(s, t, k));
-    }
-    sections.insert(sections.len() - 1, window_section(s, t, k));
     if let Some(current) = &s.omarchy {
         sections.insert(0, omarchy_section(s, t, k, &current.name));
     }
@@ -1888,16 +1893,12 @@ pub fn audio(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>)
         .child(group(t, rows(audio_rows(s, cx, t, k, layer))).key("devices"))
         .child(group_note(
             t,
-            "Disconnect to change devices; volume applies immediately. Use headphones for the microphone test.",
+            "Changes apply straight away. Use headphones for the microphone test.",
         ))
         .child(group_title(t, "Microphone Processing"))
         .child(group(t, rows(processing_rows(s, t, k, layer))).key("processing"))
         .child(group_title(t, "Voice Transmission"))
         .child(group(t, rows(transmission_rows(s, t, k, layer))).key("transmission"))
-        .child(group_note(
-            t,
-            "Stop the microphone test or disconnect from every server to change processing and transmission. Save to keep them.",
-        ))
 }
 
 fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
@@ -1929,7 +1930,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
                     } else {
                         "Choose…"
                     },
-                    !busy,
+                    true,
                     size::FORM_CONTROL,
                     {
                         let devices = s.devices.inputs.clone();
@@ -1965,7 +1966,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
                     } else {
                         "Choose…"
                     },
-                    !busy,
+                    true,
                     size::FORM_CONTROL,
                     {
                         let devices = s.devices.outputs.clone();
@@ -2000,7 +2001,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
                     "Refresh Devices",
                     None,
                     Variant::Secondary,
-                    (!busy).then_some(Message::Refresh),
+                    Some(Message::Refresh),
                 ),
                 button(
                     t,
@@ -2031,7 +2032,7 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
     ]
 }
 
-/// The OS's current answer as a tinted pill, so the row reads at a glance.
+/// The OS's current answer as an icon and a word in its colour, so the row reads at a glance.
 fn status_pill(t: &Theme, status: permissions::Status) -> El {
     use permissions::Status;
     let (glyph, color) = match status {
@@ -2043,11 +2044,8 @@ fn status_pill(t: &Theme, status: permissions::Status) -> El {
     };
     row()
         .h(22.0)
-        .px(8.0)
         .gap(5.0)
         .center_y()
-        .radius(11.0)
-        .fill(color.alpha(0.14))
         .label(status.label())
         .child(rune::icon(glyph, 12.0).color(color).a11y_hidden())
         .child(
@@ -2239,19 +2237,15 @@ fn sound_group_row(s: &App, t: &Theme, k: &Kit, group: crate::sounds::Group, ope
 }
 
 /// One sound inside an opened group, set in from the group's name.
-fn sound_row(s: &App, t: &Theme, k: &Kit, sound: crate::sounds::Sound, connected: bool) -> El {
+fn sound_row(s: &App, t: &Theme, k: &Kit, sound: crate::sounds::Sound) -> El {
     let on = s.sounds.sound_on(sound);
     let preview = icon_button(
         t,
         &format!("preview-{}", sound.key()),
         &icons::PLAY,
-        if connected {
-            "Play this sound"
-        } else {
-            "Connect to a server to hear it"
-        },
+        "Play this sound",
         Variant::Ghost,
-        connected.then_some(Message::PreviewSound(sound)),
+        Some(Message::PreviewSound(sound)),
     );
     row()
         .w_full()
@@ -2289,7 +2283,6 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
     use crate::sounds::{Group, Pack};
     const TITLE: &str = "Sound Cues";
     const TERMS: &str = "audio sound cues";
-    let connected = s.sessions.iter().any(|session| session.connected);
     let volume = s.sounds.volume;
     let packs: Vec<Pack> = Pack::ALL
         .into_iter()
@@ -2349,7 +2342,7 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
         for sound in group.sounds() {
             let terms = format!("sound cues {}", sound.title().to_lowercase());
             if open || (hunting && matches(&terms, query)) {
-                rows.push(item(terms, sound_row(s, t, k, sound, connected)));
+                rows.push(item(terms, sound_row(s, t, k, sound)));
             }
         }
     }
@@ -2357,7 +2350,7 @@ fn sound_section(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Section {
         "TeamSpeak's sounds appear as a pack if TeamSpeak is installed on this computer."
     } else {
         "TeamSpeak's sounds are read from TeamSpeak on this computer and played equally loud. \
-         It has none for stream viewers, so they get its stream sounds a little higher."
+         It has none for stream viewers, so they get its stream sounds, a little higher-pitched."
     };
     Section::boxed("sounds", TITLE, TERMS, rows).note(group_note(t, note))
 }
@@ -2373,7 +2366,7 @@ fn typing_row(s: &App, t: &Theme, k: &Kit) -> Row {
                 "typing-suppression-switch",
                 "Typing suppression",
                 s.audio_processing.typing_suppression,
-                s.idle(),
+                true,
                 k,
                 |s, on| processing_with(s, |o| o.typing_suppression = on),
             ),
@@ -2398,7 +2391,6 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
         ];
     }
     let options = s.audio_processing;
-    let editable = s.idle();
     let levels: Vec<String> = audio_processing::SuppressionLevel::ALL
         .iter()
         .map(ToString::to_string)
@@ -2412,7 +2404,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
                 "noise-suppression-switch",
                 "Noise suppression",
                 options.noise_suppression,
-                editable,
+                true,
                 k,
                 |s, on| processing_with(s, |o| o.noise_suppression = on),
             ),
@@ -2429,7 +2421,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
                 levels,
                 Some(options.suppression_level.to_string().as_str()),
                 "Choose…",
-                editable && options.noise_suppression,
+                options.noise_suppression,
                 size::FORM_CONTROL,
                 move |index| {
                     Message::AudioProcessing(audio_processing::Settings {
@@ -2449,7 +2441,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
                 "automatic-gain-switch",
                 "Automatic gain",
                 options.automatic_gain,
-                editable,
+                true,
                 k,
                 |s, on| processing_with(s, |o| o.automatic_gain = on),
             ),
@@ -2463,7 +2455,7 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
                 "echo-cancellation-switch",
                 "Echo cancellation",
                 options.echo_cancellation,
-                editable,
+                true,
                 k,
                 |s, on| processing_with(s, |o| o.echo_cancellation = on),
             ),
@@ -2488,7 +2480,6 @@ fn processing_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row>
 
 fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Row> {
     let settings = s.transmission;
-    let editable = s.idle();
     let modes: Vec<String> = transmission::Mode::ALL
         .iter()
         .map(ToString::to_string)
@@ -2499,9 +2490,7 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
         transmission::Mode::PushToTalk if !shortcuts::supported() => {
             "Global shortcuts are unavailable here. Choose another mode.".into()
         }
-        transmission::Mode::PushToTalk if ptt_key.is_empty() => {
-            "Set a push-to-talk key under Keyboard Shortcuts.".into()
-        }
+        transmission::Mode::PushToTalk if ptt_key.is_empty() => "Set a key below to talk.".into(),
         transmission::Mode::PushToTalk => format!("Hold {ptt_key} to talk while unmuted."),
         transmission::Mode::VoiceActivation if !audio_processing::AVAILABLE => {
             "Speech detection needs Mac or Windows. Choose another mode.".into()
@@ -2522,7 +2511,7 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
                 modes,
                 Some(settings.mode.to_string().as_str()),
                 "Choose…",
-                editable,
+                true,
                 size::FORM_CONTROL,
                 move |index| {
                     Message::Transmission(transmission::Settings {
@@ -2535,6 +2524,13 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
         )
         .key("transmission-mode"),
     ];
+    // The key itself, so push-to-talk is set up in one place.
+    if settings.mode == transmission::Mode::PushToTalk && shortcuts::supported() {
+        rows.push(
+            shortcut_row(s, t, k, shortcuts::Binding::PushToTalk, "Push-to-talk key", None)
+                .key("transmission-ptt-key"),
+        );
+    }
     match settings.mode {
         transmission::Mode::Continuous => {}
         transmission::Mode::PushToTalk => rows.push(
@@ -2542,28 +2538,25 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
                 t,
                 format!("Release delay · {} ms", settings.ptt_release_ms),
                 Some("Keeps sending briefly after you let go."),
-                trailing(locked(
-                    editable,
-                    slider(
-                        t,
-                        "ptt-release",
-                        "Push-to-talk release delay",
-                        i32::from(settings.ptt_release_ms),
-                        format!("{} milliseconds", settings.ptt_release_ms),
-                        Range {
-                            min: 0,
-                            max: 500,
-                            step: 25,
-                            key_step: 25,
-                        },
-                        |s| i32::from(s.transmission.ptt_release_ms),
-                        move |value| {
-                            Message::Transmission(transmission::Settings {
-                                ptt_release_ms: value.clamp(0, 500) as u16,
-                                ..settings
-                            })
-                        },
-                    ),
+                trailing(slider(
+                    t,
+                    "ptt-release",
+                    "Push-to-talk release delay",
+                    i32::from(settings.ptt_release_ms),
+                    format!("{} milliseconds", settings.ptt_release_ms),
+                    Range {
+                        min: 0,
+                        max: 500,
+                        step: 25,
+                        key_step: 25,
+                    },
+                    |s| i32::from(s.transmission.ptt_release_ms),
+                    move |value| {
+                        Message::Transmission(transmission::Settings {
+                            ptt_release_ms: value.clamp(0, 500) as u16,
+                            ..settings
+                        })
+                    },
                 )),
             )
             .key("ptt-release"),
@@ -2573,28 +2566,25 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
                 t,
                 format!("Voice threshold · {} dBFS", settings.voice_threshold_db),
                 Some("Move right to require a louder voice."),
-                trailing(locked(
-                    editable,
-                    slider(
-                        t,
-                        "voice-threshold",
-                        "Voice activation threshold",
-                        i32::from(settings.voice_threshold_db),
-                        format!("{} decibels", settings.voice_threshold_db),
-                        Range {
-                            min: -60,
-                            max: 0,
-                            step: 1,
-                            key_step: 2,
-                        },
-                        |s| i32::from(s.transmission.voice_threshold_db),
-                        move |value| {
-                            Message::Transmission(transmission::Settings {
-                                voice_threshold_db: value.clamp(-60, 0) as i16,
-                                ..settings
-                            })
-                        },
-                    ),
+                trailing(slider(
+                    t,
+                    "voice-threshold",
+                    "Voice activation threshold",
+                    i32::from(settings.voice_threshold_db),
+                    format!("{} decibels", settings.voice_threshold_db),
+                    Range {
+                        min: -60,
+                        max: 0,
+                        step: 1,
+                        key_step: 2,
+                    },
+                    |s| i32::from(s.transmission.voice_threshold_db),
+                    move |value| {
+                        Message::Transmission(transmission::Settings {
+                            voice_threshold_db: value.clamp(-60, 0) as i16,
+                            ..settings
+                        })
+                    },
                 )),
             )
             .key("voice-threshold"),
@@ -2608,15 +2598,6 @@ fn transmission_rows(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> Vec<Ro
             )
         })
         .collect()
-}
-
-/// A control that `update` would refuse right now: shown at 42% and not interactive.
-fn locked(editable: bool, control: El) -> El {
-    if editable {
-        control
-    } else {
-        control.dim(0.42).disabled(true)
-    }
 }
 
 /// Operating-system access, with its note. Onboarding shows it too.
@@ -2697,6 +2678,12 @@ fn shortcut_row(
 ) -> El {
     let Some(capture) = s.key_capture.as_ref().filter(|c| c.binding == binding) else {
         let current = s.keybind_draft.get(binding).trim();
+        // Another app holding the key says so on its row, in place of the explanation.
+        let detail = if s.taken_shortcuts.contains(&binding) && !current.is_empty() {
+            Some("In use by another app")
+        } else {
+            detail
+        };
         let shown = row()
             .key("shortcut-value")
             .grow(1.0)
@@ -2774,29 +2761,18 @@ fn shortcut_row(
     form_row(
         t,
         label,
-        Some(if binding == shortcuts::Binding::PushToTalk {
-            "Esc to cancel · Backspace to clear"
-        } else {
-            "Esc to cancel"
-        }),
+        Some("Esc to cancel · Backspace to clear"),
         trailing(control),
     )
 }
 
-/// The mute and deafen shortcuts and their test. Onboarding shows it too.
+/// The mute, deafen and push-to-talk shortcuts. Onboarding shows it too.
 pub fn shortcut_settings(s: &App, t: &Theme, k: &Kit) -> El {
     shortcut_section(s, t, k).render(t, "").unwrap_or_else(el)
 }
 
 fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
-    let detected = match s.last_shortcut {
-        Some(shortcuts::Action::Mute) => "Detected mute / unmute",
-        Some(shortcuts::Action::Deafen) => "Detected deafen / undeafen",
-        Some(shortcuts::Action::PushToTalk(true)) => "Detected push-to-talk pressed",
-        Some(shortcuts::Action::PushToTalk(false)) => "Detected push-to-talk released",
-        None => "Press a shortcut after testing to check it",
-    };
-    Section::boxed(
+    let section = Section::boxed(
         "shortcuts",
         "Keyboard Shortcuts",
         "hotkeys keybinds keys",
@@ -2820,50 +2796,13 @@ fn shortcut_section(s: &App, t: &Theme, k: &Kit) -> Section {
                     Some("Held, not toggled. Used in push-to-talk mode."),
                 ),
             ),
-            item(
-                "global shortcuts test detect",
-                form_row(
-                    t,
-                    "Global shortcuts",
-                    Some(detected),
-                    button(
-                        t,
-                        "test-shortcuts",
-                        "Test Shortcuts",
-                        None,
-                        Variant::Secondary,
-                        s.key_capture.is_none().then_some(Message::TestHotkeys),
-                    ),
-                )
-                .key("detected"),
-            ),
         ],
-    )
-    .note(shortcut_hint(s, t).px(2.0))
-}
-
-/// The global shortcuts in force, or why they aren't.
-fn shortcut_hint(s: &App, t: &Theme) -> El {
-    if let Some(error) = &s.shortcut_error {
-        super::widgets::error_text(
-            t,
-            if shortcuts::supported() {
-                "Global shortcuts unavailable. Configure them in Settings.".into()
-            } else {
-                format!("Global shortcuts unavailable: {error}")
-            },
-        )
-    } else {
-        let mut hint = format!(
-            "Global: {} · mute/unmute   |   {} · deafen/undeafen",
-            s.keybinds.toggle_mute, s.keybinds.toggle_deafen
-        );
-        if !s.keybinds.push_to_talk.trim().is_empty() {
-            hint.push_str(&format!(
-                "   |   {} · hold to talk",
-                s.keybinds.push_to_talk
-            ));
-        }
-        super::widgets::faint(t, hint)
+    );
+    // Only trouble needs a note: the rows already say which keys do what.
+    match &s.shortcut_error {
+        Some(error) => section.note(
+            super::widgets::error_text(t, format!("Global shortcuts unavailable: {error}")).px(2.0),
+        ),
+        None => section,
     }
 }

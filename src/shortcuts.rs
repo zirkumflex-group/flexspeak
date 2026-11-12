@@ -30,31 +30,25 @@ impl Default for Keybinds {
 }
 
 impl Keybinds {
-    pub fn parse(&self) -> Result<Vec<HotKey>> {
-        let mute: HotKey = self
-            .toggle_mute
-            .trim()
-            .parse()
-            .context("Invalid mute shortcut")?;
-        let deafen: HotKey = self
-            .toggle_deafen
-            .trim()
-            .parse()
-            .context("Invalid deafen shortcut")?;
-        if mute.id() == deafen.id() {
-            bail!("Mute, deafen and push-to-talk must use different shortcuts.");
-        }
-        let mut keys = vec![mute, deafen];
-        if !self.push_to_talk.trim().is_empty() {
-            let ptt: HotKey = self
-                .push_to_talk
-                .trim()
+    /// The keys that are set, each with its action. Any of them may be left empty.
+    pub fn parse(&self) -> Result<Vec<(Binding, HotKey)>> {
+        let mut keys: Vec<(Binding, HotKey)> = Vec::new();
+        for (binding, what) in [
+            (Binding::Mute, "mute"),
+            (Binding::Deafen, "deafen"),
+            (Binding::PushToTalk, "push-to-talk"),
+        ] {
+            let shortcut = self.get(binding).trim();
+            if shortcut.is_empty() {
+                continue;
+            }
+            let key: HotKey = shortcut
                 .parse()
-                .context("Invalid push-to-talk shortcut")?;
-            if keys.iter().any(|key| key.id() == ptt.id()) {
+                .with_context(|| format!("Invalid {what} shortcut"))?;
+            if keys.iter().any(|(_, other)| other.id() == key.id()) {
                 bail!("Mute, deafen and push-to-talk must use different shortcuts.");
             }
-            keys.push(ptt);
+            keys.push((binding, key));
         }
         Ok(keys)
     }
@@ -171,18 +165,18 @@ pub enum Action {
 
 #[derive(Default)]
 struct Edges {
-    ids: Vec<u32>,
+    ids: Vec<(Binding, u32)>,
     down: [bool; 3],
 }
 
 impl Edges {
-    fn bind(&mut self, ids: Vec<u32>) {
+    fn bind(&mut self, ids: Vec<(Binding, u32)>) {
         let mut down = [false; 3];
-        for (index, id) in ids.iter().enumerate() {
+        for (index, (_, id)) in ids.iter().enumerate() {
             down[index] = self
                 .ids
                 .iter()
-                .position(|old| old == id)
+                .position(|(_, old)| old == id)
                 .is_some_and(|old| self.down[old]);
         }
         self.ids = ids;
@@ -190,15 +184,16 @@ impl Edges {
     }
 
     fn event(&mut self, event: GlobalHotKeyEvent) -> Option<Action> {
-        let index = self.ids.iter().position(|id| *id == event.id)?;
+        let index = self.ids.iter().position(|(_, id)| *id == event.id)?;
+        let binding = self.ids[index].0;
         let pressed = event.state == HotKeyState::Pressed;
         let was_down = std::mem::replace(&mut self.down[index], pressed);
-        if index == 2 {
+        if binding == Binding::PushToTalk {
             return (pressed != was_down || (cfg!(windows) && pressed))
                 .then_some(Action::PushToTalk(pressed));
         }
         // Windows uses MOD_NOREPEAT; its synthetic release can arrive after a fast second tap.
-        (pressed && (cfg!(windows) || !was_down)).then_some(if index == 0 {
+        (pressed && (cfg!(windows) || !was_down)).then_some(if binding == Binding::Mute {
             Action::Mute
         } else {
             Action::Deafen
@@ -208,8 +203,8 @@ impl Edges {
 
 pub struct Shortcuts {
     manager: Option<GlobalHotKeyManager>,
-    /// The keys asked for: mute, deafen, then push-to-talk if set.
-    bindings: Vec<HotKey>,
+    /// The keys asked for, each with its action; one left empty has none.
+    bindings: Vec<(Binding, HotKey)>,
     /// Those of them another app holds. The rest work, and these are tried again until free.
     taken: Vec<HotKey>,
     edges: Arc<Mutex<Edges>>,
@@ -254,9 +249,9 @@ impl Shortcuts {
     pub fn configure(&mut self, keys: &Keybinds) -> Result<()> {
         let next = keys.parse()?;
         if !supported() {
-            bail!("Global shortcuts currently support Linux X11, not native Wayland.");
+            bail!("Global shortcuts need X11; native Wayland is not supported.");
         }
-        if self.bindings.as_slice() == next {
+        if self.bindings == next {
             return Ok(());
         }
         if self.manager.is_none() {
@@ -267,11 +262,12 @@ impl Shortcuts {
         let held: Vec<HotKey> = self
             .bindings
             .iter()
-            .copied()
+            .map(|(_, key)| *key)
             .filter(|key| !self.taken.contains(key))
             .collect();
         // Release old keys first, so a key moving to another action is free to take again.
-        for key in held.iter().filter(|key| !next.contains(key)) {
+        let wanted: Vec<HotKey> = next.iter().map(|(_, key)| *key).collect();
+        for key in held.iter().filter(|key| !wanted.contains(key)) {
             if let Err(error) = manager.unregister(*key) {
                 self.disable();
                 bail!(
@@ -281,7 +277,7 @@ impl Shortcuts {
         }
         // A key another app holds doesn't stop the others: it's tried again until it's free.
         let mut taken = Vec::new();
-        for key in next.iter().filter(|key| !held.contains(key)) {
+        for key in wanted.iter().filter(|key| !held.contains(key)) {
             if let Err(error) = manager.register(*key) {
                 tracing::info!(%key, %error, "Global shortcut is taken");
                 taken.push(*key);
@@ -290,9 +286,9 @@ impl Shortcuts {
         self.edges
             .lock()
             .unwrap()
-            .bind(next.iter().map(HotKey::id).collect());
+            .bind(next.iter().map(|(binding, key)| (*binding, key.id())).collect());
         self.ptt.store(false, Ordering::Release);
-        self.bindings = next.to_vec();
+        self.bindings = next;
         self.taken = taken;
         Ok(())
     }
@@ -311,13 +307,8 @@ impl Shortcuts {
     pub fn taken(&self) -> Vec<Binding> {
         self.bindings
             .iter()
-            .enumerate()
             .filter(|(_, key)| self.taken.contains(key))
-            .map(|(index, _)| match index {
-                0 => Binding::Mute,
-                1 => Binding::Deafen,
-                _ => Binding::PushToTalk,
-            })
+            .map(|(binding, _)| *binding)
             .collect()
     }
 
@@ -327,8 +318,8 @@ impl Shortcuts {
         let released = self.manager.as_ref().is_none_or(|manager| {
             self.bindings
                 .iter()
-                .filter(|key| !self.taken.contains(key))
-                .all(|key| manager.unregister(*key).is_ok())
+                .filter(|(_, key)| !self.taken.contains(key))
+                .all(|(_, key)| manager.unregister(*key).is_ok())
         });
         if !released {
             self.disable();
@@ -340,12 +331,15 @@ impl Shortcuts {
         self.taken.clear();
     }
 
+    /// Whether the shortcuts are registered, as far as any are set.
     pub fn is_active(&self) -> bool {
-        self.bindings.len() >= 2
+        self.manager.is_some()
     }
 
     pub fn has_ptt(&self) -> bool {
-        self.bindings.len() == 3
+        self.bindings
+            .iter()
+            .any(|(binding, _)| *binding == Binding::PushToTalk)
     }
 
     fn disable(&mut self) {
@@ -461,12 +455,31 @@ mod tests {
             .parse()
             .is_ok()
         );
+        // Any shortcut may be left empty.
+        let cleared = Keybinds {
+            toggle_mute: String::new(),
+            ..Keybinds::default()
+        }
+        .parse()
+        .unwrap();
+        assert_eq!(
+            cleared.iter().map(|(binding, _)| *binding).collect::<Vec<_>>(),
+            [Binding::Deafen, Binding::PushToTalk]
+        );
+    }
+
+    /// Key ids for mute, deafen and push-to-talk, in that order.
+    fn ids(keys: &[u32]) -> Vec<(Binding, u32)> {
+        [Binding::Mute, Binding::Deafen, Binding::PushToTalk]
+            .into_iter()
+            .zip(keys.iter().copied())
+            .collect()
     }
 
     #[test]
     fn a_held_key_toggles_once_and_unrelated_keys_are_ignored() {
         let mut edges = Edges {
-            ids: vec![10, 20, 30],
+            ids: ids(&[10, 20, 30]),
             down: [false; 3],
         };
         let event = |id, state| GlobalHotKeyEvent { id, state };
@@ -488,7 +501,7 @@ mod tests {
             edges.event(event(20, HotKeyState::Pressed)),
             Some(Action::Deafen)
         );
-        edges.bind(vec![20, 10, 30]);
+        edges.bind(ids(&[20, 10, 30]));
         #[cfg(not(windows))]
         assert_eq!(edges.event(event(10, HotKeyState::Pressed)), None);
         assert_eq!(edges.event(event(10, HotKeyState::Released)), None);
@@ -501,7 +514,7 @@ mod tests {
     #[test]
     fn push_to_talk_emits_both_edges_without_repeated_releases() {
         let mut edges = Edges::default();
-        edges.bind(vec![10, 20, 30]);
+        edges.bind(ids(&[10, 20, 30]));
         let event = |state| GlobalHotKeyEvent { id: 30, state };
         assert_eq!(edges.event(event(HotKeyState::Released)), None);
         assert_eq!(
@@ -519,7 +532,7 @@ mod tests {
             edges.event(event(HotKeyState::Pressed)),
             Some(Action::PushToTalk(true))
         );
-        edges.bind(vec![10, 20]);
+        edges.bind(ids(&[10, 20]));
         assert_eq!(edges.event(event(HotKeyState::Released)), None);
     }
 }

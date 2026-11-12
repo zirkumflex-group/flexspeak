@@ -250,7 +250,7 @@ fn saved_servers(s: &App, t: &Theme, k: &Kit) -> El {
                 if s.server().stopping {
                     "Stopping…"
                 } else {
-                    "Stop test"
+                    "Stop Test"
                 },
                 Some(&icons::STOP),
                 Variant::Secondary,

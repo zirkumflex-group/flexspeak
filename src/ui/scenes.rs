@@ -45,7 +45,9 @@ pub const SCENES: &[Scene] = &[
     ("footer-hidden", footer_hidden),
     ("statistics", statistics),
     ("settings", settings_page),
+    ("settings-nickname-empty", settings_nickname_empty),
     ("settings-appearance", settings_appearance),
+    ("settings-general", settings_general),
     ("settings-omarchy", settings_omarchy),
     ("settings-sounds", settings_sounds),
     ("settings-sounds-pack", settings_sounds_pack),
@@ -62,14 +64,17 @@ pub const SCENES: &[Scene] = &[
     ("settings-sounds-search", settings_sounds_search),
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
+    ("settings-audio-ptt", settings_audio_ptt),
     ("settings-streaming", settings_streaming),
     ("settings-picker", settings_picker),
     ("settings-auto-connect", settings_auto_connect),
     ("server-add", server_add),
     ("server-edit", server_edit),
+    ("server-edit-remove", server_edit_remove),
     ("home-connecting", home_connecting),
     ("settings-shortcuts", settings_shortcuts),
     ("settings-shortcuts-recording", settings_shortcuts_recording),
+    ("settings-shortcuts-taken", settings_shortcuts_taken),
     ("settings-permissions", settings_permissions),
     ("settings-file", settings_file),
     ("settings-search", settings_search),
@@ -1258,11 +1263,15 @@ fn settings_more_themes(s: &mut App) {
     s.settings_query = "mocha".into();
 }
 
-/// Searching brings the sounds into view: one pack for all of them, and a switch for each group.
+/// Settings › Sounds: one pack for all of them, and a switch for each group.
 fn settings_sounds(s: &mut App) {
     connected(s);
-    s.settings_page = Some(SettingsPage::Audio);
-    s.settings_query = "sound cues".into();
+    s.settings_page = Some(SettingsPage::Sounds);
+}
+
+/// Settings › General: the tray icon and running setup again.
+fn settings_general(s: &mut App) {
+    settings_at(s, SettingsPage::General);
 }
 
 /// Ten hours of a busy server, running past midnight.
@@ -1386,6 +1395,20 @@ fn settings_audio(s: &mut App) {
     settings_at(s, SettingsPage::Audio);
 }
 
+/// Push to talk chosen: its key is set right there, under the mode.
+fn settings_audio_ptt(s: &mut App) {
+    settings_at(s, SettingsPage::Audio);
+    s.transmission.mode = crate::transmission::Mode::PushToTalk;
+}
+
+/// An emptied nickname, committed: the reason shows under the field.
+fn settings_nickname_empty(s: &mut App) {
+    settings_page(s);
+    let _ = s.update(crate::Message::Nickname(String::new()));
+    let _ = s.update(crate::Message::CommitNickname);
+    s.sync_fields();
+}
+
 /// Settings > Streaming with both options on.
 fn settings_streaming(s: &mut App) {
     settings_at(s, SettingsPage::Streaming);
@@ -1417,6 +1440,12 @@ fn server_edit(s: &mut App) {
     s.sync_fields();
 }
 
+/// Remove pressed once in Edit Server: the second press removes the server.
+fn server_edit_remove(s: &mut App) {
+    server_edit(s);
+    let _ = s.update(crate::Message::RemoveServer);
+}
+
 /// Connecting to the second server: the others wait for it.
 fn home_connecting(s: &mut App) {
     home(s);
@@ -1446,6 +1475,14 @@ fn settings_shortcuts(s: &mut App) {
     s.sync_fields();
 }
 
+/// Mute cleared, and another app holding the deafen shortcut.
+fn settings_shortcuts_taken(s: &mut App) {
+    settings_shortcuts(s);
+    s.keybind_draft.toggle_mute.clear();
+    s.taken_shortcuts = vec![crate::shortcuts::Binding::Deafen];
+    s.sync_fields();
+}
+
 /// A mix of answers, to show the same live status outside setup.
 fn settings_permissions(s: &mut App) {
     settings_at(s, SettingsPage::Permissions);
@@ -1454,7 +1491,7 @@ fn settings_permissions(s: &mut App) {
 
 fn settings_file(s: &mut App) {
     settings_at(s, SettingsPage::File);
-    s.settings_message = Some("Settings saved".into());
+    s.settings_message = Some("Settings reloaded".into());
 }
 
 /// A query that finds rows in several categories.
@@ -2649,10 +2686,14 @@ fn update_install_failed(s: &mut App) {
     );
 }
 
-/// Settings with a downloaded build waiting and the notice closed.
+/// Settings with a downloaded build waiting and the notice closed. What's New leads with the
+/// waiting build's notes.
 fn update_settings(s: &mut App) {
     settings_at(s, SettingsPage::Updates);
     with_update(s, Phase::Ready);
+    if let Some(release) = &mut s.updater.release {
+        *release.notes = demo_notes();
+    }
     s.updater.dismissed = true;
 }
 
@@ -3108,8 +3149,8 @@ mod tests {
 
     #[test]
     #[cfg(any(windows, target_os = "macos"))]
-    fn the_tray_icon_stays_on_until_switched_off_in_appearance() {
-        let mut rt = runtime(settings_appearance, (1000.0, 1500.0));
+    fn the_tray_icon_stays_on_until_switched_off_in_general() {
+        let mut rt = runtime(settings_general, (1000.0, 1500.0));
         settle(&mut rt);
         assert!(!rt.state.appearance.hide_tray_icon, "on by default");
         assert!(rt.state.tray_status().is_some());
@@ -3118,7 +3159,7 @@ mod tests {
         let path = root.join("settings.json");
         crate::settings::save(&path, &crate::settings::Settings::default()).unwrap();
         rt.state.settings_path = Some(path.clone());
-        scroll_into_view(&mut rt, "settings-body-Appearance", "tray-icon");
+        scroll_into_view(&mut rt, "settings-body-General", "tray-icon");
         click(&mut rt, "tray-icon");
         assert!(rt.state.appearance.hide_tray_icon);
         assert!(rt.state.tray_status().is_none(), "no icon once it's off");
@@ -3139,6 +3180,8 @@ mod tests {
         let path = root.join("settings.json");
         crate::settings::save(&path, &crate::settings::Settings::default()).unwrap();
         rt.state.settings_path = Some(path.clone());
+        // Motion follows More Themes, below the fold.
+        scroll_into_view(&mut rt, "settings-body-Appearance", "disable-animations");
         click(&mut rt, "disable-animations");
         assert!(rt.state.appearance.disable_animations);
         let saved = crate::settings::load(&path).unwrap().unwrap();
@@ -3864,6 +3907,16 @@ mod tests {
         assert!(rt.find("permission-0").is_some());
         search(&mut rt, "bluetooth");
         assert!(rt.find("no-results").is_some());
+        // Each page's results are headed by its name.
+        search(&mut rt, "password");
+        assert!(rt.find("edit-server-0").is_some());
+        assert!(rt.find("results-Server").is_some());
+        search(&mut rt, "auto connect");
+        assert!(rt.find("edit-server-0").is_some());
+        // History is the chat's, not the changelog's or the error log's.
+        search(&mut rt, "history");
+        assert!(rt.find("chat-history-clear").is_some());
+        assert!(rt.find("results-Updates").is_none() && rt.find("results-Error Log").is_none());
     }
 
     #[test]
@@ -3889,7 +3942,7 @@ mod tests {
         press(&mut rt, "add-server");
         assert_eq!(rt.state.settings_page, Some(SettingsPage::Server));
         assert_eq!(rt.state.server_editor.as_ref().unwrap().index, None);
-        key(&mut rt, rune::Key::Escape, false);
+        // Settings opened only for the dialog, so it closes with it.
         key(&mut rt, rune::Key::Escape, false);
         assert_eq!(rt.state.settings_page, None);
         press(&mut rt, "connect-1");
@@ -3948,7 +4001,7 @@ mod tests {
     // The switches exist only where WebRTC processing is built (Mac and Windows).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn processing_switches_apply_while_idle_and_lock_during_a_session() {
+    fn processing_switches_apply_while_idle_and_during_a_session() {
         let mut rt = runtime(settings_audio, (900.0, 2000.0));
         for _ in 0..10 {
             rt.frame(1.0 / 30.0);
@@ -3964,17 +4017,21 @@ mod tests {
             crate::audio_processing::AVAILABLE
         );
         let before = rt.state.audio_processing;
-        let id = add_session(&mut rt.state, "Locked", "locked.example");
+        let id = add_session(&mut rt.state, "Busy", "busy.example");
         rt.state.activate(Some(id));
         for _ in 0..10 {
             rt.frame(1.0 / 30.0);
         }
-        if let Some((x, y)) = rt.find("echo-cancellation-switch") {
-            rt.pointer_down(x, y);
-            rt.pointer_up(x, y);
-            rt.frame(1.0 / 60.0);
-        }
-        assert_eq!(rt.state.audio_processing, before);
+        let (x, y) = rt
+            .find("echo-cancellation-switch")
+            .expect("echo cancellation switch");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(
+            rt.state.audio_processing.echo_cancellation,
+            before.echo_cancellation != crate::audio_processing::AVAILABLE
+        );
     }
 
     /// The connected scene with enough streams to overflow the pane, whether or not this
