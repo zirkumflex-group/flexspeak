@@ -47,7 +47,8 @@ tracing = "0.1"
 hickory-net = "0.26"
 hickory-resolver = "0.26"
 ts-bookkeeping = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5", version = "0.1" }
-tsproto = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5", version = "0.2" }
+# Patched: see vendor/tsproto/FLEXSPEAK-PATCH.md.
+tsproto = { path = "../tsproto", version = "0.2" }
 tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5", version = "0.1" }
 tsproto-types = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5", version = "0.1" }
 url = "2"

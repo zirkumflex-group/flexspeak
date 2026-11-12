@@ -9,7 +9,7 @@ description = "A minimal native TeamSpeak voice client"
 # workspace of its own, with its own lock file, so its image builds without the app.
 [workspace]
 members = [".", "crates/monster-core"]
-exclude = ["vendor/tsclientlib", "server"]
+exclude = ["vendor/tsclientlib", "vendor/tsproto", "server"]
 
 [dependencies]
 anyhow = "1"

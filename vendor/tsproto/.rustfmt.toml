@@ -1,0 +1,5 @@
+edition = "2018"
+newline_style = "Unix"
+hard_tabs = true
+use_small_heuristics = "Max"
+use_try_shorthand = true
