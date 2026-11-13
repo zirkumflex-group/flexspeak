@@ -57,6 +57,9 @@ pub struct Config {
     pub address: String,
     pub nickname: String,
     pub password: String,
+    /// The channel to be placed in on arrival, with its password: the server puts you there
+    /// instead of its default channel, or in that one when it can't.
+    pub channel: Option<(u64, String)>,
     pub input: DeviceChoice,
     pub output: DeviceChoice,
 }
@@ -1245,12 +1248,18 @@ async fn run_connection(
         return Ok(());
     }
     let _ = events.try_send(Event::Status("Resolving server and connecting…".into()));
-    let mut connection = Connection::build(config.address)
+    let mut options = Connection::build(config.address)
         .name(config.nickname)
         .identity(load_identity()?)
         .password(config.password)
-        .input_muted(true)
-        .connect()?;
+        .input_muted(true);
+    if let Some((channel, password)) = config.channel {
+        options = options.channel_id(ChannelId(channel));
+        if !password.is_empty() {
+            options = options.channel_password(password);
+        }
+    }
+    let mut connection = options.connect()?;
     let mut traffic = TrafficMeter::new(Instant::now());
     let mut reported_transmission = false;
     let flow = Rc::new(RefCell::new(Flow::default()));
