@@ -46,6 +46,8 @@ pub enum Source {
     Moderate,
     Groups,
     Install,
+    /// The log folder couldn't be shown, or a diagnostics bundle couldn't be saved.
+    Diagnostics,
 }
 
 /// How much a problem matters, which sets its colour.
@@ -139,6 +141,7 @@ impl Source {
             Self::Moderate => "Couldn't kick or ban",
             Self::Groups => "Groups not changed",
             Self::Install => "Install failed",
+            Self::Diagnostics => "Diagnostics not saved",
         }
     }
 }
@@ -312,6 +315,19 @@ impl Alerts {
             );
         }
         let incident = &self.incidents[&key];
+        // Every problem shown also goes to the log file, with the server it happened on.
+        let level = incident.source.severity();
+        let (heading, detail) = (incident.heading(), &incident.detail);
+        let (source, address) = (incident.source, incident.address.as_deref().unwrap_or(""));
+        let reports = incident.reports;
+        match level {
+            Severity::Error => tracing::error!(
+                target: "flexspeak::alerts", ?source, address, reports, detail, "{heading}"
+            ),
+            _ => tracing::warn!(
+                target: "flexspeak::alerts", ?source, address, reports, detail, "{heading}"
+            ),
+        }
         self.log(
             incident.id,
             incident.heading(),
@@ -423,6 +439,12 @@ impl Alerts {
         if let Some(incident) = self.incidents.remove(key)
             && resolved
         {
+            tracing::info!(
+                target: "flexspeak::alerts",
+                source = ?incident.source,
+                "recovered: {}",
+                incident.heading()
+            );
             self.resolve(incident.id);
         }
     }

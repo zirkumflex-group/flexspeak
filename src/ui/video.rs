@@ -89,6 +89,7 @@ impl Videos {
         }
         let key = f.device_key();
         if self.gpu.as_ref().is_none_or(|(k, _)| *k != key) {
+            tracing::info!(gpu = rune::describe_gpu(f.device), "video drawn on");
             let entries: Vec<_> = (0..4)
                 .map(|binding| wgpu::BindGroupLayoutEntry {
                     binding,

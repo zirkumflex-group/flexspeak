@@ -102,6 +102,10 @@ pub struct Settings {
     /// signing out, so the next account starts by comparing.
     #[serde(skip_serializing_if = "is_zero")]
     pub settings_sync_version: i64,
+    /// Settings > Error Log: the log file gets debug detail too (`crate::diagnostics`). Stays
+    /// on this computer; saved straight away when changed, like `footer_hidden`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub debug_logging: bool,
 }
 
 /// What the window's close button does while connected (Settings > Appearance > Window).
@@ -745,8 +749,21 @@ impl Default for Settings {
             monster_session: None,
             retired_settings_sync: None,
             settings_sync_version: 0,
+            debug_logging: false,
         }
     }
+}
+
+/// Whether the saved settings turn debug logging on, read before anything else so the log
+/// has the detail from the first line. Only that one value is looked at: a file that doesn't
+/// load otherwise is reported later, by the app.
+pub fn debug_logging_saved() -> bool {
+    path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|value| value.get("debug_logging")?.as_bool())
+        .unwrap_or(false)
 }
 
 impl Settings {
