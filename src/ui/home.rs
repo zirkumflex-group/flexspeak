@@ -1958,7 +1958,7 @@ fn spacer_row(t: &Theme, id: u64, spacer: &client::Spacer) -> El {
         .child(line)
 }
 
-/// Right-clicking a channel: join it, or fold it.
+/// Right-clicking a channel: join it, fold it, or make it the one you join on connecting.
 fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some((id, point)) = s.ui.channel_menu else {
         return;
@@ -1979,6 +1979,7 @@ fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
             .get(index + 1)
             .is_some_and(|next| next.depth > channel.depth);
     let collapsed = s.server().collapsed_channels.contains(&id);
+    let default = s.default_channel() == Some(id);
     let mut join = MenuItem::new("Join")
         .icon(&icons::CONNECT)
         .disabled(current || !s.can_request_join(id))
@@ -2005,6 +2006,16 @@ fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     s.ui.channel_menu = None;
                     dispatch(s, tx, Message::ToggleChannel(id));
+                }),
+        )
+        .separator()
+        .item(
+            MenuItem::new("Join on Connect")
+                .checked(default)
+                .disabled(!s.server_saved())
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    s.ui.channel_menu = None;
+                    dispatch(s, tx, Message::DefaultChannel((!default).then_some(id)));
                 }),
         );
     let _ = menu.build(k, layer);

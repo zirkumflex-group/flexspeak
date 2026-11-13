@@ -965,6 +965,14 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
                         .truncate_fade(),
                 );
             }
+            if let Some(channel) = &server.default_channel {
+                names = names.child(
+                    text(format!("Joins {} on connect", channel.name))
+                        .font(ty::CAPTION)
+                        .color(t.faint)
+                        .truncate_fade(),
+                );
+            }
             let e = row()
                 .key(format!("saved-server-{index}"))
                 .w_full()
@@ -1031,7 +1039,7 @@ fn servers_section(s: &App, t: &Theme, k: &Kit) -> Section {
             item(
                 server.title(),
                 format!(
-                    "server {} {} auto connect launch startup password",
+                    "server {} {} auto connect launch startup password default channel",
                     server.name, server.address
                 ),
                 e,
