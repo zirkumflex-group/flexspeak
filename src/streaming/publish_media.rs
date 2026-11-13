@@ -1094,6 +1094,15 @@ mod native {
         let hardware_av1 = codecs
             .first()
             .is_some_and(|c| c.mime_type.eq_ignore_ascii_case("video/AV1"));
+        tracing::info!(
+            codecs = ?codecs.iter().map(|c| c.mime_type.as_str()).collect::<Vec<_>>(),
+            hardware_av1,
+            asked_hardware_av1 = options.hardware_av1,
+            fast_capture = options.fast_capture,
+            quality = ?options.quality,
+            camera = options.source.kind.is_camera(),
+            "share starting"
+        );
         // The official TS6 client silently drops an offer without an audio section, so a share
         // without system audio still negotiates this track and simply never feeds it.
         let audio = NativeAudioSource::new(AudioSourceOptions::default(), 48000, 2, 50);

@@ -253,6 +253,7 @@ pub const SCENES: &[Scene] = &[
     ("alert-settings", alert_settings),
     ("settings-error-log", settings_error_log),
     ("settings-error-log-empty", settings_error_log_empty),
+    ("settings-diagnostics-debug", settings_diagnostics_debug),
     ("update-available", update_available),
     ("update-whats-new", update_whats_new),
     ("update-downloading", update_downloading),
@@ -2042,6 +2043,7 @@ fn settings_page(s: &mut App) {
 fn settings_at(s: &mut App, page: SettingsPage) {
     saved(s);
     s.settings_path = Some("/Users/jan/Library/Application Support/Flexspeak/settings.json".into());
+    s.log_folder = Some("/Users/jan/Library/Application Support/Flexspeak/logs".into());
     s.open_settings(page);
 }
 
@@ -3458,6 +3460,14 @@ fn settings_error_log_empty(s: &mut App) {
     settings_at(s, SettingsPage::Errors);
 }
 
+/// Debug logging on, and a diagnostics bundle just saved for a bug report.
+fn settings_diagnostics_debug(s: &mut App) {
+    settings_at(s, SettingsPage::Errors);
+    s.debug_logging = true;
+    s.diagnostics_path =
+        Some("/Users/jan/Downloads/flexspeak-diagnostics-20261113-142210.zip".into());
+}
+
 /// A session where a few things went wrong: some recovered, one repeated.
 fn settings_error_log(s: &mut App) {
     connected(s);
@@ -3496,6 +3506,7 @@ fn settings_error_log(s: &mut App) {
         alerts
     };
     s.settings_path = Some("/Users/jan/Library/Application Support/Flexspeak/settings.json".into());
+    s.log_folder = Some("/Users/jan/Library/Application Support/Flexspeak/logs".into());
     s.open_settings(SettingsPage::Errors);
 }
 

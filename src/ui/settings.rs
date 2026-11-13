@@ -409,9 +409,97 @@ fn sections(
             ),
         ],
         SettingsPage::General => general_sections(s, t, k),
-        SettingsPage::Errors => vec![error_log_section(s, t)],
+        SettingsPage::Errors => vec![diagnostics_section(s, t, k), error_log_section(s, t)],
         SettingsPage::File => vec![file_section(s, t)],
     }
+}
+
+/// The log file: how much goes in it, where it is, and a bundle of it for a bug report.
+fn diagnostics_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    let forced = crate::diagnostics::env_override();
+    let folder = &s.log_folder;
+    let location = folder
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "Unavailable".into());
+    let saved = s
+        .diagnostics_path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| format!("Saved {}; its folder is open.", name.to_string_lossy()));
+    let rows = vec![
+        item(
+            "Debug logging",
+            "debug logging verbose detail log file experimental developer trace",
+            form_row(
+                t,
+                "Debug logging",
+                Some(if forced {
+                    "RUST_LOG decides what is written while it is set."
+                } else {
+                    "Also writes what you click and choose, and every connection and stream detail. Stays on until you turn it off."
+                }),
+                switch(
+                    "debug-logging",
+                    "Debug logging",
+                    s.debug_logging,
+                    !forced,
+                    k,
+                    |_, on| Message::DebugLogging(on),
+                ),
+            ),
+        ),
+        item(
+            "Log files",
+            "log files folder location path open logs",
+            form_row(
+                t,
+                "Log files",
+                Some(location.as_str()),
+                button(
+                    t,
+                    "open-log-folder",
+                    "Open Folder",
+                    Some(&icons::FOLDER_OPEN),
+                    Variant::Secondary,
+                    folder.as_ref().map(|_| Message::OpenLogFolder),
+                ),
+            ),
+        ),
+        item(
+            "Diagnostics",
+            "diagnostics bug report zip save export share logs",
+            form_row(
+                t,
+                "Diagnostics",
+                Some(saved.as_deref().unwrap_or(
+                    "Zips recent logs, your settings without passwords and the Error Log into Downloads, for a bug report.",
+                )),
+                button(
+                    t,
+                    "save-diagnostics",
+                    if s.diagnostics_saving {
+                        "Saving\u{2026}"
+                    } else {
+                        "Save Diagnostics"
+                    },
+                    Some(&icons::DOWNLOAD),
+                    Variant::Secondary,
+                    (!s.diagnostics_saving).then_some(Message::SaveDiagnostics),
+                ),
+            ),
+        ),
+    ];
+    Section::boxed(
+        "diagnostics",
+        "Diagnostics",
+        "diagnostics debug logging log files bug report",
+        rows,
+    )
+    .note(group_note(
+        t,
+        "Every run is logged on this computer. Logs older than 30 days go, and the oldest go first past 256 MB.",
+    ))
 }
 
 /// Every problem since launch, newest first, including ones whose notice has gone.

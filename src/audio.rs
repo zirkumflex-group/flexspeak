@@ -376,6 +376,19 @@ impl AudioEngine {
         let output_config =
             config(&output_device, false).context("No usable playback configuration")?;
         let processor = Processor::new(processing)?;
+        tracing::info!(
+            input = input.name.as_str(),
+            input_rate = input_config.sample_rate(),
+            input_channels = input_config.channels(),
+            input_format = ?input_config.sample_format(),
+            output = output.name.as_str(),
+            output_rate = output_config.sample_rate(),
+            output_channels = output_config.channels(),
+            output_format = ?output_config.sample_format(),
+            ?processing,
+            ?transmission,
+            "audio devices opening"
+        );
         let discontinuity = Arc::new(AtomicBool::new(false));
         let capture = Arc::new(Capture {
             samples: ArrayQueue::new(input_config.sample_rate() as usize / 4),

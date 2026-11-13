@@ -10,6 +10,7 @@ mod chat_store;
 mod client;
 mod command_flow;
 mod connection_charts;
+mod diagnostics;
 mod hub;
 mod icons;
 mod install;
@@ -72,13 +73,14 @@ const RESUME_CHANNEL_WAIT: std::time::Duration = std::time::Duration::from_secs(
 const TOAST_GAP: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "flexspeak=info,tsclientlib=warn,tsproto=warn".into()),
-        )
-        .init();
     let args: Vec<_> = std::env::args().skip(1).collect();
+    // The client and `--probe` keep a log file; previews and the other tools only print.
+    let logged = match args.first().map(String::as_str) {
+        None | Some("--probe") => true,
+        Some(first) => first == autostart::MINIMIZED,
+    } && !args.iter().any(|arg| ui::is_tool_flag(arg));
+    let terminal = !logged || args.first().is_some_and(|arg| arg == "--probe");
+    diagnostics::init(logged, logged && settings::debug_logging_saved(), terminal);
     match args.first().map(String::as_str) {
         Some("--list-devices") => {
             let devices = audio::devices()?;
@@ -109,11 +111,16 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("--probe") => {
-            return client::probe(
+            let probed = client::probe(
                 args.get(1)
                     .map(String::as_str)
                     .unwrap_or("ts.zirkumflex.io"),
             );
+            if let Err(error) = &probed {
+                tracing::error!("Probe failed: {error:#}");
+            }
+            diagnostics::session_end();
+            return probed;
         }
         Some("--help" | "-h") => {
             println!(
@@ -142,8 +149,10 @@ fn main() -> anyhow::Result<()> {
     if !tool {
         // A second launch brings the running window forward, from the tray too, and ends.
         if !rune::single_instance("io.venator.flexspeak") {
+            diagnostics::discard();
             return Ok(());
         }
+        diagnostics::tidy_later();
         session_end::install();
         tray::allow();
     }
@@ -151,6 +160,7 @@ fn main() -> anyhow::Result<()> {
         restore_place: !tool,
         minimized: !tool && args.iter().any(|arg| arg == autostart::MINIMIZED),
     });
+    diagnostics::session_end();
     Ok(())
 }
 
@@ -310,6 +320,14 @@ struct App {
     trace_summary: Option<profiler::TraceSummary>,
     trace_path: Option<PathBuf>,
     trace_saving: bool,
+    /// The log file gets debug detail too; saved straight away when changed.
+    debug_logging: bool,
+    /// A diagnostics bundle is being zipped.
+    diagnostics_saving: bool,
+    /// The last diagnostics bundle saved this run.
+    diagnostics_path: Option<PathBuf>,
+    /// Where the log files are (`diagnostics::folder`).
+    log_folder: Option<PathBuf>,
     updater: updater::Updater,
     /// Where to return after an update's restart, until it has been reached.
     resume: Option<resume::Resume>,
@@ -665,8 +683,173 @@ impl SettingsPage {
             Self::Permissions => "Permissions",
             Self::General => "General",
             Self::Updates => "Updates",
-            Self::Errors => "Error Log",
+            Self::Errors => "Diagnostics",
             Self::File => "Settings File",
+        }
+    }
+}
+
+/// Writes what you did to the log, by the message's name only, with debug logging on. Typing
+/// and chat would say what you wrote, and ticks and backend events say nothing about you, so
+/// those stay out; `trace_event` logs backend events.
+fn trace_message(message: &Message) {
+    if !tracing::enabled!(target: "flexspeak::ui", tracing::Level::DEBUG) {
+        return;
+    }
+    let quiet = matches!(
+        message,
+        Message::Backend(..)
+            | Message::UsageTick
+            | Message::MonsterRevealTick(_)
+            | Message::UnboxTick
+            | Message::SettingsTargetSeen(_)
+            | Message::Address(_)
+            | Message::Nickname(_)
+            | Message::Password(_)
+            | Message::ChannelPassword(_)
+            | Message::ServerName(_)
+            | Message::ServerAddress(_)
+            | Message::ServerPassword(_)
+            | Message::PromptPassword(_)
+            | Message::PokeText(_)
+            | Message::ModerationReason(_)
+            | Message::LogQuery(_)
+            | Message::MonsterSearch(_)
+            | Message::SettingsSearch(_)
+            | Message::SharePreview(..)
+            | Message::Chat(_)
+    );
+    if quiet {
+        return;
+    }
+    // Only the variant's name and plain values: a name, a number, a switch. Text payloads
+    // are cut at the first quote so nothing typed or received is written.
+    let text = format!("{message:?}");
+    let shown = match text.find('"') {
+        Some(quote) => &text[..quote],
+        None => &text,
+    };
+    let shown: String = shown.chars().take(160).collect();
+    tracing::debug!(target: "flexspeak::ui", action = shown.as_str(), "ui");
+}
+
+/// Writes a server connection's events to the log: what it was told and why it stopped at
+/// info, and its measurements with debug logging on. Chat and pokes are noted without text.
+fn trace_event(id: hub::SessionId, event: &client::Event) {
+    use client::Event;
+    let session = id.0;
+    match event {
+        Event::Status(status) => {
+            tracing::info!(target: "flexspeak::connection", session, status = status.as_str(), "status")
+        }
+        Event::Connected(name) => {
+            tracing::info!(target: "flexspeak::connection", session, server = name.as_str(), "connected")
+        }
+        Event::Warning { source, detail } => tracing::warn!(
+            target: "flexspeak::connection", session, ?source, detail = detail.as_str(), "warning"
+        ),
+        Event::Recovered(source) => {
+            tracing::info!(target: "flexspeak::connection", session, ?source, "recovered")
+        }
+        Event::Limited => {
+            tracing::warn!(target: "flexspeak::connection", session, "server is slowing requests")
+        }
+        Event::ChannelPasswordRequired(channel) => tracing::info!(
+            target: "flexspeak::connection", session, channel, "channel password required"
+        ),
+        Event::Refused(refusal) => {
+            tracing::warn!(target: "flexspeak::connection", session, ?refusal, "refused")
+        }
+        Event::PermissionDenied => {
+            tracing::info!(target: "flexspeak::connection", session, "permission denied")
+        }
+        Event::Done(source) => {
+            tracing::debug!(target: "flexspeak::connection", session, ?source, "done")
+        }
+        Event::Stopped(reason) => match reason {
+            Some((source, detail)) => tracing::warn!(
+                target: "flexspeak::connection", session, ?source, detail = detail.as_str(), "stopped"
+            ),
+            None => tracing::info!(target: "flexspeak::connection", session, "stopped"),
+        },
+        Event::Controls { confirmed, pending } => tracing::debug!(
+            target: "flexspeak::connection", session, ?confirmed, pending, "controls"
+        ),
+        Event::Transmitting(on) => {
+            tracing::debug!(target: "flexspeak::connection", session, on, "transmitting")
+        }
+        Event::Activity(activity) => tracing::debug!(
+            target: "flexspeak::connection", session, ?activity, "activity"
+        ),
+        Event::Usage {
+            network,
+            connection,
+        } => tracing::debug!(
+            target: "flexspeak::connection", session, ?network, ?connection, "usage"
+        ),
+        Event::Poked { from, .. } => {
+            tracing::info!(target: "flexspeak::connection", session, from = from.as_str(), "poked")
+        }
+        Event::Chat(_) => tracing::debug!(target: "flexspeak::connection", session, "chat message"),
+        Event::Streaming(event) => trace_stream(session, event),
+        // Many times a second, or the whole channel tree: they say nothing a reader needs.
+        Event::State(_) | Event::Talking(_) | Event::Meter { .. } | Event::ClientUsage { .. } => {}
+    }
+}
+
+fn trace_stream(session: u64, event: &streaming::Event) {
+    use streaming::Event;
+    match event {
+        Event::Publishing(status) => {
+            tracing::info!(target: "flexspeak::stream", session, ?status, "publishing")
+        }
+        Event::Notice(notice) => {
+            tracing::info!(target: "flexspeak::stream", session, notice = notice.as_str(), "notice")
+        }
+        Event::State {
+            generation,
+            slot,
+            stream,
+            phase,
+            detail,
+        } => tracing::info!(
+            target: "flexspeak::stream",
+            session,
+            generation,
+            slot,
+            stream = stream.id.as_str(),
+            publisher = stream.publisher,
+            relayed = stream.server_relayed,
+            ?phase,
+            detail = detail.as_str(),
+            "watch"
+        ),
+        Event::Stats { generation, stats } => tracing::debug!(
+            target: "flexspeak::stream",
+            session,
+            generation,
+            codec = stats.codec.as_str(),
+            decoder = stats.decoder.as_str(),
+            ice_path = stats.ice_path.as_str(),
+            publisher_version = stats.publisher_version.as_str(),
+            fps = stats.fps,
+            width = stats.width,
+            height = stats.height,
+            packets = stats.packets,
+            bytes = stats.bytes,
+            decoded_frames = stats.decoded_frames,
+            media = ?stats.media,
+            audio = stats.audio,
+            "stats"
+        ),
+        Event::Catalog(streams) => tracing::debug!(
+            target: "flexspeak::stream",
+            session,
+            streams = ?streams.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            "catalog"
+        ),
+        Event::Streamers(streamers) => {
+            tracing::debug!(target: "flexspeak::stream", session, ?streamers, "streamers")
         }
     }
 }
@@ -1165,6 +1348,12 @@ enum Message {
     StopTrace,
     TraceSaved(Result<PathBuf, String>),
     CopyTracePath,
+    /// Settings > Error Log: debug detail in the log file.
+    DebugLogging(bool),
+    OpenLogFolder,
+    /// Zips the logs, settings without secrets and the app's state for a bug report.
+    SaveDiagnostics,
+    DiagnosticsSaved(Result<PathBuf, String>),
     Updater(updater::Event),
     /// Returns to where the app was before an update's restart.
     Resume,
@@ -1409,6 +1598,10 @@ impl App {
             trace_summary: None,
             trace_path: None,
             trace_saving: false,
+            debug_logging: false,
+            diagnostics_saving: false,
+            diagnostics_path: None,
+            log_folder: diagnostics::folder(),
             // Previews and tests never check; `new` enables real builds.
             updater: updater::Updater::new(None, Err(String::new()), true),
             resume: None,
@@ -2113,6 +2306,18 @@ impl App {
         let mut forget_session = false;
         match settings::load(&path) {
             Ok(Some(mut saved)) => {
+                tracing::info!(
+                    path = %path.display(),
+                    servers = saved.servers.len(),
+                    input = ?saved.input_device_id,
+                    output = ?saved.output_device_id,
+                    audio_processing = ?saved.audio_processing,
+                    transmission = ?saved.transmission,
+                    streaming = ?saved.streaming,
+                    share = ?saved.share,
+                    debug_logging = saved.debug_logging,
+                    "settings loaded"
+                );
                 forget_session = self.retire_typed_server(&mut saved);
                 self.settings_sync = settings_sync::SettingsSync::new(saved.settings_sync_version);
                 self.apply_settings(saved);
@@ -2626,6 +2831,8 @@ impl App {
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
         self.stream_options = saved.streaming;
+        self.debug_logging = saved.debug_logging;
+        diagnostics::set_debug(saved.debug_logging);
         self.stream_view = saved.stream_view;
         for session in &mut self.sessions {
             apply_stream_view(&mut session.streaming, saved.stream_view);
@@ -2678,6 +2885,7 @@ impl App {
             share: self.share_defaults,
             streaming: self.stream_options,
             stream_view: self.stream_view,
+            debug_logging: self.debug_logging,
             chat: self.chat_options,
             skip_install_prompt: self.never_install
                 || self
@@ -2802,26 +3010,87 @@ impl App {
 
     /// Shows the folder holding the settings file, where custom themes are added.
     fn open_settings_folder(&mut self) {
-        let Some(folder) = self.settings_path.as_deref().and_then(Path::parent) else {
+        let Some(folder) = self
+            .settings_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+        else {
             return;
         };
-        let opener = if cfg!(target_os = "macos") {
-            "open"
+        self.open_folder(&folder, None, Source::SettingsLoad);
+    }
+
+    /// Shows `folder` in the file manager, with `file` selected where the system can do that.
+    fn open_folder(&mut self, folder: &Path, file: Option<&Path>, source: Source) {
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("open");
+            match file {
+                Some(file) => command.arg("-R").arg(file),
+                None => command.arg(folder),
+            };
+            command
         } else if cfg!(windows) {
-            "explorer"
+            let mut command = Command::new("explorer");
+            match file {
+                // Explorer reads `/select,` and the path as one argument.
+                Some(file) => command.arg(format!("/select,{}", file.display())),
+                None => command.arg(folder),
+            };
+            command
         } else {
-            "xdg-open"
+            let mut command = Command::new("xdg-open");
+            command.arg(folder);
+            command
         };
-        match Command::new(opener).arg(folder).spawn() {
+        match command.spawn() {
             // Waited on elsewhere so it can't linger as a zombie.
             Ok(mut child) => {
                 std::thread::spawn(move || child.wait());
             }
             Err(error) => self.alerts.raise(
-                Source::SettingsLoad,
-                format!("Couldn't open the settings folder: {error}"),
+                source,
+                format!("Couldn't open {}: {error}", folder.display()),
             ),
         }
+    }
+
+    /// What the app is doing right now, for a diagnostics bundle: nothing typed, no secrets.
+    fn diagnostic_state(&self) -> serde_json::Value {
+        let device = |d: &Option<audio::DeviceChoice>| d.as_ref().map(|d| d.name.clone());
+        let sessions: Vec<serde_json::Value> = self
+            .sessions
+            .iter()
+            .map(|session| {
+                serde_json::json!({
+                    "address": session.address,
+                    "status": format!("{:?}", session.status),
+                    "watching": session
+                        .streaming
+                        .watching
+                        .iter()
+                        .map(|w| serde_json::json!({
+                            "stream": w.stream.id,
+                            "phase": format!("{:?}", w.phase),
+                            "detail": w.detail,
+                            "stats": format!("{:?}", w.stats),
+                        }))
+                        .collect::<Vec<_>>(),
+                    "sharing": format!("{:?}", session.streaming.sharing.status),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "input": device(&self.input),
+            "output": device(&self.output),
+            "inputs": self.devices.inputs.iter().map(|d| &d.name).collect::<Vec<_>>(),
+            "outputs": self.devices.outputs.iter().map(|d| &d.name).collect::<Vec<_>>(),
+            "audio_processing": format!("{:?}", self.audio_processing),
+            "transmission": format!("{:?}", self.transmission),
+            "streaming": format!("{:?}", self.stream_options),
+            "debug_logging": self.debug_logging,
+            "sessions": sessions,
+        })
     }
 
     /// Changes the colour scheme or themes and stores only that choice.
@@ -3164,6 +3433,23 @@ impl App {
     }
 
     fn update_software(&mut self, event: updater::Event) -> Task {
+        match &event {
+            updater::Event::Progress { .. } => {}
+            updater::Event::Checked(Ok(found)) => tracing::info!(
+                target: "flexspeak::update",
+                release = ?found.as_ref().map(|found| found.release.tag.as_str()),
+                staged = found.as_ref().is_some_and(|found| found.staged.is_some()),
+                "checked"
+            ),
+            updater::Event::Checked(Err(error))
+            | updater::Event::Downloaded {
+                result: Err(error), ..
+            }
+            | updater::Event::Installed(Err(error)) => {
+                tracing::warn!(target: "flexspeak::update", ?event, error = error.as_str(), "failed")
+            }
+            other => tracing::info!(target: "flexspeak::update", event = ?other, "update"),
+        }
         if let updater::Event::AutoDownload(on) = event {
             self.save_preference(
                 |saved| saved.auto_download_updates = on,
@@ -3541,6 +3827,7 @@ impl App {
             self.commit_nickname();
         }
         let session = self.monster.session.clone();
+        trace_message(&message);
         let task = self.update_inner(message);
         // Whatever the message added to a conversation goes to the history on disk.
         self.chat_persist();
@@ -4263,6 +4550,56 @@ impl App {
             Message::CopyTracePath => {
                 if let Some(path) = &self.trace_path {
                     return Task::Copy(path.display().to_string());
+                }
+            }
+            Message::DebugLogging(on) => {
+                self.debug_logging = on;
+                diagnostics::set_debug(on);
+                self.save_preference(
+                    |saved| saved.debug_logging = on,
+                    "Debug logging applies for now but was not saved",
+                );
+            }
+            Message::OpenLogFolder => {
+                if let Some(folder) = self.log_folder.clone() {
+                    let _ = std::fs::create_dir_all(&folder);
+                    self.open_folder(&folder, None, Source::Diagnostics);
+                }
+            }
+            Message::SaveDiagnostics => {
+                if !self.diagnostics_saving {
+                    self.diagnostics_saving = true;
+                    let report = diagnostics::Report {
+                        settings: self.settings_path.clone(),
+                        state: self.diagnostic_state(),
+                        errors: self.alerts.history_text(),
+                    };
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                diagnostics::save_bundle(report).map_err(|e| format!("{e:#}"))
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|result| result)
+                        },
+                        Message::DiagnosticsSaved,
+                    );
+                }
+            }
+            Message::DiagnosticsSaved(result) => {
+                self.diagnostics_saving = false;
+                match result {
+                    Ok(path) => {
+                        self.alerts.recover(Source::Diagnostics);
+                        let folder = path.parent().unwrap_or(&path).to_path_buf();
+                        self.open_folder(&folder, Some(&path), Source::Diagnostics);
+                        self.diagnostics_path = Some(path);
+                    }
+                    Err(error) => self.alerts.raise(
+                        Source::Diagnostics,
+                        format!("The diagnostics couldn't be saved: {error}"),
+                    ),
                 }
             }
             Message::UsageTick => {
@@ -5172,6 +5509,7 @@ impl App {
     /// One server's event. Everything here belongs to that server, active or not; only the
     /// marked places also touch what the window is showing.
     fn backend(&mut self, id: hub::SessionId, event: client::Event) -> Task {
+        trace_event(id, &event);
         let Some(index) = self.sessions.iter().position(|session| session.id == id) else {
             return Task::none();
         };

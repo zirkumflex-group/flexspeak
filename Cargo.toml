@@ -40,11 +40,15 @@ sysinfo = { version = "0.40.3", default-features = false, features = ["system"] 
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Names the `log` crate's records by their own crate in the log file (src/diagnostics.rs).
+tracing-log = "0.2"
 time = { version = "0.3", default-features = false }
 tsclientlib = { path = "vendor/tsclientlib", default-features = false, features = ["audio"] }
 # Unpacks the Windows update ZIP (less than half the size of the bare executable). The version
 # and backend webrtc-sys-build already builds.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Gzips finished log files (src/diagnostics.rs), on the backend zip already builds.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5" }
 # For saved identities that tsclientlib cannot load back (see `recover_identity`).
 tsproto-types = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f45a7137db7793ba5593a321df400d53e5" }
@@ -80,7 +84,7 @@ tray-icon = { version = "0.26.1", default-features = false }
 windows = { version = "0.62", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture"] }
 # Named for `#[implement]`, which expands to paths in it (process_audio's completion handler).
 windows-core = "0.62"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 # No cross-crate LTO: thin LTO made every release rebuild of this crate ~4x slower
