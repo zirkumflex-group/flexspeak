@@ -66,6 +66,8 @@ const MIN_SIZE: (f32, f32) = (760.0, 560.0);
 /// How long a closed window's servers get to acknowledge the goodbye before the app quits
 /// regardless: each session waits up to 2 s for its server, after stopping its streams.
 const QUIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+/// How long a connection waits for the channel it should go to to show up in the list.
+const RESUME_CHANNEL_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// At most one system notification this often; the rest of a burst only flashes the taskbar.
 const TOAST_GAP: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -312,6 +314,8 @@ struct App {
     /// Where to return after an update's restart, until it has been reached.
     resume: Option<resume::Resume>,
     resume_started: bool,
+    /// The channel, with its password, the next connection asks to arrive in.
+    arrive_in: Option<(u64, String)>,
     auto_connect_checked: bool,
     /// Every server connected or connecting, oldest first.
     sessions: Vec<ServerSession>,
@@ -399,6 +403,9 @@ struct ServerSession {
     /// Where to go once connected: the saved server's default channel, or where this server
     /// was before an update's restart.
     resume: Option<resume::Server>,
+    /// Until when `resume` waits for its channel: the server sends the channel list in parts,
+    /// and can place you in the lobby before the rest of the list has arrived.
+    resume_until: Option<Instant>,
 }
 
 impl ServerSession {
@@ -419,6 +426,7 @@ impl ServerSession {
             refusal: None,
             catalog_seen: false,
             rewatch: Vec::new(),
+            resume_until: None,
             id,
             name,
             address,
@@ -1405,6 +1413,7 @@ impl App {
             updater: updater::Updater::new(None, Err(String::new()), true),
             resume: None,
             resume_started: false,
+            arrive_in: None,
             auto_connect_checked: false,
             sessions: Vec::new(),
             active: None,
@@ -3269,7 +3278,11 @@ impl App {
                 self.server_passwords
                     .insert(address.clone(), saved.password.clone());
             }
+            self.arrive_in = saved
+                .channel
+                .map(|channel| (channel, saved.channel_password.clone()));
             tasks.push(self.update(Message::Connect(index)));
+            self.arrive_in = None;
             if let Some(id) = self.session_at(&address).map(|session| session.id)
                 && let Some(session) = self.session_mut(id)
             {
@@ -3475,6 +3488,11 @@ impl App {
             address: address.clone(),
             nickname: self.nickname.trim().into(),
             password: self.password.clone(),
+            channel: if loopback {
+                None
+            } else {
+                self.arrive_in.take()
+            },
             input,
             output,
         };
@@ -4397,6 +4415,11 @@ impl App {
                     return Task::none();
                 }
                 let default_channel = server.default_channel.as_ref().map(|channel| channel.id);
+                // An update's restart asks for where you were; otherwise the default channel.
+                let arrive_in = self
+                    .arrive_in
+                    .take()
+                    .or_else(|| default_channel.map(|channel| (channel, String::new())));
                 self.ui.server_picker = false;
                 self.password = self
                     .server_passwords
@@ -4414,10 +4437,13 @@ impl App {
                 self.alerts.begin(Source::Connection);
                 self.alerts.begin(Source::Audio);
                 self.alerts.recover_at(&self.address.clone());
+                self.arrive_in = arrive_in.clone();
                 let task = self.start(false);
-                // The server's default channel is joined once the server has let you in. A
-                // return from an update's restart is set after this and goes where you were.
-                if let Some(channel) = default_channel
+                self.arrive_in = None;
+                // The server places you there on arrival. Should it put you in its own default
+                // channel instead, the channel is joined once you're in. A return from an
+                // update's restart sets this again after, with its password and microphone.
+                if let Some((channel, _)) = arrive_in
                     && let Some(id) = self.session_at(&address).map(|session| session.id)
                     && let Some(session) = self.session_mut(id)
                 {
@@ -5226,6 +5252,7 @@ impl App {
                 }
                 session.connected = true;
                 session.detail = detail;
+                session.resume_until = Some(Instant::now() + RESUME_CHANNEL_WAIT);
                 // The tree folds as you left it on this server.
                 if let Some(folded) = self
                     .saved
@@ -5318,20 +5345,33 @@ impl App {
                     session.chat.enter(channel.id, &channel.name);
                 }
                 let mut join = None;
-                if session.connected
-                    && !session.state.channels.is_empty()
-                    // The channel list arrives before the server says where you are, and
-                    // asking for the channel you were put in is refused with an error.
+                // The server says where you are before the whole channel list has arrived, so
+                // the channel to go to is waited for, and given up on once it's clearly gone.
+                let wanted = session.resume.as_ref().map(|resume| resume.channel);
+                let due = session.connected
+                    // Asking for the channel you were put in is refused with an error.
                     && session.state.current.is_some()
+                    && wanted.is_some_and(|channel| {
+                        channel.is_none_or(|channel| {
+                            session.state.channels.iter().any(|listed| listed.id == channel)
+                        }) || session
+                            .resume_until
+                            .is_some_and(|until| Instant::now() >= until)
+                    });
+                if due
                     && let Some(resume) = session.resume.take()
                     && let Some(channel) = resume.channel
-                    && session.state.current.as_ref().map(|channel| channel.id) != Some(channel)
-                    && session.can_request_join(loopback, channel)
                 {
+                    // Kept whether the server placed you there or the join below takes you, so
+                    // the next update's restart can return to a protected channel too.
                     if !resume.channel_password.is_empty() {
                         session.channel_secret = Some((channel, resume.channel_password.clone()));
                     }
-                    join = Some((channel, resume.channel_password));
+                    if session.state.current.as_ref().map(|channel| channel.id) != Some(channel)
+                        && session.can_request_join(loopback, channel)
+                    {
+                        join = Some((channel, resume.channel_password));
+                    }
                 }
                 if session
                     .password_channel
@@ -7370,6 +7410,52 @@ mod tests {
             app.server().channel_secret,
             Some((4, "channel secret".into()))
         );
+    }
+
+    #[test]
+    fn the_channel_to_go_to_is_waited_for_while_the_list_arrives_in_parts() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let (id, mut commands) = connection(&mut app);
+        app.server_mut().join_on_connect(2);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Connected(String::new()),
+        ));
+        let room = |id| client::Channel {
+            id,
+            join_access: client::JoinAccess::Unknown,
+            ..client::Channel::default()
+        };
+        // As the server sends it: you're placed in the lobby while it's the only channel known.
+        for channels in [vec![room(1)], vec![room(1), room(2), room(3)]] {
+            let _ = app.update(Message::Backend(
+                id,
+                client::Event::State(client::Snapshot {
+                    channels,
+                    current: Some(room(1)),
+                    ..client::Snapshot::default()
+                }),
+            ));
+        }
+        match commands.try_recv() {
+            Ok(client::Command::Join(2, password)) => assert!(password.is_empty()),
+            other => panic!("expected a join once the channel was listed, got {other:?}"),
+        }
+        assert!(app.server().resume.is_none());
+
+        // A channel that never shows up is given up on, and nothing is asked for.
+        app.server_mut().join_on_connect(9);
+        let lobby = client::Snapshot {
+            channels: vec![room(1), room(2)],
+            current: Some(room(1)),
+            ..client::Snapshot::default()
+        };
+        let _ = app.update(Message::Backend(id, client::Event::State(lobby.clone())));
+        assert!(app.server().resume.is_some(), "still waiting");
+        app.server_mut().resume_until = Some(Instant::now() - std::time::Duration::from_secs(1));
+        let _ = app.update(Message::Backend(id, client::Event::State(lobby)));
+        assert!(app.server().resume.is_none());
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]
