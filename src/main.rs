@@ -396,7 +396,8 @@ struct ServerSession {
     streaming: streaming::View,
     /// Bring this server to the front once it connects, since you just asked for it.
     activate_on_connect: bool,
-    /// Where to return this server after an update's restart.
+    /// Where to go once connected: the saved server's default channel, or where this server
+    /// was before an update's restart.
     resume: Option<resume::Server>,
 }
 
@@ -472,6 +473,15 @@ impl ServerSession {
         } else {
             self.address.trim()
         }
+    }
+
+    /// Goes to `channel` once connected, with the microphone as a new session has it.
+    fn join_on_connect(&mut self, channel: u64) {
+        self.resume = Some(resume::Server {
+            channel: Some(channel),
+            muted: true,
+            ..resume::Server::default()
+        });
     }
 
     fn clear_client_details(&mut self) {
@@ -991,6 +1001,8 @@ enum Message {
     ServerAutoConnect(usize, bool),
     /// Connects to the servers set to connect at launch.
     AutoConnect,
+    /// Sets the channel the server on screen joins on connecting, or clears it.
+    DefaultChannel(Option<u64>),
     ServerName(String),
     ServerAddress(String),
     ServerPassword(String),
@@ -2284,6 +2296,12 @@ impl App {
                 .and_then(|index| self.servers.get(index))
                 .is_some_and(|server| server.auto_connect),
             password,
+            // A channel belongs to its server: another address starts without one.
+            default_channel: editor
+                .index
+                .and_then(|index| self.servers.get(index))
+                .filter(|server| server.address.trim() == address)
+                .and_then(|server| server.default_channel.clone()),
         };
         let mut servers = self.servers.clone();
         let index = match editor.index {
@@ -2374,6 +2392,24 @@ impl App {
             self.activate(shown);
         }
         Task::batch(tasks)
+    }
+
+    /// The channel the server on screen joins on connecting, when it is a saved server with one.
+    fn default_channel(&self) -> Option<u64> {
+        let address = self.server().address.trim();
+        self.servers
+            .iter()
+            .find(|server| server.address.trim() == address)
+            .and_then(|server| server.default_channel.as_ref())
+            .map(|channel| channel.id)
+    }
+
+    /// Whether the server on screen is a saved one, which can keep a default channel.
+    fn server_saved(&self) -> bool {
+        let address = self.server().address.trim();
+        self.servers
+            .iter()
+            .any(|server| server.address.trim() == address)
     }
 
     fn auto_connect_servers(&self) -> Vec<usize> {
@@ -4360,13 +4396,14 @@ impl App {
                 if self.session_at(&address).is_some() {
                     return Task::none();
                 }
+                let default_channel = server.default_channel.as_ref().map(|channel| channel.id);
                 self.ui.server_picker = false;
                 self.password = self
                     .server_passwords
                     .get(&address)
                     .cloned()
                     .unwrap_or_default();
-                self.address = address;
+                self.address = address.clone();
                 // An edited nickname is kept; one that can't be falls back to the saved one.
                 self.commit_nickname();
                 if self.nickname_error.take().is_some()
@@ -4377,7 +4414,16 @@ impl App {
                 self.alerts.begin(Source::Connection);
                 self.alerts.begin(Source::Audio);
                 self.alerts.recover_at(&self.address.clone());
-                return self.start(false);
+                let task = self.start(false);
+                // The server's default channel is joined once the server has let you in. A
+                // return from an update's restart is set after this and goes where you were.
+                if let Some(channel) = default_channel
+                    && let Some(id) = self.session_at(&address).map(|session| session.id)
+                    && let Some(session) = self.session_mut(id)
+                {
+                    session.join_on_connect(channel);
+                }
+                return task;
             }
             Message::AddServer => {
                 self.ui.server_picker = false;
@@ -4439,6 +4485,29 @@ impl App {
                 }
             }
             Message::AutoConnect => return self.auto_connect(),
+            Message::DefaultChannel(channel) => {
+                let address = self.server().address.trim().to_owned();
+                let chosen = channel.and_then(|id| {
+                    self.server()
+                        .state
+                        .channels
+                        .iter()
+                        .find(|channel| channel.id == id && channel.spacer().is_none())
+                        .map(|channel| settings::DefaultChannel {
+                            id,
+                            name: channel.name.clone(),
+                        })
+                });
+                let mut servers = self.servers.clone();
+                if let Some(server) = servers
+                    .iter_mut()
+                    .find(|server| server.address.trim() == address)
+                    && server.default_channel != chosen
+                {
+                    server.default_channel = chosen;
+                    self.set_servers(servers);
+                }
+            }
             Message::ServerRemember(on) => {
                 if let Some(editor) = &mut self.server_editor {
                     editor.remember = on;
@@ -5272,7 +5341,8 @@ impl App {
                     session.channel_password.clear();
                 }
                 if let Some((channel, password)) = join {
-                    // Going back after an update isn't something to announce.
+                    // Going to your default channel, or back after an update, isn't something
+                    // to announce.
                     if let Some(session) = self.session_mut(id) {
                         session.quiet_channel_change = true;
                     }
@@ -7300,6 +7370,82 @@ mod tests {
             app.server().channel_secret,
             Some((4, "channel secret".into()))
         );
+    }
+
+    #[test]
+    fn a_saved_server_joins_its_default_channel_on_connect() {
+        let (mut app, root) = saved_fixture("default-channel");
+        let path = app.settings_path.clone().unwrap();
+        let (id, mut commands) = connection(&mut app);
+        let room = |id, name: &str| client::Channel {
+            id,
+            name: name.into(),
+            join_access: client::JoinAccess::Allowed,
+            ..client::Channel::default()
+        };
+        let state = client::Snapshot {
+            channels: vec![
+                room(1, "Lobby"),
+                room(4, "Raid night"),
+                room(5, "[cspacer]Games"),
+            ],
+            current: Some(room(1, "Lobby")),
+            ..client::Snapshot::default()
+        };
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Connected(String::new()),
+        ));
+        let _ = app.update(Message::Backend(id, client::Event::State(state.clone())));
+        assert!(app.server_saved() && app.default_channel().is_none());
+        assert!(commands.try_recv().is_err(), "nothing to join without one");
+
+        // A spacer is never one; a channel is saved with its name, and survives an edit.
+        let _ = app.update(Message::DefaultChannel(Some(5)));
+        assert!(app.default_channel().is_none());
+        let _ = app.update(Message::DefaultChannel(Some(4)));
+        assert_eq!(app.default_channel(), Some(4));
+        let chosen = Some(settings::DefaultChannel {
+            id: 4,
+            name: "Raid night".into(),
+        });
+        assert_eq!(
+            settings::load(&path).unwrap().unwrap().servers[0].default_channel,
+            chosen
+        );
+
+        // The next connection starts muted in the lobby and asks for the channel once.
+        app.sessions.clear();
+        app.active = None;
+        let (id, mut commands) = connection(&mut app);
+        app.server_mut().join_on_connect(4);
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::Connected(String::new()),
+        ));
+        assert!(app.server().muted && !app.server().deafened);
+        let _ = app.update(Message::Backend(id, client::Event::State(state.clone())));
+        match commands.try_recv() {
+            Ok(client::Command::Join(4, password)) => assert!(password.is_empty()),
+            other => panic!("expected a join, got {other:?}"),
+        }
+        let _ = app.update(Message::Backend(id, client::Event::State(state)));
+        assert!(commands.try_recv().is_err(), "only once");
+
+        // Editing the name keeps it; another address is another server, without one.
+        app.sessions.clear();
+        app.active = None;
+        let _ = app.update(Message::EditServer(0));
+        let _ = app.update(Message::ServerName("Home".into()));
+        let _ = app.update(Message::SubmitServer);
+        assert_eq!(app.servers[0].default_channel, chosen);
+        let _ = app.update(Message::EditServer(0));
+        let _ = app.update(Message::ServerAddress("elsewhere.example".into()));
+        let _ = app.update(Message::SubmitServer);
+        assert_eq!(app.servers[0].address, "elsewhere.example");
+        assert_eq!(app.servers[0].default_channel, None);
+        // The session's chat history may still be open, so the folder is removed if it can be.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

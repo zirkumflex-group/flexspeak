@@ -134,6 +134,7 @@ pub const SCENES: &[Scene] = &[
     ("settings-streaming", settings_streaming),
     ("settings-picker", settings_picker),
     ("settings-auto-connect", settings_auto_connect),
+    ("settings-default-channel", settings_default_channel),
     ("server-add", server_add),
     ("server-add-connect", server_add_connect),
     ("server-edit", server_edit),
@@ -185,6 +186,7 @@ pub const SCENES: &[Scene] = &[
     ("channel-tree", channel_tree),
     ("channel-tree-spacers", channel_tree_spacers),
     ("channel-menu", channel_menu),
+    ("channel-menu-default", channel_menu_default),
     ("sharing", sharing),
     ("sharing-stream-options", sharing_stream_options),
     (
@@ -2213,6 +2215,15 @@ fn settings_auto_connect(s: &mut App) {
     s.servers[0].auto_connect = true;
 }
 
+/// A saved server with a channel to join on connecting, named under its address.
+fn settings_default_channel(s: &mut App) {
+    settings_auto_connect(s);
+    s.servers[0].default_channel = Some(settings::DefaultChannel {
+        id: 3,
+        name: "Raid night".into(),
+    });
+}
+
 fn server_add(s: &mut App) {
     settings_page(s);
     let _ = s.update(crate::Message::AddServer);
@@ -2708,6 +2719,22 @@ fn channel_tree_spacers(s: &mut App) {
 fn channel_menu(s: &mut App) {
     channel_tree(s);
     s.ui.channel_menu = Some((3, rune::PointerPress { x: 150.0, y: 170.0 }));
+}
+
+/// The same menu on the channel this server joins on connecting.
+fn channel_menu_default(s: &mut App) {
+    channel_menu(s);
+    let address = s.server().address.trim().to_owned();
+    if let Some(server) = s
+        .servers
+        .iter_mut()
+        .find(|server| server.address.trim() == address)
+    {
+        server.default_channel = Some(settings::DefaultChannel {
+            id: 3,
+            name: "Raid night".into(),
+        });
+    }
 }
 
 fn share(s: &mut App) {

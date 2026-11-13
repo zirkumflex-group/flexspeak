@@ -266,6 +266,18 @@ pub struct Server {
     /// Windows); empty when it isn't remembered.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub password: String,
+    /// The channel to join on connecting, instead of the one the server puts you in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_channel: Option<DefaultChannel>,
+}
+
+/// A saved server's channel to join on connecting: the server's ID for it, and the name it
+/// had when it was chosen, to show while disconnected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DefaultChannel {
+    pub id: u64,
+    pub name: String,
 }
 
 impl Server {
@@ -275,6 +287,7 @@ impl Server {
             address: address.into(),
             auto_connect: false,
             password: String::new(),
+            default_channel: None,
         }
     }
 
@@ -550,6 +563,8 @@ pub struct SyncedServer {
     pub name: String,
     pub address: String,
     pub auto_connect: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_channel: Option<DefaultChannel>,
 }
 
 /// Reads a value that may be from another version of the app: one that doesn't fit is
@@ -577,6 +592,7 @@ impl Synced {
                         name: server.name.clone(),
                         address: server.address.clone(),
                         auto_connect: server.auto_connect,
+                        default_channel: server.default_channel.clone(),
                     })
                     .collect(),
             ),
@@ -629,6 +645,7 @@ impl Synced {
                     name: server.name,
                     address: server.address,
                     auto_connect: server.auto_connect,
+                    default_channel: server.default_channel,
                 })
                 .collect();
         }
@@ -1046,6 +1063,10 @@ mod tests {
                     address: "voice.example".into(),
                     auto_connect: true,
                     password: "sealed-secret".into(),
+                    default_channel: Some(DefaultChannel {
+                        id: 7,
+                        name: "Raid night".into(),
+                    }),
                 },
                 Server::new("other.example:9988"),
             ],
@@ -1115,6 +1136,7 @@ mod tests {
                     name: "Renamed".into(),
                     address: "voice.example".into(),
                     auto_connect: false,
+                    default_channel: None,
                 },
                 SyncedServer {
                     address: "new.example".into(),
