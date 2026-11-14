@@ -5198,6 +5198,7 @@ mod tests {
         click(&mut rt, "monster-tab-flavours");
         settle(&mut rt);
         assert_eq!(rt.state.monster.section, Section::Flavours);
+        scroll_into_view(&mut rt, "monster-scroll-flavours", "flavour-ultra-gold");
         click(&mut rt, "flavour-ultra-gold");
         settle(&mut rt);
         let (gold, _) = flavour_by_id("ultra-gold").unwrap();
