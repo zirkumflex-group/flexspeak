@@ -270,7 +270,7 @@ Decided on 2026-11-12: **no scanning.** A person picks the flavour they just dra
 
 A third tab on the page, beside Overview and Flavours. Its screens exist as preview scenes (`monster-leaderboard`, `-legendary`, `-hidden`, `monster-person`), with made-up people until the server exists.
 
-- **Ranked by collection, never by cans drunk.** Three rankings: different cards (each flavour at each rarity, out of 135), Legendary cards, and different flavours (out of 27). A hundred cans of one flavour don't beat three different flavours. This keeps the page from rewarding drinking more, in line with "Not in this plan" below.
+- **Ranked by collection, never by cans drunk.** Three rankings: different cards (each flavour at each rarity, out of 5 per flavour), Legendary cards, and different flavours. A hundred cans of one flavour don't beat three different flavours. This keeps the page from rewarding drinking more, in line with "Not in this plan" below.
 - Ties share a place. The top three show in gold, silver and bronze.
 - **Clicking a person opens their board:** the same stats, heatmap, flavour mix and card collection as your own Overview, read-only. Their cards can't be featured, replayed or removed. Back returns to the leaderboard.
 - Your own row is marked You and opens your Overview.
