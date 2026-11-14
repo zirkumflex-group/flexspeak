@@ -5188,7 +5188,8 @@ mod tests {
         rt.frame(5.0);
         let tip = rt.help_tooltip().map(|(tip, _)| tip.to_owned());
         assert!(
-            tip.as_deref().is_some_and(|tip| tip.contains("Full Throttle")),
+            tip.as_deref()
+                .is_some_and(|tip| tip.contains("Full Throttle")),
             "{tip:?}"
         );
     }
