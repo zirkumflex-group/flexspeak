@@ -64,6 +64,7 @@ pub const SCENES: &[Scene] = &[
     ("monster-unboxed-own", monster_unboxed_own),
     ("monster-search", monster_search),
     ("monster-search-none", monster_search_none),
+    ("monster-search-alias", monster_search_alias),
     ("monster-rarities", monster_rarities),
     ("monster-common", monster_common),
     ("monster-uncommon", monster_uncommon),
@@ -114,6 +115,7 @@ pub const SCENES: &[Scene] = &[
     ("monster-flavours", monster_flavours),
     ("monster-flavours-empty", monster_flavours_empty),
     ("monster-flavour", monster_flavour),
+    ("monster-flavour-aka", monster_flavour_aka),
     ("monster-flavour-new", monster_flavour_new),
     ("settings-sounds", settings_sounds),
     ("settings-sounds-pack", settings_sounds_pack),
@@ -1659,6 +1661,13 @@ fn monster_search_none(s: &mut App) {
     s.sync_fields();
 }
 
+/// A search by a name the drink used to have: Top Speed, and the older LH44 can.
+fn monster_search_alias(s: &mut App) {
+    stocked(s);
+    s.monster.query = "lewis hamilton".into();
+    s.sync_fields();
+}
+
 fn monster_rarities(s: &mut App) {
     use crate::monster::Rarity;
     stocked(s);
@@ -2027,6 +2036,14 @@ fn monster_flavour(s: &mut App) {
     stocked(s);
     let (gold, _) = flavour_by_id("ultra-gold").unwrap();
     s.monster.section = Section::Flavour(gold);
+}
+
+/// A flavour sold under other names, which its "i" lists.
+fn monster_flavour_aka(s: &mut App) {
+    use crate::monster::{Section, flavour_by_id};
+    stocked(s);
+    let (top_speed, _) = flavour_by_id("lewis-hamilton").unwrap();
+    s.monster.section = Section::Flavour(top_speed);
 }
 
 /// A flavour with no cans yet; the scene's cans leave out the catch-all.
@@ -5079,6 +5096,7 @@ mod tests {
         assert!(rt.find(&format!("card-{}", added.identity())).is_some());
 
         let other = rt.state.monster.cans[before - 1].identity();
+        scroll_into_view(&mut rt, "monster-scroll-overview", &format!("card-{other}"));
         click(&mut rt, &format!("card-{other}"));
         settle(&mut rt);
         assert!(rt.find(&format!("showcase-{other}")).is_some());
@@ -5158,11 +5176,31 @@ mod tests {
     }
 
     #[test]
+    fn a_flavour_found_by_another_name_lists_its_names_on_the_i() {
+        let mut rt = runtime(monster_search_alias, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-flavour-lewis-hamilton").is_some());
+        assert!(rt.find("monster-flavour-lh44").is_some());
+        assert!(rt.find("monster-flavour-original").is_none());
+        let (x, y) = rt.find("monster-aka-lewis-hamilton").unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.frame(5.0);
+        let tip = rt.help_tooltip().map(|(tip, _)| tip.to_owned());
+        assert!(
+            tip.as_deref()
+                .is_some_and(|tip| tip.contains("Full Throttle")),
+            "{tip:?}"
+        );
+    }
+
+    #[test]
     fn the_pointer_over_a_card_is_remembered_and_forgotten_when_it_leaves() {
         use crate::monster::Rarity;
         let mut rt = runtime(monster_board, (1100.0, 1500.0));
         settle(&mut rt);
         let key = format!("card-{}", can_rolling(Rarity::Mythic));
+        scroll_into_view(&mut rt, "monster-scroll-overview", &key);
         let (x, y) = rt.find(&key).unwrap();
         rt.pointer_move(x, y);
         settle(&mut rt);
@@ -5226,6 +5264,7 @@ mod tests {
         let today = chrono::Local::now().date_naive();
         let board = crate::monster::Board::new(&top, today, |_| today);
         let id = board.by_flavour[0].0.id;
+        scroll_into_view(&mut rt, "monster-scroll-overview", &format!("legend-{id}"));
         click(&mut rt, &format!("legend-{id}"));
         settle(&mut rt);
         let (index, _) = flavour_by_id(id).unwrap();

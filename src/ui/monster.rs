@@ -1354,10 +1354,15 @@ fn flavour_buttons(t: &Theme, flavours: &[(usize, u32)], open: bool) -> El {
     for &(index, count) in flavours {
         let flavour = &FLAVOURS[index];
         let [_, main, high, _] = flavour.palette;
+        let aka = flavour.also_known_as();
+        let label = match &aka {
+            Some(aka) => format!("Add a can of {}. {aka}", flavour.name),
+            None => format!("Add a can of {}", flavour.name),
+        };
         let mut button = row()
             .key(format!("monster-flavour-{}", flavour.id))
             .role("button")
-            .label(format!("Add a can of {}", flavour.name))
+            .label(label)
             .h(size::CONTROL)
             .pl(8.0)
             .pr(10.0)
@@ -1379,6 +1384,9 @@ fn flavour_buttons(t: &Theme, flavours: &[(usize, u32)], open: bool) -> El {
                     .color(t.text)
                     .a11y_hidden(),
             );
+        if let Some(aka) = aka {
+            button = button.child(aliases_info(t, flavour, aka));
+        }
         if count > 0 {
             button = button.child(
                 text(format!("×{count}"))
@@ -1402,6 +1410,15 @@ fn flavour_buttons(t: &Theme, flavours: &[(usize, u32)], open: bool) -> El {
         wrap = wrap.child(button);
     }
     wrap
+}
+
+/// A small "i" whose tooltip names the other names a flavour is sold under.
+fn aliases_info(t: &Theme, flavour: &Flavour, aka: String) -> El {
+    el().key(format!("monster-aka-{}", flavour.id))
+        .size(14.0, 16.0)
+        .center()
+        .help(aka)
+        .child(icon(&icons::INFO, 12.0).color(t.faint).a11y_hidden())
 }
 
 fn notice(s: &App, t: &Theme) -> El {
@@ -1996,7 +2013,17 @@ fn flavour_page(s: &App, t: &Theme, index: usize, today: NaiveDate, reduced: boo
         .grow(1.0)
         .min_w(320.0)
         .gap(14.0)
-        .child(muted(t, flavour.line))
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(muted(t, flavour.line))
+                .children(
+                    flavour
+                        .also_known_as()
+                        .map(|aka| aliases_info(t, flavour, aka)),
+                ),
+        )
         .child(flavour_stats(t, s, &cans, &board));
 
     let mut all = col()

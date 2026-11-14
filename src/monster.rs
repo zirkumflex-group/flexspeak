@@ -338,7 +338,8 @@ fn read_collection(connection: &Connection) -> Result<Vec<Can>> {
 }
 
 /// The flavours to offer, most drunk first, then the latest drunk, then in their usual order,
-/// with how often each was drunk. A search keeps only the flavours whose name holds it.
+/// with how often each was drunk. A search keeps only the flavours whose name, or one of their
+/// other names, holds it.
 pub fn favourites(cans: &[Can], query: &str) -> Vec<(usize, u32)> {
     let mut counts = vec![(0u32, i64::MIN); FLAVOURS.len()];
     for can in cans {
@@ -349,11 +350,7 @@ pub fn favourites(cans: &[Can], query: &str) -> Vec<(usize, u32)> {
     let query = query.trim().to_lowercase();
     let words: Vec<&str> = query.split_whitespace().collect();
     let mut order: Vec<usize> = (0..FLAVOURS.len())
-        .filter(|&index| {
-            let flavour = &FLAVOURS[index];
-            let name = format!("{} {}", flavour.name, flavour.line).to_lowercase();
-            words.iter().all(|word| name.contains(word))
-        })
+        .filter(|&index| FLAVOURS[index].matches(&words))
         .collect();
     // Stable, so flavours never drunk keep the order they're listed in.
     order.sort_by_key(|&index| std::cmp::Reverse(counts[index]));
@@ -1134,8 +1131,13 @@ mod tests {
                 .map(|(index, _)| FLAVOURS[*index].name)
                 .collect()
         };
-        assert_eq!(names("MANGO"), ["Ultra Fiesta Mango", "Mango Loco"]);
+        assert_eq!(
+            names("MANGO"),
+            ["Maxx Mango Matic", "Ultra Fiesta Mango", "Mango Loco"]
+        );
         assert_eq!(names("ultra mango"), ["Ultra Fiesta Mango"]);
+        assert_eq!(names("full throttle"), ["Top Speed"], "by another name");
+        assert_eq!(names("m-80"), ["Ripper"]);
         assert!(names("no such drink").is_empty());
         assert_eq!(names("  ").len(), FLAVOURS.len());
     }
