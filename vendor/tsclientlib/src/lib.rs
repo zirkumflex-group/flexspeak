@@ -153,6 +153,8 @@ pub enum TemporaryDisconnectReason {
 	/// The network refused to send or receive a packet, for example because Windows briefly ran
 	/// out of UDP ports or socket buffers (os error 10055). Reconnecting opens a new socket.
 	Network(std::io::ErrorKind),
+	/// The user asked to reconnect, see [`Connection::reconnect`].
+	Requested,
 }
 
 /// Whether an error on an established connection only interrupts it, so a reconnect should
@@ -169,11 +171,44 @@ fn temporary_disconnect(error: &client::Error) -> Option<TemporaryDisconnectReas
 	}
 }
 
+/// How long each reconnect attempt waits before sending its first packet. Later attempts keep
+/// the last delay.
+const RECONNECT_DELAYS: [Duration; 4] = [
+	Duration::from_secs(1),
+	Duration::from_secs(2),
+	Duration::from_secs(5),
+	Duration::from_secs(10),
+];
+
+fn reconnect_delay(step: usize) -> Duration {
+	RECONNECT_DELAYS[step.min(RECONNECT_DELAYS.len() - 1)]
+}
+
+fn next_reconnect_step(step: usize) -> usize {
+	(step + 1).min(RECONNECT_DELAYS.len() - 1)
+}
+
+/// Where the reconnect delays start. When our own network refused packets, the server is most
+/// likely fine and a new socket works at once. When the server stopped answering or shut down,
+/// trying again right away only adds packets, so start at the longest delay.
+fn first_reconnect_step(reason: TemporaryDisconnectReason) -> usize {
+	match reason {
+		TemporaryDisconnectReason::Network(_) | TemporaryDisconnectReason::Requested => 0,
+		TemporaryDisconnectReason::Timeout(_) | TemporaryDisconnectReason::Serverstop => {
+			RECONNECT_DELAYS.len() - 1
+		}
+	}
+}
+
 /// Whether a failed reconnect attempt should be tried again: the server did not answer, or the
 /// network was not usable yet (no socket, no name resolution, a refused send).
 fn retry_reconnect(error: &Error) -> bool {
 	match error {
 		Error::ResolveAddress(_) => true,
+		// The name resolved to no address at all: while the internet is down, DNS answers
+		// nothing rather than an error. Only reconnects get here, so a mistyped address on the
+		// first connect still fails at once.
+		Error::ConnectFailed { errors, .. } if errors.is_empty() => true,
 		Error::ConnectFailed { errors, .. } => errors.iter().any(|error| {
 			matches!(
 				error,
@@ -329,11 +364,14 @@ struct ConnectedConnection {
 }
 
 enum ConnectionState {
-	/// The future that resolves to a connection and a boolean if we should reconnect on failure.
+	/// The future that resolves to a connection, and the reconnect step if this is a reconnect.
 	///
-	/// If the `bool` is `false`, the connection will abort on error. Otherwise it will try to
-	/// connect again on timeout.
-	Connecting(future::BoxFuture<'static, Result<(client::Client, data::Connection)>>, bool),
+	/// With `None`, the connection aborts on error. With `Some(step)`, a failed attempt is tried
+	/// again after the next delay in [`RECONNECT_DELAYS`].
+	Connecting(
+		future::BoxFuture<'static, Result<(client::Client, data::Connection)>>,
+		Option<usize>,
+	),
 	IdentityLevelIncreasing {
 		/// We get the improved identity here.
 		recv: oneshot::Receiver<Identity>,
@@ -492,14 +530,14 @@ impl Connection {
 
 	/// Connect to a server.
 	///
-	/// If `is_reconnect` is `true`, wait 10 seconds before sending the first packet. This is to not
-	/// spam unnecessary packets if the internet or server is down.
+	/// A reconnect first waits the delay of its step in [`RECONNECT_DELAYS`], so it does not spam
+	/// packets while the internet or the server is down.
 	async fn connect(
 		options: ConnectOptions,
-		is_reconnect: bool,
+		reconnect: Option<usize>,
 	) -> Result<(client::Client, data::Connection)> {
-		if is_reconnect {
-			tokio::time::sleep(Duration::from_secs(10)).await;
+		if let Some(step) = reconnect {
+			tokio::time::sleep(reconnect_delay(step)).await;
 		}
 
 		let resolved = match &options.address {
@@ -975,6 +1013,41 @@ impl Connection {
 		Ok(())
 	}
 
+	/// Drop the current connection and connect again with a new socket, for when packets aren't
+	/// getting through and waiting for the timeout would take longer. The server is told we left,
+	/// as far as that one packet gets there, so it doesn't keep showing us twice.
+	///
+	/// Yields [`StreamItem::DisconnectedTemporarily`] with
+	/// [`TemporaryDisconnectReason::Requested`]. Does nothing unless connected.
+	pub fn reconnect(&mut self) {
+		let ConnectionState::Connected { con, book } = &mut self.state else {
+			return;
+		};
+		let can_send = Self::intern_can_send_audio(book, &self.options);
+		let can_receive = Self::intern_can_receive_audio(book, &self.options);
+		let packet = book.disconnect(DisconnectOptions::new());
+		if con.client.send_packet(packet.into_packet()).is_ok() {
+			// Give the packet one chance to leave before the socket closes.
+			let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+			let _ = con.client.poll_next_unpin(&mut cx);
+		}
+		info!("Reconnecting on request");
+		let step = first_reconnect_step(TemporaryDisconnectReason::Requested);
+		let fut = Self::connect(self.options.clone(), Some(step));
+		self.state = ConnectionState::Connecting(Box::pin(fut.in_current_span()), Some(step));
+		if can_send {
+			self.stream_items
+				.push_back(Ok(StreamItem::AudioChange(AudioEvent::CanSendAudio(false))));
+		}
+		if can_receive {
+			self.stream_items
+				.push_back(Ok(StreamItem::AudioChange(AudioEvent::CanReceiveAudio(false))));
+		}
+		self.stream_items.push_back(Ok(StreamItem::DisconnectedTemporarily(
+			TemporaryDisconnectReason::Requested,
+		)));
+	}
+
 	/// Send audio to the server.
 	///
 	/// This function does only accept `Voice` and `VoiceWhisper` packets. Commands should be send
@@ -1087,6 +1160,20 @@ impl Connection {
 		}
 	}
 
+	/// How long ago the server last sent anything. It answers a ping every second, so a few
+	/// seconds of silence mean packets are not getting through, well before the connection
+	/// times out.
+	///
+	/// # Error
+	/// Returns an error if currently not connected.
+	pub fn get_server_silence(&self) -> Result<Duration> {
+		if let ConnectionState::Connected { con, .. } = &self.state {
+			Ok(con.client.resender.silent_for())
+		} else {
+			Err(Error::NotConnected)
+		}
+	}
+
 	/// If this client can send audio or is muted.
 	///
 	/// If the client is muted, the server will drop any sent audio packets. A client counts as
@@ -1189,11 +1276,15 @@ impl Connection {
 					Poll::Ready(Some(Ok(StreamItem::IdentityLevelIncreasing(level))))
 				}
 				Poll::Ready(Err(e)) => {
-					if *reconnect && retry_reconnect(&e) {
-						debug!(error = %e, "Connect failed, reconnecting");
-						let fut = Self::connect(self.options.clone(), true).in_current_span();
-						self.state = ConnectionState::Connecting(Box::pin(fut), true);
-						return self.poll_next(cx);
+					if let Some(step) = *reconnect {
+						if retry_reconnect(&e) {
+							let next = next_reconnect_step(step);
+							info!(error = %e, retry_in = ?reconnect_delay(next), "Reconnect failed, trying again");
+							let fut =
+								Self::connect(self.options.clone(), Some(next)).in_current_span();
+							self.state = ConnectionState::Connecting(Box::pin(fut), Some(next));
+							return self.poll_next(cx);
+						}
 					}
 					Poll::Ready(Some(Err(e)))
 				}
@@ -1232,9 +1323,8 @@ impl Connection {
 				}
 				Poll::Ready(Ok(identity)) => {
 					self.options.identity = Some(identity);
-					let fut = Self::connect(self.options.clone(), false);
-					self.state =
-						ConnectionState::Connecting(Box::pin(fut.in_current_span()), false);
+					let fut = Self::connect(self.options.clone(), None);
+					self.state = ConnectionState::Connecting(Box::pin(fut.in_current_span()), None);
 					Poll::Ready(Some(Ok(StreamItem::IdentityLevelIncreased)))
 				}
 			},
@@ -1253,10 +1343,13 @@ impl Connection {
 
 						if let Some(reason) = temporary_disconnect(&e) {
 							// Reconnect on a timeout or a network error
-							warn!(error = %e, "Connection failed, reconnecting");
-							let fut = Self::connect(self.options.clone(), true);
-							self.state =
-								ConnectionState::Connecting(Box::pin(fut.in_current_span()), true);
+							let step = first_reconnect_step(reason);
+							warn!(error = %e, retry_in = ?reconnect_delay(step), "Connection failed, reconnecting");
+							let fut = Self::connect(self.options.clone(), Some(step));
+							self.state = ConnectionState::Connecting(
+								Box::pin(fut.in_current_span()),
+								Some(step),
+							);
 							return Poll::Ready(Some(Ok(StreamItem::DisconnectedTemporarily(
 								reason,
 							))));
@@ -1303,11 +1396,12 @@ impl Connection {
 								&mut self.options,
 								cmd,
 							) {
-								warn!("Server shut down, reconnecting");
-								let fut = Self::connect(self.options.clone(), true);
+								let step = first_reconnect_step(reason);
+								warn!(retry_in = ?reconnect_delay(step), "Server shut down, reconnecting");
+								let fut = Self::connect(self.options.clone(), Some(step));
 								self.state = ConnectionState::Connecting(
 									Box::pin(fut.in_current_span()),
-									true,
+									Some(step),
 								);
 								if prev_can_send {
 									self.stream_items.push_back(Ok(StreamItem::AudioChange(
@@ -1859,10 +1953,10 @@ impl ConnectOptions {
 		}));
 
 		// Try all addresses
-		let fut = Connection::connect(self.clone(), false);
+		let fut = Connection::connect(self.clone(), None);
 
 		Ok(Connection {
-			state: ConnectionState::Connecting(Box::pin(fut.in_current_span()), false),
+			state: ConnectionState::Connecting(Box::pin(fut.in_current_span()), None),
 			span: span.exit(),
 			options: self,
 			stream_items,

@@ -93,7 +93,7 @@ fn readings(quality: usage::ConnectionUsage) -> [Reading; 4] {
             label: "Ping",
             short: "Ping",
             value: quality.ping_text(),
-            health: usage::Health::ping(quality.ping_ms, quality.ping_deviation_ms),
+            health: quality.ping_health(),
             status: None,
             explanation: "Round-trip latency ± variation. Fair: 100 ms or variation 20 ms; Poor: 200 ms or variation 50 ms.",
         },

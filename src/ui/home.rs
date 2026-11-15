@@ -225,9 +225,76 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
         if reconnecting {
             return reconnecting_window(s, t, window);
         }
+        if let Some(silence) = unstable(s) {
+            return unstable_window(t, silence, window);
+        }
         return window;
     }
     saved_servers(s, t, k)
+}
+
+/// How long a connected server has answered nothing and how bad that is, once it is long enough
+/// to say so.
+fn unstable(s: &App) -> Option<(u64, usage::Health)> {
+    let session = s.server();
+    let quality = session.connection_usage;
+    if !session.connected {
+        return None;
+    }
+    Some((quality.server_silent_seconds?, quality.silence_health()?))
+}
+
+/// The server's window as it is, under a band saying the server has stopped answering, coloured
+/// by how long. It stays usable: the connection may come back by itself before it times out.
+fn unstable_window(t: &Theme, (seconds, health): (u64, usage::Health), window: El) -> El {
+    let color = t.health(health);
+    let band = row()
+        .key("unstable-band")
+        .w_full()
+        .h(40.0)
+        .gap(10.0)
+        .center_y()
+        .fill(t.chrome.mix(color, 0.16))
+        .child(el().w(3.0).h_full().fill(color).a11y_hidden())
+        .child(pulse(color))
+        .child(text("Connection unstable").font(ty::BODY_STRONG).color(t.text))
+        .child(
+            muted(
+                t,
+                format!(
+                    "No answer from the server for {seconds} s · reconnects by itself if it doesn't come back"
+                ),
+            )
+            .grow(1.0)
+            .min_w(0.0),
+        )
+        .child(
+            el().pr(size::CARD_PAD).child(button(
+                t,
+                "reconnect-now",
+                "Reconnect now",
+                None,
+                Variant::Secondary,
+                Some(Message::Reconnect),
+            )),
+        );
+    col()
+        .w_full()
+        .h_full()
+        .child(band)
+        .child(
+            el().w_full()
+                .h(1.0)
+                .fill(t.chrome.mix(color, 0.4))
+                .a11y_hidden(),
+        )
+        .child(
+            el().key("unstable-window")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(window),
+        )
 }
 
 /// The server's last known channels and chat, dimmed and out of reach, under one line saying

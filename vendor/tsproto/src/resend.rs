@@ -581,6 +581,12 @@ impl Resender {
 		self.state
 	}
 
+	/// How long ago the other side last sent us anything. Pings go out every second, so on a
+	/// healthy connection this stays around a second.
+	pub fn silent_for(&self) -> Duration {
+		Instant::now().saturating_duration_since(self.last_receive)
+	}
+
 	/// If the send queue is full if it reached the congestion window size or
 	/// it contains packets that were not yet sent once.
 	pub fn is_full(&self) -> bool {

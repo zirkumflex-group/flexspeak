@@ -1209,6 +1209,8 @@ enum Message {
     RemoveServer,
     TestAudio,
     Stop,
+    /// Connect again now, from the unstable connection banner.
+    Reconnect,
     Mute,
     Deafen,
     Join(u64),
@@ -4924,6 +4926,9 @@ impl App {
                 self.alerts.begin(Source::Audio);
                 return self.start(true);
             }
+            Message::Reconnect => {
+                self.command(client::Command::Reconnect);
+            }
             Message::Stop => {
                 // Leaving cuts a live share off for its viewers, so that asks first.
                 if self.server().streaming.sharing.status.active {
@@ -6500,10 +6505,13 @@ impl App {
     }
     fn footer_connection_status(&self) -> (usage::Health, &'static str, String) {
         if self.live() && self.server().state.current.is_some() {
-            let health = self
-                .server()
-                .connection_health
-                .show(self.server().connection_usage.health());
+            let usage = self.server().connection_usage;
+            // Unstable has already lasted seconds: it shows at once, not after the usual hold.
+            let health = if usage.unstable() {
+                usage.health()
+            } else {
+                self.server().connection_health.show(usage.health())
+            };
             let label = if health == usage::Health::Unknown {
                 "Unknown"
             } else {
