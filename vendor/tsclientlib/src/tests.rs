@@ -81,8 +81,36 @@ fn reconnect_retries_while_the_network_is_unusable() {
 	assert!(!crate::retry_reconnect(&failed(crate::Error::Connect(
 		tsproto::client::Error::ConnectionEnd
 	))));
-	assert!(!crate::retry_reconnect(&crate::Error::ConnectFailed {
+	// The name resolved to nothing, as DNS does while the internet is down: try again.
+	assert!(crate::retry_reconnect(&crate::Error::ConnectFailed {
 		address: "server".into(),
 		errors: Vec::new()
 	}));
+}
+
+#[test]
+fn reconnect_waits_less_when_our_own_network_refused() {
+	use std::time::Duration;
+	let network = crate::first_reconnect_step(crate::TemporaryDisconnectReason::Network(
+		std::io::ErrorKind::Other,
+	));
+	assert_eq!(crate::reconnect_delay(network), Duration::from_secs(1));
+	let delays: Vec<_> =
+		std::iter::successors(Some(network), |&step| Some(crate::next_reconnect_step(step)))
+			.take(6)
+			.map(crate::reconnect_delay)
+			.map(|delay| delay.as_secs())
+			.collect();
+	assert_eq!(delays, [1, 2, 5, 10, 10, 10]);
+
+	// The server not answering or shutting down keeps the old 10 seconds.
+	for reason in [
+		crate::TemporaryDisconnectReason::Timeout("ping"),
+		crate::TemporaryDisconnectReason::Serverstop,
+	] {
+		assert_eq!(
+			crate::reconnect_delay(crate::first_reconnect_step(reason)),
+			Duration::from_secs(10)
+		);
+	}
 }

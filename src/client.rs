@@ -1284,6 +1284,8 @@ async fn run_connection(
         let mut last_meter = Instant::now();
         let mut meter = MeterDelivery::default();
         let mut last_usage = Instant::now();
+        // Whether the server has gone quiet; logged when that starts and ends.
+        let mut unstable = false;
         let mut last_server_request = Instant::now() - usage::SERVER_REFRESH_INTERVAL;
         let mut server_usage: Option<ServerUsage> = None;
         let mut pending_info: Option<(Ticket, ClientId, Option<ChannelId>, Instant)> = None;
@@ -1566,6 +1568,7 @@ async fn run_connection(
                     },
                     StreamItem::IdentityLevelIncreasing(level) => { let _ = events.try_send(Event::Status(format!("Preparing server identity (security level {level})…"))); },
                     StreamItem::DisconnectedTemporarily(_) => {
+                        unstable = false;
                         streams.reset();
                         *flow.borrow_mut() = Flow::default();
                         controls.reconnect(Instant::now());
@@ -1748,7 +1751,16 @@ async fn run_connection(
                         if now.duration_since(last_usage) >= usage::REFRESH_INTERVAL {
                             if let Ok(stats) = connection.get_network_stats() {
                                 let network = traffic.sample(&stats.total_bytes, now);
-                                let quality = usage::connection_usage(stats, server_usage.as_ref(), last_voice, now);
+                                let mut quality = usage::connection_usage(stats, server_usage.as_ref(), last_voice, now);
+                                quality.server_silent_seconds = connection.get_server_silence().ok().map(|silence| silence.as_secs());
+                                if quality.unstable() != unstable {
+                                    unstable = quality.unstable();
+                                    if unstable {
+                                        tracing::warn!(target: "flexspeak::connection", silent_seconds = quality.server_silent_seconds, "unstable");
+                                    } else {
+                                        tracing::info!(target: "flexspeak::connection", "stable again");
+                                    }
+                                }
                                 let _ = events.try_send(Event::Usage { network, connection: quality });
                             }
                             last_usage = now;

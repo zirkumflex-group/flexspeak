@@ -133,6 +133,115 @@ impl Socket for UdpSocket {
 	}
 }
 
+/// How long sends may keep failing before the connection counts as broken. A shorter refusal
+/// costs a few lost packets, which the resender sends again.
+pub const SEND_FAILURE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// At most this many refused receives are skipped in one poll, so a socket that keeps failing
+/// can't spin.
+const MAX_SKIPPED_RECEIVES: usize = 64;
+
+/// Whether the network refused one packet without the socket being broken: Windows briefly out
+/// of buffers or UDP ports (WSAENOBUFS, os error 10055), a route that is coming back, or, on a
+/// receive, an ICMP "port unreachable" reported for an earlier packet (WSAECONNRESET).
+pub fn is_transient(error: &io::Error) -> bool {
+	use io::ErrorKind::*;
+	if matches!(
+		error.kind(),
+		WouldBlock
+			| Interrupted
+			| NetworkUnreachable
+			| HostUnreachable
+			| NetworkDown
+			| ConnectionReset
+			| ConnectionRefused
+	) {
+		return true;
+	}
+	#[cfg(windows)]
+	const NO_BUFFERS: i32 = 10055;
+	#[cfg(not(windows))]
+	const NO_BUFFERS: i32 = 105;
+	error.raw_os_error() == Some(NO_BUFFERS)
+}
+
+/// Wraps the socket of a connection so the network refusing a packet now and then does not end
+/// the connection: a refused send counts as a lost packet, a refused receive is skipped. Only
+/// sends that keep failing for [`SEND_FAILURE_GRACE`] return their error.
+struct Forgiving {
+	inner: Box<dyn Socket + Send>,
+	/// When the current run of refused sends started.
+	failing_since: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl Forgiving {
+	fn new(inner: Box<dyn Socket + Send>) -> Self {
+		Self { inner, failing_since: Default::default() }
+	}
+
+	/// What to do with a send the network refused at `now`: `None` drops the packet, `Some`
+	/// gives up because sends have been failing too long.
+	fn refused(&self, error: io::Error, now: std::time::Instant) -> Option<io::Error> {
+		let mut failing_since = self.failing_since.lock().unwrap();
+		let since = *failing_since.get_or_insert_with(|| {
+			tracing::warn!(%error, "Network refused a packet; counting it as lost");
+			now
+		});
+		if now.saturating_duration_since(since) >= SEND_FAILURE_GRACE {
+			Some(error)
+		} else {
+			tracing::trace!(%error, "Dropped a packet the network refused");
+			None
+		}
+	}
+
+	fn sent(&self) {
+		if let Some(since) = self.failing_since.lock().unwrap().take() {
+			tracing::info!(after = ?since.elapsed(), "Network accepts packets again");
+		}
+	}
+}
+
+impl Socket for Forgiving {
+	fn poll_recv_from(&self, cx: &mut Context, buf: &mut ReadBuf) -> Poll<io::Result<SocketAddr>> {
+		for _ in 0..MAX_SKIPPED_RECEIVES {
+			match self.inner.poll_recv_from(cx, buf) {
+				Poll::Ready(Err(error)) if is_transient(&error) => {
+					tracing::debug!(%error, "Skipped a refused receive");
+				}
+				result => return result,
+			}
+		}
+		cx.waker().wake_by_ref();
+		Poll::Pending
+	}
+
+	fn poll_send_to(
+		&self,
+		cx: &mut Context,
+		buf: &[u8],
+		target: SocketAddr,
+	) -> Poll<io::Result<usize>> {
+		match self.inner.poll_send_to(cx, buf, target) {
+			Poll::Ready(Ok(size)) => {
+				self.sent();
+				Poll::Ready(Ok(size))
+			}
+			Poll::Ready(Err(error)) if is_transient(&error) => {
+				match self.refused(error, std::time::Instant::now()) {
+					Some(error) => Poll::Ready(Err(error)),
+					None => Poll::Ready(Ok(buf.len())),
+				}
+			}
+			other => other,
+		}
+	}
+
+	fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.inner.local_addr()
+	}
+}
+
 impl Default for CachedKey {
 	fn default() -> Self {
 		CachedKey { generation_id: u32::MAX, key: [0; 16], nonce: [0; 16] }
@@ -157,6 +266,7 @@ impl Connection {
 	pub fn new(is_client: bool, address: SocketAddr, udp_socket: Box<dyn Socket + Send>) -> Self {
 		let span = info_span!("connection", local_addr = %udp_socket.local_addr().unwrap(),
 			remote_addr = %address);
+		let udp_socket: Box<dyn Socket + Send> = Box::new(Forgiving::new(udp_socket));
 
 		let mut res = Self {
 			is_client,
@@ -462,5 +572,105 @@ impl Stream for Connection {
 		}
 
 		Poll::Pending
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::cell::RefCell;
+	use std::time::{Duration, Instant};
+
+	use futures::task::noop_waker_ref;
+
+	use super::*;
+
+	/// Answers each send with the next result queued, and each receive with the next error.
+	#[derive(Default)]
+	struct Scripted {
+		sends: RefCell<VecDeque<io::Result<usize>>>,
+		receives: RefCell<VecDeque<io::Error>>,
+	}
+	// Only ever used on one thread in these tests.
+	unsafe impl Send for Scripted {}
+
+	impl Socket for Scripted {
+		fn poll_recv_from(&self, _: &mut Context, _: &mut ReadBuf) -> Poll<io::Result<SocketAddr>> {
+			match self.receives.borrow_mut().pop_front() {
+				Some(error) => Poll::Ready(Err(error)),
+				None => Poll::Ready(Ok("127.0.0.1:9987".parse().unwrap())),
+			}
+		}
+		fn poll_send_to(
+			&self,
+			_: &mut Context,
+			_: &[u8],
+			_: SocketAddr,
+		) -> Poll<io::Result<usize>> {
+			Poll::Ready(self.sends.borrow_mut().pop_front().unwrap_or(Ok(4)))
+		}
+		fn local_addr(&self) -> io::Result<SocketAddr> {
+			Ok("127.0.0.1:1".parse().unwrap())
+		}
+	}
+
+	fn no_buffers() -> io::Error {
+		#[cfg(windows)]
+		return io::Error::from_raw_os_error(10055);
+		#[cfg(not(windows))]
+		return io::Error::from_raw_os_error(105);
+	}
+
+	fn send(socket: &Forgiving) -> Poll<io::Result<usize>> {
+		let mut cx = Context::from_waker(noop_waker_ref());
+		socket.poll_send_to(&mut cx, &[0; 4], "127.0.0.1:9987".parse().unwrap())
+	}
+
+	#[test]
+	fn transient_errors() {
+		assert!(is_transient(&no_buffers()));
+		assert!(is_transient(&io::Error::from(io::ErrorKind::ConnectionReset)));
+		assert!(!is_transient(&io::Error::from(io::ErrorKind::PermissionDenied)));
+		assert!(!is_transient(&io::Error::from(io::ErrorKind::InvalidInput)));
+	}
+
+	#[test]
+	fn a_refused_send_counts_as_lost() {
+		let inner = Scripted::default();
+		inner.sends.borrow_mut().extend([Err(no_buffers()), Err(no_buffers())]);
+		let socket = Forgiving::new(Box::new(inner));
+		assert!(matches!(send(&socket), Poll::Ready(Ok(4))));
+		assert!(matches!(send(&socket), Poll::Ready(Ok(4))));
+		assert!(socket.failing_since.lock().unwrap().is_some());
+		// A send that goes through ends the run.
+		assert!(matches!(send(&socket), Poll::Ready(Ok(4))));
+		assert!(socket.failing_since.lock().unwrap().is_none());
+	}
+
+	#[test]
+	fn sends_failing_past_the_grace_end_the_connection() {
+		let socket = Forgiving::new(Box::new(Scripted::default()));
+		let start = Instant::now();
+		assert!(socket.refused(no_buffers(), start).is_none());
+		assert!(socket.refused(no_buffers(), start + Duration::from_secs(4)).is_none());
+		assert!(socket.refused(no_buffers(), start + SEND_FAILURE_GRACE).is_some());
+	}
+
+	#[test]
+	fn other_send_errors_pass_through() {
+		let inner = Scripted::default();
+		inner.sends.borrow_mut().push_back(Err(io::ErrorKind::PermissionDenied.into()));
+		let socket = Forgiving::new(Box::new(inner));
+		assert!(matches!(send(&socket), Poll::Ready(Err(_))));
+	}
+
+	#[test]
+	fn a_refused_receive_is_skipped() {
+		let inner = Scripted::default();
+		inner.receives.borrow_mut().push_back(io::ErrorKind::ConnectionReset.into());
+		let socket = Forgiving::new(Box::new(inner));
+		let mut cx = Context::from_waker(noop_waker_ref());
+		let mut data = [0; 8];
+		let mut buf = ReadBuf::new(&mut data);
+		assert!(matches!(socket.poll_recv_from(&mut cx, &mut buf), Poll::Ready(Ok(_))));
 	}
 }

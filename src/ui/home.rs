@@ -225,37 +225,81 @@ fn home(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> E
         if reconnecting {
             return reconnecting_window(s, t, window);
         }
+        if let Some(seconds) = unstable_seconds(s) {
+            return unstable_window(t, seconds, window);
+        }
         return window;
     }
     saved_servers(s, t, k)
 }
 
-/// The server's last known channels and chat, dimmed and out of reach, under one line saying
-/// the connection is coming back.
-fn reconnecting_window(s: &App, t: &Theme, window: El) -> El {
-    let session = s.server();
-    let strip = row()
-        .key("reconnecting-strip")
+/// One line over the server's window about the state of its connection.
+fn connection_strip(t: &Theme, key: &str, color: rune::Color, label: String) -> El {
+    row()
+        .key(key)
         .w_full()
         .h(36.0)
         .px(size::CARD_PAD)
         .gap(8.0)
         .center_y()
         .fill(t.chrome)
-        .child(pulse(t.fair))
-        .child(muted(t, client::CONNECTION_LOST).grow(1.0).min_w(0.0))
-        .child(button(
+        .child(pulse(color))
+        .child(muted(t, label).grow(1.0).min_w(0.0))
+}
+
+/// How long a connected server has answered nothing, once that is long enough to say so.
+fn unstable_seconds(s: &App) -> Option<u64> {
+    let session = s.server();
+    let quality = session.connection_usage;
+    (session.connected && quality.unstable())
+        .then_some(quality.server_silent_seconds)
+        .flatten()
+}
+
+/// The server's window as it is, under one line saying the server has stopped answering. It
+/// stays usable: the connection may come back by itself before it times out.
+fn unstable_window(t: &Theme, seconds: u64, window: El) -> El {
+    col()
+        .w_full()
+        .h_full()
+        .child(connection_strip(
             t,
-            "cancel-reconnecting",
-            if session.stopping {
-                "Stopping…"
-            } else {
-                "Disconnect"
-            },
-            None,
-            Variant::Ghost,
-            (!session.stopping).then_some(Message::Stop),
-        ));
+            "unstable-strip",
+            t.poor,
+            format!("Connection unstable · no answer from the server for {seconds} s"),
+        ))
+        .child(el().w_full().h(1.0).fill(t.hairline).a11y_hidden())
+        .child(
+            el().key("unstable-window")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(window),
+        )
+}
+
+/// The server's last known channels and chat, dimmed and out of reach, under one line saying
+/// the connection is coming back.
+fn reconnecting_window(s: &App, t: &Theme, window: El) -> El {
+    let session = s.server();
+    let strip = connection_strip(
+        t,
+        "reconnecting-strip",
+        t.fair,
+        client::CONNECTION_LOST.into(),
+    )
+    .child(button(
+        t,
+        "cancel-reconnecting",
+        if session.stopping {
+            "Stopping…"
+        } else {
+            "Disconnect"
+        },
+        None,
+        Variant::Ghost,
+        (!session.stopping).then_some(Message::Stop),
+    ));
     col()
         .w_full()
         .h_full()

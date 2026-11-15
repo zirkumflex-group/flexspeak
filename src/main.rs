@@ -6500,10 +6500,13 @@ impl App {
     }
     fn footer_connection_status(&self) -> (usage::Health, &'static str, String) {
         if self.live() && self.server().state.current.is_some() {
-            let health = self
-                .server()
-                .connection_health
-                .show(self.server().connection_usage.health());
+            let usage = self.server().connection_usage;
+            // Unstable has already lasted seconds: it shows at once, not after the usual hold.
+            let health = if usage.unstable() {
+                usage.health()
+            } else {
+                self.server().connection_health.show(usage.health())
+            };
             let label = if health == usage::Health::Unknown {
                 "Unknown"
             } else {

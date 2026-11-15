@@ -26,6 +26,7 @@ pub const SCENES: &[Scene] = &[
     ("servers-switched", servers_switched),
     ("servers-connecting", servers_connecting),
     ("server-reconnecting", server_reconnecting),
+    ("server-unstable", server_unstable),
     ("servers-picker", servers_picker),
     ("setup-ts6-offer", setup_ts6_offer),
     ("setup-ts6-server", setup_ts6_server),
@@ -501,6 +502,14 @@ fn server_reconnecting(s: &mut App) {
     session.connected = false;
     session.reconnecting = true;
     session.status = crate::client::CONNECTION_LOST.into();
+}
+
+/// Still connected, but the server has answered nothing for a while: one line over the window,
+/// which stays usable, and the ping says so.
+fn server_unstable(s: &mut App) {
+    connected(s);
+    let usage = &mut s.server_mut().connection_usage;
+    usage.server_silent_seconds = Some(8);
 }
 
 fn servers_picker(s: &mut App) {

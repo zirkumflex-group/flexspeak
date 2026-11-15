@@ -8,6 +8,9 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tsclientlib::{ConnectionStats, PacketStat, data::ConnectionClientData};
 
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// How long the server may send nothing before the connection shows as unstable. It answers a
+/// ping every second, so this is five pings without an answer.
+pub const UNSTABLE_AFTER: Duration = Duration::from_secs(5);
 pub const SERVER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const SERVER_MAX_AGE: Duration = Duration::from_secs(15);
 const HISTORY_WINDOW: Duration = Duration::from_secs(300);
@@ -316,6 +319,8 @@ pub struct ConnectionUsage {
     pub loss_in: LossIn,
     pub packet_loss_out: Option<f32>,
     pub idle_seconds: Option<u64>,
+    /// How long the server has sent nothing, on our own connection. See [`Self::unstable`].
+    pub server_silent_seconds: Option<u64>,
     pub file_upload_per_second: Option<u64>,
     pub file_download_per_second: Option<u64>,
 }
@@ -347,6 +352,7 @@ impl ServerUsage {
                 packet_loss_out: loss_percent(data.client_to_server_packetloss_total),
                 loss_in: LossIn::default(),
                 idle_seconds: Some(data.idle_time.whole_seconds().max(0) as u64),
+                server_silent_seconds: None,
                 file_upload_per_second: data.filetransfer_bandwidth_sent,
                 file_download_per_second: data.filetransfer_bandwidth_received,
             },
@@ -499,6 +505,9 @@ impl SteadyHealth {
 
 impl ConnectionUsage {
     pub fn health_tooltip(self) -> String {
+        if let Some(seconds) = self.server_silent_seconds.filter(|_| self.unstable()) {
+            return format!("No answer from the server for {seconds} s");
+        }
         let mut problems = Vec::new();
         let mut missing = Vec::new();
         for (label, value, health) in [
@@ -540,7 +549,17 @@ impl ConnectionUsage {
         }
     }
 
+    /// The server has answered nothing for [`UNSTABLE_AFTER`]: packets aren't getting through,
+    /// though the connection only gives up after 30 seconds.
+    pub fn unstable(self) -> bool {
+        self.server_silent_seconds
+            .is_some_and(|seconds| seconds >= UNSTABLE_AFTER.as_secs())
+    }
+
     pub fn health(self) -> Health {
+        if self.unstable() {
+            return Health::Poor;
+        }
         let readings = [
             Health::loss(self.packet_loss_in),
             Health::loss(self.packet_loss_out),
@@ -554,7 +573,20 @@ impl ConnectionUsage {
         Health::Good
     }
 
+    /// The ping's colour: poor while the server isn't answering, whatever it last measured.
+    pub fn ping_health(self) -> Health {
+        if self.unstable() {
+            Health::Poor
+        } else {
+            Health::ping(self.ping_ms, self.ping_deviation_ms)
+        }
+    }
+
     pub fn ping_text(self) -> String {
+        if self.unstable() {
+            // The last ping measured is from before the server went quiet.
+            return "No answer".into();
+        }
         match (self.ping_ms, self.ping_deviation_ms) {
             (Some(ping), Some(deviation)) => format!("{ping:.0} ± {deviation:.1} ms"),
             (Some(ping), None) => format!("{ping:.0} ms"),
@@ -656,6 +688,27 @@ pub fn format_bytes(mut value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quiet_server_shows_as_unstable_after_five_seconds() {
+        let usage = |silent| ConnectionUsage {
+            ping_ms: Some(20.0),
+            ping_deviation_ms: Some(2.0),
+            server_silent_seconds: Some(silent),
+            ..Default::default()
+        };
+        assert!(!usage(4).unstable());
+        assert_eq!(usage(4).ping_text(), "20 ± 2.0 ms");
+        assert!(usage(5).unstable());
+        assert_eq!(usage(5).health(), Health::Poor);
+        assert_eq!(usage(5).ping_health(), Health::Poor);
+        assert_eq!(usage(5).ping_text(), "No answer");
+        assert_eq!(
+            usage(7).health_tooltip(),
+            "No answer from the server for 7 s"
+        );
+        assert!(!ConnectionUsage::default().unstable());
+    }
     use std::time::Duration;
 
     #[test]
