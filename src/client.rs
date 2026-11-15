@@ -93,6 +93,8 @@ pub enum Command {
     RequestGroups,
     /// New devices or voice settings for the microphone test; a server takes them from the hub.
     Retune(hub::Retune),
+    /// Drops the connection and connects again now, instead of waiting for it to time out.
+    Reconnect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1361,6 +1363,7 @@ async fn run_connection(
                             }
                         },
                         Command::RefreshStreams => streams.refresh(&mut connection),
+                        Command::Reconnect => connection.reconnect(),
                         Command::WatchStream(id) => {
                             if flow.borrow().cooling_down(Instant::now()) {
                                 let _ = events.try_send(Event::Warning { source: Source::Flood, detail: flow.borrow().flood_detail(Operation::StreamJoin, Instant::now()) });

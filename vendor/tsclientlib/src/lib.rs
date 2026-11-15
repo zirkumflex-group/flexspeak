@@ -153,6 +153,8 @@ pub enum TemporaryDisconnectReason {
 	/// The network refused to send or receive a packet, for example because Windows briefly ran
 	/// out of UDP ports or socket buffers (os error 10055). Reconnecting opens a new socket.
 	Network(std::io::ErrorKind),
+	/// The user asked to reconnect, see [`Connection::reconnect`].
+	Requested,
 }
 
 /// Whether an error on an established connection only interrupts it, so a reconnect should
@@ -191,7 +193,7 @@ fn next_reconnect_step(step: usize) -> usize {
 /// trying again right away only adds packets, so start at the longest delay.
 fn first_reconnect_step(reason: TemporaryDisconnectReason) -> usize {
 	match reason {
-		TemporaryDisconnectReason::Network(_) => 0,
+		TemporaryDisconnectReason::Network(_) | TemporaryDisconnectReason::Requested => 0,
 		TemporaryDisconnectReason::Timeout(_) | TemporaryDisconnectReason::Serverstop => {
 			RECONNECT_DELAYS.len() - 1
 		}
@@ -1009,6 +1011,41 @@ impl Connection {
 			con.client.send_packet(packet.into_packet()).map_err(Error::SendPacket)?;
 		}
 		Ok(())
+	}
+
+	/// Drop the current connection and connect again with a new socket, for when packets aren't
+	/// getting through and waiting for the timeout would take longer. The server is told we left,
+	/// as far as that one packet gets there, so it doesn't keep showing us twice.
+	///
+	/// Yields [`StreamItem::DisconnectedTemporarily`] with
+	/// [`TemporaryDisconnectReason::Requested`]. Does nothing unless connected.
+	pub fn reconnect(&mut self) {
+		let ConnectionState::Connected { con, book } = &mut self.state else {
+			return;
+		};
+		let can_send = Self::intern_can_send_audio(book, &self.options);
+		let can_receive = Self::intern_can_receive_audio(book, &self.options);
+		let packet = book.disconnect(DisconnectOptions::new());
+		if con.client.send_packet(packet.into_packet()).is_ok() {
+			// Give the packet one chance to leave before the socket closes.
+			let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+			let _ = con.client.poll_next_unpin(&mut cx);
+		}
+		info!("Reconnecting on request");
+		let step = first_reconnect_step(TemporaryDisconnectReason::Requested);
+		let fut = Self::connect(self.options.clone(), Some(step));
+		self.state = ConnectionState::Connecting(Box::pin(fut.in_current_span()), Some(step));
+		if can_send {
+			self.stream_items
+				.push_back(Ok(StreamItem::AudioChange(AudioEvent::CanSendAudio(false))));
+		}
+		if can_receive {
+			self.stream_items
+				.push_back(Ok(StreamItem::AudioChange(AudioEvent::CanReceiveAudio(false))));
+		}
+		self.stream_items.push_back(Ok(StreamItem::DisconnectedTemporarily(
+			TemporaryDisconnectReason::Requested,
+		)));
 	}
 
 	/// Send audio to the server.

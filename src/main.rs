@@ -1209,6 +1209,8 @@ enum Message {
     RemoveServer,
     TestAudio,
     Stop,
+    /// Connect again now, from the unstable connection banner.
+    Reconnect,
     Mute,
     Deafen,
     Join(u64),
@@ -4923,6 +4925,9 @@ impl App {
             Message::TestAudio => {
                 self.alerts.begin(Source::Audio);
                 return self.start(true);
+            }
+            Message::Reconnect => {
+                self.command(client::Command::Reconnect);
             }
             Message::Stop => {
                 // Leaving cuts a live share off for its viewers, so that asks first.

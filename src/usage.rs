@@ -11,6 +11,9 @@ pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// How long the server may send nothing before the connection shows as unstable. It answers a
 /// ping every second, so this is five pings without an answer.
 pub const UNSTABLE_AFTER: Duration = Duration::from_secs(5);
+/// From here the silence counts as severe: halfway to the 30 seconds after which the connection
+/// gives up and reconnects.
+pub const SEVERE_AFTER: Duration = Duration::from_secs(15);
 pub const SERVER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const SERVER_MAX_AGE: Duration = Duration::from_secs(15);
 const HISTORY_WINDOW: Duration = Duration::from_secs(300);
@@ -552,13 +555,22 @@ impl ConnectionUsage {
     /// The server has answered nothing for [`UNSTABLE_AFTER`]: packets aren't getting through,
     /// though the connection only gives up after 30 seconds.
     pub fn unstable(self) -> bool {
-        self.server_silent_seconds
-            .is_some_and(|seconds| seconds >= UNSTABLE_AFTER.as_secs())
+        self.silence_health().is_some()
+    }
+
+    /// How bad the server's silence is, once it counts as unstable: fair from
+    /// [`UNSTABLE_AFTER`], poor from [`SEVERE_AFTER`].
+    pub fn silence_health(self) -> Option<Health> {
+        match self.server_silent_seconds? {
+            seconds if seconds >= SEVERE_AFTER.as_secs() => Some(Health::Poor),
+            seconds if seconds >= UNSTABLE_AFTER.as_secs() => Some(Health::Fair),
+            _ => None,
+        }
     }
 
     pub fn health(self) -> Health {
-        if self.unstable() {
-            return Health::Poor;
+        if let Some(health) = self.silence_health() {
+            return health;
         }
         let readings = [
             Health::loss(self.packet_loss_in),
@@ -573,13 +585,11 @@ impl ConnectionUsage {
         Health::Good
     }
 
-    /// The ping's colour: poor while the server isn't answering, whatever it last measured.
+    /// The ping's colour: that of the silence while the server isn't answering, whatever it
+    /// last measured.
     pub fn ping_health(self) -> Health {
-        if self.unstable() {
-            Health::Poor
-        } else {
-            Health::ping(self.ping_ms, self.ping_deviation_ms)
-        }
+        self.silence_health()
+            .unwrap_or_else(|| Health::ping(self.ping_ms, self.ping_deviation_ms))
     }
 
     pub fn ping_text(self) -> String {
@@ -690,7 +700,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_quiet_server_shows_as_unstable_after_five_seconds() {
+    fn a_quiet_server_shows_as_unstable_then_severe() {
         let usage = |silent| ConnectionUsage {
             ping_ms: Some(20.0),
             ping_deviation_ms: Some(2.0),
@@ -700,8 +710,11 @@ mod tests {
         assert!(!usage(4).unstable());
         assert_eq!(usage(4).ping_text(), "20 ± 2.0 ms");
         assert!(usage(5).unstable());
-        assert_eq!(usage(5).health(), Health::Poor);
-        assert_eq!(usage(5).ping_health(), Health::Poor);
+        assert_eq!(usage(5).health(), Health::Fair);
+        assert_eq!(usage(5).ping_health(), Health::Fair);
+        assert_eq!(usage(14).health(), Health::Fair);
+        assert_eq!(usage(15).health(), Health::Poor);
+        assert_eq!(usage(15).ping_health(), Health::Poor);
         assert_eq!(usage(5).ping_text(), "No answer");
         assert_eq!(
             usage(7).health_tooltip(),
