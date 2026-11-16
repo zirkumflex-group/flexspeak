@@ -323,6 +323,8 @@ struct App {
     trace_saving: bool,
     /// The log file gets debug detail too; saved straight away when changed.
     debug_logging: bool,
+    /// Settings > Appearance > Interface Size, in percent; saved straight away when changed.
+    interface_size: u16,
     /// A diagnostics bundle is being zipped.
     diagnostics_saving: bool,
     /// The last diagnostics bundle saved this run.
@@ -1372,6 +1374,8 @@ enum Message {
     CopyTracePath,
     /// Settings > Error Log: debug detail in the log file.
     DebugLogging(bool),
+    /// Settings > Appearance > Interface Size, in percent.
+    InterfaceSize(u16),
     OpenLogFolder,
     /// Zips the logs, settings without secrets and the app's state for a bug report.
     SaveDiagnostics,
@@ -1621,6 +1625,7 @@ impl App {
             trace_path: None,
             trace_saving: false,
             debug_logging: false,
+            interface_size: 100,
             diagnostics_saving: false,
             diagnostics_path: None,
             log_folder: diagnostics::folder(),
@@ -2866,6 +2871,7 @@ impl App {
         self.stream_options = saved.streaming;
         self.debug_logging = saved.debug_logging;
         diagnostics::set_debug(saved.debug_logging);
+        self.interface_size = saved.interface_size;
         self.stream_view = saved.stream_view;
         for session in &mut self.sessions {
             apply_stream_view(&mut session.streaming, saved.stream_view);
@@ -2919,6 +2925,7 @@ impl App {
             streaming: self.stream_options,
             stream_view: self.stream_view,
             debug_logging: self.debug_logging,
+            interface_size: self.interface_size,
             chat: self.chat_options,
             skip_install_prompt: self.never_install
                 || self
@@ -4645,6 +4652,20 @@ impl App {
                     |saved| saved.debug_logging = on,
                     "Debug logging applies for now but was not saved",
                 );
+            }
+            Message::InterfaceSize(percent) => {
+                let percent = percent.clamp(
+                    settings::INTERFACE_SIZES[0],
+                    settings::INTERFACE_SIZES[settings::INTERFACE_SIZES.len() - 1],
+                );
+                if percent != self.interface_size {
+                    tracing::debug!(target: "flexspeak::ui", percent, "interface size");
+                    self.interface_size = percent;
+                    self.save_preference(
+                        |saved| saved.interface_size = percent,
+                        "The interface size applies for now but was not saved",
+                    );
+                }
             }
             Message::OpenLogFolder => {
                 if let Some(folder) = self.log_folder.clone() {

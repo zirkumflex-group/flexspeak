@@ -121,7 +121,7 @@ const fn palette(name: ThemeName, dark: bool) -> Palette {
     }
     match (name, dark) {
         (ThemeName::Flexspeak, true) => p!(
-            0x17181b, 0x232427, 0x26272b, 0x34353a, 0xebebee, 0xa0a1a8, 0x75767e, 0x8ea8ff,
+            0x14161c, 0x1f222a, 0x282b34, 0x363a45, 0xecedf2, 0xa6a9b7, 0x7b7f8e, 0x8ea8ff,
             0x0b0f1c
         ),
         (ThemeName::Flexspeak, false) => p!(
@@ -166,7 +166,6 @@ const fn palette(name: ThemeName, dark: bool) -> Palette {
 pub mod size {
     pub const CONTROL: f32 = 28.0;
     pub const ICON_BUTTON: f32 = 28.0;
-    pub const ROW: f32 = 26.0;
     pub const GAP: f32 = 8.0;
     pub const PAGE: f32 = 24.0;
     pub const CARD_PAD: f32 = 14.0;
@@ -177,6 +176,8 @@ pub mod size {
     pub const HEADER: f32 = 40.0;
     pub const SIDEBAR: f32 = 260.0;
     pub const CHART_MIN_WIDTH: f32 = 110.0;
+    /// A channel or a person in the channel tree: taller than a list row, for the larger names.
+    pub const TREE_ROW: f32 = 28.0;
 }
 
 pub mod radius {
@@ -208,10 +209,13 @@ pub mod ty {
     pub const SUBTITLE: TextStyle = TextStyle::new(14.0, 620.0).tracking(-0.1);
     pub const HEADING: TextStyle = TextStyle::new(13.0, 600.0);
     pub const BODY: TextStyle = TextStyle::new(13.0, 400.0);
-    /// Between body and strong: a channel with people in it.
-    pub const BODY_MEDIUM: TextStyle = TextStyle::new(13.0, 500.0);
     pub const BODY_STRONG: TextStyle = TextStyle::new(13.0, 560.0);
     pub const LABEL: TextStyle = TextStyle::new(13.0, 400.0);
+    /// Names in the channel tree, a step above body text so the tree reads at a glance: people
+    /// and empty channels, a channel with people in it, and your own channel.
+    pub const TREE: TextStyle = TextStyle::new(14.0, 420.0);
+    pub const TREE_MEDIUM: TextStyle = TextStyle::new(14.0, 540.0);
+    pub const TREE_STRONG: TextStyle = TextStyle::new(14.0, 640.0);
     pub const SMALL: TextStyle = TextStyle::new(11.5, 400.0);
     pub const SMALL_STRONG: TextStyle = TextStyle::new(11.5, 600.0);
     pub const CAPTION: TextStyle = TextStyle::new(11.0, 400.0);
@@ -290,21 +294,21 @@ impl Theme {
     fn dark_status() -> Self {
         Self {
             dark: true,
-            canvas: rgb(0x17181b),
-            chrome: rgb(0x232427),
-            surface: rgb(0x26272b),
-            stage: stage(rgb(0x17181b), rgb(0x232427), true),
-            screen: screen(rgb(0x17181b), rgb(0x232427), true),
-            raised: rgb(0x34353a),
-            hairline: Color::WHITE.alpha(0.08),
+            canvas: rgb(0x14161c),
+            chrome: rgb(0x1f222a),
+            surface: rgb(0x282b34),
+            stage: stage(rgb(0x14161c), rgb(0x1f222a), true),
+            screen: screen(rgb(0x14161c), rgb(0x1f222a), true),
+            raised: rgb(0x363a45),
+            hairline: Color::WHITE.alpha(0.11),
             bevel_top: Color::WHITE.alpha(0.10),
             bevel_bottom: Color::WHITE.alpha(0.06),
             ink: Color::WHITE,
             recess: Color::BLACK.alpha(0.18),
-            knob: rgb(0xebebee),
-            text: rgb(0xebebee),
-            muted: rgb(0xa0a1a8),
-            faint: rgb(0x75767e),
+            knob: rgb(0xecedf2),
+            text: rgb(0xecedf2),
+            muted: rgb(0xa6a9b7),
+            faint: rgb(0x7b7f8e),
             accent: rgb(0x8ea8ff),
             on_accent: rgb(0x0b0f1c),
             good: rgb(0x6fdc9a),

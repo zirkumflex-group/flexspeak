@@ -61,18 +61,24 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
                 .children((!header && overlays(s)).then(|| stage_tools(s, t, supported, watching))),
         );
     } else {
+        let count = s.server().state.current_members().len();
         pane = pane
             .child(
-                row()
-                    .key("streams-header")
-                    .w_full()
-                    .px(size::PAGE)
-                    .pt(20.0)
-                    .pb(16.0)
-                    .gap(12.0)
-                    .child(channel_title(s, t))
-                    .children(own_live(s, t))
-                    .child(tools(s, t, supported, watching)),
+                header_row(
+                    "streams-header",
+                    channel_title(
+                        s,
+                        t,
+                        if count == 1 {
+                            "1 member".to_owned()
+                        } else {
+                            format!("{count} members")
+                        },
+                    ),
+                )
+                .children(own_live(s, t))
+                .child(el().grow(1.0))
+                .child(tools(s, t, supported, watching)),
             )
             .child(no_streams(s, t, supported));
     }
@@ -195,30 +201,28 @@ fn backdrop(s: &App, t: &Theme) -> Color {
 fn stage_header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
     let streaming = &s.server().streaming;
     let streams = streaming.watched() + unwatched(s).len() + streaming.sharing.shares.len();
-    let mut title = row().key("stage-title").gap(10.0).min_w(0.0);
-    if let Some(channel) = s.server().state.current.as_ref() {
-        title = title.child(
-            text(channel.name.clone())
-                .font(ty::TITLE)
-                .color(t.text)
-                .truncate_fade()
-                .min_w(0.0),
-        );
-    }
-    title = title.child(
-        text(if streams == 1 {
-            "1 stream".to_owned()
-        } else {
-            format!("{streams} streams")
-        })
-        .font(ty::SMALL)
-        .color(t.muted)
-        // On the name's baseline, not centred against its taller line.
-        .self_end()
-        .pb(2.0),
-    );
+    header_row(
+        "stage-header",
+        channel_title(
+            s,
+            t,
+            if streams == 1 {
+                "1 stream".to_owned()
+            } else {
+                format!("{streams} streams")
+            },
+        ),
+    )
+    .children(own_live(s, t))
+    .child(el().grow(1.0))
+    .child(tools(s, t, supported, watching))
+}
+
+/// The line across the top of the stage, the same with streams or without, so the channel's
+/// name stays put when someone goes live.
+fn header_row(key: &'static str, title: El) -> El {
     row()
-        .key("stage-header")
+        .key(key)
         .w_full()
         .h(STAGE_HEADER)
         .pl(STAGE_PAD + 2.0)
@@ -226,9 +230,6 @@ fn stage_header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
         .gap(16.0)
         .center_y()
         .child(title)
-        .children(own_live(s, t))
-        .child(el().grow(1.0))
-        .child(tools(s, t, supported, watching))
 }
 
 /// The stage header's height.
@@ -391,33 +392,26 @@ fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
     ))
 }
 
-/// The channel you are in, and how many are in it with you.
-fn channel_title(s: &App, t: &Theme) -> El {
-    let state = &s.server().state;
-    let Some(channel) = state.current.as_ref() else {
-        return el().grow(1.0);
-    };
-    let count = state.current_members().len();
-    col()
-        .key("channel-title")
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(2.0)
-        .child(
+/// The channel you are in, and beside it on its baseline how many streams or people are there.
+fn channel_title(s: &App, t: &Theme, count: String) -> El {
+    let mut title = row().key("stage-title").gap(10.0).min_w(0.0);
+    if let Some(channel) = s.server().state.current.as_ref() {
+        title = title.child(
             text(channel.name.clone())
                 .font(ty::TITLE)
                 .color(t.text)
-                .truncate_fade(),
-        )
-        .child(
-            text(if count == 1 {
-                "1 member".to_owned()
-            } else {
-                format!("{count} members")
-            })
+                .truncate_fade()
+                .min_w(0.0),
+        );
+    }
+    title.child(
+        text(count)
             .font(ty::SMALL)
-            .color(t.muted),
-        )
+            .color(t.muted)
+            // On the name's baseline, not centred against its taller line.
+            .self_end()
+            .pb(2.0),
+    )
 }
 
 /// Streams in the channel that you aren't watching yet.
@@ -590,6 +584,9 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
     } else if supported && streaming::AVAILABLE {
         state = state.child(go_live(s, t));
     }
+    if !sharing {
+        state = state.children(live_elsewhere(s, t));
+    }
     let mut content = col()
         .key("no-streams-area")
         .grow(1.0)
@@ -611,6 +608,98 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
     }
     content.child(state)
 }
+
+/// Who is live in other channels of this server, under the ways to go live: a stream there can
+/// only be watched from its channel, so each row offers to join it. Nothing when nobody is.
+fn live_elsewhere(s: &App, t: &Theme) -> Option<El> {
+    let state = &s.server().state;
+    let current = state.current.as_ref().map(|channel| channel.id);
+    let live: Vec<_> = state
+        .channels
+        .iter()
+        .filter(|channel| Some(channel.id) != current)
+        .flat_map(|channel| {
+            channel
+                .members
+                .iter()
+                .filter(|member| s.is_streaming(member))
+                .map(move |member| (channel, member))
+        })
+        .take(5)
+        .collect();
+    if live.is_empty() {
+        return None;
+    }
+    let mut list = col()
+        .key("live-elsewhere")
+        .w_full()
+        .max_w(LIVE_ELSEWHERE_WIDTH)
+        .mt(28.0)
+        .gap(2.0)
+        .child(
+            text("Live elsewhere on this server")
+                .font(ty::OVERLINE)
+                .color(t.faint)
+                .px(8.0)
+                .pb(4.0),
+        );
+    for (channel, member) in live {
+        let id = channel.id;
+        let can_join = s.can_request_join(id);
+        let avatar = el()
+            .size(26.0, 26.0)
+            .radius(13.0)
+            .center()
+            .fill(super::home::tile_colour(&member.name))
+            .a11y_hidden()
+            .child(
+                text(crate::chat::initial(&member.name))
+                    .font(rune::TextStyle::new(12.0, 650.0))
+                    .color(Color::WHITE),
+            );
+        let name = row()
+            .gap(6.0)
+            .center_y()
+            .min_w(0.0)
+            .child(lit_dot(t.live))
+            .child(
+                text(member.name.clone())
+                    .font(ty::BODY_STRONG)
+                    .color(t.text)
+                    .truncate_fade()
+                    .min_w(0.0),
+            );
+        let place = text(format!("in {}", channel.name))
+            .font(ty::SMALL)
+            .color(t.muted)
+            .truncate_fade();
+        let join = button(
+            t,
+            &format!("live-elsewhere-join-{}", member.id),
+            "Join",
+            None,
+            Variant::Secondary,
+            can_join.then_some(Message::Join(id)),
+        )
+        .help(format!("Join {} to watch {}", channel.name, member.name));
+        list = list.child(
+            row()
+                .key(format!("live-elsewhere-{}", member.id))
+                .w_full()
+                .h(44.0)
+                .px(8.0)
+                .gap(10.0)
+                .center_y()
+                .child(avatar)
+                .child(col().grow(1.0).min_w(0.0).gap(1.0).child(name).child(place))
+                .child(join),
+        );
+    }
+    Some(list)
+}
+
+/// The list of streams in other channels: as wide as a short form.
+const LIVE_ELSEWHERE_WIDTH: f32 = 360.0;
 
 /// Your own share in a few words: how many watch it and who may. Until it is live, what it is
 /// waiting for. The encoder and capture details move to the tooltip and the share dialog.
@@ -1341,6 +1430,23 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
             .w_full()
             .h_full(),
         ),
+        // Lit from above as an unjoined stream's box is, so a stream still connecting reads as
+        // a screen waiting rather than a hole in the pane.
+        None if mode != Mode::Solo => video
+            .linear_gradient(
+                std::f32::consts::PI,
+                [
+                    (0.0, Color::WHITE.alpha(0.07)),
+                    (1.0, Color::WHITE.alpha(0.0)),
+                ],
+            )
+            .child(
+                col().gap(10.0).center().child(pulse(t.accent)).child(
+                    text(watch.phase.label())
+                        .font(ty::SMALL)
+                        .color(Color::WHITE.alpha(0.7)),
+                ),
+            ),
         None => video.child(
             col().gap(10.0).center().child(pulse(t.accent)).child(
                 text(watch.phase.label())

@@ -43,6 +43,7 @@ pub const SCENES: &[Scene] = &[
     ("connected-deafened", connected_deafened),
     ("member-states", member_states),
     ("streaming-elsewhere", streaming_elsewhere),
+    ("live-elsewhere", live_elsewhere),
     ("own-channel-only", own_channel_only),
     ("limited", limited),
     ("footer-hidden", footer_hidden),
@@ -158,6 +159,8 @@ pub const SCENES: &[Scene] = &[
     ("settings-light", settings_light),
     ("themes", themes),
     ("connected-light", connected_light),
+    ("interface-size-large", interface_size_large),
+    ("settings-interface-size", settings_interface_size),
     ("audio-processing", audio_processing_page),
     ("push-to-talk", push_to_talk_page),
     ("push-to-talk-connected", push_to_talk_connected),
@@ -1386,6 +1389,14 @@ fn streaming_elsewhere(s: &mut App) {
     s.server_mut().streaming.streamers = [4].into_iter().collect();
 }
 
+/// No one shares in your channel, but Ines is live in Raid night: the empty stage lists her,
+/// with Join.
+fn live_elsewhere(s: &mut App) {
+    connected(s);
+    s.server_mut().streaming.catalog.clear();
+    s.server_mut().streaming.streamers = [4].into_iter().collect();
+}
+
 /// Deafened with the microphone left unmuted: the mute button shows the mic as off, since
 /// nothing is sent, and its tooltip says why. The CPU reads to one decimal.
 fn connected_deafened(s: &mut App) {
@@ -2395,6 +2406,18 @@ fn connected_light(s: &mut App) {
     connected(s);
     s.appearance.scheme = settings::ColorScheme::Light;
     s.appearance.light_theme = settings::ThemeName::Ocean;
+}
+
+/// Settings > Appearance > Interface Size at 125%: the whole window drawn a quarter larger.
+fn interface_size_large(s: &mut App) {
+    member_states(s);
+    s.interface_size = 125;
+}
+
+/// Settings opened at Interface Size, with 125% chosen.
+fn settings_interface_size(s: &mut App) {
+    settings_at(s, SettingsPage::Appearance);
+    s.interface_size = 125;
 }
 
 /// Settings with every microphone effect on and voice activation chosen.

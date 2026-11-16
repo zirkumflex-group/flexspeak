@@ -106,6 +106,17 @@ pub struct Settings {
     /// on this computer; saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub debug_logging: bool,
+    /// Settings > Appearance > Interface Size, in percent of the usual size. Stays on this
+    /// computer, since it suits one screen and not another; saved straight away when changed.
+    #[serde(skip_serializing_if = "is_usual_size")]
+    pub interface_size: u16,
+}
+
+/// The sizes Settings > Appearance offers, in percent.
+pub const INTERFACE_SIZES: [u16; 4] = [100, 110, 125, 150];
+
+fn is_usual_size(value: &u16) -> bool {
+    *value == 100
 }
 
 /// What the window's close button does while connected (Settings > Appearance > Window).
@@ -750,6 +761,7 @@ impl Default for Settings {
             retired_settings_sync: None,
             settings_sync_version: 0,
             debug_logging: false,
+            interface_size: 100,
         }
     }
 }
