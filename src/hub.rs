@@ -453,6 +453,7 @@ struct Core {
     applied: Option<(CodecType, u8)>,
     /// Servers still owed the empty packet that ends an utterance, because their queue was full.
     owed: HashSet<u64>,
+    levels: crate::voice_levels::VoiceLevels,
 }
 
 impl Core {
@@ -482,6 +483,7 @@ impl Core {
             routed: 0,
             applied: None,
             owed: HashSet::new(),
+            levels: Default::default(),
         }
     }
 
@@ -735,14 +737,30 @@ impl Core {
             self.engine().play(chime);
         }
         let surfaces = self.surfaces.clone();
-        let packets = self.engine().tick(false, |stereo| {
-            for line in lines.iter() {
-                if !line.silent.load(Ordering::Acquire) {
-                    line.incoming.lock().unwrap().fill_buffer(stereo);
+        let levels = &mut self.levels;
+        let engine = self.engine.as_mut().expect("ticked with devices open");
+        engine.levels.on = crate::voice_levels::on();
+        let metered = engine.levels.on;
+        let packets = engine.tick(false, |stereo| {
+            for line in lines
+                .iter()
+                .filter(|line| !line.silent.load(Ordering::Acquire))
+            {
+                let mut incoming = line.incoming.lock().unwrap();
+                if !metered {
+                    incoming.fill_buffer(stereo);
+                    continue;
+                }
+                incoming.fill_buffer_with_proc(stereo, |id, samples| {
+                    levels.heard(line.id, id.0, samples);
+                });
+                for (id, queue) in incoming.get_queues() {
+                    levels.volume(line.id, id.0, queue.volume);
                 }
             }
             surfaces.mix_audio(stereo);
         })?;
+        levels.report(now, &mut engine.levels, self.open.volume.percent());
         let mut heard = tsclientlib::audio::VoiceStats::default();
         let mut queued = 0;
         for line in lines.iter() {

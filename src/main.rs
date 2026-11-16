@@ -42,6 +42,7 @@ mod ts6_import;
 mod ui;
 mod updater;
 mod usage;
+mod voice_levels;
 mod window_icon;
 mod window_place;
 

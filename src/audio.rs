@@ -358,6 +358,8 @@ pub struct AudioEngine {
     pub codec: CodecType,
     output_target: usize,
     pub description: String,
+    /// Voice levels since the hub last read them.
+    pub levels: crate::voice_levels::EngineLevels,
 }
 
 impl AudioEngine {
@@ -546,6 +548,7 @@ impl AudioEngine {
             codec: CodecType::OpusVoice,
             output_target,
             description,
+            levels: Default::default(),
         })
     }
 
@@ -759,9 +762,16 @@ impl AudioEngine {
                     frame[0] += sample;
                     frame[1] += sample;
                 }
+                if self.levels.on {
+                    self.levels.limited +=
+                        stereo.iter().filter(|sample| sample.abs() > KNEE).count();
+                }
                 stereo
                     .iter_mut()
                     .for_each(|sample| *sample = soft_limit(*sample));
+                if self.levels.on {
+                    self.levels.output.add(&stereo);
+                }
             }
             for (i, frame) in stereo.as_chunks::<2>().0.iter().enumerate() {
                 self.output_rate.input[0][i] = frame[0];
@@ -791,10 +801,12 @@ impl AudioEngine {
     }
 }
 
+/// Where [`soft_limit`] starts easing peaks down.
+const KNEE: f32 = 0.8;
+
 /// Eases peaks into the -1..1 range instead of chopping them off, so several servers talking
 /// at once stay clean. Anything below the knee is left untouched.
 fn soft_limit(sample: f32) -> f32 {
-    const KNEE: f32 = 0.8;
     let level = sample.abs();
     if level <= KNEE || !level.is_finite() {
         return sample;
