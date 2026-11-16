@@ -74,9 +74,13 @@ pub enum Command {
     WatchStream(String),
     StartSharing(streaming::publishing::Options),
     /// Changes system audio and quality of the running share.
-    ConfigureSharing(streaming::LiveShare),
-    StopSharing,
-    DecideViewer(u16, bool),
+    /// Changes one share's system audio and quality while it runs.
+    ConfigureSharing(u64, streaming::LiveShare),
+    /// Stops one share, or every one.
+    StopSharing(Option<u64>),
+    DecideViewer(u64, u16, bool),
+    /// Shows or hides your own picture of one share, or of every one.
+    PreviewSharing(Option<u64>, bool),
     /// Stops the stream with this ID, or every watched stream.
     StopWatching(Option<String>),
     /// Pokes a client with a message.
@@ -1451,11 +1455,12 @@ async fn run_connection(
                             };
                             if let Err(error) = result { let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() }); }
                         },
-                        Command::ConfigureSharing(live) => if let Err(error) = streams.publisher.configure(live) {
+                        Command::ConfigureSharing(key, live) => if let Err(error) = streams.publisher.configure(key, live) {
                             let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() });
                         },
-                        Command::StopSharing => streams.publisher.stop("Stopped sharing"),
-                        Command::DecideViewer(id, allow) => if let Err(error) = streams.publisher.decide(id,allow) {
+                        Command::StopSharing(key) => streams.publisher.stop(key, "Stopped sharing"),
+                        Command::PreviewSharing(key, on) => streams.publisher.set_preview(key, on),
+                        Command::DecideViewer(key, id, allow) => if let Err(error) = streams.publisher.decide(key, id, allow) {
                             let _ = events.try_send(Event::Warning { source: Source::StreamPublish, detail: error.to_string() });
                         },
                         // The shared devices take new settings from the hub, not from here.
@@ -1816,7 +1821,7 @@ async fn run_connection(
         }
         Ok(())
     }.await;
-    streams.publisher.stop("Disconnected");
+    streams.publisher.stop(None, "Disconnected");
     streams.stop(
         &mut connection,
         None,

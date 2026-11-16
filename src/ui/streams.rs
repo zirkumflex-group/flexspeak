@@ -5,7 +5,9 @@
 //! one stream onto another trades their places. Each stream has its own volume. Codec and
 //! transport details hide behind the info button.
 //! Sharing your own screen starts from the empty pane's own buttons or the one beside
-//! Disconnect, in [`share_dialog`].
+//! Disconnect, in [`share_dialog`]. You can run several shares at once, such as a screen and a
+//! camera, each with its own card in the voice panel, and see each one's own picture on the
+//! stage beside the streams you watch.
 
 use rune::{Color, Cx, Drag, El, Phase, SurfaceFit, Transition, Tx, col, el, icon, row, text};
 use rune_kit::{Checkbox, Dialog, Kit, SegmentedControl};
@@ -19,7 +21,8 @@ use super::{TileDrag, dispatch, icons, theme};
 use crate::streaming::{
     self, Strip, Watching, health, publishing,
     publishing::{
-        Access, Preset, PreviewState, Resolution, ShareSource, SourceGroup, SourceKind, Struggle,
+        Access, Preset, PreviewState, Resolution, ShareSource, SourceGroup, SourceKind, Status,
+        Struggle,
     },
 };
 use crate::{App, Message, usage};
@@ -136,7 +139,7 @@ pub fn quick_sources(s: &App) -> &[ShareSource] {
         && !session.stopping
         && session.state.server_version.starts_with("6.")
         && streaming::AVAILABLE
-        && !session.streaming.sharing.status.active;
+        && !session.streaming.sharing.active();
     let sources = if available {
         s.ui.quick_sources.as_slice()
     } else {
@@ -190,7 +193,8 @@ fn backdrop(s: &App, t: &Theme) -> Color {
 /// The line over several streams: the channel and how many streams run in it, your own share
 /// while you are live, and the stage's tools, which then stay off the pictures.
 fn stage_header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
-    let streams = s.server().streaming.watching.len() + unwatched(s).len();
+    let streaming = &s.server().streaming;
+    let streams = streaming.watched() + unwatched(s).len() + streaming.sharing.shares.len();
     let mut title = row().key("stage-title").gap(10.0).min_w(0.0);
     if let Some(channel) = s.server().state.current.as_ref() {
         title = title.child(
@@ -230,43 +234,60 @@ fn stage_header(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
 /// The stage header's height.
 const STAGE_HEADER: f32 = 44.0;
 
-/// Your own share, on the stage where the streams are: that you are live, and who watches.
-/// The controls for it stay beside the voice buttons.
+/// Your own shares, on the stage where the streams are: that you are live, and who watches.
+/// The controls for them stay beside the voice buttons.
 fn own_live(s: &App, t: &Theme) -> Option<El> {
-    let status = &s.server().streaming.sharing.status;
-    if !status.active {
-        return None;
-    }
-    let watching = match status.viewers.len() {
-        0 => "no one watching yet".to_owned(),
-        count => format!("{count} of {} watching", streaming::publishing::MAX_VIEWERS),
+    let shares = &s.server().streaming.sharing.shares;
+    let live = shares.iter().any(|share| share.live);
+    let note = match shares.as_slice() {
+        [] => return None,
+        [share] => watching_words(share).to_lowercase(),
+        // What runs, as "screen and camera".
+        several => {
+            let kinds: Vec<&str> = several.iter().map(|share| share_kind(share)).collect();
+            let (last, rest) = kinds.split_last().expect("several");
+            format!("{} and {last}", rest.join(", "))
+        }
     };
-    Some(share_summary(
-        s,
-        row()
-            .key("own-live")
-            .gap(6.0)
-            .center_y()
-            .child(if status.live {
-                lit_dot(t.live)
-            } else {
-                pulse(t.live)
-            })
-            .child(
-                text(if status.live {
-                    "You're live"
-                } else {
-                    "Going live"
-                })
+    let line = row()
+        .key("own-live")
+        .gap(6.0)
+        .center_y()
+        .child(if live { lit_dot(t.live) } else { pulse(t.live) })
+        .child(
+            text(if live { "You're live" } else { "Going live" })
                 .font(ty::BODY_STRONG)
                 .color(t.text),
-            )
-            .children(
-                status
-                    .live
-                    .then(|| text(format!("· {watching}")).font(ty::SMALL).color(t.muted)),
-            ),
-    ))
+        )
+        .children(live.then(|| text(format!("· {note}")).font(ty::SMALL).color(t.muted)));
+    let help: Vec<String> = shares.iter().map(share_summary_text).collect();
+    Some(line.help(help.join("\n")))
+}
+
+/// How many watch a share, in a few words.
+fn watching_words(share: &Status) -> String {
+    match share.viewers.len() {
+        0 => "No one watching yet".to_owned(),
+        count => format!("{count} of {} watching", publishing::MAX_VIEWERS),
+    }
+}
+
+/// What a share shows, in two words: its picture's and its dialog's title.
+fn share_title(share: &Status) -> &'static str {
+    match share.kind.as_ref().map(SourceGroup::of) {
+        Some(SourceGroup::Camera) => "Your camera",
+        Some(SourceGroup::Window) => "Your window",
+        _ => "Your screen",
+    }
+}
+
+/// What a share shows, in one word, for the narrow card.
+fn share_kind(share: &Status) -> &'static str {
+    match share.kind.as_ref().map(SourceGroup::of) {
+        Some(SourceGroup::Camera) => "camera",
+        Some(SourceGroup::Window) => "window",
+        _ => "screen",
+    }
 }
 
 /// The toolbar floating over a lone stream, at the top right. The solid, frosted backing keeps
@@ -291,20 +312,23 @@ fn stage_tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
 
 fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
     let mut bar = row().key("streams-tools").gap(10.0).center_y();
+    let watched = s.server().streaming.watched();
     if watching {
         let on = s.server().streaming.show_stats;
-        bar = bar.child(icon_button(
-            t,
-            "stream-stats",
-            &icons::INFO,
-            if on {
-                "Hide stream details"
-            } else {
-                "Show stream details: codec, resolution, frame rate, transport"
-            },
-            if on { Variant::Active } else { Variant::Ghost },
-            Some(Message::ToggleStreamStats),
-        ));
+        bar = bar.children((watched > 0).then(|| {
+            icon_button(
+                t,
+                "stream-stats",
+                &icons::INFO,
+                if on {
+                    "Hide stream details"
+                } else {
+                    "Show stream details: codec, resolution, frame rate, transport"
+                },
+                if on { Variant::Active } else { Variant::Ghost },
+                Some(Message::ToggleStreamStats),
+            )
+        }));
         if s.server().streaming.watching.len() > 1 {
             let current = s
                 .server()
@@ -345,14 +369,16 @@ fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
                     Some(Message::StreamLayout(layout)),
                 ));
             }
-            bar = bar.child(button(
-                t,
-                "stop-all",
-                "Stop All",
-                Some(&icons::STOP),
-                Variant::Secondary,
-                Some(Message::StopWatching(None)),
-            ));
+            if watched > 1 {
+                bar = bar.child(button(
+                    t,
+                    "stop-all",
+                    "Stop All",
+                    Some(&icons::STOP),
+                    Variant::Secondary,
+                    Some(Message::StopWatching(None)),
+                ));
+            }
         }
     }
     bar.child(icon_button(
@@ -419,7 +445,7 @@ fn watch_blocked(s: &App, supported: bool, stream: &streaming::StreamInfo) -> Op
         Some("Unavailable here")
     } else if stream.server_relayed {
         Some("Server relay unavailable")
-    } else if s.server().streaming.watching.len() >= streaming::MAX_WATCHES {
+    } else if s.server().streaming.watched() >= streaming::MAX_WATCHES {
         Some("Watching the most at once")
     } else {
         None
@@ -479,7 +505,7 @@ fn go_live(s: &App, t: &Theme) -> El {
             } else {
                 Variant::Ghost
             },
-            Some(Message::OpenShare),
+            Some(Message::OpenShare(None)),
         )
         .help("Choose a screen, window or camera, its quality and who may watch"),
     )
@@ -489,7 +515,8 @@ fn go_live(s: &App, t: &Theme) -> El {
 /// below the header however wide the window is: the ways to start one, or your own share
 /// while it is the only one.
 fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
-    let sharing = s.server().streaming.sharing.status.active;
+    let shares = &s.server().streaming.sharing.shares;
+    let sharing = !shares.is_empty();
     let mut state = col()
         .key("no-streams")
         .grow(1.0)
@@ -513,13 +540,53 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
             ),
         );
     if sharing {
-        state = state.child(share_summary(
-            s,
-            text(share_summary_text(s))
-                .font(ty::SMALL)
-                .color(t.faint)
-                .align(rune::Align::Center),
-        ));
+        for share in shares {
+            state = state.child(share_summary(
+                share,
+                text(share_summary_text(share))
+                    .key(format!("share-summary-{}", share.key))
+                    .font(ty::SMALL)
+                    .color(t.faint)
+                    .align(rune::Align::Center),
+            ));
+        }
+        let full = s.server().streaming.sharing.full();
+        state = state.child(
+            row()
+                .key("own-actions")
+                .gap(size::GAP)
+                .mt(4.0)
+                .center()
+                .child(
+                    button(
+                        t,
+                        "show-preview",
+                        if shares.len() == 1 {
+                            "Show Preview"
+                        } else {
+                            "Show Previews"
+                        },
+                        Some(&icons::EYE),
+                        Variant::Secondary,
+                        Some(Message::PreviewShare(None, true)),
+                    )
+                    .help("See what you share, here on the stage. Only you see it."),
+                )
+                .children((supported && !full).then(|| {
+                    button(
+                        t,
+                        "share-another",
+                        "Share Another…",
+                        Some(&icons::PLUS),
+                        Variant::Ghost,
+                        Some(Message::OpenShare(None)),
+                    )
+                    .help(
+                        "Share a camera beside your screen, or another screen or window, \
+                         at the same time",
+                    )
+                })),
+        );
     } else if supported && streaming::AVAILABLE {
         state = state.child(go_live(s, t));
     }
@@ -547,24 +614,19 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
 
 /// Your own share in a few words: how many watch it and who may. Until it is live, what it is
 /// waiting for. The encoder and capture details move to the tooltip and the share dialog.
-fn share_summary(s: &App, line: El) -> El {
-    let detail = &s.server().streaming.sharing.status.detail;
-    if detail.is_empty() {
+fn share_summary(status: &Status, line: El) -> El {
+    if status.detail.is_empty() {
         line
     } else {
-        line.help(detail.clone())
+        line.help(status.detail.clone())
     }
 }
 
-fn share_summary_text(s: &App) -> String {
-    let status = &s.server().streaming.sharing.status;
+fn share_summary_text(status: &Status) -> String {
     if !status.live && !status.detail.is_empty() {
         return status.detail.clone();
     }
-    let watching = match status.viewers.len() {
-        0 => "No one watching yet".to_owned(),
-        count => format!("{count} of {} watching", streaming::publishing::MAX_VIEWERS),
-    };
+    let watching = watching_words(status);
     if status.source.is_empty() {
         format!("{watching} · {}", status.access.label())
     } else {
@@ -574,15 +636,11 @@ fn share_summary_text(s: &App) -> String {
 
 /// The same for the card beside the voice buttons, which is narrow: the source's name goes
 /// last, where a line cut short loses the least.
-fn share_card_text(s: &App) -> String {
-    let status = &s.server().streaming.sharing.status;
+fn share_card_text(status: &Status) -> String {
     if !status.live && !status.detail.is_empty() {
         return status.detail.clone();
     }
-    let watching = match status.viewers.len() {
-        0 => "No one watching yet".to_owned(),
-        count => format!("{count} of {} watching", streaming::publishing::MAX_VIEWERS),
-    };
+    let watching = watching_words(status);
     if status.source.is_empty() {
         format!("{watching} · {}", status.access.label())
     } else {
@@ -595,13 +653,13 @@ fn notice(t: &Theme) -> El {
     super::widgets::well(t).padding(size::CARD_PAD)
 }
 
-/// Your own share while it runs, for the voice panel: what it shows and who watches, requests
-/// to watch, and the way to stop. The summary stays on one line.
-pub fn sharing_status(s: &App, t: &Theme) -> El {
-    let sharing = &s.server().streaming.sharing;
-    let status = &sharing.status;
+/// One of your shares while it runs, for the voice panel: what it shows and who watches,
+/// requests to watch, and the ways to see it, change it and stop it. The summary stays on one
+/// line.
+pub fn share_card(t: &Theme, status: &Status) -> El {
+    let key = status.key;
     let mut tile = col()
-        .key("sharing-status")
+        .key(format!("sharing-status-{key}"))
         .w_full()
         .gap(4.0)
         // Room around the words; less on the buttons' side, which carry a margin of their own.
@@ -621,51 +679,61 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(lit_dot(t.live))
+                .child(if status.live {
+                    lit_dot(t.live)
+                } else {
+                    pulse(t.live)
+                })
                 .child(
-                    text("You are sharing")
+                    text(capitalised(share_kind(status)))
                         .font(ty::BODY_STRONG)
                         .color(t.text)
                         .grow(1.0)
                         .min_w(0.0)
                         .truncate_fade(),
                 )
-                // The two quiet buttons sit together, a step apart from Stop.
+                // The quiet buttons sit together, a step apart from Stop.
                 .child(
                     row()
                         .gap(2.0)
                         .center_y()
-                        .child(share_audio_toggle(t, sharing))
+                        .child(preview_toggle(t, status))
+                        // A camera rarely sends system audio; its button shows once it does.
+                        .children(
+                            (!status.kind.as_ref().is_some_and(SourceKind::is_camera)
+                                || status.system_audio)
+                                .then(|| share_audio_toggle(t, status)),
+                        )
                         .child(icon_button(
                             t,
                             "manage-share",
                             &icons::SETTINGS,
                             "Stream settings: Performance or Quality, audio, and who watches",
                             Variant::Ghost,
-                            Some(Message::OpenShare),
+                            Some(Message::OpenShare(Some(key))),
                         )),
                 )
                 .child(icon_button(
                     t,
                     "stop-sharing",
                     &icons::STOP,
-                    "Stop sharing",
+                    "Stop sharing this",
                     Variant::Danger,
-                    Some(Message::StopSharing),
+                    Some(Message::StopSharing(Some(key))),
                 )),
         )
         // Always one line. Who watches and who may lead it, so a narrow sidebar fades out
         // only the source's name, which the tooltip still gives.
         .child(
-            text(share_card_text(s))
+            text(share_card_text(status))
                 .font(ty::CAPTION)
                 .color(t.faint)
                 .truncate_fade()
                 .pr(4.0)
                 .help(if status.detail.is_empty() {
-                    share_summary_text(s)
+                    share_summary_text(status)
                 } else {
-                    format!("{}\n{}", share_summary_text(s), status.detail)
+                    format!("{}\n{}", share_summary_text(status), status.detail)
                 }),
         );
     for (id, name) in &status.requests {
@@ -674,13 +742,38 @@ pub fn sharing_status(s: &App, t: &Theme) -> El {
     tile
 }
 
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// Whether you see the share's own picture on the stage, lit while you do. Only you see it.
+fn preview_toggle(t: &Theme, status: &Status) -> El {
+    let on = status.preview;
+    icon_button(
+        t,
+        "share-preview-toggle",
+        if on { &icons::EYE } else { &icons::EYE_OFF },
+        if on {
+            "Your preview is on the stage. Hide it"
+        } else {
+            "See what you share on the stage. Only you see it"
+        },
+        if on { Variant::Active } else { Variant::Ghost },
+        Some(Message::PreviewShare(Some(status.key), !on)),
+    )
+}
+
 /// Whether your share sends system audio, lit while it does; a press turns it on or off
 /// without stopping the share.
-fn share_audio_toggle(t: &Theme, sharing: &streaming::publishing::Ui) -> El {
-    let on = sharing.audio;
+fn share_audio_toggle(t: &Theme, status: &Status) -> El {
+    let on = status.system_audio;
     let help = if !on {
         "System audio is not shared. Share it"
-    } else if sharing.status.audio_level > 0.01 {
+    } else if status.audio_level > 0.01 {
         "Sharing system audio: sound is going out. Stop sharing it"
     } else {
         "Sharing system audio: nothing is playing right now. Stop sharing it"
@@ -695,12 +788,12 @@ fn share_audio_toggle(t: &Theme, sharing: &streaming::publishing::Ui) -> El {
         },
         help,
         if on { Variant::Active } else { Variant::Ghost },
-        Some(Message::ShareAudio(!on)),
+        Some(Message::ShareSystemAudio(status.key, !on)),
     )
 }
 
 /// A request to watch on one line, for the wide share dialog.
-fn request_inline(t: &Theme, status: &streaming::publishing::Status, id: u16, name: &str) -> El {
+fn request_inline(t: &Theme, status: &Status, id: u16, name: &str) -> El {
     row()
         .key(format!("request-{id}"))
         .w_full()
@@ -723,7 +816,7 @@ fn request_inline(t: &Theme, status: &streaming::publishing::Status, id: u16, na
             None,
             Variant::Primary,
             (status.viewers.len() < streaming::publishing::MAX_VIEWERS)
-                .then_some(Message::DecideViewer(id, true)),
+                .then_some(Message::DecideViewer(status.key, id, true)),
         ))
         .child(button(
             t,
@@ -731,11 +824,11 @@ fn request_inline(t: &Theme, status: &streaming::publishing::Status, id: u16, na
             "Deny",
             None,
             Variant::Secondary,
-            Some(Message::DecideViewer(id, false)),
+            Some(Message::DecideViewer(status.key, id, false)),
         ))
 }
 
-fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name: &str) -> El {
+fn request_row(t: &Theme, status: &Status, id: u16, name: &str) -> El {
     col()
         .key(format!("request-{id}"))
         .w_full()
@@ -759,7 +852,7 @@ fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name:
                     None,
                     Variant::Primary,
                     (status.viewers.len() < streaming::publishing::MAX_VIEWERS)
-                        .then_some(Message::DecideViewer(id, true)),
+                        .then_some(Message::DecideViewer(status.key, id, true)),
                 ))
                 .child(button(
                     t,
@@ -767,7 +860,7 @@ fn request_row(t: &Theme, status: &streaming::publishing::Status, id: u16, name:
                     "Deny",
                     None,
                     Variant::Secondary,
-                    Some(Message::DecideViewer(id, false)),
+                    Some(Message::DecideViewer(status.key, id, false)),
                 )),
         )
 }
@@ -1261,7 +1354,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
     } else {
         video = double_click_fullscreen(video);
     }
-    if s.server().streaming.show_stats && mode != Mode::Thumbnail {
+    if s.server().streaming.show_stats && mode != Mode::Thumbnail && watch.own.is_none() {
         video = video.child(stats(s, watch).absolute(10.0, 10.0));
     }
     if let Some(problem) = s.stream_problem(watch) {
@@ -1371,6 +1464,16 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
         } else {
             pulse(t.fair)
         };
+        if let Some(key) = watch.own {
+            return frame.child(
+                label_row(
+                    t,
+                    own_share(s, key).map_or("You", share_title).to_owned(),
+                    dot,
+                )
+                .child(hide_preview_button(t, key)),
+            );
+        }
         frame.child(
             thumbnail_label(s, t, watch.stream.publisher, dot).child(mute_button(
                 s,
@@ -1402,6 +1505,11 @@ fn tile_frame(t: &Theme, id: &str, edge: Color, video: El) -> El {
 }
 
 fn thumbnail_label(s: &App, t: &Theme, publisher: u16, dot: El) -> El {
+    label_row(t, publisher_name(s, publisher), dot)
+}
+
+/// A small tile's line under its picture: the dot, then who it is.
+fn label_row(t: &Theme, name: String, dot: El) -> El {
     row()
         .w_full()
         .pl(8.0)
@@ -1412,7 +1520,7 @@ fn thumbnail_label(s: &App, t: &Theme, publisher: u16, dot: El) -> El {
         .center_y()
         .child(dot)
         .child(
-            text(publisher_name(s, publisher))
+            text(name)
                 .font(ty::SMALL)
                 .color(t.text)
                 .truncate_fade()
@@ -1544,12 +1652,39 @@ const STREAM_VOLUME: Range = Range {
 /// A stream's two lines: what it shows over who shares it, or the publisher first when the
 /// stream's own name only says it is a screen share.
 fn stream_lines(s: &App, stream: &streaming::StreamInfo) -> (String, String) {
+    if let Some(share) = s
+        .server()
+        .streaming
+        .watching(&stream.id)
+        .and_then(|watch| watch.own)
+        .and_then(|key| own_share(s, key))
+    {
+        let words = format!("{} · {}", share.source, watching_words(share));
+        return (share_title(share).to_owned(), words);
+    }
     let publisher = publisher_name(s, stream.publisher);
     if publishing::generic_name(&stream.name) {
         (publisher, stream.name.clone())
     } else {
         (stream.name.clone(), publisher)
     }
+}
+
+/// One of your shares, by key.
+fn own_share(s: &App, key: u64) -> Option<&Status> {
+    s.server().streaming.sharing.share(key)
+}
+
+/// Takes your own picture off the stage; the share itself runs on.
+fn hide_preview_button(t: &Theme, key: u64) -> El {
+    icon_button(
+        t,
+        "hide-preview",
+        &icons::EYE_OFF,
+        "Hide your preview. Your share carries on",
+        Variant::Ghost,
+        Some(Message::PreviewShare(Some(key), false)),
+    )
 }
 
 /// Mutes a stream's sound, or brings it back; a stream without sound gets nothing.
@@ -1635,11 +1770,11 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El 
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(1.0)
-                .help(format!(
-                    "{} · {}",
-                    watch.stream.name,
-                    publisher_name(s, publisher)
-                ))
+                .help(if watch.own.is_some() {
+                    "Your own picture, as viewers get it. Only you see it here.".to_owned()
+                } else {
+                    format!("{} · {}", watch.stream.name, publisher_name(s, publisher))
+                })
                 .child(
                     text(title)
                         .font(ty::BODY_STRONG)
@@ -1714,6 +1849,9 @@ fn controls(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El 
     }
     if large {
         bar = bar.child(fullscreen_button(s, t));
+    }
+    if let Some(key) = watch.own {
+        return bar.child(hide_preview_button(t, key));
     }
     bar.child(icon_button(
         t,
@@ -1928,6 +2066,7 @@ fn screen_tiles(s: &App, t: &Theme) -> El {
     screens.sort_by_key(|source| !s.ui.quick_sources.iter().any(|q| q.kind == source.kind));
     for (index, source) in screens.into_iter().enumerate() {
         let on = sharing.selected.as_ref() == Some(source);
+        let busy = sharing.in_use(source);
         let mut tile = col()
             .key(format!("share-screen-{index}"))
             .role("radio")
@@ -1936,13 +2075,19 @@ fn screen_tiles(s: &App, t: &Theme) -> El {
             .gap(6.0)
             .child(source_frame(s, t, Some(source), on))
             .child(
-                text(source.name.clone())
-                    .font(ty::CAPTION)
-                    .color(if on { t.text } else { t.muted })
-                    .truncate_fade()
-                    .a11y_hidden(),
+                text(if busy {
+                    format!("{} · {IN_USE}", source.name)
+                } else {
+                    source.name.clone()
+                })
+                .font(ty::CAPTION)
+                .color(if on { t.text } else { t.muted })
+                .truncate_fade()
+                .a11y_hidden(),
             );
-        if !on {
+        if busy {
+            tile = tile.opacity(0.5).help(IN_USE_HELP);
+        } else if !on {
             tile = tile
                 .focusable(true)
                 .cursor(rune::Cursor::Pointer)
@@ -2018,6 +2163,7 @@ fn source_rows(s: &App, t: &Theme, k: &Kit, group: SourceGroup) -> El {
     let mut rows = col().key("share-rows").w_full().gap(2.0);
     for (index, source) in sources.iter().enumerate() {
         let on = sharing.selected.as_ref() == Some(*source);
+        let busy = sharing.in_use(source);
         let glyph = if game(source) {
             &icons::GAMEPAD
         } else {
@@ -2046,8 +2192,11 @@ fn source_rows(s: &App, t: &Theme, k: &Kit, group: SourceGroup) -> El {
                     .grow(1.0)
                     .min_w(0.0)
                     .a11y_hidden(),
-            );
-        line = if on {
+            )
+            .children(busy.then(|| faint(t, IN_USE)));
+        line = if busy {
+            line.opacity(0.6).help(IN_USE_HELP)
+        } else if on {
             line.fill(t.wash(0.08))
         } else {
             line.focusable(true)
@@ -2085,20 +2234,25 @@ fn source_rows(s: &App, t: &Theme, k: &Kit, group: SourceGroup) -> El {
         )
 }
 
-/// Choosing what to share, its quality and audio; or, while sharing, who watches.
+/// What a source already shared says in the picker.
+const IN_USE: &str = "Sharing";
+const IN_USE_HELP: &str =
+    "You share this already. Its card beside the voice buttons changes or stops it.";
+
+/// Choosing what to share, its quality and audio; or, for a running share, who watches.
 pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     if !s.server().streaming.share_open {
         return;
     }
     let sharing = &s.server().streaming.sharing;
-    let status = &sharing.status;
+    let editing = sharing.editing_share();
     let mut menus = Vec::new();
     let height = cx
         .layout_size("window")
         .map_or(s.window_size.1, |size| size[1]);
     let actions;
     let mut body = col().key("share-body").w_full().px(16.0).pb(16.0).gap(14.0);
-    if status.active {
+    if let Some(status) = editing {
         // One line on what runs, then who watches, then the settings that change live.
         let mut summary = row()
             .w_full()
@@ -2187,14 +2341,24 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                 "Stop Sharing",
                 Some(&icons::STOP),
                 Variant::Danger,
-                Some(Message::StopSharing),
+                Some(Message::StopSharing(Some(status.key))),
             ));
     } else {
         body = body.child(source_picker(s, t, k));
         body = audio_field(s, k, quality_fields(s, t, k, body, true, &mut menus));
-        if !status.detail.is_empty() {
-            body = body.child(muted(t, status.detail.clone()));
+        if sharing.audio && sharing.shares.iter().any(|share| share.system_audio) {
+            body = body.child(faint(
+                t,
+                "Your other share sends system audio already; viewers of both would hear it twice.",
+            ));
         }
+        if !sharing.ended.is_empty() {
+            body = body.child(muted(t, sharing.ended.clone()));
+        }
+        let ready = sharing
+            .selected
+            .as_ref()
+            .is_some_and(|source| !sharing.in_use(source));
         actions = row()
             .w_full()
             .gap(size::GAP)
@@ -2215,18 +2379,17 @@ pub fn share_dialog(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut V
                     "Go Live",
                     Some(&icons::MONITOR_UP),
                     Variant::Primary,
-                    (!sharing.loading && sharing.selected.is_some())
-                        .then_some(Message::StartSharing),
+                    (!sharing.loading && ready && !sharing.full()).then_some(Message::StartSharing),
                 )
                 .default_button(),
             );
     }
     Dialog::new(
         "share",
-        if status.active {
-            "You are sharing"
-        } else {
-            "Share screen or camera"
+        match editing {
+            Some(status) => share_title(status),
+            None if sharing.active() => "Share another screen or camera",
+            None => "Share screen or camera",
         },
     )
     .open(true)

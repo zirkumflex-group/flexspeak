@@ -1,4 +1,4 @@
-use super::{Event, protocol, publish_media};
+use super::{Event, MAX_SHARES, Surface, Surfaces, protocol, publish_media};
 use crate::{
     alerts::Source,
     audio::DeviceChoice,
@@ -13,6 +13,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
@@ -121,19 +122,52 @@ mod tests {
             hardware_av1: false,
         }
     }
+    fn camera() -> Options {
+        Options {
+            source: ShareSource {
+                kind: SourceKind::Camera("camera".into()),
+                name: "Camera".into(),
+            },
+            ..options()
+        }
+    }
+    fn publisher() -> Publisher {
+        let (events, _) = mpsc::channel(128);
+        Publisher::new(
+            events,
+            Rc::new(RefCell::new(Flow::default())),
+            Arc::new(Surfaces::default()),
+        )
+    }
+    /// A share as `start` adds it, on a stand-in worker.
+    fn add(
+        publisher: &mut Publisher,
+        options: Options,
+    ) -> (
+        u64,
+        mpsc::Receiver<publish_media::Input>,
+        mpsc::Sender<publish_media::Output>,
+    ) {
+        let (worker, commands, output, _) = publish_media::test_worker();
+        publisher.next_key += 1;
+        let key = publisher.next_key;
+        publisher.shares.push(Share::new(key, worker, options));
+        (key, commands, output)
+    }
+    /// One live share, key 1, with one channel member who may watch.
     fn fixture() -> (
         Publisher,
         mpsc::Receiver<publish_media::Input>,
         mpsc::Sender<publish_media::Output>,
     ) {
-        let (events, _) = mpsc::channel(128);
-        let mut publisher = Publisher::new(events, Rc::new(RefCell::new(Flow::default())));
-        let (worker, commands, output, _) = publish_media::test_worker();
-        publisher.worker = Some(worker);
-        publisher.options = Some(options());
-        publisher.id = Some("ours".into());
+        let mut publisher = publisher();
+        let (_, commands, output) = add(&mut publisher, options());
+        publisher.shares[0].id = Some("ours".into());
         publisher.sync(ClientId(1), HashMap::from([(2, "Viewer".into())]));
         (publisher, commands, output)
+    }
+    fn share(publisher: &Publisher) -> &Share {
+        &publisher.shares[0]
     }
     fn notify(publisher: &mut Publisher, name: &str, fields: &str) {
         let args = protocol::parse(name, &format!("{name} {fields}")).unwrap();
@@ -164,18 +198,18 @@ mod tests {
         let (mut publisher, mut commands, _output) = fixture();
         notify(&mut publisher, "notifyjoinstreamrequest", "id=other clid=2");
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=3");
-        assert!(publisher.requests.is_empty());
+        assert!(share(&publisher).requests.is_empty());
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=2");
         assert!(commands.try_recv().is_err());
-        assert!(publisher.viewers.is_empty());
-        publisher.decide(2, true).unwrap();
+        assert!(share(&publisher).viewers.is_empty());
+        publisher.decide(1, 2, true).unwrap();
         let publish_media::Input::Add(key) = commands.try_recv().unwrap() else {
             panic!("Expected admitted viewer")
         };
         assert_eq!(key.client, 2);
-        assert_eq!(publisher.viewers.len(), 1);
+        assert_eq!(share(&publisher).viewers.len(), 1);
         publisher.sync(ClientId(1), HashMap::new());
-        assert!(publisher.viewers.is_empty());
+        assert!(share(&publisher).viewers.is_empty());
         assert!(
             matches!(commands.try_recv(),Ok(publish_media::Input::Remove(removed)) if removed == key)
         );
@@ -183,8 +217,8 @@ mod tests {
     #[test]
     fn public_shares_admit_channel_members_and_fill_vacancies_without_approval() {
         let (mut publisher, mut commands, _output) = fixture();
-        publisher.options.as_mut().unwrap().access = Access::Public;
-        publisher.members = (1..=6).map(|id| (id, format!("Viewer {id}"))).collect();
+        publisher.shares[0].options.access = Access::Public;
+        publisher.link.members = (1..=6).map(|id| (id, format!("Viewer {id}"))).collect();
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=1");
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=99");
         assert!(commands.try_recv().is_err());
@@ -195,9 +229,13 @@ mod tests {
                 &format!("id=ours clid={id}"),
             );
         }
-        assert_eq!(publisher.viewers.len(), MAX_VIEWERS);
+        assert_eq!(share(&publisher).viewers.len(), MAX_VIEWERS);
         assert_eq!(
-            publisher.requests.keys().copied().collect::<Vec<_>>(),
+            share(&publisher)
+                .requests
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
             vec![6]
         );
         for _ in 0..MAX_VIEWERS {
@@ -219,8 +257,8 @@ mod tests {
         assert!(
             matches!(commands.try_recv(), Ok(publish_media::Input::Add(key)) if key.client == 6)
         );
-        assert_eq!(publisher.viewers.len(), MAX_VIEWERS);
-        assert!(publisher.requests.is_empty());
+        assert_eq!(share(&publisher).viewers.len(), MAX_VIEWERS);
+        assert!(share(&publisher).requests.is_empty());
     }
 
     #[test]
@@ -278,7 +316,7 @@ mod tests {
             audio: None,
             quality: Quality::default(),
         };
-        publisher.configure(unchanged).unwrap();
+        publisher.configure(1, unchanged).unwrap();
         assert!(
             commands.try_recv().is_err(),
             "nothing changed, nothing sent"
@@ -291,105 +329,113 @@ mod tests {
             audio: Some(speakers.clone()),
             quality: Preset::Performance.quality(),
         };
-        publisher.configure(live.clone()).unwrap();
+        publisher.configure(1, live.clone()).unwrap();
         assert!(matches!(
             commands.try_recv(),
             Ok(publish_media::Input::Configure(sent)) if sent == live
         ));
-        let options = publisher.options.as_ref().unwrap();
+        let options = &share(&publisher).options;
         assert_eq!(options.audio, Some(speakers));
         assert_eq!(options.quality, Preset::Performance.quality());
         assert!(
             publisher
-                .configure(publish_media::Live {
-                    audio: None,
-                    quality: Quality {
-                        frame_rate: 0,
-                        ..Quality::default()
-                    },
-                })
+                .configure(
+                    1,
+                    publish_media::Live {
+                        audio: None,
+                        quality: Quality {
+                            frame_rate: 0,
+                            ..Quality::default()
+                        },
+                    }
+                )
                 .is_err(),
             "invalid quality is refused"
         );
-        publisher.stop("Stopped sharing");
-        assert!(publisher.configure(live).is_err());
+        publisher.stop(None, "Stopped sharing");
+        assert!(publisher.configure(1, live).is_err());
     }
 
     #[test]
     fn stale_peer_events_cannot_reopen_or_remove_a_new_attempt() {
         let (mut publisher, mut commands, _output) = fixture();
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=2");
-        publisher.decide(2, true).unwrap();
+        publisher.decide(1, 2, true).unwrap();
         let publish_media::Input::Add(first) = commands.try_recv().unwrap() else {
             panic!()
         };
-        publisher.remove_viewer(2);
+        let Publisher { shares, link, .. } = &mut publisher;
+        shares[0].remove_viewer(link, 2);
         commands.try_recv().unwrap();
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=2");
-        publisher.decide(2, true).unwrap();
+        publisher.decide(1, 2, true).unwrap();
         let publish_media::Input::Add(second) = commands.try_recv().unwrap() else {
             panic!()
         };
         assert_ne!(first, second);
         publisher
-            .media_event(publish_media::Output::Offer(first, "v=0\r\n".into()))
+            .media_event(1, publish_media::Output::Offer(first, "v=0\r\n".into()))
             .unwrap();
         publisher
-            .media_event(publish_media::Output::Connected(first))
+            .media_event(1, publish_media::Output::Connected(first))
             .unwrap();
         publisher
-            .media_event(publish_media::Output::Left(first))
+            .media_event(1, publish_media::Output::Left(first))
             .unwrap();
-        assert_eq!(publisher.viewers[&2].key, second);
-        assert!(!publisher.viewers[&2].ready);
-        assert!(publisher.pending.is_empty());
+        assert_eq!(share(&publisher).viewers[&2].key, second);
+        assert!(!share(&publisher).viewers[&2].ready);
+        assert!(publisher.link.pending.is_empty());
     }
     #[test]
     fn denied_requests_stay_denied_and_requests_are_bounded() {
         let (mut publisher, mut commands, _output) = fixture();
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=2");
-        publisher.decide(2, false).unwrap();
+        publisher.decide(1, 2, false).unwrap();
         notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=2");
-        assert!(publisher.requests.is_empty());
+        assert!(share(&publisher).requests.is_empty());
         assert!(commands.try_recv().is_err());
         for id in 3..80 {
-            publisher.members.insert(id, format!("Viewer {id}"));
+            publisher.link.members.insert(id, format!("Viewer {id}"));
             notify(
                 &mut publisher,
                 "notifyjoinstreamrequest",
                 &format!("id=ours clid={id}"),
             );
         }
-        assert_eq!(publisher.requests.len(), 16);
-        assert!(publisher.viewers.is_empty());
+        assert_eq!(share(&publisher).requests.len(), 16);
+        assert!(share(&publisher).viewers.is_empty());
     }
     #[test]
     fn stopping_cancels_capture_and_late_start_is_taken_down() {
         let (mut publisher, _commands, _output) = fixture();
-        publisher.id = None;
+        publisher.shares[0].id = None;
         publisher
-            .media_event(publish_media::Output::Ready {
-                fast_capture: false,
-                hardware_av1: false,
-            })
+            .media_event(
+                1,
+                publish_media::Output::Ready {
+                    fast_capture: false,
+                    hardware_av1: false,
+                },
+            )
             .unwrap();
-        let ticket = publisher.setup.unwrap();
-        publisher.stop("Stopped");
+        let ticket = share(&publisher).setup.unwrap();
+        publisher.stop(None, "Stopped");
         assert!(!publisher.active());
-        assert!(publisher.setup.is_none());
-        assert!(!publisher.pending.contains_key(&ticket));
+        assert!(publisher.shares.is_empty());
+        assert!(!publisher.link.pending.contains_key(&ticket));
+        assert!(publisher.link.uncertain.is_empty(), "it was never sent");
         notify(&mut publisher, "notifystreamstarted", "id=late clid=1");
-        assert!(publisher.id.is_none());
         assert!(
             publisher
+                .link
                 .pending
                 .values()
                 .any(|kind| matches!(kind, Pending::Stop))
         );
-        let count = publisher.pending.len();
-        publisher.own = None;
+        let count = publisher.link.pending.len();
+        publisher.link.own = None;
         notify(&mut publisher, "notifystreamstarted", "id=unknown");
-        assert_eq!(publisher.pending.len(), count);
+        assert_eq!(publisher.link.pending.len(), count);
         let (worker, _, _, active) = publish_media::test_worker();
         drop(worker);
         assert!(!active.load(Ordering::Acquire));
@@ -467,12 +513,24 @@ mod tests {
         assert_eq!(ui.access, Access::Public);
         assert!(!ui.audio);
 
-        ui.status.active = true;
+        ui.update(Status {
+            key: 1,
+            active: true,
+            ..Status::default()
+        });
+        ui.apply(ShareDefaults::default());
+        assert_eq!(
+            ui.quality.preset(),
+            Some(Preset::Quality),
+            "for the next share"
+        );
+        ui.apply(defaults);
+        ui.editing = Some(1);
         ui.apply(ShareDefaults::default());
         assert_eq!(
             ui.quality.preset(),
             Some(Preset::Performance),
-            "not mid-share"
+            "not over the running share the dialog shows"
         );
     }
 
@@ -520,36 +578,52 @@ mod tests {
     #[test]
     fn ui_stop_bypasses_the_voice_command_queue() {
         let (mut publisher, _commands, _output) = fixture();
-        publisher.emit();
-        let ui = Ui {
-            status: publisher.status.clone(),
-            ..Ui::default()
-        };
-        ui.stop_capture();
-        assert!(publisher.worker.as_ref().unwrap().stop.stopped());
-        publisher.tick();
-        assert!(!publisher.active());
-        assert!(publisher.status.detail.contains("Stopped"));
+        let (events, mut heard) = mpsc::channel(128);
+        publisher.link.events = events;
+        let (_, _second, _camera_output) = add(&mut publisher, camera());
+        let Publisher { shares, link, .. } = &mut publisher;
+        shares[0].emit(link);
+        shares[1].emit(link);
+        let mut ui = Ui::default();
+        while let Ok(client::Event::Streaming(Event::Publishing(status))) = heard.try_recv() {
+            ui.update(status);
+        }
+        assert_eq!(ui.shares.len(), 2);
+        ui.stop_capture(Some(1));
+        assert!(share(&publisher).worker.as_ref().unwrap().stop.stopped());
+        assert!(!publisher.shares[1].worker.as_ref().unwrap().stop.stopped());
+        publisher.tick(false);
+        assert!(publisher.active(), "the camera carries on");
+        while let Ok(client::Event::Streaming(Event::Publishing(status))) = heard.try_recv() {
+            ui.update(status);
+        }
+        assert_eq!(ui.shares.iter().map(|s| s.key).collect::<Vec<_>>(), [2]);
+        assert!(ui.ended.contains("Stopped"));
     }
     #[test]
     fn unconfirmed_start_blocks_retry_and_old_timeouts_cannot_stop_new_share() {
         let (mut publisher, _commands, _output) = fixture();
-        publisher.id = None;
+        publisher.shares[0].id = None;
         publisher
-            .media_event(publish_media::Output::Ready {
-                fast_capture: false,
-                hardware_av1: false,
-            })
+            .media_event(
+                1,
+                publish_media::Output::Ready {
+                    fast_capture: false,
+                    hardware_av1: false,
+                },
+            )
             .unwrap();
-        let ticket = publisher.setup.unwrap();
+        let ticket = share(&publisher).setup.unwrap();
         // A sent command can no longer be cancelled by removing it from the queue.
-        publisher.flow.borrow_mut().cancel(ticket);
+        publisher.link.flow.borrow_mut().cancel(ticket);
         publisher.timeout(ticket);
         assert!(!publisher.active());
+        assert_eq!(publisher.link.uncertain, [ticket]);
         assert!(publisher.start(options()).is_err());
         publisher.reset();
-        assert!(!publisher.uncertain_start);
+        assert!(publisher.link.uncertain.is_empty());
         let old = publisher
+            .link
             .send(
                 protocol::setup(
                     "old",
@@ -558,13 +632,218 @@ mod tests {
                     Quality::default(),
                     Access::Private,
                 ),
-                Pending::Setup(0),
+                Pending::Setup(99),
                 Operation::StreamStart,
             )
             .unwrap();
-        publisher.generation = 1;
         publisher.timeout(old);
-        assert!(!publisher.uncertain_start);
+        assert!(publisher.link.uncertain.is_empty());
+    }
+
+    fn ready(publisher: &mut Publisher, key: u64) {
+        publisher
+            .media_event(
+                key,
+                publish_media::Output::Ready {
+                    fast_capture: false,
+                    hardware_av1: false,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn shares_start_one_at_a_time_and_each_keeps_its_own_stream_and_viewers() {
+        let mut publisher = publisher();
+        let (screen, _screen_commands, _) = add(&mut publisher, options());
+        let (camera, mut camera_commands, _) = add(&mut publisher, camera());
+        publisher.sync(ClientId(1), HashMap::from([(2, "Viewer".into())]));
+        ready(&mut publisher, camera);
+        ready(&mut publisher, screen);
+        let starting = |p: &Publisher| {
+            p.shares
+                .iter()
+                .map(|s| s.setup.is_some())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            starting(&publisher),
+            [false, true],
+            "the screen waits until the camera's start is confirmed"
+        );
+        notify(&mut publisher, "notifystreamstarted", "id=cam clid=1");
+        assert_eq!(publisher.shares[1].id.as_deref(), Some("cam"));
+        assert_eq!(starting(&publisher), [true, false]);
+        notify(&mut publisher, "notifystreamstarted", "id=cam clid=1");
+        assert!(
+            publisher.shares[0].id.is_none(),
+            "a repeat is not the next start"
+        );
+        notify(&mut publisher, "notifystreamstarted", "id=scr clid=1");
+        assert_eq!(publisher.shares[0].id.as_deref(), Some("scr"));
+        notify(&mut publisher, "notifyjoinstreamrequest", "id=cam clid=2");
+        assert!(publisher.shares[0].requests.is_empty());
+        assert!(publisher.shares[1].requests.contains_key(&2));
+        publisher.decide(camera, 2, true).unwrap();
+        assert!(matches!(
+            camera_commands.try_recv(),
+            Ok(publish_media::Input::Add(key)) if key.client == 2
+        ));
+        assert!(
+            publisher.decide(screen, 2, true).is_err(),
+            "not asked there"
+        );
+        notify(&mut publisher, "notifystreamstopped", "id=cam");
+        assert_eq!(publisher.shares.len(), 1);
+        assert_eq!(publisher.shares[0].key, screen);
+        assert!(publisher.active(), "the screen carries on");
+        publisher.stop(Some(screen), "Stopped sharing");
+        assert!(!publisher.active());
+        assert!(
+            publisher
+                .link
+                .pending
+                .values()
+                .any(|kind| matches!(kind, Pending::Stop)),
+            "the server hears that the screen's stream ended"
+        );
+    }
+
+    #[test]
+    fn a_rejected_start_lets_the_next_share_ask() {
+        let mut publisher = publisher();
+        let (first, ..) = add(&mut publisher, options());
+        let (second, ..) = add(&mut publisher, camera());
+        publisher.sync(ClientId(1), HashMap::new());
+        ready(&mut publisher, first);
+        ready(&mut publisher, second);
+        let ticket = publisher.shares[0].setup.unwrap();
+        let refused = Err(CommandError {
+            error: tsclientlib::TsError::PermissionsClientInsufficient,
+            missing_permission: None,
+        });
+        assert!(publisher.result(ticket, &refused));
+        assert_eq!(publisher.shares.len(), 1);
+        assert_eq!(publisher.shares[0].key, second);
+        assert!(publisher.shares[0].setup.is_some());
+    }
+
+    #[test]
+    fn shares_are_bounded_and_a_source_runs_once() {
+        let mut publisher = publisher();
+        add(&mut publisher, options());
+        publisher.shares[0].options.source.kind = SourceKind::Screen(Some(1));
+        let same = Options {
+            source: ShareSource {
+                kind: SourceKind::Screen(Some(1)),
+                name: "Screen".into(),
+            },
+            ..options()
+        };
+        let error = publisher.start(same).unwrap_err().to_string();
+        assert!(error.contains("already sharing"), "{error}");
+        add(&mut publisher, camera());
+        add(&mut publisher, options());
+        let error = publisher.start(options()).unwrap_err().to_string();
+        assert!(error.contains("up to 3"), "{error}");
+    }
+
+    #[test]
+    fn a_share_shows_its_own_picture_only_while_wanted_and_on_screen() {
+        let (mut publisher, mut commands, _output) = fixture();
+        assert!(!share(&publisher).preview, "a screen starts without");
+        let (_, mut camera_commands, _camera_output) = add(&mut publisher, camera());
+        assert!(publisher.shares[1].preview, "a camera starts with");
+        publisher.set_preview(Some(1), true);
+        assert!(
+            share(&publisher).shown.is_none(),
+            "not while the server is off screen"
+        );
+        publisher.tick(true);
+        let slots: Vec<_> = publisher
+            .shares
+            .iter()
+            .map(|share| share.shown.as_ref().map(|shown| shown.slot))
+            .collect();
+        assert_eq!(
+            slots,
+            [
+                Some(super::super::MAX_WATCHES),
+                Some(super::super::MAX_WATCHES + 1)
+            ]
+        );
+        let Ok(publish_media::Input::Preview(Some((surface, generation)))) = commands.try_recv()
+        else {
+            panic!("the worker is told where to show it")
+        };
+        assert!(matches!(
+            camera_commands.try_recv(),
+            Ok(publish_media::Input::Preview(Some(_)))
+        ));
+        surface.publish(
+            generation,
+            super::super::Image {
+                width: 2,
+                height: 2,
+                pixels: vec![0; 16],
+            },
+            0.0,
+        );
+        assert!(surface.latest().is_some());
+        publisher.set_preview(Some(1), false);
+        assert!(share(&publisher).shown.is_none());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(publish_media::Input::Preview(None))
+        ));
+        assert!(surface.latest().is_none(), "its picture goes with it");
+        publisher.tick(false);
+        assert!(
+            publisher.shares[1].shown.is_none(),
+            "another server on screen takes the camera's off too"
+        );
+        assert!(publisher.shares[1].preview, "and brings it back later");
+    }
+
+    #[test]
+    fn the_dialog_moves_off_a_source_that_runs_and_keeps_how_a_share_ended() {
+        let source = |kind, name: &str| ShareSource {
+            kind,
+            name: name.into(),
+        };
+        let screen = source(SourceKind::Screen(Some(1)), "Screen");
+        let mut ui = Ui {
+            sources: vec![
+                screen.clone(),
+                source(SourceKind::Screen(Some(2)), "Other screen"),
+                source(SourceKind::Camera("c".into()), "Camera"),
+            ],
+            selected: Some(screen.clone()),
+            ..Ui::default()
+        };
+        ui.update(Status {
+            key: 1,
+            active: true,
+            kind: Some(screen.kind.clone()),
+            ..Status::default()
+        });
+        assert!(ui.in_use(&screen));
+        ui.pick_free();
+        assert_eq!(
+            ui.selected,
+            Some(ui.sources[2].clone()),
+            "a camera beside the screen"
+        );
+        assert!(!ui.audio, "a camera shares no system sound");
+        ui.editing = Some(1);
+        ui.update(Status {
+            key: 1,
+            detail: "The server stopped sharing".into(),
+            ..Status::default()
+        });
+        assert!(!ui.active());
+        assert_eq!(ui.editing, None);
+        assert_eq!(ui.ended, "The server stopped sharing");
     }
 }
 impl fmt::Display for ShareSource {
@@ -781,8 +1060,11 @@ pub fn generic_name(name: &str) -> bool {
     )
 }
 
+/// One share as the window knows it.
 #[derive(Debug, Clone, Default)]
 pub struct Status {
+    /// Which of your shares this is; unique on its server.
+    pub key: u64,
     pub stop: Option<publish_media::Stop>,
     pub active: bool,
     pub live: bool,
@@ -791,6 +1073,15 @@ pub struct Status {
     pub access: Access,
     /// What the running share shows: a screen's, window's or camera's name.
     pub source: String,
+    /// What kind of source that is, and which one.
+    pub kind: Option<SourceKind>,
+    /// Whether system audio goes out with it.
+    pub system_audio: bool,
+    pub quality: Quality,
+    /// Whether you asked to see its own picture.
+    pub preview: bool,
+    /// The slot and generation its own picture shows on, while it does.
+    pub shown: Option<(usize, u64)>,
     pub requests: Vec<(u16, String)>,
     pub viewers: Vec<(u16, String, bool)>,
     pub video_frames: u64,
@@ -926,6 +1217,7 @@ pub struct SourcePreview {
     pub state: PreviewState,
 }
 
+/// The share dialog's choices and your running shares, for the window.
 pub struct Ui {
     pub sources: Vec<ShareSource>,
     pub selected: Option<ShareSource>,
@@ -934,7 +1226,12 @@ pub struct Ui {
     pub audio_device: Option<DeviceChoice>,
     pub quality: Quality,
     pub access: Access,
-    pub status: Status,
+    /// Every running share, the oldest first.
+    pub shares: Vec<Status>,
+    /// The running share the dialog shows; `None` while it starts another.
+    pub editing: Option<u64>,
+    /// How the last share to end ended, for the dialog that starts the next one.
+    pub ended: String,
     /// One still per source chosen since the dialog opened.
     pub previews: Vec<SourcePreview>,
 }
@@ -948,15 +1245,90 @@ impl Default for Ui {
             audio_device: None,
             quality: Quality::default(),
             access: Access::default(),
-            status: Status::default(),
+            shares: Vec::new(),
+            editing: None,
+            ended: String::new(),
             previews: Vec::new(),
         }
     }
 }
 impl Ui {
+    /// Whether any share runs.
+    pub fn active(&self) -> bool {
+        !self.shares.is_empty()
+    }
+    /// Whether any share is live on the server.
+    pub fn live(&self) -> bool {
+        self.shares.iter().any(|share| share.live)
+    }
+    pub fn share(&self, key: u64) -> Option<&Status> {
+        self.shares.iter().find(|share| share.key == key)
+    }
+    /// The running share the dialog shows, if it shows one.
+    pub fn editing_share(&self) -> Option<&Status> {
+        self.editing.and_then(|key| self.share(key))
+    }
+    /// Whether no other share can start until one stops.
+    pub fn full(&self) -> bool {
+        self.shares.len() >= MAX_SHARES
+    }
+    /// Whether a running share already shows this source. The system picker asks each time,
+    /// so it never counts.
+    pub fn in_use(&self, source: &ShareSource) -> bool {
+        source.kind != SourceKind::Screen(None)
+            && self
+                .shares
+                .iter()
+                .any(|share| share.kind.as_ref() == Some(&source.kind))
+    }
+    /// Takes in a share's news. A share that ended leaves only how it ended.
+    pub fn update(&mut self, status: Status) {
+        let index = self.shares.iter().position(|share| share.key == status.key);
+        if !status.active {
+            if let Some(index) = index {
+                self.shares.remove(index);
+            }
+            if self.editing == Some(status.key) {
+                self.editing = None;
+            }
+            if !status.detail.is_empty() {
+                self.ended = status.detail;
+            }
+            return;
+        }
+        match index {
+            Some(index) => self.shares[index] = status,
+            None => self.shares.push(status),
+        }
+    }
+    /// Moves the dialog off a source that already runs: to a camera when one is free, since
+    /// a screen and a camera is the usual pair, then to anything free of the same kind, then
+    /// to anything free at all.
+    pub fn pick_free(&mut self) {
+        let Some(selected) = self.selected.clone().filter(|source| self.in_use(source)) else {
+            return;
+        };
+        let group = SourceGroup::of(&selected.kind);
+        let free = |wanted: Option<SourceGroup>| {
+            self.sources
+                .iter()
+                .find(|source| {
+                    !self.in_use(source)
+                        && wanted.is_none_or(|group| SourceGroup::of(&source.kind) == group)
+                })
+                .cloned()
+        };
+        let next = free(Some(SourceGroup::Camera))
+            .or_else(|| free(Some(group)))
+            .or_else(|| free(None));
+        if next.as_ref().is_some_and(|source| source.kind.is_camera()) {
+            self.audio = false;
+        }
+        self.selected = next;
+    }
     /// Starts from what was last used. A chosen camera keeps sharing without system sound.
     pub fn apply(&mut self, defaults: ShareDefaults) {
-        if self.status.active {
+        if self.editing_share().is_some() {
             return;
         }
         self.quality = defaults.quality;
@@ -998,18 +1370,25 @@ impl Ui {
         };
     }
 
-    pub fn stop_capture(&self) {
-        if let Some(stop) = &self.status.stop {
-            stop.stop();
+    /// Stops one share's capture at once, or with `None` every one's, ahead of the commands
+    /// the voice connection has queued.
+    pub fn stop_capture(&self, key: Option<u64>) {
+        for share in &self.shares {
+            if key.is_none_or(|key| key == share.key)
+                && let Some(stop) = &share.stop
+            {
+                stop.stop();
+            }
         }
     }
 }
 
+/// What a command sent for sharing was for, with the share it belongs to.
 #[derive(Clone, Copy)]
 enum Pending {
     Setup(u64),
     Stop,
-    Peer(PeerKey),
+    Peer(u64, PeerKey),
 }
 
 struct Viewer {
@@ -1018,117 +1397,22 @@ struct Viewer {
     key: PeerKey,
 }
 
-pub struct Publisher {
-    generation: u64,
-    next_peer: u64,
+/// What every share goes through: the window, the server's command queue, and who is in the
+/// channel to watch.
+struct Link {
     events: mpsc::Sender<client::Event>,
     flow: Rc<RefCell<Flow>>,
-    worker: Option<publish_media::Publisher>,
-    options: Option<Options>,
-    id: Option<String>,
-    setup: Option<Ticket>,
-    uncertain_start: bool,
     pending: HashMap<Ticket, Pending>,
-    requests: BTreeMap<u16, String>,
-    viewers: BTreeMap<u16, Viewer>,
-    denied: HashSet<u16>,
     members: HashMap<u16, String>,
     own: Option<u16>,
-    started: Instant,
-    status: Status,
-    /// Whether fast capture is the one running, once capture started.
-    fast_capture: bool,
-    /// Whether hardware AV1 is offered to viewers, once capture started.
-    hardware_av1: bool,
-    /// A change to the running share the worker was too busy to take yet.
-    unsent: Option<publish_media::Live>,
+    next_peer: u64,
+    /// Starts the server may still confirm although their share was stopped. The stream each
+    /// brings is taken down when it shows up; until then no other share starts, so a late
+    /// confirmation can't be taken for a new share's.
+    uncertain: Vec<Ticket>,
 }
 
-impl Publisher {
-    pub fn new(events: mpsc::Sender<client::Event>, flow: Rc<RefCell<Flow>>) -> Self {
-        Self {
-            generation: 0,
-            next_peer: 0,
-            events,
-            flow,
-            worker: None,
-            options: None,
-            id: None,
-            setup: None,
-            uncertain_start: false,
-            pending: HashMap::new(),
-            requests: BTreeMap::new(),
-            viewers: BTreeMap::new(),
-            denied: HashSet::new(),
-            members: HashMap::new(),
-            own: None,
-            started: Instant::now(),
-            status: Status::default(),
-            fast_capture: false,
-            hardware_av1: false,
-            unsent: None,
-        }
-    }
-    pub fn active(&self) -> bool {
-        self.worker.is_some()
-    }
-    /// The running share in a few words: who may watch, then the capture and encoding
-    /// options that were asked for and whether they run ("Public · Hardware AV1 · Fast capture").
-    fn running_note(&self) -> String {
-        let asked = |f: fn(&Options) -> bool| self.options.as_ref().is_some_and(f);
-        let access = self
-            .options
-            .as_ref()
-            .map_or(Access::default(), |o| o.access);
-        let mut parts = vec![access.label()];
-        match (asked(|o| o.hardware_av1), self.hardware_av1) {
-            (false, _) => {}
-            (true, true) => parts.push("Hardware AV1"),
-            (true, false) => parts.push("VP8, AV1 unavailable"),
-        }
-        match (asked(|o| o.fast_capture), self.fast_capture) {
-            (false, _) => {}
-            (true, true) => parts.push("Fast capture"),
-            (true, false) => parts.push("Standard capture"),
-        }
-        parts.join(" · ")
-    }
-    #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
-    /// Starts a stand-in share; it runs for as long as the returned value is held.
-    pub fn pretend_sharing(&mut self) -> impl Sized + use<> {
-        let (worker, commands, output, active) = publish_media::test_worker();
-        self.worker = Some(worker);
-        (commands, output, active)
-    }
-    fn emit(&mut self) {
-        self.status.stop = self.worker.as_ref().map(|worker| worker.stop.clone());
-        self.status.active = self.active();
-        self.status.live = self.id.is_some() && self.active();
-        self.status.access = self
-            .options
-            .as_ref()
-            .map_or_else(Access::default, |o| o.access);
-        self.status.source = self
-            .options
-            .as_ref()
-            .map(|o| o.source.name.clone())
-            .unwrap_or_default();
-        self.status.requests = self
-            .requests
-            .iter()
-            .map(|(id, name)| (*id, name.clone()))
-            .collect();
-        self.status.viewers = self
-            .viewers
-            .iter()
-            .map(|(id, viewer)| (*id, viewer.name.clone(), viewer.ready))
-            .collect();
-        let _ = self
-            .events
-            .try_send(client::Event::Streaming(Event::Publishing(
-                self.status.clone(),
-            )));
-    }
+impl Link {
     fn send(
         &mut self,
         packet: tsproto_packets::packets::OutCommand,
@@ -1143,107 +1427,189 @@ impl Publisher {
         self.pending.insert(ticket, kind);
         Ok(ticket)
     }
-    pub fn sync(&mut self, own: ClientId, members: HashMap<u16, String>) {
-        self.own = Some(own.0);
-        let gone: Vec<_> = self
-            .viewers
-            .keys()
-            .chain(self.requests.keys())
-            .copied()
-            .filter(|id| !members.contains_key(id))
-            .collect();
-        self.members = members;
-        for id in gone {
-            self.remove_viewer(id);
-        }
+    fn warn(&self, detail: String) {
+        let _ = self.events.try_send(client::Event::Warning {
+            source: Source::StreamPublish,
+            detail,
+        });
     }
-    pub fn start(&mut self, options: Options) -> Result<()> {
-        ensure!(!self.active(), "Already sharing");
-        ensure!(
-            self.setup.is_none() && !self.uncertain_start,
-            "The previous start is still unconfirmed. Reconnect before starting another share."
-        );
-        ensure!(
-            !self.flow.borrow().cooling_down(Instant::now()),
-            "Wait for the server cooldown before sharing"
-        );
-        options.quality.validate()?;
-        self.generation += 1;
-        self.status = Status::default();
-        self.denied.clear();
-        self.started = Instant::now();
-        self.worker = Some(publish_media::start(options.clone())?);
-        self.options = Some(options);
-        self.status.detail = "Starting capture; allow access if prompted…".into();
-        self.emit();
-        Ok(())
-    }
-    pub fn stop(&mut self, detail: &str) {
-        self.worker = None;
-        self.unsent = None;
-        self.options = None;
-        self.requests.clear();
-        self.viewers.clear();
-        self.denied.clear();
+    /// Drops the queued commands `matches` picks, sent or not.
+    fn cancel(&mut self, matches: impl Fn(&Pending) -> bool) {
         let tickets: Vec<_> = self
             .pending
             .iter()
-            .filter_map(|(ticket, kind)| matches!(kind, Pending::Peer(_)).then_some(*ticket))
+            .filter_map(|(ticket, kind)| matches(kind).then_some(*ticket))
             .collect();
         for ticket in tickets {
             self.pending.remove(&ticket);
             self.flow.borrow_mut().cancel(ticket);
         }
-        if let Some(ticket) = self.setup {
-            if self.flow.borrow_mut().cancel(ticket) {
-                self.pending.remove(&ticket);
-                self.setup = None;
-            } else {
-                self.uncertain_start = true;
-            }
-        }
-        if let Some(id) = self.id.take()
-            && let Err(error) = self.send(protocol::stop(&id), Pending::Stop, Operation::StreamStop)
-        {
-            self.warn(format!(
-                "Capture stopped, but the server could not be notified: {error}"
-            ));
-        }
-        self.status.detail = detail.into();
-        self.status.audio_level = 0.0;
-        self.emit();
     }
-    pub fn reset(&mut self) {
+}
+
+/// A share's own picture, on a stage slot of its own (see [`super::SLOTS`]).
+struct Shown {
+    surface: Arc<Surface>,
+    slot: usize,
+    generation: u64,
+}
+
+/// One running share: its capture, its stream on the server and who watches it.
+struct Share {
+    /// Unique among this server's shares, so the window can tell them apart before the server
+    /// names the stream.
+    key: u64,
+    worker: Option<publish_media::Publisher>,
+    options: Options,
+    id: Option<String>,
+    setup: Option<Ticket>,
+    /// Capture is running; the server is asked to start the stream once no other share's start
+    /// is waiting for it.
+    ready: bool,
+    requests: BTreeMap<u16, String>,
+    viewers: BTreeMap<u16, Viewer>,
+    denied: HashSet<u16>,
+    started: Instant,
+    status: Status,
+    /// Whether fast capture is the one running, once capture started.
+    fast_capture: bool,
+    /// Whether hardware AV1 is offered to viewers, once capture started.
+    hardware_av1: bool,
+    /// A change to the running share the worker was too busy to take yet.
+    unsent: Option<publish_media::Live>,
+    /// Whether you asked to see this share's own picture.
+    preview: bool,
+    /// Where it shows, while it does: only on the server the window shows.
+    shown: Option<Shown>,
+}
+
+impl Share {
+    fn new(key: u64, worker: publish_media::Publisher, options: Options) -> Self {
+        Self {
+            key,
+            worker: Some(worker),
+            // You can't see your camera any other way; a screen you see already.
+            preview: options.source.kind.is_camera(),
+            options,
+            id: None,
+            setup: None,
+            ready: false,
+            requests: BTreeMap::new(),
+            viewers: BTreeMap::new(),
+            denied: HashSet::new(),
+            started: Instant::now(),
+            status: Status {
+                detail: "Starting capture; allow access if prompted…".into(),
+                ..Status::default()
+            },
+            fast_capture: false,
+            hardware_av1: false,
+            unsent: None,
+            shown: None,
+        }
+    }
+    fn active(&self) -> bool {
+        self.worker.is_some()
+    }
+    /// The server was asked to start this stream and hasn't said yet.
+    fn confirming(&self) -> bool {
+        self.setup.is_some() && self.id.is_none()
+    }
+    /// The running share in a few words: who may watch, then the capture and encoding
+    /// options that were asked for and whether they run ("Public · Hardware AV1 · Fast capture").
+    fn running_note(&self) -> String {
+        let mut parts = vec![self.options.access.label()];
+        match (self.options.hardware_av1, self.hardware_av1) {
+            (false, _) => {}
+            (true, true) => parts.push("Hardware AV1"),
+            (true, false) => parts.push("VP8, AV1 unavailable"),
+        }
+        match (self.options.fast_capture, self.fast_capture) {
+            (false, _) => {}
+            (true, true) => parts.push("Fast capture"),
+            (true, false) => parts.push("Standard capture"),
+        }
+        parts.join(" · ")
+    }
+    fn emit(&mut self, link: &Link) {
+        let status = &mut self.status;
+        status.key = self.key;
+        status.stop = self.worker.as_ref().map(|worker| worker.stop.clone());
+        status.active = self.worker.is_some();
+        status.live = self.id.is_some() && self.worker.is_some();
+        status.access = self.options.access;
+        status.source = self.options.source.name.clone();
+        status.kind = Some(self.options.source.kind.clone());
+        status.system_audio = self.options.audio.is_some();
+        status.quality = self.options.quality;
+        status.preview = self.preview;
+        status.shown = self
+            .shown
+            .as_ref()
+            .map(|shown| (shown.slot, shown.generation));
+        status.requests = self
+            .requests
+            .iter()
+            .map(|(id, name)| (*id, name.clone()))
+            .collect();
+        status.viewers = self
+            .viewers
+            .iter()
+            .map(|(id, viewer)| (*id, viewer.name.clone(), viewer.ready))
+            .collect();
+        let _ = link
+            .events
+            .try_send(client::Event::Streaming(Event::Publishing(status.clone())));
+    }
+    fn stop(&mut self, link: &mut Link, detail: &str) {
         self.worker = None;
         self.unsent = None;
-        self.options = None;
-        self.id = None;
-        self.setup = None;
-        self.uncertain_start = false;
+        self.ready = false;
         self.requests.clear();
         self.viewers.clear();
         self.denied.clear();
-        for ticket in self.pending.keys() {
-            self.flow.borrow_mut().cancel(*ticket);
+        let key = self.key;
+        link.cancel(|kind| matches!(kind, Pending::Peer(owner, _) if *owner == key));
+        if let Some(ticket) = self.setup.take() {
+            if link.flow.borrow_mut().cancel(ticket) {
+                link.pending.remove(&ticket);
+            } else if self.id.is_none() {
+                link.uncertain.push(ticket);
+            }
         }
-        self.pending.clear();
-        self.status = Status::default();
-        self.emit();
+        if let Some(id) = self.id.take()
+            && let Err(error) = link.send(protocol::stop(&id), Pending::Stop, Operation::StreamStop)
+        {
+            link.warn(format!(
+                "Capture stopped, but the server could not be notified: {error}"
+            ));
+        }
+        self.hide();
+        self.status.detail = detail.into();
+        self.status.audio_level = 0.0;
+        self.emit(link);
+    }
+    fn fail(&mut self, link: &mut Link, detail: &str) {
+        self.stop(link, detail);
+        link.warn(detail.into());
+    }
+    /// Takes the share's own picture off the stage.
+    fn hide(&mut self) {
+        if let Some(shown) = self.shown.take() {
+            shown.surface.end(shown.generation);
+            let _ = self.command(publish_media::Input::Preview(None));
+        }
     }
     /// Changes system audio and quality while sharing, without starting again. Source and
     /// access stay as they started.
-    pub fn configure(&mut self, live: publish_media::Live) -> Result<()> {
+    fn configure(&mut self, live: publish_media::Live) -> Result<()> {
         live.quality.validate()?;
-        let options = self
-            .options
-            .as_mut()
-            .ok_or_else(|| anyhow!("Sharing has stopped"))?;
-        if options.audio == live.audio && options.quality == live.quality {
+        ensure!(self.worker.is_some(), "Sharing has stopped");
+        if self.options.audio == live.audio && self.options.quality == live.quality {
             return Ok(());
         }
-        ensure!(self.worker.is_some(), "Sharing has stopped");
-        options.audio = live.audio.clone();
-        options.quality = live.quality;
+        self.options.audio = live.audio.clone();
+        self.options.quality = live.quality;
         // A slider sends many changes; only the newest matters, and a busy worker gets it later.
         self.unsent = Some(live);
         self.send_configuration();
@@ -1261,16 +1627,6 @@ impl Publisher {
             Err(_) => {}
         }
     }
-    fn warn(&self, detail: String) {
-        let _ = self.events.try_send(client::Event::Warning {
-            source: Source::StreamPublish,
-            detail,
-        });
-    }
-    fn fail(&mut self, detail: &str) {
-        self.stop(detail);
-        self.warn(detail.into());
-    }
     fn command(&self, command: publish_media::Input) -> Result<()> {
         self.worker
             .as_ref()
@@ -1279,14 +1635,14 @@ impl Publisher {
             .try_send(command)
             .map_err(|_| anyhow!("The publisher is busy or stopped"))
     }
-    pub fn decide(&mut self, peer: u16, allow: bool) -> Result<()> {
+    fn decide(&mut self, link: &mut Link, peer: u16, allow: bool) -> Result<()> {
         let name = self
             .requests
             .get(&peer)
             .cloned()
             .ok_or_else(|| anyhow!("This viewer is no longer waiting"))?;
         ensure!(
-            self.members.contains_key(&peer),
+            link.members.contains_key(&peer),
             "The viewer left your channel"
         );
         let id = self
@@ -1298,10 +1654,10 @@ impl Publisher {
                 self.viewers.len() < MAX_VIEWERS,
                 "This share already has four viewers"
             );
-            self.next_peer += 1;
+            link.next_peer += 1;
             let key = PeerKey {
                 client: peer,
-                serial: self.next_peer,
+                serial: link.next_peer,
             };
             self.command(publish_media::Input::Add(key))?;
             self.viewers.insert(
@@ -1319,20 +1675,23 @@ impl Publisher {
                 "Too many denied requests; restart sharing to clear them"
             );
             self.denied.insert(peer);
-            self.send(
+            link.send(
                 protocol::admit(&id, peer, None)?,
-                Pending::Peer(PeerKey {
-                    client: peer,
-                    serial: 0,
-                }),
+                Pending::Peer(
+                    self.key,
+                    PeerKey {
+                        client: peer,
+                        serial: 0,
+                    },
+                ),
                 Operation::StreamAdmit,
             )?;
         }
         self.requests.remove(&peer);
-        self.emit();
+        self.emit(link);
         Ok(())
     }
-    fn remove_viewer(&mut self, peer: u16) {
+    fn remove_viewer(&mut self, link: &mut Link, peer: u16) {
         self.requests.remove(&peer);
         if let Some(viewer) = self.viewers.remove(&peer)
             && self
@@ -1340,110 +1699,62 @@ impl Publisher {
                 .is_err()
             && self.active()
         {
-            self.fail("Could not stop a departing viewer; sharing stopped");
+            self.fail(link, "Could not stop a departing viewer; sharing stopped");
             return;
         }
-        let tickets: Vec<_> = self
-            .pending
-            .iter()
-            .filter_map(|(ticket, kind)| {
-                matches!(kind, Pending::Peer(key) if key.client == peer).then_some(*ticket)
-            })
-            .collect();
-        for ticket in tickets {
-            self.pending.remove(&ticket);
-            self.flow.borrow_mut().cancel(ticket);
-        }
-        self.admit_waiting();
-        self.emit();
+        let key = self.key;
+        link.cancel(
+            |kind| matches!(kind, Pending::Peer(owner, p) if *owner == key && p.client == peer),
+        );
+        self.admit_waiting(link);
+        self.emit(link);
     }
     /// Public shares also fill newly freed slots, so a full share never needs manual approval.
-    fn admit_waiting(&mut self) {
-        if !self
-            .options
-            .as_ref()
-            .is_some_and(|o| o.access == Access::Public)
-        {
+    fn admit_waiting(&mut self, link: &mut Link) {
+        if self.options.access != Access::Public || !self.active() {
             return;
         }
         let available = MAX_VIEWERS.saturating_sub(self.viewers.len());
         let waiting: Vec<_> = self.requests.keys().copied().take(available).collect();
         for peer in waiting {
-            if let Err(error) = self.decide(peer, true) {
-                self.warn(format!("Could not admit viewer: {error}"));
+            if let Err(error) = self.decide(link, peer, true) {
+                link.warn(format!("Could not admit viewer: {error}"));
                 break;
             }
         }
     }
-    pub fn notification(&mut self, name: &str, args: &protocol::Args) {
-        if name == "notifystreamstarted"
-            && self.own.is_some()
-            && args.get("clid").and_then(|v| v.parse().ok()) == self.own
-        {
-            let Some(id) = args.get("id").filter(|id| {
-                !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
-            }) else {
-                return;
-            };
-            if !self.active()
-                || self.uncertain_start
-                || self.options.is_none()
-                || (self.id.is_none() && self.setup.is_none())
-            {
-                self.setup = None;
-                self.uncertain_start = false;
-                if let Err(error) =
-                    self.send(protocol::stop(id), Pending::Stop, Operation::StreamStop)
-                {
-                    self.warn(error.to_string());
-                }
-                return;
-            }
-            if self.id.as_ref().is_some_and(|current| current != id) {
-                return;
-            }
-            self.id = Some(id.clone());
-            self.setup = None;
-            self.status.detail = self.running_note();
-            let _ = self
-                .events
-                .try_send(client::Event::Recovered(Source::StreamPublish));
-            self.emit();
-            return;
-        }
-        if self.id.as_ref().is_none_or(|id| args.get("id") != Some(id)) {
-            return;
-        }
+    /// A notification about this share's stream, by its ID.
+    fn notification(&mut self, link: &mut Link, name: &str, args: &protocol::Args) {
         let peer = args.get("clid").and_then(|v| v.parse::<u16>().ok());
         match name {
             "notifystreamstopped" => {
                 self.id = None;
-                self.stop("The server stopped sharing");
+                self.stop(link, "The server stopped sharing");
             }
             "notifystreamclientleft" => {
                 if let Some(peer) = peer {
-                    self.remove_viewer(peer);
+                    self.remove_viewer(link, peer);
                 }
             }
             "notifyjoinstreamrequest" => {
                 if let Some(peer) =
-                    peer.filter(|id| self.members.contains_key(id) && Some(*id) != self.own)
+                    peer.filter(|id| link.members.contains_key(id) && Some(*id) != link.own)
                 {
                     if args.get("is_remove").is_some_and(|v| v == "1") {
-                        self.remove_viewer(peer);
+                        self.remove_viewer(link, peer);
                     } else if !self.denied.contains(&peer)
                         && !self.viewers.contains_key(&peer)
                         && self.requests.len() < 16
                     {
-                        self.requests.insert(peer, self.members[&peer].clone());
-                        self.admit_waiting();
-                        self.emit();
+                        self.requests.insert(peer, link.members[&peer].clone());
+                        self.admit_waiting(link);
+                        self.emit(link);
                     }
                 }
             }
             "notifystreamsignaling" => {
                 if let Some(peer) =
-                    peer.filter(|id| self.viewers.contains_key(id) && self.members.contains_key(id))
+                    peer.filter(|id| self.viewers.contains_key(id) && link.members.contains_key(id))
                 {
                     let result =
                         protocol::incoming_signal(args.get("json").map_or("", String::as_str))
@@ -1458,110 +1769,79 @@ impl Publisher {
                                 _ => Ok(()),
                             });
                     if let Err(error) = result {
-                        self.remove_viewer(peer);
-                        self.warn(format!("Viewer negotiation failed: {error}"));
+                        self.remove_viewer(link, peer);
+                        link.warn(format!("Viewer negotiation failed: {error}"));
                     }
                 }
             }
             _ => {}
         }
     }
-    fn current(&self, kind: Pending) -> bool {
-        match kind {
-            Pending::Setup(generation) => generation == self.generation,
-            Pending::Peer(key) => {
-                key.serial == 0 || self.viewers.get(&key.client).is_some_and(|v| v.key == key)
-            }
-            Pending::Stop => true,
-        }
+    /// Whether a viewer's command still belongs to the viewer this share has now.
+    fn current(&self, peer: PeerKey) -> bool {
+        peer.serial == 0
+            || self
+                .viewers
+                .get(&peer.client)
+                .is_some_and(|v| v.key == peer)
     }
-    pub fn result(
-        &mut self,
-        ticket: Ticket,
-        result: &std::result::Result<(), CommandError>,
-    ) -> bool {
-        let Some(kind) = self.pending.remove(&ticket) else {
-            return false;
-        };
-        if !self.current(kind) {
-            return true;
-        }
-        if let Err(error) = result {
-            if matches!(kind, Pending::Setup(_)) {
-                self.setup = None;
-                self.uncertain_start = false;
-            }
-            if error.error == tsclientlib::TsError::ClientIsFlooding {
-                self.stop("Sharing stopped while the server limits requests");
-            } else {
-                match kind {
-                    Pending::Setup(_) => {
-                        self.fail(&format!("The server rejected sharing: {}", error.error))
-                    }
-                    Pending::Peer(peer) => {
-                        self.remove_viewer(peer.client);
-                        self.warn(format!("Viewer signaling rejected: {}", error.error));
-                    }
-                    Pending::Stop => self.warn(format!(
-                        "Capture stopped; the server rejected stop sharing: {}",
-                        error.error
-                    )),
-                }
-            }
-        }
-        true
+    /// Asks the server to start the stream.
+    fn send_setup(&mut self, link: &mut Link) -> Result<()> {
+        let packet = protocol::setup(
+            &announced_name(&self.options.source),
+            &self.options.source.kind,
+            self.options.audio.is_some(),
+            self.options.quality,
+            self.options.access,
+        );
+        self.setup = Some(link.send(packet, Pending::Setup(self.key), Operation::StreamStart)?);
+        self.status.detail = "Capture ready; waiting for the server…".into();
+        self.emit(link);
+        Ok(())
     }
-    pub fn timeout(&mut self, ticket: Ticket) -> bool {
-        let Some(kind) = self.pending.remove(&ticket) else {
-            return false;
-        };
-        if !self.current(kind) {
-            return true;
-        }
-        match kind {
-            Pending::Setup(_) => {
-                self.uncertain_start = true;
-                self.fail("The server did not confirm sharing. Reconnect before retrying.");
-            }
-            Pending::Peer(peer) => {
-                self.remove_viewer(peer.client);
-                self.warn("Viewer signaling timed out".into());
-            }
-            Pending::Stop => {
-                self.warn("Capture stopped; the server did not confirm stop sharing".into())
-            }
-        }
-        true
+    /// The server started the stream under `id`.
+    fn started(&mut self, link: &Link, id: String) {
+        self.id = Some(id);
+        self.setup = None;
+        self.status.detail = self.running_note();
+        let _ = link
+            .events
+            .try_send(client::Event::Recovered(Source::StreamPublish));
+        self.emit(link);
     }
-    pub fn tick(&mut self) {
+    fn tick(&mut self, link: &mut Link) {
         if self
             .worker
             .as_ref()
             .is_some_and(|worker| worker.stop.stopped())
         {
-            self.stop("Stopped sharing");
+            self.stop(link, "Stopped sharing");
             return;
         }
         self.send_configuration();
         if self.active() && self.id.is_none() && self.started.elapsed() > Duration::from_secs(60) {
-            self.fail("Screen sharing did not start. Check capture permission and try again.");
+            self.fail(
+                link,
+                "Screen sharing did not start. Check capture permission and try again.",
+            );
+            return;
         }
         for _ in 0..32 {
             let event = match self.worker.as_mut().map(|w| w.output.try_recv()) {
                 Some(Ok(event)) => event,
                 Some(Err(mpsc::error::TryRecvError::Disconnected)) => {
-                    self.fail("The screen publisher stopped");
+                    self.fail(link, "The screen publisher stopped");
                     break;
                 }
                 _ => break,
             };
-            if let Err(error) = self.media_event(event) {
-                self.fail(&error.to_string());
+            if let Err(error) = self.media_event(link, event) {
+                self.fail(link, &error.to_string());
                 break;
             }
         }
     }
-    fn media_event(&mut self, event: publish_media::Output) -> Result<()> {
+    fn media_event(&mut self, link: &mut Link, event: publish_media::Output) -> Result<()> {
         match event {
             publish_media::Output::Ready {
                 fast_capture,
@@ -1569,47 +1849,32 @@ impl Publisher {
             } => {
                 self.fast_capture = fast_capture;
                 self.hardware_av1 = hardware_av1;
-                let options = self
-                    .options
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Sharing was cancelled"))?;
-                let packet = protocol::setup(
-                    &announced_name(&options.source),
-                    &options.source.kind,
-                    options.audio.is_some(),
-                    options.quality,
-                    options.access,
-                );
-                self.setup = Some(self.send(
-                    packet,
-                    Pending::Setup(self.generation),
-                    Operation::StreamStart,
-                )?);
+                self.ready = true;
                 self.status.detail = "Capture ready; waiting for the server…".into();
-                self.emit();
+                self.emit(link);
             }
             publish_media::Output::Offer(peer, sdp) => {
-                if self.current(Pending::Peer(peer)) {
+                if self.current(peer) {
                     let id = self
                         .id
                         .as_deref()
                         .ok_or_else(|| anyhow!("Sharing has stopped"))?;
-                    self.send(
+                    link.send(
                         protocol::admit(id, peer.client, Some(&sdp))?,
-                        Pending::Peer(peer),
+                        Pending::Peer(self.key, peer),
                         Operation::StreamAdmit,
                     )?;
                 }
             }
             publish_media::Output::Signal(peer, value) => {
-                if self.current(Pending::Peer(peer)) {
+                if self.current(peer) {
                     let id = self
                         .id
                         .as_deref()
                         .ok_or_else(|| anyhow!("Sharing has stopped"))?;
-                    self.send(
+                    link.send(
                         protocol::signal_to(id, peer.client, &value)?,
-                        Pending::Peer(peer),
+                        Pending::Peer(self.key, peer),
                         Operation::StreamSignal,
                     )?;
                 }
@@ -1618,11 +1883,11 @@ impl Publisher {
                 if let Some(viewer) = self.viewers.get_mut(&peer.client).filter(|v| v.key == peer) {
                     viewer.ready = true;
                 }
-                self.emit();
+                self.emit(link);
             }
             publish_media::Output::Left(peer) => {
-                if self.current(Pending::Peer(peer)) {
-                    self.remove_viewer(peer.client);
+                if self.current(peer) {
+                    self.remove_viewer(link, peer.client);
                 }
             }
             publish_media::Output::Stats {
@@ -1633,19 +1898,414 @@ impl Publisher {
                 self.status.video_frames = video;
                 self.status.audio_frames = audio;
                 self.status.audio_level = level;
-                self.emit();
+                self.emit(link);
             }
-            publish_media::Output::Warning(detail) => self.warn(detail),
+            publish_media::Output::Warning(detail) => link.warn(detail),
             publish_media::Output::StandardCapture(detail) => {
                 self.fast_capture = false;
-                let _ = self.events.try_send(client::Event::Warning {
+                let _ = link.events.try_send(client::Event::Warning {
                     source: Source::StreamCapture,
                     detail,
                 });
-                self.emit();
+                self.emit(link);
             }
             publish_media::Output::Failed(error) => return Err(anyhow!(error)),
         }
+        Ok(())
+    }
+}
+
+/// Your shares on one server: up to [`MAX_SHARES`] at once, such as a screen and a camera,
+/// each its own stream with its own viewers.
+pub struct Publisher {
+    link: Link,
+    shares: Vec<Share>,
+    next_key: u64,
+    surfaces: Arc<Surfaces>,
+    /// Whether this server is the one on screen; only then do shares show their own picture.
+    foreground: bool,
+}
+
+impl Publisher {
+    pub fn new(
+        events: mpsc::Sender<client::Event>,
+        flow: Rc<RefCell<Flow>>,
+        surfaces: Arc<Surfaces>,
+    ) -> Self {
+        Self {
+            link: Link {
+                events,
+                flow,
+                pending: HashMap::new(),
+                members: HashMap::new(),
+                own: None,
+                next_peer: 0,
+                uncertain: Vec::new(),
+            },
+            shares: Vec::new(),
+            next_key: 0,
+            surfaces,
+            foreground: false,
+        }
+    }
+    pub fn active(&self) -> bool {
+        self.shares.iter().any(Share::active)
+    }
+    fn index(&self, key: u64) -> Option<usize> {
+        self.shares.iter().position(|share| share.key == key)
+    }
+    /// Forgets stopped shares, then asks the server for the next start and shows or hides
+    /// each share's picture.
+    fn settle(&mut self) {
+        self.shares.retain(Share::active);
+        self.send_setups();
+        self.shares.retain(Share::active);
+        self.update_previews();
+    }
+    /// One start at a time: the server says which client started a stream, not which request
+    /// it answers, so the next share asks only once the one before it is confirmed.
+    fn send_setups(&mut self) {
+        if !self.link.uncertain.is_empty()
+            || self
+                .shares
+                .iter()
+                .any(|share| share.active() && share.confirming())
+        {
+            return;
+        }
+        while let Some(share) = self.shares.iter_mut().find(|share| {
+            share.active() && share.ready && share.setup.is_none() && share.id.is_none()
+        }) {
+            match share.send_setup(&mut self.link) {
+                Ok(()) => break,
+                Err(error) => share.fail(&mut self.link, &error.to_string()),
+            }
+        }
+    }
+    /// Puts each share's own picture on a free slot while you want it and the server is on
+    /// screen, and takes it off otherwise.
+    fn update_previews(&mut self) {
+        for index in 0..self.shares.len() {
+            let share = &self.shares[index];
+            let wanted = self.foreground && share.preview && share.active();
+            if !wanted {
+                if share.shown.is_some() {
+                    let share = &mut self.shares[index];
+                    share.hide();
+                    share.emit(&self.link);
+                }
+                continue;
+            }
+            if share.shown.is_some() {
+                continue;
+            }
+            let used: Vec<usize> = self
+                .shares
+                .iter()
+                .filter_map(|share| share.shown.as_ref().map(|shown| shown.slot))
+                .collect();
+            let Some(slot) = (super::MAX_WATCHES..super::SLOTS).find(|slot| !used.contains(slot))
+            else {
+                continue;
+            };
+            let surface = self.surfaces.get(slot).clone();
+            let generation = surface.begin();
+            let share = &mut self.shares[index];
+            if share
+                .command(publish_media::Input::Preview(Some((
+                    surface.clone(),
+                    generation,
+                ))))
+                .is_ok()
+            {
+                share.shown = Some(Shown {
+                    surface,
+                    slot,
+                    generation,
+                });
+                share.emit(&self.link);
+            } else {
+                // The worker is busy; the next tick tries again.
+                surface.end(generation);
+            }
+        }
+    }
+    #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+    /// Starts a stand-in share; it runs for as long as the returned value is held.
+    pub fn pretend_sharing(&mut self) -> impl Sized + use<> {
+        let (worker, commands, output, active) = publish_media::test_worker();
+        self.next_key += 1;
+        let options = Options {
+            source: ShareSource {
+                kind: SourceKind::Screen(None),
+                name: "Screen".into(),
+            },
+            audio: None,
+            voice_output: None,
+            quality: Quality::default(),
+            access: Access::default(),
+            fast_capture: false,
+            hardware_av1: false,
+        };
+        self.shares.push(Share::new(self.next_key, worker, options));
+        (commands, output, active)
+    }
+    pub fn sync(&mut self, own: ClientId, members: HashMap<u16, String>) {
+        self.link.own = Some(own.0);
+        self.link.members = members;
+        for share in &mut self.shares {
+            let gone: Vec<_> = share
+                .viewers
+                .keys()
+                .chain(share.requests.keys())
+                .copied()
+                .filter(|id| !self.link.members.contains_key(id))
+                .collect();
+            for id in gone {
+                share.remove_viewer(&mut self.link, id);
+            }
+        }
+        self.settle();
+    }
+    pub fn start(&mut self, options: Options) -> Result<()> {
+        ensure!(
+            self.shares.len() < MAX_SHARES,
+            "You can share up to {MAX_SHARES} streams at once. Stop one first."
+        );
+        // The system picker asks what to share each time, so it may be asked again.
+        ensure!(
+            options.source.kind == SourceKind::Screen(None)
+                || !self
+                    .shares
+                    .iter()
+                    .any(|share| share.options.source.kind == options.source.kind),
+            "You are already sharing {}",
+            options.source.name
+        );
+        ensure!(
+            self.link.uncertain.is_empty(),
+            "The previous start is still unconfirmed. Reconnect before starting another share."
+        );
+        ensure!(
+            !self.link.flow.borrow().cooling_down(Instant::now()),
+            "Wait for the server cooldown before sharing"
+        );
+        options.quality.validate()?;
+        let worker = publish_media::start(options.clone())?;
+        self.next_key += 1;
+        let mut share = Share::new(self.next_key, worker, options);
+        share.emit(&self.link);
+        self.shares.push(share);
+        self.settle();
+        Ok(())
+    }
+    /// Stops one share, or with `None` every one.
+    pub fn stop(&mut self, key: Option<u64>, detail: &str) {
+        for share in &mut self.shares {
+            if key.is_none_or(|key| key == share.key) && share.active() {
+                share.stop(&mut self.link, detail);
+            }
+        }
+        self.settle();
+    }
+    pub fn reset(&mut self) {
+        for mut share in std::mem::take(&mut self.shares) {
+            share.worker = None;
+            share.hide();
+            share.status = Status::default();
+            share.emit(&self.link);
+        }
+        for ticket in self.link.pending.keys() {
+            self.link.flow.borrow_mut().cancel(*ticket);
+        }
+        self.link.pending.clear();
+        self.link.uncertain.clear();
+    }
+    /// Changes one share's system audio and quality while it runs.
+    pub fn configure(&mut self, key: u64, live: publish_media::Live) -> Result<()> {
+        let index = self
+            .index(key)
+            .ok_or_else(|| anyhow!("Sharing has stopped"))?;
+        let share = &mut self.shares[index];
+        share.configure(live)?;
+        share.emit(&self.link);
+        Ok(())
+    }
+    pub fn decide(&mut self, key: u64, peer: u16, allow: bool) -> Result<()> {
+        let index = self
+            .index(key)
+            .ok_or_else(|| anyhow!("Sharing has stopped"))?;
+        let result = self.shares[index].decide(&mut self.link, peer, allow);
+        self.settle();
+        result
+    }
+    /// Shows or hides one share's own picture, or with `None` every one's.
+    pub fn set_preview(&mut self, key: Option<u64>, on: bool) {
+        for share in &mut self.shares {
+            if key.is_none_or(|key| key == share.key) && share.preview != on {
+                share.preview = on;
+                share.emit(&self.link);
+            }
+        }
+        self.update_previews();
+    }
+    pub fn notification(&mut self, name: &str, args: &protocol::Args) {
+        if name == "notifystreamstarted"
+            && self.link.own.is_some()
+            && args.get("clid").and_then(|v| v.parse().ok()) == self.link.own
+        {
+            let Some(id) = args.get("id").filter(|id| {
+                !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+            }) else {
+                return;
+            };
+            if self
+                .shares
+                .iter()
+                .any(|share| share.id.as_deref() == Some(id.as_str()))
+            {
+                return;
+            }
+            let waiting = self
+                .shares
+                .iter()
+                .position(|share| share.active() && share.confirming());
+            match waiting {
+                Some(index) => self.shares[index].started(&self.link, id.clone()),
+                // A stream none of the running shares asked for: a start whose share was
+                // stopped before the server confirmed it.
+                None => {
+                    if !self.link.uncertain.is_empty() {
+                        self.link.uncertain.remove(0);
+                    }
+                    if let Err(error) =
+                        self.link
+                            .send(protocol::stop(id), Pending::Stop, Operation::StreamStop)
+                    {
+                        self.link.warn(error.to_string());
+                    }
+                }
+            }
+            self.settle();
+            return;
+        }
+        let Some(index) = self
+            .shares
+            .iter()
+            .position(|share| share.id.is_some() && share.id.as_ref() == args.get("id"))
+        else {
+            return;
+        };
+        self.shares[index].notification(&mut self.link, name, args);
+        self.settle();
+    }
+    pub fn result(
+        &mut self,
+        ticket: Ticket,
+        result: &std::result::Result<(), CommandError>,
+    ) -> bool {
+        let Some(kind) = self.link.pending.remove(&ticket) else {
+            return false;
+        };
+        let flooding = |error: &CommandError| error.error == tsclientlib::TsError::ClientIsFlooding;
+        match kind {
+            Pending::Stop => {
+                if let Err(error) = result {
+                    self.link.warn(format!(
+                        "Capture stopped; the server rejected stop sharing: {}",
+                        error.error
+                    ));
+                }
+            }
+            Pending::Setup(key) => match self.index(key) {
+                // Its share was stopped while the server decided; a refusal means no stream.
+                None => {
+                    if result.is_err() {
+                        self.link.uncertain.retain(|uncertain| *uncertain != ticket);
+                    }
+                }
+                Some(index) => {
+                    if let Err(error) = result {
+                        let share = &mut self.shares[index];
+                        share.setup = None;
+                        if flooding(error) {
+                            share.stop(
+                                &mut self.link,
+                                "Sharing stopped while the server limits requests",
+                            );
+                        } else {
+                            share.fail(
+                                &mut self.link,
+                                &format!("The server rejected sharing: {}", error.error),
+                            );
+                        }
+                    }
+                }
+            },
+            Pending::Peer(key, peer) => {
+                if let Some(index) = self.index(key)
+                    && self.shares[index].current(peer)
+                    && let Err(error) = result
+                {
+                    let share = &mut self.shares[index];
+                    if flooding(error) {
+                        share.stop(
+                            &mut self.link,
+                            "Sharing stopped while the server limits requests",
+                        );
+                    } else {
+                        share.remove_viewer(&mut self.link, peer.client);
+                        self.link
+                            .warn(format!("Viewer signaling rejected: {}", error.error));
+                    }
+                }
+            }
+        }
+        self.settle();
+        true
+    }
+    pub fn timeout(&mut self, ticket: Ticket) -> bool {
+        let Some(kind) = self.link.pending.remove(&ticket) else {
+            return false;
+        };
+        match kind {
+            Pending::Stop => self
+                .link
+                .warn("Capture stopped; the server did not confirm stop sharing".into()),
+            // Stopping finds the start sent, so it stays uncertain until its stream shows up.
+            Pending::Setup(key) => {
+                if let Some(index) = self.index(key) {
+                    self.shares[index].fail(
+                        &mut self.link,
+                        "The server did not confirm sharing. Reconnect before retrying.",
+                    );
+                }
+            }
+            Pending::Peer(key, peer) => {
+                if let Some(index) = self.index(key)
+                    && self.shares[index].current(peer)
+                {
+                    self.shares[index].remove_viewer(&mut self.link, peer.client);
+                    self.link.warn("Viewer signaling timed out".into());
+                }
+            }
+        }
+        self.settle();
+        true
+    }
+    /// `foreground`: the server is the one on screen, so shares may show their own picture.
+    pub fn tick(&mut self, foreground: bool) {
+        self.foreground = foreground;
+        for share in &mut self.shares {
+            share.tick(&mut self.link);
+        }
+        self.settle();
+    }
+    #[cfg(test)]
+    fn media_event(&mut self, key: u64, event: publish_media::Output) -> Result<()> {
+        let index = self.index(key).ok_or_else(|| anyhow!("No such share"))?;
+        self.shares[index].media_event(&mut self.link, event)?;
+        self.settle();
         Ok(())
     }
 }

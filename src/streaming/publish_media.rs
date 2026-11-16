@@ -24,6 +24,9 @@ pub enum Input {
     Signal(PeerKey, protocol::Input),
     /// Changes system audio and quality while the share runs.
     Configure(Live),
+    /// Shows the pictures sent to viewers on this surface too, under this generation, or
+    /// stops showing them.
+    Preview(Option<(Arc<super::Surface>, u64)>),
 }
 
 /// What a running share can change without starting again.
@@ -792,6 +795,51 @@ mod native {
     const RECONNECT_GRACE: Duration = Duration::from_secs(10);
     /// How often a share nobody watches yet captures, to keep its checks alive.
     const IDLE_FRAME: Duration = Duration::from_secs(1);
+    /// The shortest time between two pictures of your own preview: 30 a second is plenty for a
+    /// picture you only glance at, and leaves the encoder its time.
+    const PREVIEW_FRAME: Duration = Duration::from_millis(33);
+
+    /// A picture sent to viewers, shared with your own preview: an I420 picture is the same
+    /// buffer, not a copy.
+    struct Mirror(I420Buffer);
+
+    impl crate::streaming::Planes for Mirror {
+        fn planes(&self) -> [(&[u8], usize); 3] {
+            let (y, u, v) = self.0.data();
+            let (sy, su, sv) = self.0.strides();
+            [(y, sy as usize), (u, su as usize), (v, sv as usize)]
+        }
+    }
+
+    /// Where your own preview goes and when it last got a picture.
+    struct Preview {
+        surface: Arc<crate::streaming::Surface>,
+        generation: u64,
+        last: Option<Instant>,
+    }
+
+    impl Preview {
+        /// Whether the next picture should be shown: often while it is drawn, once a second
+        /// while it is tucked away, so its shape still reaches the window.
+        fn due(&mut self) -> bool {
+            let gap = if self.surface.shown() {
+                PREVIEW_FRAME
+            } else {
+                IDLE_FRAME
+            };
+            if self.last.is_some_and(|last| last.elapsed() < gap) {
+                return false;
+            }
+            self.last = Some(Instant::now());
+            true
+        }
+        fn show(&self, picture: I420Buffer) {
+            use libwebrtc::video_frame::VideoBuffer;
+            let size = (picture.width(), picture.height());
+            self.surface
+                .publish_planes(self.generation, size, Arc::new(Mirror(picture)), 0.0);
+        }
+    }
     /// A finished signaling step of one viewer.
     enum Step {
         Offered(Peer, String),
@@ -1214,11 +1262,14 @@ mod native {
         let mut level = 0.0_f32;
         let mut tick = audio_tick(system_audio.is_some());
         let mut video_tick = frame_tick(quality);
+        let mut preview: Option<Preview> = None;
         let result = async {
             loop {
                 if !active.load(Ordering::Acquire) { return Ok(()); }
                 ensure!(!overflow.load(Ordering::Relaxed),"Too many publisher connection events");
-                idle.store(peers.is_empty() && adding.is_empty() && frames > 0, Ordering::Relaxed);
+                // Your own preview on screen counts as someone watching.
+                let previewed = preview.as_ref().is_some_and(|p| p.surface.shown());
+                idle.store(peers.is_empty() && adding.is_empty() && frames > 0 && !previewed, Ordering::Relaxed);
                 tokio::select! {
                     biased;
                     _ = cancel.changed() => return Ok(()),
@@ -1275,6 +1326,9 @@ mod native {
                                         }
                                     }
                                 }
+                            },
+                            Input::Preview(next) => {
+                                preview = next.map(|(surface, generation)| Preview { surface, generation, last: None });
                             },
                             Input::Signal(id,input) => {
                                 if let Some(Err(error)) = peers.get_mut(&id).map(|peer| signal(peer,id,input,&mut negotiating)) {
@@ -1345,10 +1399,13 @@ mod native {
                             if let Some(frame) = &mut fast_frame {
                                 frame.timestamp_us = start.elapsed().as_micros() as i64;
                                 video.capture_frame(frame); last_video = Instant::now(); frames += 1;
+                                // NV12 for the hardware encoder is converted for the preview alone.
+                                if let Some(preview) = preview.as_mut() && preview.due() { preview.show(frame.buffer.to_i420()); }
                                 if frames == 1 { emit(events,Output::Ready { fast_capture: true, hardware_av1 })?; }
                             }
                         }
                         if let Some(buffer) = latest.lock().unwrap().take() {
+                            if let Some(preview) = preview.as_mut() && preview.due() { preview.show(libwebrtc::video_frame::native::VideoFrameBufferExt::to_i420(&buffer)); }
                             let mut frame = VideoFrame::new(VideoRotation::VideoRotation0,buffer);
                             frame.timestamp_us = start.elapsed().as_micros() as i64;
                             video.capture_frame(&frame); last_video = Instant::now(); frames += 1;
