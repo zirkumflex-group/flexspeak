@@ -151,6 +151,8 @@ pub enum Task {
     Stream(Box<StreamJob>),
     /// A session's backend events, forwarded until the worker closes the channel.
     Events(crate::hub::SessionId, mpsc::Receiver<client::Event>),
+    /// The system's open dialog, for TeamSpeak whisper lists to import.
+    ChooseWhisperLists,
 }
 
 impl Task {
@@ -250,6 +252,7 @@ pub struct UiState {
     /// The card the pointer is over there, by its key, whose can leans toward it.
     pub can_hover: Option<String>,
     pub server_name: TextEdit,
+    pub whisper_name: TextEdit,
     pub server_address: TextEdit,
     pub server_password: TextEdit,
     /// The password prompt a server's refusal opens.
@@ -266,6 +269,8 @@ pub struct UiState {
     pub channel_menu: Option<(u64, rune::PointerPress)>,
     /// The context menu's Move submenu is open.
     pub move_menu: bool,
+    /// The member menu's Whisper submenu is open.
+    pub whisper_menu: bool,
     pub rail_peek: RailPeek,
     /// The chat column while it hides behind the right edge, as the rail does behind the left.
     pub chat_peek: RailPeek,
@@ -361,6 +366,7 @@ impl Default for UiState {
             can_spin: can3d::Spin::default(),
             can_hover: None,
             server_name: TextEdit::new(""),
+            whisper_name: TextEdit::new(""),
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
             prompt_password: TextEdit::new("").secure(),
@@ -371,6 +377,7 @@ impl Default for UiState {
             rail_menu: None,
             channel_menu: None,
             move_menu: false,
+            whisper_menu: false,
             rail_peek: RailPeek::default(),
             chat_peek: RailPeek::default(),
             chat_input: TextEdit::new(""),
@@ -482,6 +489,11 @@ impl App {
         mirror(&mut self.ui.server_name, &editor.name);
         mirror(&mut self.ui.server_address, &editor.address);
         mirror(&mut self.ui.server_password, &editor.password);
+        let whisper_name = self
+            .whisper_editor
+            .as_ref()
+            .map_or(String::new(), |editor| editor.list.name.clone());
+        mirror(&mut self.ui.whisper_name, &whisper_name);
         let prompt = self
             .server_password_prompt
             .as_ref()
@@ -616,6 +628,26 @@ fn execute(s: &mut App, tx: &mut Tx, task: Task) {
             }
         }
         Task::Exit => tx.quit(),
+        Task::ChooseWhisperLists => {
+            let options = rune::FileDialogOptions {
+                title: "Import Whisper Lists".into(),
+                ..Default::default()
+            }
+            .filter("TeamSpeak whisper list", &["whisperlist"]);
+            tx.open_file(options, |s: &mut App, result, tx| match result {
+                Ok(Some(path)) => dispatch(
+                    s,
+                    tx,
+                    Message::Whisper(crate::whisper_app::Msg::ImportFiles(vec![path])),
+                ),
+                Ok(None) => {}
+                Err(error) => {
+                    if let Some(import) = &mut s.whisper_import {
+                        import.error = Some(format!("The file dialog didn't open: {error}"));
+                    }
+                }
+            });
+        }
         Task::Copy(text) => tx.copy(text),
         Task::Focus(Field::ChannelPassword) => s.ui.channel_password.focused = true,
         Task::Focus(Field::PokeMessage) => s.ui.poke_message.focused = true,

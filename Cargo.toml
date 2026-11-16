@@ -23,7 +23,8 @@ futures = "0.3"
 global-hotkey = "0.10"
 # Update checks and downloads. TLS through rustls on ring: no extra C toolchain on any platform.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
-rune = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
+# The native file dialog picks TeamSpeak whisper lists to import.
+rune = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114", features = ["native-file-dialog"] }
 rune-fx = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
 # The video compositor and rune-fx need wgpu's types; the same version and features Rune already builds.

@@ -151,6 +151,7 @@ pub fn channel_in_path(path: &str) -> Option<u64> {
 fn close(s: &mut App) {
     s.ui.member_menu = None;
     s.ui.move_menu = false;
+    s.ui.whisper_menu = false;
     s.ui.groups_menu = None;
     s.server_mut().group_edit = None;
 }
@@ -285,6 +286,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                         dispatch(s, tx, Message::ToggleUserMute(id));
                     }),
             )
+            .item(whisper_item(s, t, member))
             .item(
                 MenuItem::new("Auto-join streams")
                     .lead(neutral(&icons::MONITOR_PLAY, true))
@@ -338,6 +340,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     .on_select(|s: &mut App| {
         s.ui.move_menu = !s.ui.move_menu;
         s.ui.groups_menu = None;
+        s.ui.whisper_menu = false;
     });
     if movable {
         move_to = move_to.submenu(channels, s.ui.move_menu);
@@ -364,6 +367,7 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                 .lead(neutral(&icons::SHIELD, true))
                 .on_select_tx(move |s: &mut App, tx: &mut Tx| {
                     s.ui.move_menu = false;
+                    s.ui.whisper_menu = false;
                     s.ui.groups_menu = (s.ui.groups_menu != Some(which)).then_some(which);
                     dispatch(s, tx, Message::OpenGroups(group_ids.clone()));
                 })
@@ -421,6 +425,89 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     }
     // A context menu anchors at its point; the trigger only receives focus back.
     let _ = menu.build(k, layer);
+}
+
+/// Whispering to someone: now, until stopped, or as part of a saved list.
+fn whisper_item(s: &App, t: &Theme, member: &client::Member) -> MenuItem {
+    use crate::whisper_app::Msg;
+    let (uid, name) = (member.uid.clone(), member.name.clone());
+    let mut entries = vec![MenuEntry::item(
+        MenuItem::new("Whisper now")
+            .lead(icon(&icons::WHISPER, 14.0).color(t.private))
+            .description("Until you press Stop")
+            .on_select_tx({
+                let (uid, name) = (uid.clone(), name.clone());
+                move |s: &mut App, tx: &mut Tx| {
+                    close(s);
+                    dispatch(
+                        s,
+                        tx,
+                        Message::Whisper(Msg::To {
+                            uid: uid.clone(),
+                            name: name.clone(),
+                        }),
+                    );
+                }
+            }),
+    )];
+    let address = s.server().address.clone();
+    let mut heading = false;
+    for (index, list) in s.whisper.lists.iter().enumerate() {
+        if !list.for_server(&address) || !matches!(list.to, crate::whisper::Whom::Listed(_)) {
+            continue;
+        }
+        let known = matches!(&list.to, crate::whisper::Whom::Listed(entries)
+            if entries.iter().any(|entry| matches!(entry, crate::whisper::Entry::Client { uid: known, .. } if *known == uid)));
+        let (uid, name) = (uid.clone(), name.clone());
+        if !std::mem::replace(&mut heading, true) {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Label("Add to list".into()));
+        }
+        entries.push(MenuEntry::item(
+            MenuItem::new(list.name.clone())
+                .lead(icon(&icons::PLUS, 14.0).color(t.muted))
+                .checked(known)
+                .disabled(known)
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    close(s);
+                    dispatch(
+                        s,
+                        tx,
+                        Message::Whisper(Msg::AddTo {
+                            list: index,
+                            uid: uid.clone(),
+                            name: name.clone(),
+                        }),
+                    );
+                }),
+        ));
+    }
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::item(
+        MenuItem::new("New list…")
+            .lead(icon(&icons::PLUS, 14.0).color(t.muted))
+            .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                close(s);
+                dispatch(
+                    s,
+                    tx,
+                    Message::Whisper(Msg::NewWith {
+                        uid: uid.clone(),
+                        name: name.clone(),
+                    }),
+                );
+            }),
+    ));
+    let live = s.live();
+    MenuItem::new("Whisper")
+        .lead(icon(&icons::WHISPER, 14.0).color(if live { t.muted } else { t.faint }))
+        .disabled(!live)
+        .on_select(|s: &mut App| {
+            s.ui.whisper_menu = !s.ui.whisper_menu;
+            s.ui.move_menu = false;
+            s.ui.groups_menu = None;
+        })
+        .submenu(entries, s.ui.whisper_menu)
 }
 
 /// The label that follows the pointer while members are dragged.

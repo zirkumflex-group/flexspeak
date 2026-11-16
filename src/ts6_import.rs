@@ -104,12 +104,12 @@ fn read_audio(audio: &Value, imported: &mut Imported) {
     }
 }
 
-enum Field<'a> {
+pub(crate) enum Field<'a> {
     Number(u64),
     Bytes(&'a [u8]),
 }
 
-fn varint(bytes: &mut &[u8]) -> Option<u64> {
+pub(crate) fn varint(bytes: &mut &[u8]) -> Option<u64> {
     let mut value = 0_u64;
     for shift in (0..64).step_by(7) {
         let (first, rest) = bytes.split_first()?;
@@ -123,7 +123,7 @@ fn varint(bytes: &mut &[u8]) -> Option<u64> {
 }
 
 /// A protobuf message's fields, or `None` if it isn't one.
-fn fields(mut bytes: &[u8]) -> Option<Vec<(u64, Field<'_>)>> {
+pub(crate) fn fields(mut bytes: &[u8]) -> Option<Vec<(u64, Field<'_>)>> {
     let mut found = Vec::new();
     while !bytes.is_empty() {
         let tag = varint(&mut bytes)?;
@@ -165,7 +165,7 @@ fn display_name(account: &[u8]) -> Option<String> {
 }
 
 /// A server bookmark's address, with `:port` when it isn't the default, and its name if it has one.
-fn server_address(item: &[u8]) -> Option<(String, Option<String>)> {
+pub(crate) fn server_address(item: &[u8]) -> Option<(String, Option<String>)> {
     let top = fields(item)?;
     let bookmark = top.iter().find_map(|(number, field)| match field {
         Field::Bytes(bookmark) if *number == SERVER_BOOKMARK => Some(*bookmark),

@@ -74,6 +74,8 @@ pub struct Open {
     pub processing: crate::audio_processing::Settings,
     pub transmission: crate::transmission::Settings,
     pub ptt: Arc<AtomicBool>,
+    /// A whisper key held opens the microphone like push-to-talk.
+    pub whisper: Arc<crate::whisper::Shared>,
     pub surfaces: Arc<Surfaces>,
 }
 
@@ -444,6 +446,7 @@ struct Core {
     shared: Arc<Shared>,
     hub: Arc<AudioHub>,
     ptt: Arc<AtomicBool>,
+    whisper: Arc<crate::whisper::Shared>,
     ptt_gate: crate::transmission::PttGate,
     transmission: crate::transmission::Settings,
     surfaces: Arc<Surfaces>,
@@ -476,6 +479,7 @@ impl Core {
             shared,
             hub,
             ptt: open.ptt.clone(),
+            whisper: open.whisper.clone(),
             ptt_gate: crate::transmission::PttGate::default(),
             transmission: open.transmission,
             surfaces: open.surfaces.clone(),
@@ -720,7 +724,7 @@ impl Core {
         let can_send = active.is_some_and(|line| line.can_send.load(Ordering::Acquire));
         let capture = self.ptt_gate.allows(
             can_send,
-            self.ptt.load(Ordering::Acquire),
+            self.ptt.load(Ordering::Acquire) || self.whisper.held(),
             now,
             self.transmission,
         );
@@ -839,6 +843,7 @@ mod tests {
             processing: crate::audio_processing::Settings::default(),
             transmission: crate::transmission::Settings::default(),
             ptt: Arc::new(AtomicBool::new(false)),
+            whisper: Default::default(),
             surfaces: Arc::new(Surfaces::default()),
         };
         assert_eq!(stand_in_notice(&open, &mic, &headset), None);
@@ -880,6 +885,7 @@ mod tests {
             processing: crate::audio_processing::Settings::default(),
             transmission,
             ptt: Arc::new(AtomicBool::new(false)),
+            whisper: Default::default(),
             surfaces: Arc::new(Surfaces::default()),
         };
         let engine = AudioEngine::without_devices(transmission).unwrap();

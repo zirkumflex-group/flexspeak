@@ -161,6 +161,20 @@ pub const SCENES: &[Scene] = &[
     ("audio-processing", audio_processing_page),
     ("push-to-talk", push_to_talk_page),
     ("push-to-talk-connected", push_to_talk_connected),
+    ("settings-whisper-empty", settings_whisper_empty),
+    ("settings-whisper", settings_whisper),
+    ("settings-whisper-edit", settings_whisper_edit),
+    ("settings-whisper-new", settings_whisper_new),
+    ("settings-whisper-group", settings_whisper_group),
+    ("settings-whisper-import", settings_whisper_import),
+    (
+        "settings-whisper-import-empty",
+        settings_whisper_import_empty,
+    ),
+    ("connected-whispering", connected_whispering),
+    ("connected-whisper-toggled", connected_whisper_toggled),
+    ("whispered", whispered),
+    ("member-menu-whisper", member_menu_whisper),
     ("member-menu", member_menu),
     ("member-menu-auto-join", member_menu_auto_join),
     ("member-menu-restricted", member_menu_restricted),
@@ -2438,6 +2452,236 @@ fn push_to_talk_connected(s: &mut App) {
     s.server_mut().talking = [2].into();
 }
 
+/// The list TeamSpeak 3 exported (tests/fixtures), as imported.
+fn exported_whisper_list() -> crate::whisper::List {
+    crate::ts3_import::parse_file(include_bytes!("../../tests/fixtures/POL20THW.whisperlist"))
+        .remove(0)
+        .list
+}
+
+fn whisper_lists() -> crate::whisper::Settings {
+    use crate::whisper::{Entry, Group, GroupKind, List, Scope, Whom};
+    let person = |id: u16, name: &str| Entry::Client {
+        uid: format!("uid-{id}"),
+        name: name.into(),
+    };
+    crate::whisper::Settings {
+        lists: vec![
+            List {
+                key: "Ctrl+Shift+1".into(),
+                ..exported_whisper_list()
+            },
+            List {
+                server: "ts.zirkumflex.io".into(),
+                key: "Ctrl+Shift+2".into(),
+                to: Whom::Listed(vec![
+                    person(12, "Mara"),
+                    person(13, "Theo"),
+                    person(14, "Ines"),
+                ]),
+                ..List::new("raid".into(), "Raid leads".into())
+            },
+            List {
+                server: "ts.zirkumflex.io".into(),
+                toggle: true,
+                to: Whom::Group(Group {
+                    kind: GroupKind::ServerGroup,
+                    id: 12,
+                    scope: Scope::Everywhere,
+                }),
+                ..List::new("officers".into(), "Officers".into())
+            },
+        ],
+        reply_key: "Ctrl+Shift+R".into(),
+        ..Default::default()
+    }
+}
+
+fn settings_whisper_empty(s: &mut App) {
+    settings_at(s, SettingsPage::Whisper);
+}
+
+fn settings_whisper(s: &mut App) {
+    settings_at(s, SettingsPage::Whisper);
+    s.whisper = whisper_lists();
+}
+
+/// A server whose channels the exported list names, with people in them.
+fn connected_altis(s: &mut App) {
+    connected(s);
+    s.whisper = whisper_lists();
+    let channel = |id: u64, parent: u64, depth: usize, name: &str, members: Vec<client::Member>| {
+        client::Channel {
+            id,
+            parent,
+            depth,
+            name: name.into(),
+            members,
+            members_visible: true,
+            join_access: client::JoinAccess::Allowed,
+            ..client::Channel::default()
+        }
+    };
+    let lobby = channel(
+        1,
+        0,
+        0,
+        "Lobby",
+        vec![
+            member(1, "Jan", true, false),
+            member(15, "Lena", false, false),
+        ],
+    );
+    s.server_mut().state.channels = vec![
+        lobby.clone(),
+        channel(20, 0, 0, "[cspacer42]Polizeistreifen - ALTIS", Vec::new()),
+        channel(
+            21,
+            20,
+            1,
+            "Leitstelle - Altis",
+            vec![
+                member(12, "Mara", false, false),
+                member(13, "Theo", false, false),
+            ],
+        ),
+        channel(
+            22,
+            20,
+            1,
+            "Streife 1",
+            vec![member(16, "Kai", false, false)],
+        ),
+        channel(30, 0, 0, "[cspacer46]THW Einsatz", Vec::new()),
+        channel(
+            31,
+            30,
+            1,
+            "Einsatzleitung - ALTIS",
+            vec![member(14, "Ines", false, false)],
+        ),
+        channel(40, 0, 0, "AFK", Vec::new()),
+    ];
+    s.server_mut().state.current = Some(lobby);
+    s.server_mut().talking = [1].into();
+    s.server_mut().state.server_groups = vec![client::Group {
+        id: 12,
+        name: "Officers".into(),
+        fixed: false,
+    }];
+}
+
+/// Editing the imported list on the server it is for: both channels are found.
+fn settings_whisper_edit(s: &mut App) {
+    connected_altis(s);
+    s.open_settings(SettingsPage::Whisper);
+    let _ = s.update(crate::Message::Whisper(crate::whisper_app::Msg::Edit(0)));
+    s.sync_fields();
+}
+
+fn settings_whisper_new(s: &mut App) {
+    connected_altis(s);
+    s.open_settings(SettingsPage::Whisper);
+    let _ = s.update(crate::Message::Whisper(crate::whisper_app::Msg::Edit(1)));
+    s.sync_fields();
+}
+
+fn settings_whisper_group(s: &mut App) {
+    connected_altis(s);
+    s.open_settings(SettingsPage::Whisper);
+    let _ = s.update(crate::Message::Whisper(crate::whisper_app::Msg::Edit(2)));
+    s.sync_fields();
+}
+
+/// The exported list, and lists TeamSpeak 3's settings had.
+fn settings_whisper_import(s: &mut App) {
+    use crate::whisper::{Entry, List, Whom};
+    settings_at(s, SettingsPage::Whisper);
+    let found = |list: List, unmapped: Option<&str>| crate::whisper_app::Candidate {
+        found: crate::ts3_import::Found {
+            list,
+            server_uid: String::new(),
+            server_name: String::new(),
+            unmapped_key: unmapped.map(str::to_owned),
+        },
+        picked: true,
+    };
+    s.whisper_import = Some(crate::whisper_app::Import {
+        found: vec![
+            found(exported_whisper_list(), None),
+            found(
+                List {
+                    server: "ts.zirkumflex.io".into(),
+                    key: "F5".into(),
+                    to: Whom::Listed(vec![
+                        Entry::Client {
+                            uid: "uid-12".into(),
+                            name: "Mara".into(),
+                        },
+                        Entry::Client {
+                            uid: "uid-13".into(),
+                            name: "Theo".into(),
+                        },
+                    ]),
+                    ..List::new("leads".into(), "Raid leads".into())
+                },
+                None,
+            ),
+            found(
+                List {
+                    to: Whom::Listed(vec![Entry::Channel {
+                        path: "Ops/Briefing".into(),
+                        subchannels: true,
+                    }]),
+                    ..List::new("briefing".into(), "Briefing".into())
+                },
+                Some("Mouse:4"),
+            ),
+        ],
+        error: None,
+    });
+}
+
+fn settings_whisper_import_empty(s: &mut App) {
+    settings_at(s, SettingsPage::Whisper);
+    s.whisper_import = Some(crate::whisper_app::Import::default());
+}
+
+/// Holding the exported list's key: both its channels hear you.
+fn connected_whispering(s: &mut App) {
+    connected_altis(s);
+    s.whispering = Some(crate::whisper_app::Whispering {
+        session: s.active.expect("connected"),
+        list: Some(0),
+        person: None,
+        held: true,
+    });
+}
+
+/// A list started with one press: Stop ends it.
+fn connected_whisper_toggled(s: &mut App) {
+    connected_altis(s);
+    s.whispering = Some(crate::whisper_app::Whispering {
+        session: s.active.expect("connected"),
+        list: Some(1),
+        person: None,
+        held: false,
+    });
+}
+
+/// Someone is whispering to you.
+fn whispered(s: &mut App) {
+    connected_altis(s);
+    s.server_mut().whisperer = Some(14);
+    s.server_mut().talking = [14].into();
+}
+
+fn member_menu_whisper(s: &mut App) {
+    connected_altis(s);
+    s.ui.member_menu = Some((15, rune::PointerPress { x: 150.0, y: 120.0 }));
+    s.ui.whisper_menu = true;
+}
+
 fn member_menu(s: &mut App) {
     connected(s);
     s.ui.member_menu = Some((2, rune::PointerPress { x: 150.0, y: 200.0 }));
@@ -4173,7 +4417,7 @@ mod tests {
             .unwrap()
             .wanted
             .clear();
-        let row = "member-menu-item8-sub-item";
+        let row = "member-menu-item9-sub-item";
         click(&mut rt, &format!("{row}1"));
         settle(&mut rt);
         click(&mut rt, &format!("{row}4"));

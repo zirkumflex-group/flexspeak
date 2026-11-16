@@ -966,6 +966,7 @@ fn sidebar(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -
         ))
         .children(selection_bar(s, t))
         .children(server_log(s, cx, t, k))
+        .children(whisper_card(s, t))
         .child(voice_controls(s, t))
 }
 
@@ -1513,6 +1514,76 @@ fn selection_bar(s: &App, t: &Theme) -> Option<El> {
     )
 }
 
+/// Above the voice buttons while you whisper: to whom, and whether they're here.
+fn whisper_card(s: &App, t: &Theme) -> Option<El> {
+    let (name, detail) = s.whisper_status()?;
+    let key = s
+        .whispering
+        .as_ref()
+        .map(|whispering| {
+            s.whisper_key(match whispering.list {
+                Some(index) => crate::shortcuts::Binding::Whisper(index),
+                None => crate::shortcuts::Binding::WhisperReply,
+            })
+        })
+        .unwrap_or_default();
+    let toggled = s
+        .whispering
+        .as_ref()
+        .is_some_and(|whispering| !whispering.held);
+    let mut card = row()
+        .key("whisper-card")
+        .w_full()
+        .px(10.0)
+        .py(8.0)
+        .mb(4.0)
+        .gap(10.0)
+        .center_y()
+        .radius(radius::CARD)
+        .fill(t.private.alpha(if t.dark { 0.18 } else { 0.10 }))
+        .border(1.0, t.private.alpha(0.5))
+        .live_region(rune::LiveRegion::Polite)
+        .label(format!("Whispering to {name}"))
+        .child(super::settings::whisper_tile(t, &icons::WHISPER, 26.0))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(1.0)
+                .child(
+                    text(name)
+                        .font(ty::BODY_STRONG)
+                        .color(t.text)
+                        .truncate_fade(),
+                )
+                .child(
+                    text(detail)
+                        .font(ty::CAPTION)
+                        .color(t.muted)
+                        .truncate_fade(),
+                ),
+        );
+    if toggled {
+        card = card.child(button(
+            t,
+            "stop-whisper",
+            "Stop",
+            None,
+            Variant::Secondary,
+            Some(Message::Whisper(crate::whisper_app::Msg::Stop)),
+        ));
+    } else if !key.trim().is_empty() {
+        card = card.child(
+            el().px(6.0)
+                .py(1.0)
+                .radius(radius::CONTROL)
+                .border(1.0, t.private.alpha(0.5))
+                .child(text(key).font(ty::CAPTION).color(t.private)),
+        );
+    }
+    Some(card)
+}
+
 fn voice_controls(s: &App, t: &Theme) -> El {
     let enabled = s.server().connected && !s.loopback && !s.server().stopping;
     // Deafening keeps the microphone off, but the mute button still changes your own mute,
@@ -1739,7 +1810,30 @@ fn channel_tree(s: &App, t: &Theme) -> El {
     let mut tree = col().key("channels").w_full().gap(2.0);
     let mut hidden_below = None;
     let channels = &s.server().state.channels;
+    // Who a whisper going on reaches, and who is whispering to you.
+    let reach = s.whisper_reach();
+    let whisperer = s.server().whisperer;
     for (index, channel) in channels.iter().enumerate() {
+        let channel_hears = reach
+            .as_ref()
+            .is_some_and(|(channels, _)| channels.contains(&channel.id));
+        let whisper = Whisper {
+            channel: channel_hears,
+            hearing: channel
+                .members
+                .iter()
+                .filter(|member| {
+                    !member.is_self
+                        && (channel_hears
+                            || reach
+                                .as_ref()
+                                .is_some_and(|(_, clients)| clients.contains(&member.id)))
+                })
+                .map(|member| member.id)
+                .collect(),
+            whispering: reach.is_some(),
+            whisperer,
+        };
         if hidden_below.is_some_and(|depth| channel.depth > depth) {
             continue;
         }
@@ -1800,7 +1894,10 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 s.loopback,
                 s.server().deafened,
                 s.microphone_icon() == crate::Icon::MicOff,
-                s.ui.drag.as_ref().and_then(|drag| drag.target),
+                (
+                    s.ui.drag.as_ref().and_then(|drag| drag.target),
+                    whisper.clone(),
+                ),
             ),
             || {
                 if let Some(spacer) = channel.spacer() {
@@ -1894,6 +1991,10 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     name = name
                         .fill(t.accent.alpha(0.24))
                         .border(1.0, t.accent.alpha(0.6));
+                } else if whisper.channel {
+                    name = name
+                        .fill(t.private.alpha(if t.dark { 0.18 } else { 0.10 }))
+                        .border(1.0, t.private.alpha(0.5));
                 } else if current {
                     name = name.fill(t.accent.alpha(0.16));
                 }
@@ -1980,7 +2081,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                             s,
                             t,
                             member,
-                            member_row(s, t, member, current),
+                            member_row(s, t, member, current, &whisper),
                         ));
                     }
                     node = node.child(members);
@@ -2091,7 +2192,28 @@ fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let _ = menu.build(k, layer);
 }
 
-fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El {
+/// What a whisper means for one channel's row and its people.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Whisper {
+    /// The channel itself is whispered to.
+    channel: bool,
+    /// Its people who hear your whisper.
+    hearing: Vec<u16>,
+    /// You are whispering on this server.
+    whispering: bool,
+    /// Who is whispering to you.
+    whisperer: Option<u16>,
+}
+
+/// A word in the whisper colour beside a name.
+fn whisper_tag(t: &Theme, label: &str) -> El {
+    el().px(6.0)
+        .radius(radius::PILL)
+        .fill(t.private.alpha(if t.dark { 0.22 } else { 0.12 }))
+        .child(text(label.to_owned()).font(ty::CAPTION).color(t.private))
+}
+
+fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool, whisper: &Whisper) -> El {
     let mic_muted =
         member.mic_muted || (member.is_self && s.microphone_icon() == crate::Icon::MicOff);
     let sound_muted = member.sound_muted || (member.is_self && s.server().deafened);
@@ -2120,6 +2242,13 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         entry = entry.child(text("(you)").font(ty::BODY).color(t.muted).a11y_hidden());
     }
     entry = entry.child(el().grow(1.0).a11y_hidden());
+    if member.is_self && whisper.whispering {
+        entry = entry.child(whisper_tag(t, "whispering"));
+    } else if whisper.whisperer == Some(member.id) {
+        entry = entry.child(whisper_tag(t, "whispers to you"));
+    } else if whisper.hearing.contains(&member.id) {
+        entry = entry.child(whisper_tag(t, "hears you"));
+    }
     if let Some(lit) = s.server().unboxed.get(&member.id)
         && let Some(level) = lit.glow(Instant::now() - lit.at)
     {

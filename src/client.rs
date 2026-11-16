@@ -30,7 +30,7 @@ use tsclientlib::{
     messages::c2s,
     prelude::*,
 };
-use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio, OutCommand};
+use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutCommand};
 use tsproto_types::crypto::EccKeyPrivP256;
 
 /// How loud to play each person, by identity. Anyone absent plays at full volume.
@@ -54,6 +54,7 @@ pub struct Config {
     pub audio_processing: crate::audio_processing::Settings,
     pub transmission: crate::transmission::Settings,
     pub ptt: Arc<AtomicBool>,
+    pub whisper: Arc<crate::whisper::Shared>,
     pub address: String,
     pub nickname: String,
     pub password: String,
@@ -99,6 +100,8 @@ pub enum Command {
     Retune(hub::Retune),
     /// Drops the connection and connects again now, instead of waiting for it to time out.
     Reconnect,
+    /// Talk to these instead of the channel while it is set; `None` goes back to the channel.
+    Whisper(Option<crate::whisper::Target>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +263,58 @@ impl Snapshot {
 
 /// A quiet gap longer than this makes the next whisper a new one.
 const WHISPER_GAP: Duration = Duration::from_secs(3);
+/// How long after a whisper packet everyone else stays quieter, when that is turned on.
+const WHISPER_DUCK: Duration = Duration::from_millis(600);
+
+/// The IDs a whisper goes to on this server right now; `None` when the state can't be read.
+fn resolve_whisper(
+    connection: &Connection,
+    target: &crate::whisper::Target,
+    whisperer: Option<u16>,
+) -> Option<crate::whisper::Resolved> {
+    use crate::whisper::{ChannelNode, ClientNode, Resolved, Target};
+    let state = connection.get_state().ok()?;
+    let list = match target {
+        Target::Reply => {
+            let clients = whisperer
+                .filter(|id| state.clients.contains_key(&ClientId(*id)))
+                .into_iter()
+                .collect();
+            return Some(Resolved::Listed {
+                channels: Vec::new(),
+                clients,
+            });
+        }
+        Target::List(list) => list,
+    };
+    let channels: Vec<ChannelNode> = state
+        .channels
+        .values()
+        .map(|channel| ChannelNode {
+            id: channel.id.0,
+            parent: channel.parent.0,
+            name: channel.name.clone(),
+        })
+        .collect();
+    let clients: Vec<ClientNode> = state
+        .clients
+        .values()
+        .map(|client| ClientNode {
+            id: client.id.0,
+            uid: client
+                .uid
+                .as_ref()
+                .map_or_else(String::new, |uid| uid_key(&uid.0)),
+            channel: client.channel.0,
+        })
+        .collect();
+    Some(crate::whisper::resolve(
+        list,
+        &channels,
+        &clients,
+        state.own_client.0,
+    ))
+}
 
 /// What the status says when the connection dropped and is being re-established.
 pub const CONNECTION_LOST: &str = "Connection lost. Reconnecting…";
@@ -469,6 +524,8 @@ fn activity(state: &tsclientlib::data::Connection, change: &BookEvent) -> Option
 pub enum Event {
     /// People arriving, moving and leaving since the last update.
     Activity(Vec<Activity>),
+    /// Who is whispering to you, when that starts; `None` once they have stopped.
+    WhisperFrom(Option<u16>),
     Status(String),
     Connected(String),
     State(Snapshot),
@@ -1243,6 +1300,7 @@ async fn run_connection(
                 processing: config.audio_processing.for_session(false),
                 transmission: config.transmission,
                 ptt: config.ptt.clone(),
+                whisper: config.whisper.clone(),
                 surfaces: config.video_surfaces.clone(),
             },
         )
@@ -1301,6 +1359,15 @@ async fn run_connection(
         let mut server_info_enabled = true;
         let mut last_voice = None;
         let mut last_whisper: Option<Instant> = None;
+        // Who whispered to you last, and whether the app has been told someone is.
+        let mut whisperer: Option<u16> = None;
+        let mut whisper_reported = false;
+        // What a held whisper key talks to, its IDs on this server as they were last worked
+        // out (`None` when the tree may have changed since), and where the utterance being sent
+        // goes: the channel (`None`), or a whisper.
+        let mut whisper_to: Option<crate::whisper::Target> = None;
+        let mut whisper_ids: Option<Option<crate::whisper::Resolved>> = None;
+        let mut sending_to: Option<Option<crate::whisper::Resolved>> = None;
         let mut speakers = Speakers::default();
         // What this server last told the app about the shared devices; `None` until it has.
         let mut reported_trouble: Option<Option<hub::Trouble>> = None;
@@ -1368,6 +1435,11 @@ async fn run_connection(
                         },
                         Command::RefreshStreams => streams.refresh(&mut connection),
                         Command::Reconnect => connection.reconnect(),
+                        Command::Whisper(target) => {
+                            tracing::debug!(target: "flexspeak::whisper", started = target.is_some(), reply = matches!(target, Some(crate::whisper::Target::Reply)), "whisper");
+                            whisper_to = target;
+                            whisper_ids = None;
+                        }
                         Command::WatchStream(id) => {
                             if flow.borrow().cooling_down(Instant::now()) {
                                 let _ = events.try_send(Event::Warning { source: Source::Flood, detail: flow.borrow().flood_detail(Operation::StreamJoin, Instant::now()) });
@@ -1473,6 +1545,7 @@ async fn run_connection(
                 },
                 Step::Network(Some(Ok(event))) => match event {
                     StreamItem::BookEvents(changes) => {
+                        whisper_ids = None;
                         // The first batch is everyone already here, not people arriving.
                         let first_batch = !connected;
                         if !connected {
@@ -1554,6 +1627,11 @@ async fn run_connection(
                     },
                     StreamItem::Audio(packet) => {
                         received += 1;
+                        let whisper = matches!(packet.data().data(), AudioData::S2CWhisper { .. });
+                        // Whispers turned off in Settings are dropped unheard, with no cue.
+                        if whisper && !config.whisper.accept.load(Ordering::Acquire) {
+                            continue;
+                        }
                         if let AudioData::S2CWhisper { from, data, .. } = packet.data().data()
                             && !data.is_empty()
                             && !controls.desired.deafened
@@ -1564,13 +1642,24 @@ async fn run_connection(
                                 let name = connection.get_state()?.clients.get(&ClientId(*from)).map_or_else(String::new, |client| client.name.chars().filter(|c| !c.is_control()).take(64).collect());
                                 let _ = events.try_send(Event::Activity(vec![Activity { kind: ActivityKind::Whispered, name, channel: String::new(), is_self: false, entered_yours: true, left_yours: false }]));
                             }
+                            if whisperer != Some(*from) || !whisper_reported {
+                                whisper_reported = events.try_send(Event::WhisperFrom(Some(*from))).is_ok();
+                            }
+                            whisperer = Some(*from);
                             last_whisper = Some(now);
                         }
                         if let AudioData::S2C { from, data, .. } | AudioData::S2CWhisper { from, data, .. } = packet.data().data() {
                             speakers.packet(*from, data.is_empty(), Instant::now());
                         }
                         if !controls.desired.deafened && connection.can_receive_audio() {
-                            let gain = sender_gain(&connection, &config.user_gains, &packet);
+                            let mut gain = sender_gain(&connection, &config.user_gains, &packet);
+                            // Everyone else is quieter while someone whispers, if asked for.
+                            if !whisper
+                                && config.whisper.duck.load(Ordering::Acquire)
+                                && last_whisper.is_some_and(|at| at.elapsed() < WHISPER_DUCK)
+                            {
+                                gain *= 0.5;
+                            }
                             audio.receive(packet, gain);
                         }
                     },
@@ -1686,18 +1775,35 @@ async fn run_connection(
                 Step::Media(generation, event) => streams.media_event(&mut connection, generation, event),
                 Step::Voice(None) => {}
                 Step::Voice(Some(voice)) => {
-                    let can_send = connected && controls.capture_allowed() && connection.can_send_audio() && audio.is_active();
+                    let can_send = connected && controls.capture_allowed() && (whisper_to.is_some() || connection.can_send_audio()) && audio.is_active();
                     // Empty packets end an utterance when push-to-talk or voice activation closes.
                     if voice.data.is_empty() {
                         if connected {
-                            connection.send_audio(OutAudio::new(&AudioData::C2S { id: 0, codec: voice.codec, data: &voice.data }))?;
+                            let to = sending_to.take().flatten();
+                            connection.send_audio(crate::whisper::voice_packet(to.as_ref(), voice.codec, &voice.data))?;
                         }
                     } else if can_send {
+                        let to = whisper_to.as_ref().map(|target| {
+                            whisper_ids
+                                .get_or_insert_with(|| resolve_whisper(&connection, target, whisperer))
+                                .clone()
+                                .unwrap_or(crate::whisper::Resolved::Listed { channels: Vec::new(), clients: Vec::new() })
+                        });
+                        // A whisper starting or ending ends what was being said to the others.
+                        if let Some(before) = sending_to.as_ref().filter(|before| **before != to) {
+                            connection.send_audio(crate::whisper::voice_packet(before.as_ref(), voice.codec, &[]))?;
+                            sending_to = None;
+                        }
+                        // A whisper to nobody here is not sent.
+                        if to.as_ref().is_some_and(crate::whisper::Resolved::is_empty) {
+                            continue;
+                        }
                         if audio.level().sqrt() > crate::audio::SPEAKING_METER {
                             speakers.packet(connection.get_state()?.own_client.0, false, Instant::now());
                         }
                         let _trace = profiler::scope(Category::Network, "network.send_voice");
-                        connection.send_audio(OutAudio::new(&AudioData::C2S { id: 0, codec: voice.codec, data: &voice.data }))?;
+                        connection.send_audio(crate::whisper::voice_packet(to.as_ref(), voice.codec, &voice.data))?;
+                        sending_to = Some(to);
                         sent += 1;
                         last_voice = Some(Instant::now());
                     }
@@ -1711,8 +1817,11 @@ async fn run_connection(
                         if reported_trouble.as_ref() != Some(&trouble) && report_trouble(events, trouble.as_ref()) {
                             reported_trouble = Some(trouble);
                         }
-                        let can_send = connected && controls.capture_allowed() && connection.can_send_audio() && audio.is_active();
+                        let can_send = connected && controls.capture_allowed() && (whisper_to.is_some() || connection.can_send_audio()) && audio.is_active();
                         audio.set_can_send(can_send);
+                        if whisper_reported && last_whisper.is_none_or(|at| at.elapsed() >= WHISPER_GAP) {
+                            whisper_reported = events.try_send(Event::WhisperFrom(None)).is_err();
+                        }
                         audio.set_silent(controls.desired.deafened || !connected);
                         report_transmission(events, &mut reported_transmission, can_send && audio.transmitting());
                         let now = Instant::now();

@@ -48,6 +48,8 @@ pub enum Source {
     Install,
     /// The log folder couldn't be shown, or a diagnostics bundle couldn't be saved.
     Diagnostics,
+    /// A whisper that couldn't start.
+    Whisper,
 }
 
 /// How much a problem matters, which sets its colour.
@@ -77,6 +79,7 @@ impl Source {
                 | Self::Move
                 | Self::Moderate
                 | Self::Groups
+                | Self::Whisper
                 | Self::StreamDiscovery
                 | Self::StreamWatch
                 | Self::StreamEnded
@@ -135,6 +138,7 @@ impl Source {
             Self::StreamPublish => "Screen sharing stopped",
             Self::StreamCapture => "Sharing with standard capture",
             Self::Poke => "Poke not sent",
+            Self::Whisper => "Couldn't whisper",
             Self::Chat => "Message not sent",
             Self::ChatHistory => "Chat history not saved",
             Self::Move => "Couldn't move",

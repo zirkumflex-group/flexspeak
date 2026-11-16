@@ -5,6 +5,10 @@
 //! a query lists the rows it finds across all categories in place of the categories, and
 //! choosing one opens its category at that row.
 
+mod whisper_page;
+
+pub(in crate::ui) use whisper_page::tile as whisper_tile;
+
 use std::f32::consts::FRAC_PI_2;
 use std::rc::Rc;
 
@@ -310,6 +314,7 @@ fn page_icon(page: SettingsPage) -> &'static Icon {
         SettingsPage::Audio => &icons::AUDIO_LINES,
         SettingsPage::Sounds => &icons::VOLUME_2,
         SettingsPage::Shortcuts => &icons::KEYBOARD,
+        SettingsPage::Whisper => &icons::WHISPER,
         SettingsPage::Permissions => &icons::SHIELD,
         SettingsPage::General => &icons::SETTINGS,
         SettingsPage::Updates => &icons::DOWNLOAD,
@@ -335,6 +340,7 @@ const NAV: &[(Option<&str>, &[SettingsPage])] = &[
             SettingsPage::Audio,
             SettingsPage::Sounds,
             SettingsPage::Shortcuts,
+            SettingsPage::Whisper,
             SettingsPage::Permissions,
         ],
     ),
@@ -388,6 +394,7 @@ fn sections(
         ],
         SettingsPage::Sounds => vec![sound_section(s, t, k, layer)],
         SettingsPage::Shortcuts => vec![shortcut_section(s, t, k)],
+        SettingsPage::Whisper => whisper_page::sections(s, t, k),
         SettingsPage::Permissions => vec![permission_section(s, t)],
         SettingsPage::Updates => vec![
             Section::open(
@@ -639,6 +646,11 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
                 .into_iter()
                 .map(|section| section.render(t, target)),
         );
+    let content = if page == SettingsPage::Whisper {
+        whisper_page::drop_zone(content)
+    } else {
+        content
+    };
     // Below the default width, the panel keeps a smaller margin and a narrower sidebar.
     let narrow = s.window_size.0 < 900.0;
     let corner = 12.0;
@@ -739,6 +751,7 @@ pub fn window(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>
     );
     layer.extend(menus);
     server_dialog(s, t, k, layer);
+    whisper_page::dialogs(s, t, k, layer);
 }
 
 fn sidebar(t: &Theme, search: El, list: El, narrow: bool) -> El {
@@ -3130,7 +3143,8 @@ fn shortcut_row(
     detail: Option<&str>,
 ) -> El {
     let Some(capture) = s.key_capture.as_ref().filter(|c| c.binding == binding) else {
-        let current = s.keybind_draft.get(binding).trim();
+        let current = s.whisper_key(binding);
+        let current = current.trim();
         // Another app holding the key says so on its row, in place of the explanation.
         let detail = if s.taken_shortcuts.contains(&binding) && !current.is_empty() {
             Some("In use by another app")

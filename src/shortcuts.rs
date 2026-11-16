@@ -32,6 +32,11 @@ impl Default for Keybinds {
 impl Keybinds {
     /// The keys that are set, each with its action. Any of them may be left empty.
     pub fn parse(&self) -> Result<Vec<(Binding, HotKey)>> {
+        self.parse_with(&crate::whisper::Settings::default())
+    }
+
+    /// These keys and the whisper lists' and reply's, each with its action.
+    pub fn parse_with(&self, whisper: &crate::whisper::Settings) -> Result<Vec<(Binding, HotKey)>> {
         let mut keys: Vec<(Binding, HotKey)> = Vec::new();
         for (binding, what) in [
             (Binding::Mute, "mute"),
@@ -50,6 +55,30 @@ impl Keybinds {
             }
             keys.push((binding, key));
         }
+        let whispers = std::iter::once((Binding::WhisperReply, whisper.reply_key.as_str())).chain(
+            whisper
+                .lists
+                .iter()
+                .enumerate()
+                .map(|(index, list)| (Binding::Whisper(index), list.key.as_str())),
+        );
+        for (binding, shortcut) in whispers {
+            let shortcut = shortcut.trim();
+            if shortcut.is_empty() {
+                continue;
+            }
+            let key: HotKey = shortcut.parse().with_context(|| {
+                if binding == Binding::WhisperReply {
+                    "Invalid whisper reply shortcut".to_owned()
+                } else {
+                    "Invalid whisper list shortcut".to_owned()
+                }
+            })?;
+            if keys.iter().any(|(_, other)| other.id() == key.id()) {
+                bail!("{shortcut} is already used by another shortcut.");
+            }
+            keys.push((binding, key));
+        }
         Ok(keys)
     }
 }
@@ -60,14 +89,29 @@ pub enum Binding {
     Mute,
     Deafen,
     PushToTalk,
+    /// The whisper list at this place in Settings > Whisper.
+    Whisper(usize),
+    WhisperReply,
+}
+
+impl Binding {
+    /// Held keys report both edges; the others only presses.
+    fn held(self) -> bool {
+        matches!(
+            self,
+            Self::PushToTalk | Self::Whisper(_) | Self::WhisperReply
+        )
+    }
 }
 
 impl Keybinds {
+    /// The key for one of these three; the whisper keys live in the whisper settings.
     pub fn get(&self, binding: Binding) -> &str {
         match binding {
             Binding::Mute => &self.toggle_mute,
             Binding::Deafen => &self.toggle_deafen,
             Binding::PushToTalk => &self.push_to_talk,
+            Binding::Whisper(_) | Binding::WhisperReply => "",
         }
     }
 
@@ -77,6 +121,7 @@ impl Keybinds {
             Binding::Mute => next.toggle_mute = shortcut,
             Binding::Deafen => next.toggle_deafen = shortcut,
             Binding::PushToTalk => next.push_to_talk = shortcut,
+            Binding::Whisper(_) | Binding::WhisperReply => {}
         }
         next
     }
@@ -161,24 +206,28 @@ pub enum Action {
     Mute,
     Deafen,
     PushToTalk(bool),
+    /// The whisper list at this place, pressed or released.
+    Whisper(usize, bool),
+    WhisperReply(bool),
 }
 
 #[derive(Default)]
 struct Edges {
     ids: Vec<(Binding, u32)>,
-    down: [bool; 3],
+    down: Vec<bool>,
 }
 
 impl Edges {
     fn bind(&mut self, ids: Vec<(Binding, u32)>) {
-        let mut down = [false; 3];
-        for (index, (_, id)) in ids.iter().enumerate() {
-            down[index] = self
-                .ids
-                .iter()
-                .position(|(_, old)| old == id)
-                .is_some_and(|old| self.down[old]);
-        }
+        let down = ids
+            .iter()
+            .map(|(_, id)| {
+                self.ids
+                    .iter()
+                    .position(|(_, old)| old == id)
+                    .is_some_and(|old| self.down[old])
+            })
+            .collect();
         self.ids = ids;
         self.down = down;
     }
@@ -188,9 +237,12 @@ impl Edges {
         let binding = self.ids[index].0;
         let pressed = event.state == HotKeyState::Pressed;
         let was_down = std::mem::replace(&mut self.down[index], pressed);
-        if binding == Binding::PushToTalk {
-            return (pressed != was_down || (cfg!(windows) && pressed))
-                .then_some(Action::PushToTalk(pressed));
+        if binding.held() {
+            return (pressed != was_down || (cfg!(windows) && pressed)).then_some(match binding {
+                Binding::Whisper(index) => Action::Whisper(index, pressed),
+                Binding::WhisperReply => Action::WhisperReply(pressed),
+                _ => Action::PushToTalk(pressed),
+            });
         }
         // Windows uses MOD_NOREPEAT; its synthetic release can arrive after a fast second tap.
         (pressed && (cfg!(windows) || !was_down)).then_some(if binding == Binding::Mute {
@@ -246,8 +298,8 @@ impl Shortcuts {
         )
     }
 
-    pub fn configure(&mut self, keys: &Keybinds) -> Result<()> {
-        let next = keys.parse()?;
+    pub fn configure(&mut self, keys: &Keybinds, whisper: &crate::whisper::Settings) -> Result<()> {
+        let next = keys.parse_with(whisper)?;
         if !supported() {
             bail!("Global shortcuts need X11; native Wayland is not supported.");
         }
@@ -484,7 +536,7 @@ mod tests {
     fn a_held_key_toggles_once_and_unrelated_keys_are_ignored() {
         let mut edges = Edges {
             ids: ids(&[10, 20, 30]),
-            down: [false; 3],
+            down: vec![false; 3],
         };
         let event = |id, state| GlobalHotKeyEvent { id, state };
         assert_eq!(

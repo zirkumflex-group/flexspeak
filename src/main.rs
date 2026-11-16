@@ -38,10 +38,13 @@ mod system_appearance;
 mod themes;
 mod transmission;
 mod tray;
+mod ts3_import;
 mod ts6_import;
 mod ui;
 mod updater;
 mod usage;
+mod whisper;
+mod whisper_app;
 mod window_icon;
 mod window_place;
 
@@ -174,6 +177,13 @@ struct App {
     taken_shortcuts: Vec<shortcuts::Binding>,
     keybinds: shortcuts::Keybinds,
     keybind_draft: shortcuts::Keybinds,
+    /// Settings > Whisper as saved; changes apply and save straight away.
+    whisper: whisper::Settings,
+    /// What the servers and the audio thread read about whispering without a message.
+    whisper_shared: Arc<whisper::Shared>,
+    whisper_editor: Option<whisper_app::Editor>,
+    whisper_import: Option<whisper_app::Import>,
+    whispering: Option<whisper_app::Whispering>,
     /// The shortcut being recorded, if Change was pressed.
     key_capture: Option<KeyCapture>,
     /// TeamSpeak 6's settings file, if setup found one to offer.
@@ -397,6 +407,8 @@ struct ServerSession {
     expanded_client: Option<u16>,
     /// Clients heard right now, including yourself while you transmit.
     talking: BTreeSet<u16>,
+    /// Who is whispering to you on this server, while they are.
+    whisperer: Option<u16>,
     /// Who just opened a Monster card, shown on their row for a few seconds.
     unboxed: BTreeMap<u16, monster::Lit>,
     client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
@@ -471,6 +483,7 @@ impl ServerSession {
             chat: chat::Chat::default(),
             expanded_client: None,
             talking: BTreeSet::new(),
+            whisperer: None,
             unboxed: BTreeMap::new(),
             client_usage: BTreeMap::new(),
             client_health: BTreeMap::new(),
@@ -648,6 +661,7 @@ enum SettingsPage {
     Audio,
     Sounds,
     Shortcuts,
+    Whisper,
     Permissions,
     General,
     Updates,
@@ -656,7 +670,7 @@ enum SettingsPage {
 }
 
 impl SettingsPage {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Server,
         Self::Appearance,
         Self::Chat,
@@ -664,6 +678,7 @@ impl SettingsPage {
         Self::Audio,
         Self::Sounds,
         Self::Shortcuts,
+        Self::Whisper,
         Self::Permissions,
         Self::General,
         Self::Updates,
@@ -680,6 +695,7 @@ impl SettingsPage {
             Self::Audio => "Audio",
             Self::Sounds => "Sounds",
             Self::Shortcuts => "Shortcuts",
+            Self::Whisper => "Whisper",
             Self::Permissions => "Permissions",
             Self::General => "General",
             Self::Updates => "Updates",
@@ -750,6 +766,9 @@ fn trace_event(id: hub::SessionId, event: &client::Event) {
         ),
         Event::Recovered(source) => {
             tracing::info!(target: "flexspeak::connection", session, ?source, "recovered")
+        }
+        Event::WhisperFrom(from) => {
+            tracing::debug!(target: "flexspeak::whisper", session, whispered = from.is_some(), "whisper to you")
         }
         Event::Limited => {
             tracing::warn!(target: "flexspeak::connection", session, "server is slowing requests")
@@ -1170,6 +1189,7 @@ enum Message {
     DropTs6Server(String),
     /// Starts listening for the next key press as this shortcut.
     RecordShortcut(shortcuts::Binding),
+    Whisper(whisper_app::Msg),
     CancelRecording,
     Recorded(shortcuts::Recorded),
     ReloadSettings,
@@ -1442,7 +1462,7 @@ impl App {
         let (mut shortcuts, events) = shortcuts::Shortcuts::new(app.ptt.clone());
         if app.onboarding.is_none() {
             app.shortcut_error = shortcuts
-                .configure(&app.keybinds)
+                .configure(&app.keybinds, &app.whisper)
                 .err()
                 .map(|error| format!("{error:#}"));
             if shortcuts::supported()
@@ -1517,6 +1537,11 @@ impl App {
             taken_shortcuts: Vec::new(),
             keybinds: shortcuts::Keybinds::default(),
             keybind_draft: shortcuts::Keybinds::default(),
+            whisper: whisper::Settings::default(),
+            whisper_shared: Arc::default(),
+            whisper_editor: None,
+            whisper_import: None,
+            whispering: None,
             key_capture: None,
             ts6_path: None,
             ts6: None,
@@ -1781,6 +1806,7 @@ impl App {
             old.streaming.others_hidden
         };
         let view = self.stream_view;
+        self.stop_whisper();
         self.active = id;
         self.hub.set_active(id);
         self.transmitting = false;
@@ -1789,6 +1815,7 @@ impl App {
         self.ui.member_menu = None;
         self.ui.channel_menu = None;
         self.ui.move_menu = false;
+        self.ui.whisper_menu = false;
         self.ui.groups_menu = None;
         self.ui.drag = None;
         self.ui.tile_drag = None;
@@ -2851,6 +2878,8 @@ impl App {
         self.transmission = saved.transmission;
         self.keybinds = saved.keybinds.clone();
         self.keybind_draft = saved.keybinds;
+        self.whisper_shared.configure(&saved.whisper);
+        self.whisper = saved.whisper;
         self.footer_hidden = saved.footer_hidden;
         self.log_pane = saved.log_pane;
         self.sidebar_width = ui::sidebar_width(saved.sidebar_width);
@@ -2896,6 +2925,7 @@ impl App {
                 toggle_deafen: self.keybind_draft.toggle_deafen.trim().into(),
                 push_to_talk: self.keybind_draft.push_to_talk.trim().into(),
             },
+            whisper: self.whisper.clone(),
             input_device_id: self.input.as_ref().map(|device| device.id.clone()),
             output_device_id: self.output.as_ref().map(|device| device.id.clone()),
             footer_hidden: self.footer_hidden,
@@ -3682,7 +3712,7 @@ impl App {
         if let Some(shortcuts) = &mut self.shortcuts
             && shortcuts::supported()
         {
-            if let Err(error) = shortcuts.configure(keys) {
+            if let Err(error) = shortcuts.configure(keys, &self.whisper) {
                 if !shortcuts.is_active() {
                     self.shortcut_error = Some(format!("{error:#}"));
                 }
@@ -3710,7 +3740,12 @@ impl App {
         let one = taken.len() == 1;
         let shortcuts: Vec<String> = taken
             .iter()
-            .map(|binding| keys.get(*binding).trim().to_owned())
+            .map(|binding| match binding {
+                shortcuts::Binding::Whisper(_) | shortcuts::Binding::WhisperReply => {
+                    self.whisper_key(*binding).trim().to_owned()
+                }
+                _ => keys.get(*binding).trim().to_owned(),
+            })
             .collect();
         let actions: Vec<String> = taken
             .iter()
@@ -3719,6 +3754,8 @@ impl App {
                     shortcuts::Binding::Mute => "mute",
                     shortcuts::Binding::Deafen => "deafen",
                     shortcuts::Binding::PushToTalk => "push-to-talk",
+                    shortcuts::Binding::Whisper(_) => "whisper list",
+                    shortcuts::Binding::WhisperReply => "whisper reply",
                 }
                 .to_owned()
             })
@@ -3799,6 +3836,7 @@ impl App {
             audio_processing: self.audio_processing,
             transmission: self.transmission,
             ptt: self.ptt.clone(),
+            whisper: self.whisper_shared.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
             subscribe_all: self.subscribe_all.clone(),
             streaming_visible: visible.clone(),
@@ -3992,6 +4030,10 @@ impl App {
                 shortcuts::Action::Mute => self.toggle_mute(),
                 shortcuts::Action::Deafen => self.toggle_deafen(),
                 shortcuts::Action::PushToTalk(_) => {}
+                shortcuts::Action::Whisper(index, pressed) => {
+                    self.whisper_shortcut(Some(index), pressed)
+                }
+                shortcuts::Action::WhisperReply(pressed) => self.whisper_shortcut(None, pressed),
             },
             Message::PlaybackVolume(percent) => {
                 self.playback_volume.set_percent(percent);
@@ -4032,6 +4074,7 @@ impl App {
                 self.settings_message = None;
             }
             Message::CancelRecording => self.end_recording(),
+            Message::Whisper(msg) => return self.update_whisper(msg),
             Message::Recorded(recorded) => {
                 let Some(capture) = &mut self.key_capture else {
                     return Task::none();
@@ -4047,9 +4090,18 @@ impl App {
                     shortcuts::Recorded::Clear => String::new(),
                     shortcuts::Recorded::Shortcut(shortcut) => shortcut,
                 };
+                if matches!(
+                    binding,
+                    shortcuts::Binding::Whisper(_) | shortcuts::Binding::WhisperReply
+                ) {
+                    self.whisper_recorded(binding, shortcut);
+                    return Task::none();
+                }
                 let next = self.keybind_draft.with(binding, shortcut);
-                if let Err(error) = next.parse() {
-                    capture.error = Some(format!("{error:#}"));
+                if let Err(error) = next.parse_with(&self.whisper) {
+                    if let Some(capture) = &mut self.key_capture {
+                        capture.error = Some(format!("{error:#}"));
+                    }
                     return Task::none();
                 }
                 self.keybind_draft = next;
@@ -5816,6 +5868,7 @@ impl App {
                 }
             }
             client::Event::Talking(talking) => session.talking = talking,
+            client::Event::WhisperFrom(from) => session.whisperer = from,
             client::Event::PermissionDenied => {
                 sounds_due.push(sounds::Sound::InsufficientPermissions);
             }
@@ -6093,6 +6146,13 @@ impl App {
                 if active {
                     let next = self.next_active(id);
                     self.activate(next);
+                }
+                if self
+                    .whispering
+                    .as_ref()
+                    .is_some_and(|whispering| whispering.session == id)
+                {
+                    self.stop_whisper();
                 }
                 self.sessions.remove(index);
                 if self.sessions.is_empty() {
@@ -10371,5 +10431,68 @@ mod tests {
         assert!(app.ui.chat_peek_open(Instant::now()));
         assert!(!settings::load(&path).unwrap().unwrap().chat.hidden);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn whisper_keys_hold_toggle_and_stay_on_their_server() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.address = "ts.example.org".into();
+        let (id, mut commands) = connection(&mut app);
+        app.session_mut(id).unwrap().connected = true;
+        let held = whisper::List {
+            key: "Ctrl+Shift+1".into(),
+            ..whisper::List::new("held".into(), "Held".into())
+        };
+        let toggled = whisper::List {
+            toggle: true,
+            ..whisper::List::new("toggled".into(), "Toggled".into())
+        };
+        let elsewhere = whisper::List {
+            server: "other.example.org".into(),
+            ..whisper::List::new("elsewhere".into(), "Elsewhere".into())
+        };
+        app.whisper.lists = vec![held.clone(), toggled.clone(), elsewhere];
+        while commands.try_recv().is_ok() {}
+        let whispered = |commands: &mut mpsc::Receiver<client::Command>| match commands.try_recv() {
+            Ok(client::Command::Whisper(target)) => Some(target),
+            _ => None,
+        };
+
+        // Held: the press starts it, the release ends it.
+        let _ = app.update(Message::Shortcut(shortcuts::Action::Whisper(0, true)));
+        assert_eq!(
+            whispered(&mut commands),
+            Some(Some(whisper::Target::List(held)))
+        );
+        assert!(app.whisper_shared.held());
+        let _ = app.update(Message::Shortcut(shortcuts::Action::Whisper(0, false)));
+        assert_eq!(whispered(&mut commands), Some(None));
+        assert!(!app.whisper_shared.held() && app.whispering.is_none());
+
+        // Toggled: a press starts it, the release does nothing, the next press ends it.
+        let _ = app.update(Message::Shortcut(shortcuts::Action::Whisper(1, true)));
+        assert_eq!(
+            whispered(&mut commands),
+            Some(Some(whisper::Target::List(toggled)))
+        );
+        let _ = app.update(Message::Shortcut(shortcuts::Action::Whisper(1, false)));
+        assert!(commands.try_recv().is_err());
+        let _ = app.update(Message::Shortcut(shortcuts::Action::Whisper(1, true)));
+        assert_eq!(whispered(&mut commands), Some(None));
+
+        // A list for another server isn't started here.
+        let _ = app.update(Message::Shortcut(shortcuts::Action::Whisper(2, true)));
+        assert!(commands.try_recv().is_err());
+        assert_eq!(
+            app.alerts.current().map(|alert| alert.source),
+            Some(Source::Whisper)
+        );
+
+        // Switching servers ends a whisper.
+        let _ = app.update(Message::Shortcut(shortcuts::Action::WhisperReply(true)));
+        assert_eq!(whispered(&mut commands), Some(Some(whisper::Target::Reply)));
+        app.activate(None);
+        assert_eq!(whispered(&mut commands), Some(None));
+        assert!(!app.whisper_shared.held());
     }
 }

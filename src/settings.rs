@@ -25,6 +25,9 @@ pub struct Settings {
     pub audio_processing: crate::audio_processing::Settings,
     pub transmission: crate::transmission::Settings,
     pub keybinds: Keybinds,
+    /// Settings > Whisper: the lists, the reply key, and whether whispers to you are heard.
+    #[serde(skip_serializing_if = "crate::whisper::Settings::is_default")]
+    pub whisper: crate::whisper::Settings,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -724,6 +727,7 @@ impl Default for Settings {
             audio_processing: crate::audio_processing::Settings::default(),
             transmission: crate::transmission::Settings::default(),
             keybinds: Keybinds::default(),
+            whisper: crate::whisper::Settings::default(),
             input_device_id: None,
             output_device_id: None,
             footer_hidden: false,
@@ -794,7 +798,7 @@ impl Settings {
         if self.playback_volume_percent > 100 {
             bail!("Playback volume must be between 0 and 100.");
         }
-        self.keybinds.parse()?;
+        self.keybinds.parse_with(&self.whisper)?;
         self.transmission.validate()?;
         Ok(())
     }
