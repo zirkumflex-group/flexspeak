@@ -100,7 +100,11 @@ impl Session {
         flow: Rc<RefCell<Flow>>,
     ) -> Self {
         Self {
-            publisher: super::publishing::Publisher::new(events.clone(), flow.clone()),
+            publisher: super::publishing::Publisher::new(
+                events.clone(),
+                flow.clone(),
+                surfaces.clone(),
+            ),
             events,
             surfaces,
             visible,
@@ -222,7 +226,7 @@ impl Session {
         if channel != self.channel {
             if self.publisher.active() {
                 self.publisher
-                    .stop("Sharing stopped after changing channels");
+                    .stop(None, "Sharing stopped after changing channels");
             }
             self.stop(connection, None, Phase::Stopped, CHANGED_CHANNELS);
             self.channel = channel;
@@ -453,7 +457,7 @@ impl Session {
         let visible = self.foreground();
         if !self.visible.load(Ordering::Relaxed) && self.publisher.active() {
             self.publisher
-                .stop("Sharing stopped when leaving the server view");
+                .stop(None, "Sharing stopped when leaving the server view");
         }
         // Your own share carries on in the background; only watching is tied to the screen.
         if !visible {
@@ -464,7 +468,7 @@ impl Session {
             self.refresh(connection);
         }
         self.was_visible = visible;
-        self.publisher.tick();
+        self.publisher.tick(visible);
         // A request to watch that the publisher's client never answered, by name.
         let unanswered = self.matching(|watch| {
             watch.receiver.is_none() && watch.started.elapsed() > Duration::from_secs(45)

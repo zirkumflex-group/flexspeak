@@ -204,6 +204,11 @@ pub const SCENES: &[Scene] = &[
     ("sharing-alone", sharing_alone),
     ("sharing-sound", sharing_sound),
     ("sharing-audio-off", sharing_audio_off),
+    ("sharing-preview", sharing_preview),
+    ("sharing-preview-hover", sharing_preview_hover),
+    ("sharing-two", sharing_two),
+    ("sharing-two-watching", sharing_two_watching),
+    ("share-another", share_another),
     ("watching", watching),
     ("watching-solo", watching_solo),
     ("watching-solo-hover", watching_solo_hover),
@@ -2917,7 +2922,7 @@ fn share_custom(s: &mut App) {
 /// Sharing with system audio going out: the sound button is lit and the meter moves.
 fn sharing_sound(s: &mut App) {
     sharing(s);
-    let status = &mut s.server_mut().streaming.sharing.status;
+    let status = first_share(s);
     status.audio_frames = 1200;
     status.audio_level = 0.45;
 }
@@ -2926,29 +2931,31 @@ fn sharing_sound(s: &mut App) {
 fn sharing_audio_off(s: &mut App) {
     sharing(s);
     s.server_mut().streaming.sharing.audio = false;
+    first_share(s).system_audio = false;
 }
 
-/// The open "You are sharing" dialog says that AV1 and fast capture are both in use.
+/// The open dialog of a running share says that AV1 and fast capture are both in use.
 fn sharing_stream_options(s: &mut App) {
     sharing(s);
+    let status = first_share(s);
+    status.detail = "Public · Hardware AV1 · Fast capture".into();
+    status.access = crate::streaming::publishing::Access::Public;
     let sharing = &mut s.server_mut().streaming;
     sharing.share_open = true;
-    sharing.sharing.status.detail = "Public · Hardware AV1 · Fast capture".into();
-    sharing.sharing.status.access = crate::streaming::publishing::Access::Public;
+    sharing.sharing.editing = Some(1);
 }
 
 /// AV1 and fast capture were asked for but are unavailable: the dialog says what runs.
 fn sharing_stream_options_unavailable(s: &mut App) {
     sharing_stream_options(s);
-    s.server_mut().streaming.sharing.status.detail =
-        "Public · VP8, AV1 unavailable · Standard capture".into();
+    first_share(s).detail = "Public · VP8, AV1 unavailable · Standard capture".into();
 }
 
 /// Fast capture gave up during the share: a notice says so, and the dialog names the
 /// standard capture the share carries on with.
 fn sharing_fast_capture_fallback(s: &mut App) {
     sharing_stream_options(s);
-    s.server_mut().streaming.sharing.status.detail = "Public · Standard capture".into();
+    first_share(s).detail = "Public · Standard capture".into();
     s.alerts.raise(
         Source::StreamCapture,
         "Fast capture stopped working (the GPU has not finished a frame in 2 s). Your share carries on.",
@@ -2964,13 +2971,150 @@ fn sharing_alone(s: &mut App) {
 fn sharing(s: &mut App) {
     connected(s);
     share_sources(s);
-    let status = &mut s.server_mut().streaming.sharing.status;
-    status.active = true;
-    status.live = true;
-    status.detail = "Private · Fast capture".into();
-    status.source = "Counter-Strike 2".into();
-    status.viewers = vec![(2, "Mara".into(), true)];
-    status.requests = vec![(4, "Ines".into())];
+    add_share(
+        s,
+        crate::streaming::publishing::Status {
+            key: 1,
+            source: "Counter-Strike 2".into(),
+            kind: Some(crate::streaming::publishing::SourceKind::Window(7)),
+            system_audio: true,
+            viewers: vec![(2, "Mara".into(), true)],
+            requests: vec![(4, "Ines".into())],
+            ..live_share()
+        },
+    );
+}
+
+/// A share that is live, without viewers yet.
+fn live_share() -> crate::streaming::publishing::Status {
+    crate::streaming::publishing::Status {
+        active: true,
+        live: true,
+        detail: "Private · Fast capture".into(),
+        ..Default::default()
+    }
+}
+
+/// Runs a share as the publisher reports it.
+fn add_share(s: &mut App, status: crate::streaming::publishing::Status) {
+    s.server_mut()
+        .streaming
+        .update(crate::streaming::Event::Publishing(status));
+}
+
+/// The first running share, to change what the scene shows.
+fn first_share(s: &mut App) -> &mut crate::streaming::publishing::Status {
+    s.server_mut()
+        .streaming
+        .sharing
+        .shares
+        .first_mut()
+        .expect("a share runs")
+}
+
+/// Your own camera, as your share sends it, on the stage slot after `n` others of yours.
+fn show_own(s: &mut App, mut status: crate::streaming::publishing::Status, n: usize) {
+    let slot = crate::streaming::MAX_WATCHES + n;
+    let surface = s.server().streaming.surfaces.get(slot).clone();
+    let generation = surface.begin();
+    status.preview = true;
+    status.shown = Some((slot, generation));
+    add_share(s, status);
+    surface.publish(generation, camera_picture(), 0.0);
+    s.server_mut().streaming.sync_frame();
+}
+
+/// A stand-in for a webcam: a figure before a soft wall.
+fn camera_picture() -> crate::streaming::Image {
+    let (width, height) = (640_u32, 360_u32);
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let (fx, fy) = (x as f32 / width as f32, y as f32 / height as f32);
+            let head = ((fx - 0.5) * 1.78).hypot(fy - 0.42) < 0.17;
+            let shoulders = ((fx - 0.5) * 0.9).hypot((fy - 1.05) * 1.1) < 0.36;
+            let [r, g, b] = if head {
+                [214, 170, 140]
+            } else if shoulders {
+                [58, 74, 102]
+            } else {
+                let shade = 150.0 + 60.0 * (1.0 - fy);
+                [shade, shade * 0.86, shade * 0.72].map(|c| c as u8)
+            };
+            pixels.extend([r, g, b, 255]);
+        }
+    }
+    crate::streaming::Image {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// Your camera's share, its preview on.
+fn camera_share(key: u64) -> crate::streaming::publishing::Status {
+    crate::streaming::publishing::Status {
+        key,
+        source: "Built-in camera".into(),
+        kind: Some(crate::streaming::publishing::SourceKind::Camera(
+            "demo-camera".into(),
+        )),
+        viewers: vec![(2, "Mara".into(), true)],
+        ..live_share()
+    }
+}
+
+/// Your screen's share, without its preview.
+fn screen_share(key: u64) -> crate::streaming::publishing::Status {
+    crate::streaming::publishing::Status {
+        key,
+        source: "Built-in Retina Display".into(),
+        kind: Some(crate::streaming::publishing::SourceKind::Screen(Some(1))),
+        system_audio: true,
+        viewers: vec![(2, "Mara".into(), true), (3, "Theo".into(), false)],
+        ..live_share()
+    }
+}
+
+/// Only your camera runs, and you see it: it fills the stage as a lone stream does.
+fn sharing_preview(s: &mut App) {
+    connected(s);
+    share_sources(s);
+    s.server_mut().streaming.catalog.clear();
+    show_own(s, camera_share(1), 0);
+}
+
+/// The same with the pointer over it: its bar says it is yours, and hides it.
+fn sharing_preview_hover(s: &mut App) {
+    sharing_preview(s);
+    s.ui.streams_hover = true;
+}
+
+/// Your screen and camera at once, each with its card; the camera's picture is on the stage.
+fn sharing_two(s: &mut App) {
+    connected(s);
+    share_sources(s);
+    s.server_mut().streaming.catalog.clear();
+    add_share(s, screen_share(1));
+    show_own(s, camera_share(2), 0);
+}
+
+/// Two shares of yours beside a stream you watch: your camera sits in the grid with theirs.
+fn sharing_two_watching(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(s, &[("s1", 2, "Mara’s screen", Phase::Receiving)]);
+    share_sources(s);
+    add_share(s, screen_share(1));
+    show_own(s, camera_share(2), 0);
+}
+
+/// Starting another share while your screen runs: the camera is picked, the screen marked.
+fn share_another(s: &mut App) {
+    connected(s);
+    share_sources(s);
+    s.server_mut().streaming.catalog.clear();
+    add_share(s, screen_share(1));
+    let _ = s.update(crate::Message::OpenShare(None));
 }
 
 /// Streams watched without frames yet: what a fresh view looks like before video arrives.
@@ -3195,11 +3339,14 @@ fn streams_live(s: &mut App) {
 fn sharing_watching(s: &mut App) {
     watching(s);
     share_sources(s);
-    let status = &mut s.server_mut().streaming.sharing.status;
-    status.active = true;
-    status.live = true;
-    status.detail = "Private · Fast capture".into();
-    status.viewers = vec![(2, "Mara".into(), true)];
+    add_share(
+        s,
+        crate::streaming::publishing::Status {
+            key: 1,
+            viewers: vec![(2, "Mara".into(), true)],
+            ..live_share()
+        },
+    );
 }
 
 fn watching_grid(s: &mut App) {
@@ -3325,8 +3472,9 @@ fn watching_loud(s: &mut App) {
 fn sharing_live_audio(s: &mut App) {
     sharing_stream_options(s);
     s.server_mut().streaming.sharing.audio = true;
-    s.server_mut().streaming.sharing.status.audio_frames = 1200;
-    s.server_mut().streaming.sharing.status.audio_level = 0.4;
+    let status = first_share(s);
+    status.audio_frames = 1200;
+    status.audio_level = 0.4;
 }
 
 fn watching_stats(s: &mut App) {
@@ -3926,7 +4074,15 @@ mod tests {
             "Camera selection must not unexpectedly share system sound"
         );
         // While live, quality and sound change at once; what is shared and who may watch stay.
-        s.server_mut().streaming.sharing.status.active = true;
+        add_share(
+            s,
+            crate::streaming::publishing::Status {
+                key: 1,
+                active: true,
+                ..Default::default()
+            },
+        );
+        s.server_mut().streaming.sharing.editing = Some(1);
         let _ = s.update(Message::ShareQuality(Preset::Performance.quality()));
         let _ = s.update(Message::ShareAudio(true));
         let _ = s.update(Message::ShareAccess(Access::Private));

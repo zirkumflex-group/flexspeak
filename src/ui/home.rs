@@ -1574,8 +1574,8 @@ fn voice_controls(s: &App, t: &Theme) -> El {
     // The bar sits at the foot of the sidebar with no frame or rule of its own; the meter under the
     // buttons shows when you are heard.
     let mut panel = col().key("voice").w_full().gap(8.0).pt(4.0);
-    if s.server().streaming.sharing.status.active {
-        panel = panel.child(streams::sharing_status(s, t));
+    for share in &s.server().streaming.sharing.shares {
+        panel = panel.child(streams::share_card(t, share));
     }
     panel
         .children(quick_share(s, t))
@@ -1692,16 +1692,19 @@ fn dock_button(button: El) -> El {
     button.grow(1.0).h(32.0)
 }
 
-/// Opens the share dialog; lit while you share.
+/// Opens the share dialog for another share; lit while you share.
 fn share_button(s: &App, t: &Theme) -> El {
-    let sharing = s.server().streaming.sharing.status.active;
+    let sharing = s.server().streaming.sharing.active();
+    let full = s.server().streaming.sharing.full();
     let supported = s.server().connected
         && !s.loopback
         && !s.server().stopping
         && s.server().state.server_version.starts_with("6.")
         && crate::streaming::AVAILABLE;
-    let help = if sharing {
-        "You are sharing · manage or stop"
+    let help = if full {
+        "You share the most at once. Stop one to share something else"
+    } else if sharing {
+        "You are sharing · share a camera, screen or window as well"
     } else if !crate::streaming::AVAILABLE {
         "Screen sharing is available on Mac and Windows"
     } else if !supported {
@@ -1719,7 +1722,7 @@ fn share_button(s: &App, t: &Theme) -> El {
             .a11y_hidden(),
         help,
         Variant::Secondary,
-        (supported || sharing).then_some(Message::OpenShare),
+        (supported && !full).then_some(Message::OpenShare(None)),
     )
 }
 

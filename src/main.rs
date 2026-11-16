@@ -1060,7 +1060,7 @@ fn auto_watch_streams(
         })
         .cloned()
         .collect();
-    let mut watched = session.streaming.watching.len();
+    let mut watched = session.streaming.watched();
     auto_watchable(&session.streaming, &new, &mut watched)
 }
 
@@ -1091,14 +1091,19 @@ fn apply_stream_view(streaming: &mut streaming::View, view: settings::StreamView
     streaming.show_stats = view.details;
 }
 
-/// Your share going live or ending, then one sound for each viewer who arrived or left.
+/// A share going live or ending, then one sound for each viewer who arrived or left.
 fn viewer_sounds(
-    before: &streaming::publishing::Status,
+    shares: &[streaming::publishing::Status],
     event: &streaming::Event,
 ) -> Vec<sounds::Sound> {
     let streaming::Event::Publishing(after) = event else {
         return Vec::new();
     };
+    let idle = streaming::publishing::Status::default();
+    let before = shares
+        .iter()
+        .find(|share| share.key == after.key)
+        .unwrap_or(&idle);
     if !before.live || !after.live {
         return match (before.live, after.live) {
             (false, true) => vec![sounds::Sound::StreamStarted],
@@ -1115,18 +1120,26 @@ fn viewer_sounds(
         .map(|_| sounds::Sound::ViewerJoined)
         .chain(left.map(|_| sounds::Sound::ViewerLeft))
         .chain(
-            asked_to_watch(before, event)
+            asked_to_watch(shares, event)
                 .into_iter()
                 .map(|_| sounds::Sound::WatchRequested),
         )
         .collect()
 }
 
-/// The names of people newly asking to watch your private share.
-fn asked_to_watch(before: &streaming::publishing::Status, event: &streaming::Event) -> Vec<String> {
+/// The names of people newly asking to watch one of your private shares.
+fn asked_to_watch(
+    shares: &[streaming::publishing::Status],
+    event: &streaming::Event,
+) -> Vec<String> {
     let streaming::Event::Publishing(after) = event else {
         return Vec::new();
     };
+    let idle = streaming::publishing::Status::default();
+    let before = shares
+        .iter()
+        .find(|share| share.key == after.key)
+        .unwrap_or(&idle);
     after
         .requests
         .iter()
@@ -1319,7 +1332,8 @@ enum Message {
     /// Mutes a publisher's stream, or brings back the volume it had.
     ToggleStreamMute(u16),
     ToggleStreamStats,
-    OpenShare,
+    /// The share dialog for one running share, or with `None` for starting another.
+    OpenShare(Option<u64>),
     CloseShare,
     ShareQuality(streaming::publishing::Quality),
     ShareResolution(streaming::publishing::Resolution),
@@ -1344,8 +1358,13 @@ enum Message {
     QuickShare(streaming::publishing::ShareSource),
     RefreshQuickSources,
     QuickSources(Result<Vec<streaming::publishing::ShareSource>, String>),
-    StopSharing,
-    DecideViewer(u16, bool),
+    /// Stops one share, or with `None` every one.
+    StopSharing(Option<u64>),
+    DecideViewer(u64, u16, bool),
+    /// Turns one running share's system audio on or off.
+    ShareSystemAudio(u64, bool),
+    /// Shows or hides your own picture of one share, or of every one.
+    PreviewShare(Option<u64>, bool),
     RecordTrace,
     StopTrace,
     TraceSaved(Result<PathBuf, String>),
@@ -1799,7 +1818,7 @@ impl App {
             return;
         };
         let leaving = session.connected && !session.stopping;
-        session.streaming.sharing.stop_capture();
+        session.streaming.sharing.stop_capture(None);
         // While the output is still open: it closes with the last server.
         if leaving && !self.loopback && !self.closing {
             self.play_sound(sounds::Sound::Disconnected);
@@ -1979,7 +1998,9 @@ impl App {
     /// Takes one picture of each screen for its tile and of the chosen source, unless they
     /// have one already.
     fn take_share_preview(&mut self) -> Task {
-        if !self.server().streaming.share_open || self.server().streaming.sharing.status.active {
+        if !self.server().streaming.share_open
+            || self.server().streaming.sharing.editing_share().is_some()
+        {
             return Task::none();
         }
         let sharing = &self.server().streaming.sharing;
@@ -2017,7 +2038,8 @@ impl App {
     ) -> Task {
         let sharing = &self.server().streaming.sharing;
         if !self.server().connected
-            || sharing.status.active
+            || sharing.full()
+            || sharing.in_use(&source)
             || sharing.loading
             || self.loopback
             || self.server().stopping
@@ -2070,12 +2092,12 @@ impl App {
         Task::none()
     }
 
-    /// Sends the dialog's audio and quality to the running share, if there is one.
+    /// Sends the dialog's audio and quality to the running share it shows, if it shows one.
     fn configure_share(&mut self) {
         let sharing = &self.server().streaming.sharing;
-        if !sharing.status.active {
+        let Some(key) = sharing.editing_share().map(|share| share.key) else {
             return;
-        }
+        };
         let audio = sharing
             .audio
             .then(|| {
@@ -2089,20 +2111,28 @@ impl App {
             audio,
             quality: sharing.quality,
         };
-        self.command(client::Command::ConfigureSharing(live));
+        self.command(client::Command::ConfigureSharing(key, live));
     }
 
     fn remember_share(&mut self) {
         let sharing = &self.server().streaming.sharing;
-        let camera = sharing
-            .selected
-            .as_ref()
-            .is_some_and(|s| s.kind.is_camera());
+        let camera = match sharing.editing_share() {
+            Some(share) => share.kind.as_ref().is_some_and(|kind| kind.is_camera()),
+            None => sharing
+                .selected
+                .as_ref()
+                .is_some_and(|s| s.kind.is_camera()),
+        };
+        // Another share already sending system audio turns it off for this one, too.
+        let others = sharing
+            .shares
+            .iter()
+            .any(|share| Some(share.key) != sharing.editing && share.system_audio);
         let next = streaming::publishing::ShareDefaults {
             quality: sharing.quality,
             access: sharing.access,
             // A camera share turns system sound off without that being a preference.
-            audio: if camera {
+            audio: if camera || others {
                 self.share_defaults.audio
             } else {
                 sharing.audio
@@ -3078,7 +3108,7 @@ impl App {
                             "stats": format!("{:?}", w.stats),
                         }))
                         .collect::<Vec<_>>(),
-                    "sharing": format!("{:?}", session.streaming.sharing.status),
+                    "sharing": format!("{:?}", session.streaming.sharing.shares),
                 })
             })
             .collect();
@@ -4295,14 +4325,34 @@ impl App {
                 self.server_mut().streaming.show_stats = !self.server().streaming.show_stats;
                 self.save_stream_view();
             }
-            Message::OpenShare => {
+            Message::OpenShare(key) => {
                 if self.live() && self.tab == Tab::Home {
-                    self.server_mut().streaming.share_open = true;
-                    // How the last share ended is old news in a dialog starting a new one.
-                    let status = &mut self.server_mut().streaming.sharing.status;
-                    if !status.active {
-                        status.detail.clear();
+                    let defaults = self.share_defaults;
+                    let sharing = &mut self.server_mut().streaming.sharing;
+                    let shown = key.and_then(|key| sharing.share(key)).cloned();
+                    if shown.is_none() && sharing.full() {
+                        return Task::none();
                     }
+                    sharing.editing = shown.as_ref().map(|share| share.key);
+                    match shown {
+                        // The dialog shows what the share runs with, to change while live.
+                        Some(share) => {
+                            sharing.quality = share.quality;
+                            sharing.access = share.access;
+                            sharing.audio = share.system_audio;
+                        }
+                        None => {
+                            // How the last share ended is old news in a dialog starting a new one.
+                            sharing.ended.clear();
+                            sharing.apply(defaults);
+                            sharing.pick_free();
+                            // One share sending system audio is enough; a second would double it.
+                            if sharing.shares.iter().any(|share| share.system_audio) {
+                                sharing.audio = false;
+                            }
+                        }
+                    }
+                    self.server_mut().streaming.share_open = true;
                     if self.server().streaming.sharing.sources.is_empty() {
                         return self.update(Message::RefreshShareSources);
                     }
@@ -4313,6 +4363,7 @@ impl App {
                 self.server_mut().streaming.share_open = false;
                 self.server_mut().streaming.sharing.previews.clear();
                 self.remember_share();
+                self.server_mut().streaming.sharing.editing = None;
                 self.ui.open = None;
                 self.ui.share_group = None;
             }
@@ -4363,7 +4414,7 @@ impl App {
             // screen, the game being played, the camera. Windows without a game wait for a pick.
             Message::ShareGroup(group) => {
                 use streaming::publishing::{SourceGroup, default_source};
-                if self.server().streaming.sharing.status.active {
+                if self.server().streaming.sharing.editing_share().is_some() {
                     return Task::none();
                 }
                 self.ui.share_group = Some(group);
@@ -4386,21 +4437,25 @@ impl App {
                     SourceGroup::Camera => sharing
                         .sources
                         .iter()
-                        .find(|source| kind(source) == SourceGroup::Camera)
+                        .find(|source| {
+                            kind(source) == SourceGroup::Camera && !sharing.in_use(source)
+                        })
                         .cloned(),
-                };
+                }
+                // What you share already can't go live twice.
+                .filter(|source| !sharing.in_use(source));
                 match next {
                     Some(source) => return self.update(Message::ShareSource(source)),
                     None => self.server_mut().streaming.sharing.selected = None,
                 }
             }
             Message::ShareAccess(access) => {
-                if !self.server().streaming.sharing.status.active {
+                if self.server().streaming.sharing.editing_share().is_none() {
                     self.server_mut().streaming.sharing.access = access;
                 }
             }
             Message::RefreshShareSources => {
-                if !self.server().streaming.sharing.status.active
+                if self.server().streaming.sharing.editing_share().is_none()
                     && !self.server().streaming.sharing.loading
                 {
                     self.server_mut().streaming.sharing.loading = true;
@@ -4439,13 +4494,15 @@ impl App {
                                 );
                         }
                         self.server_mut().streaming.sharing.sources = sources;
+                        self.server_mut().streaming.sharing.pick_free();
                         return self.take_share_preview();
                     }
                     Err(error) => self.raise_active(Source::StreamPublish, error),
                 }
             }
             Message::ShareSource(source) => {
-                if !self.server().streaming.sharing.status.active {
+                let sharing = &self.server().streaming.sharing;
+                if sharing.editing_share().is_none() && !sharing.in_use(&source) {
                     // A camera share starts without system sound; voice chat remains separate.
                     if source.kind.is_camera() {
                         self.server_mut().streaming.sharing.audio = false;
@@ -4500,7 +4557,7 @@ impl App {
                     && self.tab == Tab::Home
                     && streaming::AVAILABLE
                     && session.state.server_version.starts_with("6.")
-                    && !session.streaming.sharing.status.active
+                    && !session.streaming.sharing.active()
                     && !self.ui.quick_checking
                     && allowed
                 {
@@ -4520,12 +4577,38 @@ impl App {
                 self.ui.quick_checking = false;
                 self.ui.quick_sources = result.unwrap_or_default();
             }
-            Message::StopSharing => {
-                self.server().streaming.sharing.stop_capture();
-                self.command(client::Command::StopSharing);
+            Message::StopSharing(key) => {
+                self.server().streaming.sharing.stop_capture(key);
+                self.command(client::Command::StopSharing(key));
             }
-            Message::DecideViewer(id, allow) => {
-                self.command(client::Command::DecideViewer(id, allow));
+            Message::DecideViewer(key, id, allow) => {
+                self.command(client::Command::DecideViewer(key, id, allow));
+            }
+            Message::ShareSystemAudio(key, on) => {
+                let sharing = &self.server().streaming.sharing;
+                let Some(share) = sharing.share(key) else {
+                    return Task::none();
+                };
+                let audio = on
+                    .then(|| {
+                        sharing
+                            .audio_device
+                            .clone()
+                            .or_else(|| self.devices.output.clone())
+                    })
+                    .flatten();
+                let live = streaming::LiveShare {
+                    audio,
+                    quality: share.quality,
+                };
+                // The open dialog showing this share follows.
+                if sharing.editing == Some(key) {
+                    self.server_mut().streaming.sharing.audio = on;
+                }
+                self.command(client::Command::ConfigureSharing(key, live));
+            }
+            Message::PreviewShare(key, on) => {
+                self.command(client::Command::PreviewSharing(key, on));
             }
             Message::RecordTrace => {
                 if self.recording.is_none() && !self.trace_saving {
@@ -4931,7 +5014,7 @@ impl App {
             }
             Message::Stop => {
                 // Leaving cuts a live share off for its viewers, so that asks first.
-                if self.server().streaming.sharing.status.active {
+                if self.server().streaming.sharing.active() {
                     self.disconnect_prompt = true;
                 } else if let Some(id) = self.active {
                     self.stop_session(id);
@@ -5338,7 +5421,7 @@ impl App {
                             .filter(|stream| stream.publisher == id)
                             .cloned()
                             .collect();
-                        let mut watched = streaming.watching.len();
+                        let mut watched = streaming.watched();
                         for stream in auto_watchable(streaming, &live, &mut watched) {
                             self.command(client::Command::WatchStream(stream));
                         }
@@ -5497,7 +5580,7 @@ impl App {
                 let ids: Vec<_> = self.sessions.iter().map(|session| session.id).collect();
                 for id in ids {
                     if let Some(session) = self.session(id) {
-                        session.streaming.sharing.stop_capture();
+                        session.streaming.sharing.stop_capture(None);
                     }
                     self.send_to(id, client::Command::Stop);
                     if let Some(session) = self.session_mut(id) {
@@ -5548,7 +5631,7 @@ impl App {
                         .add(server_log::Tone::Left, "", "Connection lost");
                     sounds_due.push(sounds::Sound::ConnectionLost);
                 }
-                if !session.streaming.watching.is_empty() {
+                if session.streaming.watched() > 0 {
                     let uid = |publisher: u16| {
                         session
                             .state
@@ -5560,8 +5643,7 @@ impl App {
                     };
                     session.rewatch = session
                         .streaming
-                        .watching
-                        .iter()
+                        .watches()
                         .filter_map(|watch| uid(watch.stream.publisher))
                         .filter(|uid| !uid.is_empty())
                         .collect();
@@ -5770,9 +5852,9 @@ impl App {
             }
             client::Event::Done(source) => self.alerts.recover_in(id.0, source),
             client::Event::Streaming(event) => {
-                let share_sounds = viewer_sounds(&session.streaming.sharing.status, &event);
+                let share_sounds = viewer_sounds(&session.streaming.sharing.shares, &event);
                 if let Some(name) =
-                    asked_to_watch(&session.streaming.sharing.status, &event).first()
+                    asked_to_watch(&session.streaming.sharing.shares, &event).first()
                 {
                     toast = Some((
                         format!("{name} asked to watch your stream"),
@@ -6177,7 +6259,7 @@ impl App {
         !self.chat_options.hidden
             && self.window_size.0 >= ui::chat_dock_window(self)
             && !(self.chat_options.hide_while_watching
-                && self.server().streaming.active()
+                && self.server().streaming.watched() > 0
                 && !self.ui.chat_over_stream)
     }
 
@@ -6295,7 +6377,7 @@ impl App {
                 ..self.chat_options
             });
         }
-        if self.chat_options.hide_while_watching && self.server().streaming.active() {
+        if self.chat_options.hide_while_watching && self.server().streaming.watched() > 0 {
             self.ui.chat_over_stream = true;
         }
     }
@@ -6446,7 +6528,9 @@ impl App {
                     return Task::none();
                 }
                 if self.chat_docked() {
-                    if self.chat_options.hide_while_watching && self.server().streaming.active() {
+                    if self.chat_options.hide_while_watching
+                        && self.server().streaming.watched() > 0
+                    {
                         self.ui.chat_over_stream = false;
                     } else {
                         self.set_chat_options(settings::Chat {
@@ -6669,7 +6753,7 @@ impl App {
     fn is_streaming(&self, member: &client::Member) -> bool {
         let streaming = &self.server().streaming;
         if member.is_self {
-            return streaming.sharing.status.live;
+            return streaming.sharing.live();
         }
         streaming.streamers.contains(&member.id)
             || streaming
@@ -6705,7 +6789,8 @@ impl App {
     }
     /// A playing stream's trouble, with the side it is most likely on.
     fn stream_problem(&self, watch: &streaming::Watching) -> Option<streaming::health::Problem> {
-        if watch.phase != streaming::Phase::Receiving {
+        // Your own picture comes straight from your capture: nothing travels.
+        if watch.phase != streaming::Phase::Receiving || watch.own.is_some() {
             return None;
         }
         let (ours, _, _) = self.footer_connection_status();
@@ -7299,6 +7384,19 @@ mod tests {
         assert!(!app.server().streaming.others_hidden);
     }
 
+    /// One share running on the shown server, key 1, as its publisher reports it.
+    fn share_running(app: &mut App) {
+        app.server_mut()
+            .streaming
+            .update(streaming::Event::Publishing(
+                streaming::publishing::Status {
+                    key: 1,
+                    active: true,
+                    ..Default::default()
+                },
+            ));
+    }
+
     #[test]
     fn switching_servers_reports_streaming_from_the_new_one() {
         let (mut app, (first, _a), (second, _b)) = two_servers();
@@ -7320,15 +7418,16 @@ mod tests {
                 detail: String::new(),
                 stats: streaming::Stats::default(),
                 frame: None,
+                own: None,
             });
-        app.server_mut().streaming.sharing.status.active = true;
+        share_running(&mut app);
         let _ = app.update(Message::StreamLayout(Some(streaming::Strip::Beside)));
         let _ = app.update(Message::SwitchServer(second));
         assert!(app.server().streaming.watching.is_empty());
         assert_eq!(app.server().streaming.strip, streaming::Strip::Beside);
         assert!(app.session(first).unwrap().streaming.watching.is_empty());
         assert!(
-            app.session(first).unwrap().streaming.sharing.status.active,
+            app.session(first).unwrap().streaming.sharing.active(),
             "a share in the background is left running"
         );
     }
@@ -8254,6 +8353,8 @@ mod tests {
         let id = app.active.unwrap();
         let publish = |app: &mut App, live: bool, viewers: &[u16]| {
             let status = streaming::publishing::Status {
+                key: 1,
+                active: live,
                 live,
                 viewers: viewers
                     .iter()
@@ -8289,6 +8390,8 @@ mod tests {
         let id = app.active.unwrap();
         let publish = |app: &mut App, requests: &[u16]| {
             let status = streaming::publishing::Status {
+                key: 1,
+                active: true,
                 live: true,
                 requests: requests.iter().map(|r| (*r, format!("R{r}"))).collect(),
                 ..Default::default()
@@ -8885,11 +8988,13 @@ mod tests {
             commands.try_recv().is_err(),
             "nothing runs before going live"
         );
-        app.server_mut().streaming.sharing.status.active = true;
+        share_running(&mut app);
+        // The dialog shows the running share.
+        app.server_mut().streaming.sharing.editing = Some(1);
         app.server_mut().streaming.sharing.audio = false;
         let _ = app.update(Message::ShareFrameRate(48));
         match commands.try_recv() {
-            Ok(client::Command::ConfigureSharing(live)) => {
+            Ok(client::Command::ConfigureSharing(1, live)) => {
                 assert_eq!(live.quality.frame_rate, 48);
                 assert!(live.audio.is_none());
             }
@@ -8903,7 +9008,7 @@ mod tests {
         let _ = commands.try_recv();
         let _ = app.update(Message::ShareAudio(true));
         match commands.try_recv() {
-            Ok(client::Command::ConfigureSharing(live)) => assert_eq!(live.audio, Some(output)),
+            Ok(client::Command::ConfigureSharing(1, live)) => assert_eq!(live.audio, Some(output)),
             other => panic!("Unexpected command: {other:?}"),
         }
     }
@@ -10004,7 +10109,7 @@ mod tests {
     #[test]
     fn disconnect_asks_first_only_while_sharing() {
         let (mut app, mut commands) = session_fixture();
-        app.server_mut().streaming.sharing.status.active = true;
+        share_running(&mut app);
         let _ = app.update(Message::Stop);
         assert!(app.disconnect_prompt);
         assert!(commands.try_recv().is_err());

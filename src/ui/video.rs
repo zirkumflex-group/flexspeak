@@ -1,5 +1,5 @@
 //! I420 video stays planar until the compositor draws it in painter order.
-use crate::{App, streaming::MAX_WATCHES};
+use crate::{App, streaming::SLOTS};
 use rune::compose::{DeviceKey, Frame};
 use rune::render::EffectSite;
 use wgpu::util::DeviceExt;
@@ -34,7 +34,7 @@ struct Gpu {
     layout: wgpu::BindGroupLayout,
     shader: wgpu::ShaderModule,
     pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
-    pictures: [Option<Picture>; MAX_WATCHES],
+    pictures: [Option<Picture>; SLOTS],
     /// `draw` has no queue of its own; uniform updates go through this one.
     queue: wgpu::Queue,
     next_picture: u64,
@@ -64,7 +64,7 @@ impl Videos {
         let surfaces = &f.rt.state.server().streaming.surfaces;
         // The streams some painter draws this frame, exits and drag ghosts included. Only
         // those upload, and only those wake the window for each new frame.
-        let mut drawn = [false; MAX_WATCHES];
+        let mut drawn = [false; SLOTS];
         for (n, i) in f.rt.instances.iter().enumerate() {
             if i.params[1] == rune::render::KIND_EFFECT
                 && f.rt.marks.get(n).copied().unwrap_or(0) & 0xff == VIDEO
@@ -142,7 +142,7 @@ impl Videos {
             ));
         }
         let gpu = &mut self.gpu.as_mut().unwrap().1;
-        for slot in (0..MAX_WATCHES).filter(|&slot| drawn[slot]) {
+        for slot in (0..SLOTS).filter(|&slot| drawn[slot]) {
             let surface = surfaces.get(slot);
             // Only taking the handle locks the surface; the decoder publishes on meanwhile.
             let Some((frame, picture)) = surface.picture() else {
@@ -230,7 +230,7 @@ impl Videos {
             return;
         };
         let slot = site.data[0] as usize;
-        if slot >= MAX_WATCHES || gpu.pictures[slot].is_none() {
+        if slot >= SLOTS || gpu.pictures[slot].is_none() {
             return;
         }
         if !gpu.pipelines.iter().any(|(fmt, _)| *fmt == site.format) {

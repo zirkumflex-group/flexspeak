@@ -110,6 +110,13 @@ pub const MAX_VOLUME: u16 = 300;
 /// The most streams watched at once; each has its own picture and audio.
 pub const MAX_WATCHES: usize = 5;
 
+/// The most streams you share at once on one server, such as a screen and a camera. Each
+/// is its own stream, with its own viewers.
+pub const MAX_SHARES: usize = 3;
+
+/// Every picture the stage can show: the watched streams' first, then your own shares'.
+pub const SLOTS: usize = MAX_WATCHES + MAX_SHARES;
+
 /// Where the other streams go while one is on the stage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Strip {
@@ -128,6 +135,8 @@ pub struct Watching {
     pub detail: String,
     pub stats: Stats,
     pub frame: Option<Frame>,
+    /// One of your own shares, by key, shown to you: nothing is received, nothing heard.
+    pub own: Option<u64>,
 }
 
 pub struct View {
@@ -190,8 +199,75 @@ impl View {
         }
     }
 
+    /// Whether the stage shows any picture, your own shares' included.
     pub fn active(&self) -> bool {
         !self.watching.is_empty()
+    }
+    /// The streams of others you watch, without your own pictures.
+    pub fn watches(&self) -> impl Iterator<Item = &Watching> {
+        self.watching.iter().filter(|watch| watch.own.is_none())
+    }
+    /// How many streams of others you watch.
+    pub fn watched(&self) -> usize {
+        self.watches().count()
+    }
+    /// The tile ID of one of your own shares' pictures.
+    pub fn own_id(key: u64) -> String {
+        format!("own-{key}")
+    }
+    /// Puts each share's own picture on the stage while it shows, and takes it off once it
+    /// doesn't. The publisher owns those pictures, so none is ended here.
+    fn sync_own(&mut self) {
+        let shown: Vec<(u64, usize, u64, String)> = self
+            .sharing
+            .shares
+            .iter()
+            .filter_map(|share| {
+                let (slot, generation) = share.shown?;
+                Some((share.key, slot, generation, share.source.clone()))
+            })
+            .collect();
+        self.watching.retain(|watch| {
+            watch.own.is_none_or(|key| {
+                shown
+                    .iter()
+                    .any(|(own, _, generation, _)| *own == key && *generation == watch.generation)
+            })
+        });
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|id| !self.watching.iter().any(|watch| &watch.stream.id == id))
+        {
+            self.focused = None;
+        }
+        for (key, slot, generation, source) in shown {
+            if let Some(watch) = self
+                .watching
+                .iter_mut()
+                .find(|watch| watch.own == Some(key))
+            {
+                watch.stream.name = source;
+                continue;
+            }
+            self.watching.push(Watching {
+                stream: StreamInfo {
+                    id: Self::own_id(key),
+                    publisher: 0,
+                    name: source,
+                    viewers: 0,
+                    has_audio: false,
+                    server_relayed: false,
+                },
+                slot,
+                generation,
+                phase: Phase::Receiving,
+                detail: String::new(),
+                stats: Stats::default(),
+                frame: None,
+                own: Some(key),
+            });
+        }
     }
     pub fn watching(&self, id: &str) -> Option<&Watching> {
         self.watching.iter().find(|watch| watch.stream.id == id)
@@ -249,16 +325,23 @@ impl View {
         }
     }
     pub fn reset(&mut self) {
-        self.sharing.status = publishing::Status::default();
+        self.sharing.shares.clear();
+        self.sharing.editing = None;
         self.clear_picture();
+        self.sync_own();
         self.catalog.clear();
         self.streamers.clear();
         self.notice.clear();
         self.share_open = false;
     }
-    /// Ends every picture and forgets the watched streams; the session stops them too.
+    /// Ends every watched stream's picture and forgets them; the session stops them too.
+    /// Your own shares' pictures stay.
     pub fn clear_picture(&mut self) {
-        for watch in self.watching.drain(..) {
+        let (own, watched) = std::mem::take(&mut self.watching)
+            .into_iter()
+            .partition(|watch| watch.own.is_some());
+        self.watching = own;
+        for watch in watched {
             self.surfaces.get(watch.slot).end(watch.generation);
             self.stopped = self.stopped.max(watch.generation);
         }
@@ -266,7 +349,11 @@ impl View {
     }
     /// Forgets one watched stream at once, before the session confirms it stopped.
     pub fn forget(&mut self, id: &str) {
-        if let Some(index) = self.watching.iter().position(|watch| watch.stream.id == id) {
+        if let Some(index) = self
+            .watching
+            .iter()
+            .position(|watch| watch.stream.id == id && watch.own.is_none())
+        {
             let watch = self.watching.remove(index);
             self.surfaces.get(watch.slot).end(watch.generation);
             self.stopped = self.stopped.max(watch.generation);
@@ -277,7 +364,10 @@ impl View {
     }
     pub fn update(&mut self, event: Event) {
         match event {
-            Event::Publishing(status) => self.sharing.status = status,
+            Event::Publishing(status) => {
+                self.sharing.update(status);
+                self.sync_own();
+            }
             Event::Catalog(catalog) => self.catalog = catalog,
             Event::Streamers(streamers) => self.streamers = streamers.into_iter().collect(),
             Event::Notice(notice) => self.notice = notice,
@@ -289,7 +379,8 @@ impl View {
                 detail,
             } => {
                 let index = self.watching.iter().position(|watch| {
-                    watch.generation == generation || watch.stream.id == stream.id
+                    watch.own.is_none()
+                        && (watch.generation == generation || watch.stream.id == stream.id)
                 });
                 if let Some(index) = index
                     && self.watching[index].generation > generation
@@ -317,6 +408,7 @@ impl View {
                     detail,
                     stats: Stats::default(),
                     frame: None,
+                    own: None,
                 };
                 match index {
                     Some(index) if self.watching[index].generation == generation => {
@@ -371,7 +463,7 @@ impl View {
 
 /// One surface per watched stream, shared with the session and the audio callback.
 pub struct Surfaces {
-    slots: [Arc<Surface>; MAX_WATCHES],
+    slots: [Arc<Surface>; SLOTS],
 }
 
 impl Default for Surfaces {
@@ -384,7 +476,7 @@ impl Default for Surfaces {
 
 impl Surfaces {
     pub fn get(&self, slot: usize) -> &Arc<Surface> {
-        &self.slots[slot.min(MAX_WATCHES - 1)]
+        &self.slots[slot.min(SLOTS - 1)]
     }
     pub fn set_waker(&self, waker: rune::Waker) {
         for surface in &self.slots {
@@ -554,6 +646,11 @@ impl Surface {
     /// Whether any painter draws this stream; see `hidden`.
     pub(crate) fn set_shown(&self, shown: bool) {
         self.hidden.store(!shown, Ordering::Relaxed);
+    }
+    /// Whether a painter drew this stream last time.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    pub(crate) fn shown(&self) -> bool {
+        !self.hidden.load(Ordering::Relaxed)
     }
     pub(crate) fn note_presented(&self) {
         self.presented.fetch_add(1, Ordering::Relaxed);
@@ -870,6 +967,56 @@ mod tests {
             detail: String::new(),
         });
         assert_eq!(view.watching.len(), 1);
+    }
+
+    #[test]
+    fn your_own_pictures_join_the_stage_without_counting_as_watched() {
+        let mut view = View::default();
+        let watched = view.surfaces.get(0).begin();
+        let slot = MAX_WATCHES;
+        let own = view.surfaces.get(slot).begin();
+        assert!(own > watched);
+        let share = |shown: Option<(usize, u64)>| publishing::Status {
+            key: 3,
+            active: true,
+            source: "Camera".into(),
+            shown,
+            ..Default::default()
+        };
+        view.update(Event::Publishing(share(Some((slot, own)))));
+        assert_eq!(view.watching.len(), 1);
+        assert_eq!(view.watched(), 0);
+        assert_eq!(
+            view.stage().and_then(|w| w.own),
+            Some(3),
+            "it fills the stage alone"
+        );
+        // A watch started before it still arrives: hiding or showing it stops nothing.
+        view.update(Event::State {
+            generation: watched,
+            slot: 0,
+            stream: info("a", 7),
+            phase: Phase::Receiving,
+            detail: String::new(),
+        });
+        assert_eq!(view.watched(), 1);
+        view.focused = Some(View::own_id(3));
+        view.clear_picture();
+        assert_eq!(view.watched(), 0);
+        assert_eq!(view.watching.len(), 1, "Stop All leaves your own picture");
+        view.update(Event::Publishing(share(None)));
+        assert!(view.watching.is_empty());
+        assert!(view.focused.is_none());
+        view.update(Event::Publishing(share(Some((slot, own)))));
+        view.update(Event::Publishing(publishing::Status {
+            key: 3,
+            ..Default::default()
+        }));
+        assert!(
+            view.watching.is_empty(),
+            "an ended share takes its picture along"
+        );
+        assert!(!view.sharing.active());
     }
 
     #[test]
