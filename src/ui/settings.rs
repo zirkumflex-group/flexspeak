@@ -1513,6 +1513,7 @@ fn appearance_sections(s: &App, t: &Theme, k: &Kit) -> Vec<Section> {
         )
         .child(theme_cell().key("spacer").py(0.0).h(0.0).a11y_hidden());
     let mut sections = vec![
+        interface_size_section(s, t, k),
         Section::open(
             "scheme",
             "Color Scheme",
@@ -1806,6 +1807,42 @@ fn tray_section(s: &App, t: &Theme, k: &Kit) -> Section {
                         })
                     },
                 ),
+            ),
+        )],
+    )
+}
+
+/// How large text and controls are drawn: a zoom over the whole window, for screens where the
+/// usual size reads small.
+fn interface_size_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    use crate::settings::INTERFACE_SIZES;
+    let labels = INTERFACE_SIZES.map(|size| format!("{size}%"));
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let control = rune_kit::SegmentedControl::new(
+        &labels,
+        INTERFACE_SIZES
+            .iter()
+            .position(|size| *size == s.interface_size),
+    )
+    .label("Interface size")
+    .fit()
+    .on_pick(|s: &mut App, index, tx| {
+        dispatch(s, tx, Message::InterfaceSize(INTERFACE_SIZES[index]));
+    })
+    .build(k)
+    .key("interface-size");
+    Section::boxed(
+        "interface-size",
+        "Size",
+        "interface size zoom scale text font bigger larger smaller read readable",
+        vec![item(
+            "Interface size",
+            "interface size zoom scale text font bigger larger smaller",
+            form_row(
+                t,
+                "Interface size",
+                Some("Larger text and controls. Ctrl and + or − change it too."),
+                control,
             ),
         )],
     )

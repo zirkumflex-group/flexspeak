@@ -1839,11 +1839,11 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 // Weight says the same in a second voice: yours strongest, then one with people
                 // in it, then an empty one, so the server above stays the only heading.
                 let weight = if current {
-                    ty::HEADING
+                    ty::TREE_STRONG
                 } else if channel.members.is_empty() {
-                    ty::BODY
+                    ty::TREE
                 } else {
-                    ty::BODY_MEDIUM
+                    ty::TREE_MEDIUM
                 };
                 let mut name = row()
                     .key("name")
@@ -1852,7 +1852,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                     .help(hint)
                     .grow(1.0)
                     .min_w(0.0)
-                    .h(size::ROW)
+                    .h(size::TREE_ROW)
                     .px(8.0)
                     .gap(8.0)
                     .center_y()
@@ -1865,7 +1865,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                             } else {
                                 &icons::VOLUME
                             },
-                            14.0,
+                            15.0,
                         )
                         .color(if current { t.accent } else { t.faint })
                         .a11y_hidden(),
@@ -1924,7 +1924,9 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                 }
                 // An empty channel keeps the arrow's space, so names stay lined up.
                 let disclosure = if !foldable {
-                    el().key("disclosure").size(18.0, size::ROW).a11y_hidden()
+                    el().key("disclosure")
+                        .size(18.0, size::TREE_ROW)
+                        .a11y_hidden()
                 } else {
                     el().key("disclosure")
                         .role("button")
@@ -1934,7 +1936,7 @@ fn channel_tree(s: &App, t: &Theme) -> El {
                             "Collapse channel"
                         })
                         .expanded(!collapsed)
-                        .size(18.0, size::ROW)
+                        .size(18.0, size::TREE_ROW)
                         .center()
                         .radius(6.0)
                         .focusable(true)
@@ -2009,7 +2011,7 @@ fn spacer_row(t: &Theme, id: u64, spacer: &client::Spacer) -> El {
     let line = row()
         .key("name")
         .w_full()
-        .h(size::ROW)
+        .h(size::TREE_ROW)
         .px(8.0)
         .center_y()
         .label(spacer.text.clone())
@@ -2099,9 +2101,9 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
     let mut entry = row()
         .key(format!("member-{}", member.id))
         .w_full()
-        .h(24.0)
-        .px(6.0)
-        .gap(6.0)
+        .h(size::TREE_ROW)
+        .px(4.0)
+        .gap(7.0)
         .center_y()
         .radius(radius::ROW)
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
@@ -2109,7 +2111,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .child(
             text(member.name.clone())
                 // Someone talking reads in a heavier weight as well as by the ring.
-                .font(if talking { ty::BODY_STRONG } else { ty::BODY })
+                .font(if talking { ty::TREE_MEDIUM } else { ty::TREE })
                 .color(t.text)
                 .truncate_fade()
                 // Gives way to "(you)" and the badges after it when the name is long.
@@ -2117,7 +2119,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         );
     // "(you)" is a note about the name, not part of it, so it steps back.
     if member.is_self {
-        entry = entry.child(text("(you)").font(ty::BODY).color(t.muted).a11y_hidden());
+        entry = entry.child(text("(you)").font(ty::TREE).color(t.muted).a11y_hidden());
     }
     entry = entry.child(el().grow(1.0).a11y_hidden());
     if let Some(lit) = s.server().unboxed.get(&member.id)
@@ -2201,9 +2203,9 @@ fn signal_bars(t: &Theme, lit: usize, colour: rune::Color) -> El {
     bars
 }
 
-/// What you'll hear from someone, in one place: headphones struck through in red when their
-/// sound is off, a microphone struck through when muted, otherwise a ring that fills and glows
-/// green while they talk.
+/// What you'll hear from someone, in one place, where TeamSpeak puts it: headphones struck
+/// through when their sound is off, a microphone struck through when muted, otherwise a dim dot
+/// that grows and glows green while they talk.
 fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> El {
     let slot = el().key("voice").size(20.0, 20.0).center();
     let muted = if sound_muted {
@@ -2217,23 +2219,22 @@ fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> E
         return slot
             .help(help)
             .label(help)
-            .child(struck(t, glyph, &icons::STRIKE, 13.0).key("muted"));
+            .child(struck(t, glyph, &icons::STRIKE, 14.0).key("muted"));
     }
-    // Idle draws nothing, so the column only shows what matters: someone talking or muted. A
-    // hollow ring on every quiet person read as a checkbox.
-    let (ring, fill, glow) = if talking {
-        (t.good, t.good, t.good.alpha(0.55))
+    // Quiet, a small dim dot, filled so it reads as a status light (a hollow ring read as a
+    // checkbox) and so every name has the same anchor; talking, it grows and glows green.
+    let (diameter, fill, glow) = if talking {
+        (10.0, t.good, t.good.alpha(0.55))
     } else {
-        (t.good.alpha(0.0), t.good.alpha(0.0), t.good.alpha(0.0))
+        (8.0, t.faint.alpha(0.7), t.good.alpha(0.0))
     };
     let help = if talking { "Speaking" } else { "Not speaking" };
     slot.help(help).label(help).child(
-        el().key("ring")
-            .size(8.0, 8.0)
-            .radius(4.0)
+        el().key("dot")
+            .size(diameter, diameter)
+            .radius(diameter / 2.0)
             .fill(fill)
-            .border(1.5, ring)
-            .shadow(0.0, 8.0, glow)
+            .shadow(0.0, 9.0, glow)
             .motion(motion::QUICK)
             .a11y_hidden(),
     )

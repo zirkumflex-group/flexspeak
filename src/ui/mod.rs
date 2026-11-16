@@ -340,6 +340,9 @@ pub struct UiState {
     pub press_point: (f32, f32),
     /// The window position of the member row or stream last under the pointer, to place drags.
     pub row_origin: (f32, f32),
+    /// The interface size `App::window_size` was last laid out at, so the window's own size in
+    /// its points is `window_size` times this.
+    pub window_zoom: f32,
 }
 
 impl Default for UiState {
@@ -406,6 +409,7 @@ impl Default for UiState {
             log_people: false,
             log_search: TextEdit::new(""),
             warm_blur: true,
+            window_zoom: 1.0,
             unseen: false,
             changelog_open: false,
             sound_groups: std::collections::BTreeSet::new(),
@@ -852,6 +856,23 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         dispatch(s, tx, Message::Recorded(recorded));
         return true;
     }
+    // Ctrl and + or − change the interface size, and Ctrl+0 resets it, as in a browser.
+    let step = if key.is_command('=') || key.is_command('+') {
+        Some(1)
+    } else if key.is_command('-') {
+        Some(-1)
+    } else if key.is_command('0') {
+        Some(0)
+    } else {
+        None
+    };
+    if let Some(step) = step
+        && s.key_capture.is_none()
+    {
+        let size = step_interface_size(s.interface_size, step);
+        dispatch(s, tx, Message::InterfaceSize(size));
+        return true;
+    }
     // ⌘, opens Settings, as in every Mac app.
     if key.is_command(',') && s.onboarding.is_none() && s.settings_page.is_none() {
         dispatch(s, tx, Message::OpenSettings(s.settings_recent));
@@ -999,11 +1020,46 @@ fn style(s: &App) -> std::rc::Rc<(Theme, rune_kit::Kit)> {
     })
 }
 
+/// The zoom Settings > Appearance > Interface Size asks for, held back while the window is too
+/// small for it, so the view never lays out below the window's minimum size. Performance mode's
+/// small window stays at the usual size.
+pub fn interface_zoom(s: &App) -> f32 {
+    let wanted = f32::from(s.interface_size) / 100.0;
+    if wanted <= 1.0 {
+        return 1.0;
+    }
+    let (width, height) = (
+        s.window_size.0 * s.ui.window_zoom,
+        s.window_size.1 * s.ui.window_zoom,
+    );
+    if width <= 0.0 || height <= 0.0 {
+        return wanted;
+    }
+    let fits = (width / crate::MIN_SIZE.0).min(height / crate::MIN_SIZE.1);
+    // In whole percent, so a window dragged a point at a time doesn't zoom by fractions.
+    (wanted.min(fits).max(1.0) * 100.0).floor() / 100.0
+}
+
+/// The next interface size up or down from the current one, or the usual size.
+fn step_interface_size(current: u16, step: i32) -> u16 {
+    let sizes = crate::settings::INTERFACE_SIZES;
+    if step == 0 {
+        return sizes[0];
+    }
+    let at = sizes
+        .iter()
+        .position(|size| *size >= current)
+        .unwrap_or(sizes.len() - 1) as i32;
+    sizes[(at + step).clamp(0, sizes.len() as i32 - 1) as usize]
+}
+
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let _trace = crate::profiler::scope(crate::profiler::Category::Ui, "ui.view");
     // Left off, the system's own Reduce Motion setting still applies.
     let reduced = s.appearance.disable_animations || cx.system_reduced_motion();
     cx.reduced_motion(reduced);
+    let zoom = interface_zoom(s);
+    cx.zoom(zoom);
     let style = style(s);
     let t = style.0;
     let k = &style.1;
@@ -1034,13 +1090,15 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         .fill(t.canvas)
         // Settings reads it for its margins. Recording it must not commit: a committing layout
         // handler would re-run layout every frame.
-        .on_layout_tx(|s: &mut App, r: [f32; 4], tx: &mut Tx| {
+        .on_layout_tx(move |s: &mut App, r: [f32; 4], tx: &mut Tx| {
             // The one width that changes the view: where the chat column docks or folds away.
             let at = chat::dock_window(s);
             let docks = |width: f32| width >= at;
             let crossed = docks(s.window_size.0) != docks(r[2]);
             s.window_size = (r[2], r[3]);
-            if !crossed {
+            s.ui.window_zoom = zoom;
+            // Also when the window grew or shrank past what the interface size fits in.
+            if !crossed && interface_zoom(s) == zoom {
                 tx.live_only();
             }
         });
