@@ -157,6 +157,9 @@ pub struct Member {
     pub name: String,
     pub is_self: bool,
     pub mic_muted: bool,
+    /// Their microphone is switched off in their client (TeamSpeak's "input deactivated"),
+    /// as opposed to muted; both can be true at once.
+    pub mic_deactivated: bool,
     pub sound_muted: bool,
     /// Whether the server says you may poke and move this client; `None` when it hasn't said.
     pub can_poke: Option<bool>,
@@ -860,7 +863,8 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
                 .map_or_else(String::new, |uid| uid_key(&uid.0)),
             name: client.name.clone(),
             is_self: client.id == state.own_client,
-            mic_muted: client.input_muted || client.output_muted || !client.input_hardware_enabled,
+            mic_muted: client.input_muted || client.output_muted,
+            mic_deactivated: !client.input_hardware_enabled,
             sound_muted: client.output_muted
                 || client.output_only_muted
                 || !client.output_hardware_enabled,
@@ -2202,6 +2206,8 @@ mod tests {
             .find(|member| member.is_self)
             .context("Own client missing")?;
         assert!(own.mic_muted && own.sound_muted);
+        // Flexspeak never switches its own microphone off, so the server mustn't say it has.
+        assert!(!own.mic_deactivated);
         println!(
             "Tree probe: {} channels, {} visible clients, {} subscribed channels; join hints: {} allowed / {} denied / {} unavailable. Muted/deafened in Lobby; no audio devices opened.",
             state.channels.len(),

@@ -192,6 +192,11 @@ pub const SCENES: &[Scene] = &[
     ("share-quick-streams", share_quick_streams),
     ("channel-tree", channel_tree),
     ("channel-tree-spacers", channel_tree_spacers),
+    ("channel-tree-mic-deactivated", channel_tree_mic_deactivated),
+    (
+        "channel-tree-mic-deactivated-light",
+        channel_tree_mic_deactivated_light,
+    ),
     ("channel-menu", channel_menu),
     ("channel-menu-default", channel_menu_default),
     ("sharing", sharing),
@@ -1192,6 +1197,7 @@ fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member
         name: name.into(),
         is_self,
         mic_muted,
+        mic_deactivated: false,
         sound_muted: false,
         can_poke: None,
         can_move: (!is_self).then_some(id != 3),
@@ -2757,6 +2763,25 @@ fn channel_tree(s: &mut App) {
     ];
     s.server_mut().state.current = Some(lobby);
     s.server_mut().talking.clear();
+}
+
+/// The evening tree with Kofi's microphone switched off in their client rather than muted, beside
+/// Noor and Lena who muted theirs, so the two marks compare in one column.
+fn channel_tree_mic_deactivated(s: &mut App) {
+    channel_tree(s);
+    for channel in &mut s.server_mut().state.channels {
+        for member in &mut channel.members {
+            if member.id == 6 {
+                member.mic_deactivated = true;
+            }
+        }
+    }
+}
+
+fn channel_tree_mic_deactivated_light(s: &mut App) {
+    channel_tree_mic_deactivated(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+    s.appearance.light_theme = settings::ThemeName::Ocean;
 }
 
 /// A server that parts its tree into sections with spacer channels: centred, left, right and

@@ -2098,6 +2098,13 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         member.mic_muted || (member.is_self && s.microphone_icon() == crate::Icon::MicOff);
     let sound_muted = member.sound_muted || (member.is_self && s.server().deafened);
     let talking = s.server().talking.contains(&member.id);
+    let mic = if mic_muted {
+        Mic::Muted
+    } else if member.mic_deactivated {
+        Mic::Deactivated
+    } else {
+        Mic::On
+    };
     let mut entry = row()
         .key(format!("member-{}", member.id))
         .w_full()
@@ -2107,7 +2114,7 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .center_y()
         .radius(radius::ROW)
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
-        .child(voice_icon(t, talking, mic_muted, sound_muted))
+        .child(voice_icon(t, talking, mic, sound_muted))
         .child(
             text(member.name.clone())
                 // Someone talking reads in a heavier weight as well as by the ring.
@@ -2203,23 +2210,40 @@ fn signal_bars(t: &Theme, lit: usize, colour: rune::Color) -> El {
     bars
 }
 
+/// Someone's microphone as the tree shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mic {
+    On,
+    /// Muted, by them or because their sound is off.
+    Muted,
+    /// Switched off in their client, so there is nothing to unmute until they turn it back on.
+    Deactivated,
+}
+
 /// What you'll hear from someone, in one place, where TeamSpeak puts it: headphones struck
-/// through when their sound is off, a microphone struck through when muted, otherwise a dim dot
-/// that grows and glows green while they talk.
-fn voice_icon(t: &Theme, talking: bool, mic_muted: bool, sound_muted: bool) -> El {
+/// through when their sound is off, a microphone struck through when muted, a microphone with a
+/// cross beside it when it's deactivated, otherwise a dim dot that grows and glows green while
+/// they talk.
+fn voice_icon(t: &Theme, talking: bool, mic: Mic, sound_muted: bool) -> El {
     let slot = el().key("voice").size(20.0, 20.0).center();
     let muted = if sound_muted {
-        Some((&icons::HEADPHONE_OFF_GLYPH, "Sound muted"))
-    } else if mic_muted {
-        Some((&icons::MIC_OFF_GLYPH, "Microphone muted"))
+        Some((&icons::HEADPHONE_OFF_GLYPH, &icons::STRIKE, "Sound muted"))
     } else {
-        None
+        match mic {
+            Mic::Muted => Some((&icons::MIC_OFF_GLYPH, &icons::STRIKE, "Microphone muted")),
+            Mic::Deactivated => Some((
+                &icons::MIC_DEACTIVATED_GLYPH,
+                &icons::MIC_DEACTIVATED_CROSS,
+                "Microphone deactivated",
+            )),
+            Mic::On => None,
+        }
     };
-    if let Some((glyph, help)) = muted {
+    if let Some((glyph, mark, help)) = muted {
         return slot
             .help(help)
             .label(help)
-            .child(struck(t, glyph, &icons::STRIKE, 14.0).key("muted"));
+            .child(struck(t, glyph, mark, 14.0).key("muted"));
     }
     // Quiet, a small dim dot, filled so it reads as a status light (a hollow ring read as a
     // checkbox) and so every name has the same anchor; talking, it grows and glows green.
