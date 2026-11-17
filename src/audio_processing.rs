@@ -6,6 +6,8 @@ use std::{
 
 use anyhow::{Result, ensure};
 use nnnoiseless::DenoiseState;
+
+use crate::voice_levels::MicTaps;
 use serde::{Deserialize, Serialize};
 
 /// WebRTC processing (noise suppression, gain, echo cancellation) needs the bundled native
@@ -76,6 +78,20 @@ impl Settings {
     }
 }
 
+/// What echo cancellation reports about itself, each value only when it has one.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct EchoStats {
+    /// Echo return loss, dB: how much quieter the echo is than playback.
+    pub erl: Option<f64>,
+    /// Echo return loss enhancement, dB: how much echo cancellation removed.
+    pub erle: Option<f64>,
+    /// Share of the last second the linear filter was diverging.
+    pub divergent_filter_fraction: Option<f64>,
+    pub residual_echo_likelihood: Option<f64>,
+    /// The playback-to-microphone delay it estimates.
+    pub delay_ms: Option<i32>,
+}
+
 /// Runs RNNoise on one block in place. It expects 16-bit-range samples.
 fn denoise(state: &mut DenoiseState, block: &mut [f32; SAMPLES]) {
     let input = block.map(|sample| sample * 32768.0);
@@ -139,6 +155,10 @@ pub struct Processor {
     rendered_at: Option<Instant>,
     reference: Option<(Instant, Instant)>,
     started: Instant,
+    /// Whether what comes out is thrown away (muted, or push-to-talk released). Capture is
+    /// still processed then, as WebRTC's own send path does, so echo cancellation keeps seeing
+    /// both directions and has nothing to catch up on when the microphone opens.
+    output_muted: bool,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     apm: Option<crate::native_audio::Apm>,
     rnnoise: Option<Box<DenoiseState<'static>>>,
@@ -160,6 +180,7 @@ impl Processor {
             rendered_at: None,
             reference: None,
             started: Instant::now(),
+            output_muted: false,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             apm: settings
                 .webrtc()
@@ -170,8 +191,30 @@ impl Processor {
     }
 
     pub fn reset(&mut self) -> Result<()> {
+        let muted = self.output_muted;
         *self = Self::new(self.settings)?;
+        self.set_output_muted(muted)
+    }
+
+    /// Tells the processor whether its output is sent. It keeps processing either way.
+    pub fn set_output_muted(&mut self, muted: bool) -> Result<()> {
+        self.output_muted = muted;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(apm) = self.apm.as_mut() {
+            apm.set_output_muted(muted)?;
+        }
         Ok(())
+    }
+
+    /// Echo cancellation's own figures, when it is on.
+    pub fn echo_stats(&mut self) -> Option<EchoStats> {
+        if !self.echo_enabled() {
+            return None;
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        return self.apm.as_mut().and_then(|apm| apm.stats());
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        None
     }
 
     /// Drops the audio and timing held between frames and keeps the processors themselves, so
@@ -242,13 +285,21 @@ impl Processor {
         (0.0..=500.0).contains(&delay).then(|| delay.round() as i32)
     }
 
+    /// Processes microphone audio into `output`. `taps`, when measuring, gets the audio as it
+    /// comes in, after WebRTC's stages and as it leaves.
     pub fn capture(
         &mut self,
         samples: &[f32],
         at: Option<Instant>,
         output: &mut VecDeque<f32>,
+        mut taps: Option<&mut MicTaps>,
     ) -> Result<()> {
         if !self.settings.enabled() {
+            if let Some(taps) = taps {
+                taps.captured.add(samples);
+                taps.processed.add(samples);
+                taps.sent.add(samples);
+            }
             output.extend(samples.iter().copied());
             return Ok(());
         }
@@ -276,6 +327,9 @@ impl Processor {
                 } else {
                     None
                 };
+                if let Some(taps) = taps.as_deref_mut() {
+                    taps.captured.add(&self.capture);
+                }
                 let mut pcm = self.capture.map(pcm16);
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if let Some(apm) = self.apm.as_mut() {
@@ -286,9 +340,15 @@ impl Processor {
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 let _ = (delay, &mut pcm);
                 let mut block = pcm.map(|sample| f32::from(sample) / 32768.0);
+                if let Some(taps) = taps.as_deref_mut() {
+                    taps.processed.add(&block);
+                }
                 // After WebRTC, so echo cancellation still sees the unaltered microphone.
                 if let Some(state) = self.rnnoise.as_mut() {
                     denoise(state, &mut block);
+                }
+                if let Some(taps) = taps.as_deref_mut() {
+                    taps.sent.add(&block);
                 }
                 output.extend(block);
             }
@@ -306,8 +366,8 @@ mod tests {
         let mut processor = Processor::new(Settings::default())?;
         let input = [0.000_001, -0.0, -0.321_987, 1.0];
         let mut output = VecDeque::new();
-        processor.capture(&input[..1], None, &mut output)?;
-        processor.capture(&input[1..], None, &mut output)?;
+        processor.capture(&input[..1], None, &mut output, None)?;
+        processor.capture(&input[1..], None, &mut output, None)?;
         assert_eq!(
             output.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
             input.map(f32::to_bits)
@@ -367,10 +427,10 @@ mod tests {
             .map(|i| (i as f32 * 0.0576).sin() * 0.2)
             .collect();
         let mut expected = VecDeque::new();
-        whole.capture(&input, None, &mut expected)?;
+        whole.capture(&input, None, &mut expected, None)?;
         let mut output = VecDeque::new();
         for chunk in input.chunks(137) {
-            processor.capture(chunk, None, &mut output)?;
+            processor.capture(chunk, None, &mut output, None)?;
         }
         assert_eq!(output, expected);
         assert_eq!(output.len(), input.len());
@@ -380,20 +440,20 @@ mod tests {
                 .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
         );
         assert!(output.iter().any(|sample| sample.abs() > 0.001));
-        processor.capture(&[0.8; 123], None, &mut output)?;
+        processor.capture(&[0.8; 123], None, &mut output, None)?;
         processor.reset()?;
         output.clear();
-        processor.capture(&[0.0; SAMPLES - 1], None, &mut output)?;
+        processor.capture(&[0.0; SAMPLES - 1], None, &mut output, None)?;
         assert!(output.is_empty());
-        processor.capture(&[0.0], None, &mut output)?;
+        processor.capture(&[0.0], None, &mut output, None)?;
         assert_eq!(output, VecDeque::from([0.0; SAMPLES]));
         // Clearing drops a part-filled frame as a rebuild does.
-        processor.capture(&[0.8; 123], None, &mut output)?;
+        processor.capture(&[0.8; 123], None, &mut output, None)?;
         processor.clear();
         output.clear();
-        processor.capture(&[0.0; SAMPLES - 1], None, &mut output)?;
+        processor.capture(&[0.0; SAMPLES - 1], None, &mut output, None)?;
         assert!(output.is_empty());
-        processor.capture(&[0.0], None, &mut output)?;
+        processor.capture(&[0.0], None, &mut output, None)?;
         assert_eq!(output.len(), SAMPLES);
         Ok(())
     }
@@ -433,7 +493,7 @@ mod tests {
         let input = rumble(300);
         let mut output = VecDeque::new();
         for chunk in input.chunks(137) {
-            processor.capture(chunk, None, &mut output)?;
+            processor.capture(chunk, None, &mut output, None)?;
         }
         assert_eq!(output.len(), input.len() / SAMPLES * SAMPLES);
         let tail = 100 * SAMPLES;
@@ -457,9 +517,31 @@ mod tests {
         })?;
         let input = rumble(200);
         let mut output = VecDeque::new();
-        processor.capture(&input, None, &mut output)?;
+        processor.capture(&input, None, &mut output, None)?;
         assert_eq!(output.len(), input.len());
         assert!(energy(output.iter().copied()) < energy(input.iter().copied()));
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn muted_processing_keeps_running_and_a_rebuild_keeps_it_muted() -> Result<()> {
+        let mut processor = Processor::new(Settings {
+            noise_suppression: true,
+            automatic_gain: true,
+            echo_cancellation: true,
+            ..Settings::default()
+        })?;
+        processor.set_output_muted(true)?;
+        processor.reset()?;
+        assert!(processor.output_muted);
+        processor.started = Instant::now() - Duration::from_secs(1);
+        let mut output = VecDeque::new();
+        processor.capture(&[0.2; SAMPLES], None, &mut output, None)?;
+        assert_eq!(output.len(), SAMPLES, "muted audio is still processed");
+        processor.set_output_muted(false)?;
+        let stats = processor.echo_stats();
+        assert!(stats.is_some(), "echo cancellation reports itself");
         Ok(())
     }
 
@@ -501,11 +583,11 @@ mod tests {
         // At startup, microphone audio waits for the first playback reference.
         processor.reset()?;
         let mut output = VecDeque::new();
-        processor.capture(&[0.4; SAMPLES], Some(Instant::now()), &mut output)?;
+        processor.capture(&[0.4; SAMPLES], Some(Instant::now()), &mut output, None)?;
         assert!(output.is_empty());
         // Once that wait is over, the microphone keeps working even without usable timing.
         processor.started = now - Duration::from_secs(1);
-        processor.capture(&[0.4; SAMPLES], Some(Instant::now()), &mut output)?;
+        processor.capture(&[0.4; SAMPLES], Some(Instant::now()), &mut output, None)?;
         assert_eq!(output.len(), SAMPLES);
         Ok(())
     }
@@ -544,7 +626,12 @@ mod tests {
                 .map(|value| value * 0.6)
                 .collect();
             let mut output = VecDeque::new();
-            processor.capture(&echo, Some(now - Duration::from_millis(20)), &mut output)?;
+            processor.capture(
+                &echo,
+                Some(now - Duration::from_millis(20)),
+                &mut output,
+                None,
+            )?;
             assert_eq!(output.len(), SAMPLES);
             if frame >= 300 {
                 input_energy += echo.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
@@ -578,7 +665,7 @@ mod tests {
                     (random as f64 / u32::MAX as f64 * 0.2 - 0.1) as f32
                 });
                 let mut output = VecDeque::new();
-                processor.capture(&input, None, &mut output)?;
+                processor.capture(&input, None, &mut output, None)?;
                 assert_eq!(output.len(), SAMPLES);
                 if block >= 200 {
                     energy += output

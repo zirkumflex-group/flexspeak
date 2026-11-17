@@ -101,4 +101,4 @@ Charts are Rune vector shapes sized from layout. Connection charts show 60 s wit
 
 ## Previews
 
-`flexspeak --snap out.png --scene <name>` renders a screen headlessly with demo data (`--list-scenes`, `--size 760x560`, `--at 1.5`). `src/ui/scenes.rs` defines the scenes, and its tests build each one at the normal and compact minimum sizes.
+`cargo run --release --locked --features tooling -- --snap out.png --scene <name>` renders a screen headlessly with demo data (`--list-scenes`, `--size 760x560`, `--at 1.5`). `src/ui/scenes.rs` defines the scenes, and its tests build each one at the normal and compact minimum sizes.

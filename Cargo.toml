@@ -11,6 +11,11 @@ description = "A minimal native TeamSpeak voice client"
 members = [".", "crates/monster-core"]
 exclude = ["vendor/tsclientlib", "vendor/tsproto", "server"]
 
+[features]
+# Rune's headless agent tooling (--snap, --scene, --list-scenes, --tree, ...) in a release build.
+# Shipped builds leave it out; screenshots use `cargo run --release --locked --features tooling`.
+tooling = ["rune/tooling"]
+
 [dependencies]
 anyhow = "1"
 audiopus = "0.3.0-rc.0"
@@ -23,9 +28,9 @@ futures = "0.3"
 global-hotkey = "0.10"
 # Update checks and downloads. TLS through rustls on ring: no extra C toolchain on any platform.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
-rune = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
-rune-fx = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+rune-fx = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
 # The video compositor and rune-fx need wgpu's types; the same version and features Rune already builds.
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 rubato = { version = "5.0.1", default-features = false }
@@ -55,7 +60,7 @@ tsproto-types = { git = "https://github.com/ReSpeak/tsclientlib", rev = "ee3bc6f
 base64 = "0.23"
 nnnoiseless = { version = "0.5.2", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-rusqlite = { version = "0.42.0", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 # The tray icon's SVG renderer. Keep it on the version Rune builds (crates/rune/Cargo.toml),
 # so the tree carries one resvg/usvg/tiny-skia, not two.
 resvg = { version = "0.45.1", default-features = false }
@@ -71,10 +76,10 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-libwebrtc = "=0.4.0"
+libwebrtc = "=0.4.1"
 # Named only to switch off libaom's software AV1 encoder: AV1 is then offered only
 # when a hardware encoder (NVENC) provides it, and sharing otherwise stays on VP8.
-webrtc-sys = { version = "=0.3.53", features = ["no-software-av1-encoder"] }
+webrtc-sys = { version = "=0.3.54", features = ["no-software-av1-encoder"] }
 tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
@@ -103,18 +108,19 @@ embed-resource = "3"
 webrtc-sys-build = "=0.3.21"
 
 # webrtc-sys with the NVENC hardware encoders built on Windows, from
-# zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.53 (based on webrtc-sys v0.3.53).
-# The rev is also tagged flexspeak/webrtc-sys-v0.3.53-nvenc.2 there, so it stays fetchable.
+# zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.54 (based on webrtc-sys v0.3.54).
+# The rev is also tagged flexspeak/webrtc-sys-v0.3.54-nvenc.1 there, so it stays fetchable.
 [patch.crates-io]
 # Rune's own patched copies of these, from the same rev as rune above. A dependency's [patch]
 # doesn't reach the app that builds it, so each app repeats them; without winit's, macOS doesn't
 # build at all. Keep the rev in step with rune's when it is bumped.
-winit = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
-wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
-parley_engine = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "9ef8a17cbf5d91de1f9cbab908c622f03b644114" }
-webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "1f542d7bc61cb00270849632415485490f9e52e5" }
-webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "1f542d7bc61cb00270849632415485490f9e52e5" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "78bf1c5e8f889193f7eec2ac4ced0808de673251" }
+webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "78bf1c5e8f889193f7eec2ac4ced0808de673251" }
 # cpal 0.18.2 with one change: the macOS loopback tap leaves the app's own sound out, so
 # shared system audio does not echo the call back to viewers. Windows does the same in
 # src/streaming/process_audio.rs.

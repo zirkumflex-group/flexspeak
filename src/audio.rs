@@ -36,14 +36,13 @@ struct Capture {
     samples: ArrayQueue<(u64, Timed<f32>)>,
     generation: AtomicU64,
     level: AtomicU32,
+    /// Whether the microphone is sent. Muted, it is still captured and processed, but its
+    /// level reads as silence.
+    sending: AtomicBool,
     discontinuity: Arc<AtomicBool>,
 }
 
 impl Capture {
-    fn enabled(&self) -> bool {
-        self.generation.load(Ordering::Acquire) & 1 != 0
-    }
-
     fn clear(&self, enabled: bool) {
         let previous = self.generation.load(Ordering::Acquire);
         self.generation.store(
@@ -343,6 +342,8 @@ pub struct AudioEngine {
     voice_gate: crate::transmission::VoiceGate,
     packet_boundary: crate::transmission::PacketBoundary,
     last_frame: Option<Instant>,
+    /// Whether processed microphone audio goes on to the voice gate and encoder.
+    sending: bool,
     reference: Option<Reference>,
     input_clock: ResampleClock,
     input_device_rate: u32,
@@ -396,6 +397,7 @@ impl AudioEngine {
             samples: ArrayQueue::new(input_config.sample_rate() as usize / 4),
             generation: AtomicU64::new(0),
             level: AtomicU32::new(0.0_f32.to_bits()),
+            sending: AtomicBool::new(false),
             discontinuity: discontinuity.clone(),
         });
         let reference = processing
@@ -493,6 +495,7 @@ impl AudioEngine {
                 samples: ArrayQueue::new(RATE / 4),
                 generation: AtomicU64::new(0),
                 level: AtomicU32::new(0.0_f32.to_bits()),
+                sending: AtomicBool::new(false),
                 discontinuity,
             }),
             Arc::new(ArrayQueue::new(RATE / 4)),
@@ -525,6 +528,10 @@ impl AudioEngine {
     ) -> Result<Self> {
         let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         encoder.set_bitrate(Bitrate::BitsPerSecond(32_768))?;
+        // The microphone is processed from the start; only sending waits for `set_capture`.
+        capture.clear(true);
+        let mut processor = processor;
+        processor.set_output_muted(true)?;
         Ok(Self {
             _streams: streams,
             capture,
@@ -534,6 +541,7 @@ impl AudioEngine {
             voice_gate,
             packet_boundary: crate::transmission::PacketBoundary::default(),
             last_frame: None,
+            sending: false,
             reference,
             input_clock: ResampleClock::default(),
             input_device_rate,
@@ -558,21 +566,39 @@ impl AudioEngine {
         self.voice_gate.tune(settings)
     }
 
+    /// Starts or stops sending the microphone (mute, push-to-talk). Capture and processing run
+    /// on either way, as in WebRTC's own send path: echo cancellation only stays in step with
+    /// playback when it sees both all the time.
     pub fn set_capture(&mut self, enabled: bool) -> Result<()> {
-        if self.capture.enabled() != enabled {
-            self.reset_capture(enabled, false)?;
+        if self.sending != enabled {
+            self.sending = enabled;
+            self.capture.sending.store(enabled, Ordering::Relaxed);
+            if !enabled {
+                self.capture
+                    .level
+                    .store(0.0_f32.to_bits(), Ordering::Relaxed);
+            }
+            self.processor.set_output_muted(!enabled)?;
+            self.reset_sending()?;
         }
         Ok(())
     }
 
-    /// Empties the microphone pipeline. `fresh` also rebuilds the processor, which takes long
-    /// enough to make playback wait: only a change of server needs that. Muting and a dropped
-    /// device buffer keep the one that has already adapted to the room.
-    fn reset_capture(&mut self, enabled: bool, fresh: bool) -> Result<()> {
+    /// Drops what was on its way to the encoder, so an utterance never spans a gap.
+    fn reset_sending(&mut self) -> Result<()> {
         self.packet_boundary.end();
-        self.capture.clear(enabled);
         self.pcm.clear();
         self.monitor.clear();
+        self.voice_gate.reset()?;
+        self.last_frame = None;
+        Ok(())
+    }
+
+    /// Empties the microphone pipeline after a gap in the device audio. `fresh` also rebuilds
+    /// the processor, which takes long enough to make playback wait: only a change of server
+    /// needs that. A dropped device buffer keeps the one that has already adapted to the room.
+    fn reset_capture(&mut self, fresh: bool) -> Result<()> {
+        self.capture.clear(true);
         self.input_rate.reset();
         self.input_clock = ResampleClock::default();
         self.input_len = 0;
@@ -582,12 +608,10 @@ impl AudioEngine {
         } else {
             self.processor.clear();
         }
-        self.voice_gate.reset()?;
-        self.last_frame = None;
         if let Some(reference) = &mut self.reference {
             reference.reset();
         }
-        Ok(())
+        self.reset_sending()
     }
 
     pub fn set_codec(&mut self, codec: CodecType, quality: u8) -> Result<()> {
@@ -617,7 +641,8 @@ impl AudioEngine {
     /// Ends any utterance in progress and clears the microphone pipeline, so nothing spoken to
     /// one server reaches another. Returns the packets that close that utterance.
     pub fn end_utterance(&mut self) -> Result<Vec<Vec<u8>>> {
-        self.reset_capture(false, true)?;
+        self.set_capture(false)?;
+        self.reset_capture(true)?;
         let mut packets = Vec::new();
         self.packet_boundary.flush(&mut packets);
         Ok(packets)
@@ -643,7 +668,7 @@ impl AudioEngine {
     }
 
     pub fn transmitting(&self) -> bool {
-        self.capture.enabled()
+        self.sending
             && self.voice_gate.active()
             && self
                 .last_frame
@@ -675,7 +700,7 @@ impl AudioEngine {
             bail!("Audio device failed: {error}");
         }
         if self.capture.discontinuity.swap(false, Ordering::AcqRel) {
-            self.reset_capture(self.capture.enabled(), false)?;
+            self.reset_capture(false)?;
         }
         if let Some(reference) = &mut self.reference {
             reference.process(&mut self.processor)?;
@@ -686,10 +711,8 @@ impl AudioEngine {
             let Some(sample) = self.capture.pop() else {
                 break;
             };
-            anyhow::ensure!(
-                !self.processor.echo_enabled() || sample.at.is_some(),
-                "Echo cancellation cannot read microphone timing. Disable it or choose another microphone."
-            );
+            // A sample without usable timing (the first callback after the device starts often
+            // has none) only loses echo cancellation its delay hint; it finds the delay itself.
             if self.input_len == 0 {
                 self.input_at = sample.at;
             }
@@ -708,8 +731,16 @@ impl AudioEngine {
                 delay,
             );
             self.input_len = 0;
+            let taps = (self.levels.on && self.sending).then_some(&mut self.levels.mic);
             self.processor
-                .capture(&samples[0][..count], at, &mut self.pcm)?;
+                .capture(&samples[0][..count], at, &mut self.pcm, taps)?;
+        }
+        if self.levels.on && self.sending {
+            self.levels.echo = self.processor.echo_stats();
+        }
+        if !self.sending {
+            // Processed and dropped: nothing is sent while muted.
+            self.pcm.clear();
         }
         while self.pcm.len() >= FRAME {
             let mut frame = [0.0; FRAME];
@@ -719,6 +750,9 @@ impl AudioEngine {
             self.voice_gate.process(frame)?;
             self.last_frame = Some(Instant::now());
             while let Some(frame) = self.voice_gate.pop() {
+                if self.levels.on {
+                    self.levels.sent_frames += 1;
+                }
                 if loopback {
                     self.monitor.extend(frame);
                     while self.monitor.len() > RATE / 4 {
@@ -1117,7 +1151,12 @@ where
                 }
             }
             if capture.generation.load(Ordering::Acquire) == generation {
-                capture.level.store(peak.to_bits(), Ordering::Relaxed);
+                let level = if capture.sending.load(Ordering::Relaxed) {
+                    peak
+                } else {
+                    0.0
+                };
+                capture.level.store(level.to_bits(), Ordering::Relaxed);
             }
         },
         move |error| {
@@ -1688,11 +1727,69 @@ mod tests {
     }
 
     #[test]
-    fn capture_generations_reject_inflight_audio_after_mute_and_resume() {
+    fn a_muted_microphone_is_still_processed_but_nothing_is_sent_or_metered() -> Result<()> {
+        let mut engine = AudioEngine::without_devices(crate::transmission::Settings::default())?;
+        engine.levels.on = true;
+        let speak = |engine: &mut AudioEngine| {
+            for i in 0..FRAME * 2 {
+                let at = i as f32 / RATE as f32;
+                engine.push_mic((at * 440.0 * std::f32::consts::TAU).sin() * 0.3);
+            }
+        };
+        // Muted from the start: the samples are taken off the device queue and processed.
+        speak(&mut engine);
+        assert!(engine.tick(false, |_| {})?.is_empty());
+        assert!(engine.capture.samples.is_empty());
+        assert!(engine.pcm.is_empty());
+        assert_eq!(engine.level(), 0.0);
+        assert!(!engine.transmitting());
+        assert_eq!(engine.levels.mic.captured.samples(), 0);
+        // Unmuted, the same audio is sent and measured.
+        engine.set_capture(true)?;
+        speak(&mut engine);
+        let packets = engine.tick(false, |_| {})?;
+        assert!(
+            packets.iter().any(|packet| !packet.is_empty()),
+            "{packets:?}"
+        );
+        assert!(engine.levels.mic.captured.samples() > 0);
+        assert!(engine.levels.sent_frames > 0);
+        // Muting again ends the utterance and stops sending at once.
+        engine.set_capture(false)?;
+        speak(&mut engine);
+        let packets = engine.tick(false, |_| {})?;
+        assert!(packets.iter().all(Vec::is_empty), "{packets:?}");
+        assert!(engine.capture.samples.is_empty());
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn microphone_audio_without_timing_keeps_echo_cancellation_running() -> Result<()> {
+        let mut engine = AudioEngine::without_devices(crate::transmission::Settings::default())?;
+        engine.processor = Processor::new(audio_processing::Settings {
+            echo_cancellation: true,
+            ..audio_processing::Settings::default()
+        })?;
+        // Muted from the start and then sending: neither stops on samples with no timestamp.
+        for sending in [false, true] {
+            engine.set_capture(sending)?;
+            for _ in 0..FRAME * 3 {
+                engine.push_mic(0.1);
+            }
+            engine.tick(false, |_| {})?;
+            assert!(engine.capture.samples.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn capture_generations_reject_inflight_audio_after_a_reset() {
         let capture = Capture {
             samples: ArrayQueue::new(8),
             generation: AtomicU64::new(0),
             level: AtomicU32::new(0),
+            sending: AtomicBool::new(false),
             discontinuity: Arc::new(AtomicBool::new(false)),
         };
         capture.clear(true);
