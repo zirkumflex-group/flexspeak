@@ -711,10 +711,8 @@ impl AudioEngine {
             let Some(sample) = self.capture.pop() else {
                 break;
             };
-            anyhow::ensure!(
-                !self.processor.echo_enabled() || sample.at.is_some(),
-                "Echo cancellation cannot read microphone timing. Disable it or choose another microphone."
-            );
+            // A sample without usable timing (the first callback after the device starts often
+            // has none) only loses echo cancellation its delay hint; it finds the delay itself.
             if self.input_len == 0 {
                 self.input_at = sample.at;
             }
@@ -1762,6 +1760,26 @@ mod tests {
         let packets = engine.tick(false, |_| {})?;
         assert!(packets.iter().all(Vec::is_empty), "{packets:?}");
         assert!(engine.capture.samples.is_empty());
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn microphone_audio_without_timing_keeps_echo_cancellation_running() -> Result<()> {
+        let mut engine = AudioEngine::without_devices(crate::transmission::Settings::default())?;
+        engine.processor = Processor::new(audio_processing::Settings {
+            echo_cancellation: true,
+            ..audio_processing::Settings::default()
+        })?;
+        // Muted from the start and then sending: neither stops on samples with no timestamp.
+        for sending in [false, true] {
+            engine.set_capture(sending)?;
+            for _ in 0..FRAME * 3 {
+                engine.push_mic(0.1);
+            }
+            engine.tick(false, |_| {})?;
+            assert!(engine.capture.samples.is_empty());
+        }
         Ok(())
     }
 
