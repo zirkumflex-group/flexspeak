@@ -2,7 +2,7 @@
 
 ## UI changes
 
-When a change adds, removes or alters visible UI, show the result inline in the thread before finishing: render every affected screen and state with `flexspeak --snap <file>.png --scene <name>` (`--list-scenes` names them, and a new state gets a new scene), then embed each PNG in your reply with Markdown image syntax and an absolute path. Done means each changed state is visible in the thread, including one that was removed from the UI.
+When a change adds, removes or alters visible UI, show the result inline in the thread before finishing: render every affected screen and state with `cargo run --release --locked --features tooling -- --snap <file>.png --scene <name>` (`--list-scenes` names them, and a new state gets a new scene; shipped builds leave the tooling out), then embed each PNG in your reply with Markdown image syntax and an absolute path. Done means each changed state is visible in the thread, including one that was removed from the UI.
 
 The PR carries the same screenshots, in a `## Screenshots` section of its description: one image per changed state, captioned with the scene name, plus a before shot (rendered from `main`) for a state that changed or was removed. Push the PNGs to the `pr-screenshots` branch in a folder named after the PR branch, never to the PR branch itself, so they stay out of `main`:
 

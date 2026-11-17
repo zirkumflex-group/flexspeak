@@ -2338,7 +2338,7 @@ mod tests {
                 recover_identity(&encoded).context("not recovered")?,
                 parse_identity(&format!("{encoded}\n"))?,
             ] {
-                assert_eq!(restored.key().to_short().as_slice(), scalar);
+                assert_eq!(&restored.key().to_short()[..], scalar);
                 assert_eq!(public_key(&restored), public_key(&identity));
                 assert_eq!(restored.counter(), 7);
             }
@@ -2366,7 +2366,7 @@ mod tests {
             .context("not recovered")?;
         let mut scalar = [0x5a; 32];
         scalar[0] = 0;
-        assert_eq!(restored.key().to_short().as_slice(), scalar);
+        assert_eq!(&restored.key().to_short()[..], scalar);
         assert_eq!(restored.counter(), 3);
         Ok(())
     }
