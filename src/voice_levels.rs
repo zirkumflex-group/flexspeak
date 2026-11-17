@@ -2,6 +2,10 @@
 //! each person as they arrive, the volume they are played at, and everything you hear. It tells
 //! whether someone who sounds quiet arrives quiet or is turned down on your end. Only what is
 //! heard is measured, since the people talking may use another client.
+//!
+//! Your own microphone is measured too, while it is not muted: in three bands at three points
+//! (as captured, after WebRTC's processing, as sent), with echo cancellation's own figures. A
+//! voice that sounds muffled or weak then shows which stage took it away.
 
 use std::{
     collections::BTreeMap,
@@ -61,7 +65,121 @@ impl fmt::Display for Level {
     }
 }
 
-/// What the audio engine measures: the sum played to you.
+/// A second-order section (RBJ cookbook, Q = 1/sqrt 2) at 48 kHz.
+#[derive(Debug, Clone, Copy)]
+struct Biquad {
+    b: [f32; 3],
+    a: [f32; 2],
+    z: [f32; 2],
+}
+
+impl Biquad {
+    fn new(high_pass: bool, frequency: f32) -> Self {
+        let w = std::f32::consts::TAU * frequency / 48_000.0;
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin * std::f32::consts::FRAC_1_SQRT_2;
+        let a0 = 1.0 + alpha;
+        let b = if high_pass {
+            [(1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0]
+        } else {
+            [(1.0 - cos) / 2.0, 1.0 - cos, (1.0 - cos) / 2.0]
+        };
+        Self {
+            b: b.map(|b| b / a0),
+            a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
+            z: [0.0; 2],
+        }
+    }
+
+    fn run(&mut self, x: f32) -> f32 {
+        let y = self.b[0] * x + self.z[0];
+        self.z[0] = self.b[1] * x - self.a[0] * y + self.z[1];
+        self.z[1] = self.b[2] * x - self.a[1] * y;
+        y
+    }
+}
+
+/// Loudness in three bands: below 1 kHz (body), 1-4 kHz (clarity), above 4 kHz (air). A voice
+/// that turns muffled loses the upper two against the first.
+#[derive(Debug, Clone)]
+pub struct BandMeter {
+    filters: [Biquad; 8],
+    energy: [f64; 3],
+    samples: usize,
+}
+
+impl Default for BandMeter {
+    fn default() -> Self {
+        let low = |frequency| Biquad::new(false, frequency);
+        let high = |frequency| Biquad::new(true, frequency);
+        Self {
+            filters: [
+                low(1000.0),
+                low(1000.0),
+                high(1000.0),
+                high(1000.0),
+                low(4000.0),
+                low(4000.0),
+                high(4000.0),
+                high(4000.0),
+            ],
+            energy: [0.0; 3],
+            samples: 0,
+        }
+    }
+}
+
+impl BandMeter {
+    pub fn add(&mut self, samples: &[f32]) {
+        let [l0, l1, m0, m1, m2, m3, h0, h1] = &mut self.filters;
+        for &x in samples.iter().filter(|sample| sample.is_finite()) {
+            let low = l1.run(l0.run(x));
+            let mid = m3.run(m2.run(m1.run(m0.run(x))));
+            let high = h1.run(h0.run(x));
+            for (energy, band) in self.energy.iter_mut().zip([low, mid, high]) {
+                *energy += f64::from(band) * f64::from(band);
+            }
+            self.samples += 1;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn samples(&self) -> usize {
+        self.samples
+    }
+
+    /// Average level per band since the last read, or `None` without samples. The filters
+    /// keep their state, so the next stretch continues seamlessly.
+    fn take(&mut self) -> Option<Bands> {
+        let samples = std::mem::take(&mut self.samples);
+        let energy = std::mem::take(&mut self.energy);
+        (samples > 0).then(|| Bands(energy.map(|e| (e / samples as f64).sqrt() as f32)))
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Bands([f32; 3]);
+
+impl fmt::Display for Bands {
+    /// Decibels below full scale, low/mid/high, as in "-30.1/-38.4/-51.0".
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let [low, mid, high] = self.0.map(db);
+        write!(formatter, "{low:.1}/{mid:.1}/{high:.1}")
+    }
+}
+
+/// Your microphone at the three points it is measured.
+#[derive(Debug, Default)]
+pub struct MicTaps {
+    /// As captured, resampled to 48 kHz.
+    pub captured: BandMeter,
+    /// After WebRTC's echo cancellation, noise suppression and gain.
+    pub processed: BandMeter,
+    /// After typing suppression: what the voice gate and encoder get.
+    pub sent: BandMeter,
+}
+
+/// What the audio engine measures: the sum played to you, and your microphone.
 #[derive(Debug, Default)]
 pub struct EngineLevels {
     /// Set by the hub each tick from [`on`].
@@ -70,6 +188,12 @@ pub struct EngineLevels {
     pub output: Meter,
     /// Samples of `output` (48 kHz stereo) loud enough for the limiter to ease them down.
     pub limited: usize,
+    /// Your microphone, measured only while it is not muted.
+    pub mic: MicTaps,
+    /// 20 ms frames the voice gate let through to the encoder.
+    pub sent_frames: usize,
+    /// Echo cancellation's figures as last read, when it is on.
+    pub echo: Option<crate::audio_processing::EchoStats>,
 }
 
 /// One person heard on one server.
@@ -124,6 +248,7 @@ impl VoiceLevels {
         self.next = now + EVERY;
         let output = engine.output.take();
         let limited = std::mem::take(&mut engine.limited);
+        report_mic(engine);
         let heard: Vec<String> = std::mem::take(&mut self.talkers)
             .into_iter()
             .filter_map(|((line, client), mut talker)| {
@@ -146,6 +271,32 @@ impl VoiceLevels {
             "levels"
         );
     }
+}
+
+/// Writes your microphone's line when it was measured in the last second.
+fn report_mic(engine: &mut EngineLevels) {
+    let captured = engine.mic.captured.take();
+    let processed = engine.mic.processed.take();
+    let sent = engine.mic.sent.take();
+    let sent_frames = std::mem::take(&mut engine.sent_frames);
+    let Some(captured) = captured else {
+        return;
+    };
+    let echo = engine.echo.unwrap_or_default();
+    let round = |value: Option<f64>| value.map(|value| (value * 10.0).round() / 10.0);
+    tracing::debug!(
+        target: "flexspeak::voice",
+        captured = %captured,
+        processed = processed.map(tracing::field::display),
+        sent = sent.map(tracing::field::display),
+        sent_ms = sent_frames * 20,
+        erle = round(echo.erle),
+        erl = round(echo.erl),
+        echo_delay_ms = echo.delay_ms,
+        divergent = round(echo.divergent_filter_fraction),
+        residual_echo = round(echo.residual_echo_likelihood),
+        "mic"
+    );
 }
 
 #[cfg(test)]
@@ -193,5 +344,42 @@ mod tests {
         assert!(levels.talkers.is_empty());
         assert_eq!(engine.limited, 0);
         assert_eq!(engine.output.take(), None);
+    }
+
+    #[test]
+    fn band_meter_splits_body_clarity_and_air() {
+        let tone = |hz: f32| -> Vec<f32> {
+            (0..48_000)
+                .map(|i| 0.5 * (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin())
+                .collect()
+        };
+        for (hz, band) in [(200.0, 0), (2000.0, 1), (9000.0, 2)] {
+            let mut meter = BandMeter::default();
+            meter.add(&tone(hz));
+            let Bands(levels) = meter.take().unwrap();
+            let loudest = (0..3)
+                .max_by(|&a, &b| levels[a].total_cmp(&levels[b]))
+                .unwrap();
+            assert_eq!(loudest, band, "{hz} Hz lands in its band: {levels:?}");
+            // A sine at 0.5 has an RMS of about -9 dB; its own band keeps most of it.
+            assert!(db(levels[band]) > -12.0, "{hz} Hz: {levels:?}");
+        }
+        let mut meter = BandMeter::default();
+        assert_eq!(meter.take(), None);
+        meter.add(&[f32::NAN]);
+        assert_eq!(meter.take(), None);
+    }
+
+    #[test]
+    fn mic_is_read_with_the_rest_and_starts_over() {
+        let mut levels = VoiceLevels::default();
+        let mut engine = EngineLevels::default();
+        engine.mic.captured.add(&[0.1; 480]);
+        engine.mic.sent.add(&[0.1; 480]);
+        engine.sent_frames = 3;
+        levels.report(Instant::now() + EVERY, &mut engine, 100);
+        assert_eq!(engine.mic.captured.take(), None);
+        assert_eq!(engine.mic.sent.take(), None);
+        assert_eq!(engine.sent_frames, 0);
     }
 }

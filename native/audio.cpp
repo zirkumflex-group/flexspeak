@@ -50,6 +50,40 @@ extern "C" int flex_apm_render(void* processor, int16_t* pcm) noexcept {
     } catch (...) { return -1; }
 }
 
+// Mute is applied after processing, as WebRTC's own send path does: capture keeps flowing so
+// echo cancellation stays aligned with playback, and the processor is told its output is unused.
+extern "C" int flex_apm_set_output_muted(void* processor, bool muted) noexcept {
+    if (!processor) return -1;
+    try {
+        static_cast<Processor*>(processor)->apm->set_output_will_be_muted(muted);
+        return 0;
+    } catch (...) { return -1; }
+}
+
+struct FlexEchoStats {
+    double erl;
+    double erle;
+    double divergent_filter_fraction;
+    double residual_echo_likelihood;
+    int32_t delay_ms;
+    // Bit per field above, in order, set when WebRTC reported it.
+    uint32_t present;
+};
+
+extern "C" int flex_apm_stats(void* processor, FlexEchoStats* out) noexcept {
+    if (!processor || !out) return -1;
+    try {
+        const auto stats = static_cast<Processor*>(processor)->apm->GetStatistics();
+        *out = {};
+        if (stats.echo_return_loss) { out->erl = *stats.echo_return_loss; out->present |= 1; }
+        if (stats.echo_return_loss_enhancement) { out->erle = *stats.echo_return_loss_enhancement; out->present |= 2; }
+        if (stats.divergent_filter_fraction) { out->divergent_filter_fraction = *stats.divergent_filter_fraction; out->present |= 4; }
+        if (stats.residual_echo_likelihood) { out->residual_echo_likelihood = *stats.residual_echo_likelihood; out->present |= 8; }
+        if (stats.delay_ms) { out->delay_ms = *stats.delay_ms; out->present |= 16; }
+        return 0;
+    } catch (...) { return -1; }
+}
+
 extern "C" void* flex_vad_create() noexcept {
     auto* vad = WebRtcVad_Create();
     if (!vad) return nullptr;
