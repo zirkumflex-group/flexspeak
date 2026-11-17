@@ -2911,9 +2911,9 @@ dependencies = [
 
 [[package]]
 name = "libwebrtc"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65444d0d6a96c9574bfaefb49829ef8cb112d611d77e888cf4e0081486084e8f"
+checksum = "814e93897c8689013dac8e4babc08957fdc04823748903f4be2409d5d3b8d9a2"
 dependencies = [
  "cxx",
  "jni 0.21.1",
@@ -3872,7 +3872,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6722,8 +6722,8 @@ dependencies = [
 
 [[package]]
 name = "webrtc-sys"
-version = "0.3.53"
-source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=1f542d7bc61cb00270849632415485490f9e52e5#1f542d7bc61cb00270849632415485490f9e52e5"
+version = "0.3.54"
+source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=78bf1c5e8f889193f7eec2ac4ced0808de673251#78bf1c5e8f889193f7eec2ac4ced0808de673251"
 dependencies = [
  "cc",
  "cxx",
@@ -6737,7 +6737,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys-build"
 version = "0.3.21"
-source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=1f542d7bc61cb00270849632415485490f9e52e5#1f542d7bc61cb00270849632415485490f9e52e5"
+source = "git+https://github.com/zirkumflex-group/rust-sdks?rev=78bf1c5e8f889193f7eec2ac4ced0808de673251#78bf1c5e8f889193f7eec2ac4ced0808de673251"
 dependencies = [
  "anyhow",
  "fs2",
