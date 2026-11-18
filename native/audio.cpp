@@ -1,10 +1,27 @@
 #include <cstdint>
 #include <memory>
+#include <string>
 #include "api/audio/builtin_audio_processing_builder.h"
 #include "api/environment/environment_factory.h"
+#include "api/field_trials_view.h"
 #include "common_audio/vad/include/webrtc_vad.h"
 
 namespace {
+// Echo cancellation's HMM transparent mode. The default (legacy) detector needs several
+// seconds of playback before it decides that no echo reaches the microphone, as with a
+// headset, and until then it suppresses the voice as possible echo, mostly above 4 kHz: the
+// first words after starting sounded muffled with a music bot playing. The HMM detector
+// decides within about a second and still leaves echo cancellation working on speakers.
+class FieldTrials : public webrtc::FieldTrialsView {
+public:
+    std::string Lookup(absl::string_view key) const override {
+        return key == "WebRTC-Aec3TransparentModeHmm" ? "Enabled" : "";
+    }
+    std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
+        return std::make_unique<FieldTrials>();
+    }
+};
+
 struct Processor {
     webrtc::scoped_refptr<webrtc::AudioProcessing> apm;
 };
@@ -15,7 +32,8 @@ extern "C" void* flex_apm_create(bool echo, bool gain, bool noise, int level) no
     if (level < 0 || level > 3) return nullptr;
     try {
         auto processor = std::make_unique<Processor>();
-        processor->apm = webrtc::BuiltinAudioProcessingBuilder().Build(webrtc::CreateEnvironment());
+        processor->apm = webrtc::BuiltinAudioProcessingBuilder().Build(
+            webrtc::CreateEnvironment(std::make_unique<FieldTrials>()));
         if (!processor->apm) return nullptr;
         webrtc::AudioProcessing::Config config;
         config.echo_canceller.enabled = echo;
