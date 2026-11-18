@@ -239,6 +239,16 @@ pub const SCENES: &[Scene] = &[
     ("watching-focus", watching_focus),
     ("watching-grid-live", watching_grid_live),
     ("watching-grid-hover", watching_grid_hover),
+    ("multiview-three", multiview_three),
+    ("multiview-four", multiview_four),
+    ("multiview-three-below", multiview_three_below),
+    ("multiview-three-beside", multiview_three_beside),
+    ("multiview-fullscreen", multiview_fullscreen),
+    ("multiview-fullscreen-hover", multiview_fullscreen_hover),
+    ("multiview-fullscreen-light", multiview_fullscreen_light),
+    ("multiview-strip-hover", multiview_strip_hover),
+    ("multiview-strip-hover-light", multiview_strip_hover_light),
+    ("streams-crowded", streams_crowded),
     ("watching-grid-hover-light", watching_grid_hover_light),
     ("watching-focus-hover", watching_focus_hover),
     ("watching-stats", watching_stats),
@@ -3447,6 +3457,95 @@ fn watching_grid_live(s: &mut App) {
     );
 }
 
+/// Three streams playing with the chat folded away: render at `--size 2000x1100`, a wide pane.
+fn multiview_three(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(
+        s,
+        &[
+            ("s1", 2, "Mara’s camera", Phase::Receiving),
+            ("s2", 4, "Ines’s game", Phase::Receiving),
+            ("s3", 3, "Theo’s camera", Phase::Receiving),
+        ],
+    );
+    s.chat_options.hidden = true;
+}
+
+/// Four streams playing with the chat folded away, the fourth a 4:3 camera.
+fn multiview_four(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(
+        s,
+        &[
+            ("s1", 2, "Mara’s camera", Phase::Receiving),
+            ("s2", 4, "Ines’s game", Phase::Receiving),
+            ("s3", 3, "Theo’s camera", Phase::Receiving),
+            ("s4", 5, "Kai’s screen", Phase::Receiving),
+        ],
+    );
+    s.chat_options.hidden = true;
+}
+
+/// Four streams full screen as the grid lays them out: nothing else on the screen.
+fn multiview_fullscreen(s: &mut App) {
+    multiview_four(s);
+    s.ui.fullscreen = Some(false);
+    s.ui.window_fullscreen = true;
+}
+
+/// Four streams full screen with the pointer moving over them: the stage's tools float.
+fn multiview_fullscreen_hover(s: &mut App) {
+    multiview_fullscreen(s);
+    s.ui.streams_hover = true;
+}
+
+/// More streams than the pane holds: the grid scrolls in pairs.
+fn streams_crowded(s: &mut App) {
+    connected(s);
+    let base = s.server().streaming.catalog[0].clone();
+    for id in 0..12 {
+        s.server_mut()
+            .streaming
+            .catalog
+            .push(crate::streaming::StreamInfo {
+                id: format!("extra-{id}"),
+                name: format!("Screen {id}"),
+                ..base.clone()
+            });
+    }
+}
+
+/// The same in a light palette: full screen still sits on the dark the pictures do.
+fn multiview_fullscreen_light(s: &mut App) {
+    multiview_fullscreen(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+/// The pointer over a small tile under the large stream: its name and sound float over it.
+fn multiview_strip_hover(s: &mut App) {
+    multiview_three_below(s);
+    s.ui.streams_hover = true;
+    s.ui.stream_hover = Some("s1".into());
+}
+
+/// The same in a light palette.
+fn multiview_strip_hover_light(s: &mut App) {
+    multiview_strip_hover(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+/// Three streams with one on the stage and the others below it, in a wide pane.
+fn multiview_three_below(s: &mut App) {
+    multiview_three(s);
+    s.server_mut().streaming.focused = Some("s2".into());
+}
+
+/// Three streams with one on the stage and the others beside it, in a wide pane.
+fn multiview_three_beside(s: &mut App) {
+    multiview_three_below(s);
+    s.server_mut().streaming.strip = crate::streaming::Strip::Beside;
+}
+
 /// The pointer over one stream in the grid: its bar floats over the bottom of its picture.
 fn watching_grid_hover(s: &mut App) {
     watching_grid_live(s);
@@ -5657,6 +5756,104 @@ mod tests {
         let mut small = runtime(server_log, crate::MIN_SIZE);
         settle(&mut small);
         assert!(small.find("server-log").is_none());
+    }
+
+    /// A keyed element's box: x, y, width, height.
+    fn rect(rt: &Runtime<App>, key: &str) -> [f32; 4] {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            .unwrap_or_else(|| panic!("no {key}"))
+            .target
+    }
+
+    #[test]
+    fn three_streams_in_a_wide_pane_share_it_equally_with_no_bands() {
+        let mut rt = runtime(multiview_three, (2000.0, 1100.0));
+        settle(&mut rt);
+        let [a, b, c] = ["s1", "s2", "s3"].map(|id| rect(&rt, &format!("tile-{id}")));
+        for tile in [a, b, c] {
+            assert!(
+                (tile[2] / tile[3] - 16.0 / 9.0).abs() < 0.02,
+                "each box hugs its 16:9 picture: {tile:?}"
+            );
+            assert!((tile[2] - a[2]).abs() < 1.0, "all one size");
+        }
+        assert_eq!(a[1], b[1], "two across");
+        assert!(c[1] > a[1] + a[3], "the third under them");
+        assert!(
+            a[2] > 800.0,
+            "much larger than a one-over-two lead row allows"
+        );
+    }
+
+    #[test]
+    fn a_four_by_three_camera_keeps_its_shape_in_the_grid() {
+        let mut rt = runtime(multiview_four, (2000.0, 1100.0));
+        settle(&mut rt);
+        let camera = rect(&rt, "tile-s4");
+        assert!(
+            (camera[2] / camera[3] - 4.0 / 3.0).abs() < 0.02,
+            "{camera:?}"
+        );
+    }
+
+    #[test]
+    fn pressing_a_streams_bar_between_its_buttons_acts_on_the_stream() {
+        let mut rt = runtime(watching_grid_hover, (1400.0, 900.0));
+        settle(&mut rt);
+        let (x, y) = rt.find("tile-s2").unwrap();
+        rt.pointer_move(x, y);
+        settle(&mut rt);
+        click(&mut rt, "stream-name");
+        assert_eq!(
+            rt.state.server().streaming.focused.as_deref(),
+            Some("s2"),
+            "a press on the name makes the stream large, as one on the picture does"
+        );
+        hover(&mut rt, "tile-s2");
+        click(&mut rt, "hide-others");
+        assert!(
+            rt.state.server().streaming.others_hidden,
+            "the bar's own buttons still win"
+        );
+    }
+
+    #[test]
+    fn dragging_a_bars_volume_slider_moves_only_the_slider() {
+        let mut rt = runtime(watching_grid_hover, (1400.0, 900.0));
+        settle(&mut rt);
+        hover(&mut rt, "tile-s2");
+        let before = rt.state.server().streaming.volume(4);
+        let (x, y) = rt.find("stream-volume").expect("a slider in the bar");
+        rt.pointer_down(x, y);
+        rt.pointer_move(x + 30.0, y);
+        rt.frame(1.0 / 60.0);
+        rt.pointer_up(x + 30.0, y);
+        settle(&mut rt);
+        assert_ne!(rt.state.server().streaming.volume(4), before);
+        assert!(rt.state.ui.tile_drag.is_none(), "not a drag of the stream");
+        assert!(rt.state.server().streaming.focused.is_none());
+    }
+
+    #[test]
+    fn f_takes_every_stream_full_screen_as_laid_out() {
+        let mut rt = runtime(multiview_three_below, (1400.0, 900.0));
+        settle(&mut rt);
+        key(&mut rt, rune::Key::Text("f".into()), false);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.fullscreen, Some(false));
+        assert!(
+            !rt.state.server().streaming.others_hidden,
+            "nothing tucked away"
+        );
+        assert!(
+            rt.find("strip").is_some(),
+            "the others stay where they were"
+        );
+        key(&mut rt, rune::Key::Escape, false);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.fullscreen, None);
     }
 
     #[test]

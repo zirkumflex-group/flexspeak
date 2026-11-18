@@ -20,8 +20,10 @@ use crate::{App, Message, Tab, client, usage};
 pub fn normal(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
     // Full screen, the streams are all there is: no header, sidebar, chat or status bar.
     if streams::fullscreen(s) {
+        // On black, as the monitor's own edge is, so the gaps between streams don't light up
+        // in a light palette.
         return pane(t)
-            .fill(t.stage)
+            .fill(rune::Color::BLACK)
             .key("main-pane")
             .w_full()
             .h_full()
