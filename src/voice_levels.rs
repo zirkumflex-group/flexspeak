@@ -1,7 +1,10 @@
 //! How loud the people you hear are, summed up once a second for the log with debug logging on:
 //! each person as they arrive, the volume they are played at, and everything you hear. It tells
 //! whether someone who sounds quiet arrives quiet or is turned down on your end. Only what is
-//! heard is measured, since the people talking may use another client.
+//! heard is measured, since the people talking may use another client. A person reads
+//! "1:23 -43.2/-29.0 x1.50 auto+18.0 music": server and client id, their level and peak as
+//! decoded, your volume for them, the gain evening them out (`crate::leveler`, only while it is
+//! on for them), and whether they send with the music codec.
 //!
 //! Your own microphone is measured too, while it is not muted: in three bands at three points
 //! (as captured, after WebRTC's processing, as sent), with echo cancellation's own figures and
@@ -199,12 +202,46 @@ pub struct EngineLevels {
     pub echo_energy: crate::audio_processing::EchoEnergy,
 }
 
+/// How one person was played, after the meter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Played {
+    /// Their volume as you set it for them.
+    pub volume: f32,
+    /// The gain evening them out with everyone else, in dB, while that is on for them.
+    pub evened: Option<f32>,
+    /// Whether they send with the music codec.
+    pub music: bool,
+}
+
+impl Default for Played {
+    fn default() -> Self {
+        Self {
+            volume: 1.0,
+            evened: None,
+            music: false,
+        }
+    }
+}
+
+impl fmt::Display for Played {
+    /// As in "x1.50 auto+12.4 music": your volume, the evening-out gain, the music codec.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "x{:.2}", self.volume)?;
+        if let Some(evened) = self.evened {
+            write!(formatter, " auto{evened:+.1}")?;
+        }
+        if self.music {
+            formatter.write_str(" music")?;
+        }
+        Ok(())
+    }
+}
+
 /// One person heard on one server.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Talker {
     meter: Meter,
-    /// Their volume as set for them, applied after the meter.
-    volume: f32,
+    played: Played,
 }
 
 #[derive(Debug)]
@@ -228,18 +265,15 @@ impl VoiceLevels {
     pub fn heard(&mut self, line: u64, client: u16, samples: &[f32]) {
         self.talkers
             .entry((line, client))
-            .or_insert(Talker {
-                meter: Meter::default(),
-                volume: 1.0,
-            })
+            .or_default()
             .meter
             .add(samples);
     }
 
-    /// The volume a talker heard since the last report is played at.
-    pub fn volume(&mut self, line: u64, client: u16, volume: f32) {
+    /// How a talker heard since the last report is played.
+    pub fn played(&mut self, line: u64, client: u16, played: Played) {
         if let Some(talker) = self.talkers.get_mut(&(line, client)) {
-            talker.volume = volume;
+            talker.played = played;
         }
     }
 
@@ -257,7 +291,7 @@ impl VoiceLevels {
             .filter_map(|((line, client), mut talker)| {
                 // Near silence is a talker between words.
                 let level = talker.meter.take().filter(|level| level.peak >= 1e-4)?;
-                Some(format!("{line}:{client} {level} x{:.2}", talker.volume))
+                Some(format!("{line}:{client} {level} {}", talker.played))
             })
             .collect();
         if heard.is_empty() {
@@ -331,11 +365,22 @@ mod tests {
         levels.heard(1, 7, &[0.1; 4]);
         levels.heard(1, 7, &[0.3; 4]);
         levels.heard(2, 7, &[0.0; 4]);
-        levels.volume(1, 7, 0.5);
-        levels.volume(3, 7, 0.2);
+        let half = Played {
+            volume: 0.5,
+            ..Played::default()
+        };
+        levels.played(1, 7, half);
+        levels.played(3, 7, half);
         assert_eq!(levels.talkers.len(), 2);
-        assert_eq!(levels.talkers[&(1, 7)].volume, 0.5);
-        assert_eq!(levels.talkers[&(2, 7)].volume, 1.0);
+        assert_eq!(levels.talkers[&(1, 7)].played, half);
+        assert_eq!(levels.talkers[&(2, 7)].played, Played::default());
+        assert_eq!(half.to_string(), "x0.50");
+        let evened = Played {
+            volume: 1.5,
+            evened: Some(12.44),
+            music: true,
+        };
+        assert_eq!(evened.to_string(), "x1.50 auto+12.4 music");
         let mut engine = EngineLevels {
             limited: 96,
             ..EngineLevels::default()

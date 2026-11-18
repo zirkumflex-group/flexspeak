@@ -33,16 +33,30 @@ use tsclientlib::{
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio, OutCommand};
 use tsproto_types::crypto::EccKeyPrivP256;
 
-/// How loud to play each person, by identity. Anyone absent plays at full volume.
-pub type UserGains = Arc<Mutex<HashMap<String, f32>>>;
+/// How the people you hear are played, shared between the window and the voice threads.
+#[derive(Debug, Default)]
+pub struct Listening {
+    /// What you've set for people, by identity. Anyone absent plays as the default.
+    pub people: Mutex<HashMap<String, crate::settings::UserAudio>>,
+    /// Settings > Audio > Even out voices.
+    pub even_out: AtomicBool,
+}
 
 /// A TeamSpeak identity as text, for settings and lookups.
 pub fn uid_key(uid: &[u8]) -> String {
     uid.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Tells one identity from another in a number, for [`hub::Playback::who`].
+fn uid_hash(uid: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    uid.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub struct Config {
-    pub user_gains: UserGains,
+    pub listening: Arc<Listening>,
     pub id: SessionId,
     pub hub: Arc<AudioHub>,
     pub channel_health_visible: Arc<AtomicBool>,
@@ -819,29 +833,49 @@ impl Speakers {
     }
 }
 
-/// How loud the sender of this packet should play.
-fn sender_gain(connection: &Connection, gains: &UserGains, packet: &InAudioBuf) -> f32 {
-    let gains = gains.lock().unwrap();
-    if gains.is_empty() {
-        return 1.0;
-    }
-    let (AudioData::S2C { from, .. } | AudioData::S2CWhisper { from, .. }) = packet.data().data()
+/// Whether a voice is evened out: the setting is on, you left it on for them, and they are
+/// not a music bot. Bots that encode their own audio send the music codec whatever the channel
+/// is set to, while people's clients send the channel's codec; in a music channel everyone
+/// does, so there the codec says nothing and the switch for each person decides.
+fn evened_out(setting: bool, person: bool, sent: CodecType, channel: Option<Codec>) -> bool {
+    let music_bot = sent == CodecType::OpusMusic && channel != Some(Codec::OpusMusic);
+    setting && person && !music_bot
+}
+
+/// How the sender of this packet should play.
+fn sender_playback(
+    connection: &Connection,
+    listening: &Listening,
+    packet: &InAudioBuf,
+) -> hub::Playback {
+    let (AudioData::S2C { from, codec, .. } | AudioData::S2CWhisper { from, codec, .. }) =
+        packet.data().data()
     else {
-        return 1.0;
+        return hub::Playback::default();
     };
-    connection
-        .get_state()
-        .ok()
-        .and_then(|state| {
-            state
-                .clients
-                .get(&ClientId(*from))?
-                .uid
-                .as_ref()
-                .map(|uid| uid_key(&uid.0))
-        })
-        .and_then(|key| gains.get(&key).copied())
-        .unwrap_or(1.0)
+    let state = connection.get_state().ok();
+    let client = state.and_then(|state| state.clients.get(&ClientId(*from)));
+    let uid = client.and_then(|client| client.uid.as_ref());
+    let person = {
+        let people = listening.people.lock().unwrap();
+        uid.filter(|_| !people.is_empty())
+            .and_then(|uid| people.get(&uid_key(&uid.0)).copied())
+            .unwrap_or_default()
+    };
+    let channel = client
+        .and_then(|client| state?.channels.get(&client.channel))
+        .map(|channel| channel.codec);
+    hub::Playback {
+        gain: person.gain(),
+        music: *codec == CodecType::OpusMusic,
+        even_out: evened_out(
+            listening.even_out.load(Ordering::Relaxed),
+            person.even_out,
+            *codec,
+            channel,
+        ),
+        who: uid.map(|uid| uid_hash(&uid.0)),
+    }
 }
 
 fn snapshot(connection: &Connection) -> Result<Snapshot> {
@@ -1574,8 +1608,8 @@ async fn run_connection(
                             speakers.packet(*from, data.is_empty(), Instant::now());
                         }
                         if !controls.desired.deafened && connection.can_receive_audio() {
-                            let gain = sender_gain(&connection, &config.user_gains, &packet);
-                            audio.receive(packet, gain);
+                            let playback = sender_playback(&connection, &config.listening, &packet);
+                            audio.receive(packet, playback);
                         }
                     },
                     StreamItem::IdentityLevelIncreasing(level) => { let _ = events.try_send(Event::Status(format!("Preparing server identity (security level {level})…"))); },
@@ -2283,6 +2317,23 @@ mod tests {
         let mut ids: Vec<_> = ordered.iter().map(|channel| channel.id).collect();
         ids.sort_unstable();
         assert_eq!(ids, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn voices_are_evened_out_unless_switched_off_or_a_music_bot() {
+        use CodecType::{OpusMusic, OpusVoice};
+        let voice_channel = Some(Codec::OpusVoice);
+        assert!(evened_out(true, true, OpusVoice, voice_channel));
+        assert!(!evened_out(false, true, OpusVoice, voice_channel), "off");
+        assert!(
+            !evened_out(true, false, OpusVoice, voice_channel),
+            "not them"
+        );
+        // A bot sends music into a voice channel; a person never does.
+        assert!(!evened_out(true, true, OpusMusic, voice_channel));
+        assert!(!evened_out(true, true, OpusMusic, None));
+        // In a music channel everyone sends the music codec.
+        assert!(evened_out(true, true, OpusMusic, Some(Codec::OpusMusic)));
     }
 
     #[test]

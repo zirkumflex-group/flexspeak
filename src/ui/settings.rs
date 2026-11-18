@@ -2455,6 +2455,23 @@ fn audio_rows(s: &App, _cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El
             ),
         ),
         item(
+            "Even out voices",
+            "even out voices level loudness quiet loud normalize equalize volume",
+            form_row(
+                t,
+                "Even out voices",
+                Some("Turns quiet people up and loud people down. Music bots stay as they are."),
+                switch(
+                    "even-out-voices",
+                    "Even out voices",
+                    s.even_out_voices,
+                    true,
+                    k,
+                    |_, on| Message::EvenOutVoices(on),
+                ),
+            ),
+        ),
+        item(
             "Refresh and Test Devices",
             "refresh devices test microphone loopback",
             actions([

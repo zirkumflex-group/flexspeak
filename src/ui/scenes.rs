@@ -136,6 +136,9 @@ pub const SCENES: &[Scene] = &[
     ("settings-more-themes", settings_more_themes),
     ("settings-audio", settings_audio),
     ("settings-audio-ptt", settings_audio_ptt),
+    ("settings-audio-even-out", settings_audio_even_out),
+    ("member-volume-even-out", member_volume_even_out),
+    ("member-volume-left-out", member_volume_left_out),
     ("settings-streaming", settings_streaming),
     ("settings-picker", settings_picker),
     ("settings-auto-connect", settings_auto_connect),
@@ -1382,7 +1385,7 @@ fn member_states(s: &mut App) {
         "uid-3".into(),
         settings::UserAudio {
             volume_percent: 30,
-            muted: false,
+            ..settings::UserAudio::default()
         },
     );
     s.server_mut().talking = [2].into();
@@ -2241,6 +2244,24 @@ fn settings_audio(s: &mut App) {
     settings_at(s, SettingsPage::Audio);
 }
 
+/// Voices evened out.
+fn settings_audio_even_out(s: &mut App) {
+    settings_at(s, SettingsPage::Audio);
+    s.even_out_voices = true;
+}
+
+/// Someone's volume while voices are evened out: they can be left out of it.
+fn member_volume_even_out(s: &mut App) {
+    member_volume(s);
+    s.even_out_voices = true;
+}
+
+/// A music bot left out of evening out.
+fn member_volume_left_out(s: &mut App) {
+    member_volume_even_out(s);
+    s.user_audio.get_mut("uid-3").unwrap().even_out = false;
+}
+
 /// Push to talk chosen: its key is set right there, under the mode.
 fn settings_audio_ptt(s: &mut App) {
     settings_at(s, SettingsPage::Audio);
@@ -2584,7 +2605,7 @@ fn member_volume(s: &mut App) {
         "uid-3".into(),
         settings::UserAudio {
             volume_percent: 65,
-            muted: false,
+            ..settings::UserAudio::default()
         },
     );
     s.ui.user_volume = Some(super::UserVolumeTarget {
@@ -2598,8 +2619,8 @@ fn member_muted(s: &mut App) {
     s.user_audio.insert(
         "uid-2".into(),
         settings::UserAudio {
-            volume_percent: 100,
             muted: true,
+            ..settings::UserAudio::default()
         },
     );
 }
