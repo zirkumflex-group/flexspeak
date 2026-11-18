@@ -2428,6 +2428,15 @@ impl App {
                     streaming = ?saved.streaming,
                     share = ?saved.share,
                     debug_logging = saved.debug_logging,
+                    playback_volume = saved.playback_volume_percent,
+                    // How many people have their own volume or mute; who stays out.
+                    people_adjusted = saved.user_audio.len(),
+                    streams_adjusted = saved.stream_volumes.len(),
+                    auto_watch = saved.auto_watch.len(),
+                    sound_cues = saved.sound_cues,
+                    interface_size = saved.interface_size,
+                    close_button = ?saved.close_button,
+                    auto_download_updates = saved.auto_download_updates,
                     "settings loaded"
                 );
                 forget_session = self.retire_typed_server(&mut saved);

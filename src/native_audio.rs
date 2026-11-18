@@ -23,6 +23,8 @@ struct EchoStatsC {
     residual_echo_likelihood: f64,
     delay_ms: i32,
     present: u32,
+    echo_in: [f64; 3],
+    echo_out: [f64; 3],
 }
 
 pub struct Apm(NonNull<c_void>);
@@ -85,6 +87,10 @@ impl Apm {
             divergent_filter_fraction: has(4).then_some(raw.divergent_filter_fraction),
             residual_echo_likelihood: has(8).then_some(raw.residual_echo_likelihood),
             delay_ms: has(16).then_some(raw.delay_ms),
+            energy: crate::audio_processing::EchoEnergy {
+                before: raw.echo_in,
+                after: raw.echo_out,
+            },
         })
     }
 }
@@ -203,6 +209,8 @@ mod tests {
         treble_loss: Vec<f64>,
         /// Per second: the output's level against the microphone's, in dB.
         level: Vec<f64>,
+        /// Per second: what echo cancellation itself let through, per band.
+        echo: Vec<crate::audio_processing::EchoEnergy>,
     }
 
     /// Music plays the whole time, as from a music bot, and `echo` of it reaches the
@@ -228,6 +236,7 @@ mod tests {
         let mut run = Run {
             treble_loss: Vec::new(),
             level: Vec::new(),
+            echo: Vec::new(),
         };
         let mut phase = 0.0f32;
         for block in 0..(muted_s + 12) * 100 {
@@ -270,6 +279,7 @@ mod tests {
             if block % 100 == 99 {
                 let [x, y] = std::mem::take(&mut energy).map(|e| 10.0 * e.max(1e-12).log10());
                 run.level.push(y - x);
+                run.echo.push(apm.stats().unwrap().energy);
                 if open {
                     let ([low_in, high_in], [low_out, high_out]) = (before.take(), after.take());
                     run.treble_loss
@@ -292,6 +302,28 @@ mod tests {
                 run.treble_loss
             );
         }
+    }
+
+    /// Decibels echo cancellation let through in each band, for a second it measured.
+    fn echo_gain(energy: &crate::audio_processing::EchoEnergy) -> [f64; 3] {
+        std::array::from_fn(|band| 10.0 * (energy.after[band] / energy.before[band]).log10())
+    }
+
+    #[test]
+    fn echo_cancellation_is_measured_only_while_its_output_is_used() {
+        let run = simulate(3, 0.004, 0.03, true);
+        for energy in &run.echo[..3] {
+            assert_eq!(*energy, Default::default(), "muted: {:?}", run.echo);
+        }
+        // A headset voice settles to passing through echo cancellation untouched.
+        for energy in &run.echo[run.echo.len() - 4..] {
+            let gain = echo_gain(energy);
+            assert!(gain.iter().all(|db| db.abs() < 3.0), "{gain:?}");
+        }
+        // Speakers: the echo going in is taken out in every band.
+        let run = simulate(30, 0.05, 0.5, false);
+        let gain = echo_gain(run.echo.last().unwrap());
+        assert!(gain.iter().all(|db| *db < -20.0), "{gain:?}");
     }
 
     #[test]

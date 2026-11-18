@@ -657,6 +657,7 @@ impl Core {
                 .as_mut()
                 .is_some_and(|engine| engine.tune_transmission(retune.transmission))
         {
+            tracing::info!(transmission = ?retune.transmission, "voice gate retuned");
             return;
         }
         self.close();
@@ -703,6 +704,12 @@ impl Core {
         let active = find(self.hub.active());
         let routed = active.map_or(0, |line| line.id);
         if self.routed != routed {
+            // Echo cancellation and gain start over from here, as on a fresh start.
+            tracing::info!(
+                from = self.routed,
+                to = routed,
+                "voice routed; microphone processing restarted"
+            );
             let closing = self.engine().end_utterance()?;
             if let Some(line) = find(self.routed) {
                 for data in closing {

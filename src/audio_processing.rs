@@ -90,6 +90,42 @@ pub struct EchoStats {
     pub residual_echo_likelihood: Option<f64>,
     /// The playback-to-microphone delay it estimates.
     pub delay_ms: Option<i32>,
+    /// What went into and came out of it since the last read.
+    pub energy: EchoEnergy,
+}
+
+/// Energy of your microphone into and out of echo cancellation, below 1 kHz, 1-4 kHz and above
+/// 4 kHz, while its output is sent. Their ratio is what it took away, in each band.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct EchoEnergy {
+    pub before: [f64; 3],
+    pub after: [f64; 3],
+}
+
+impl EchoEnergy {
+    pub fn add(&mut self, other: Self) {
+        for band in 0..3 {
+            self.before[band] += other.before[band];
+            self.after[band] += other.after[band];
+        }
+    }
+
+    /// Decibels per band out against in, low/mid/high as in "-0.1/-3.2/-24.5", with "-" for a
+    /// band that had next to nothing going in. `None` when nothing was measured.
+    pub fn gain(&self) -> Option<String> {
+        if self.before.iter().all(|energy| *energy <= 0.0) {
+            return None;
+        }
+        let band = |band: usize| {
+            // About -90 dBFS over a second of the 16 kHz bands: silence, not a voice.
+            if self.before[band] < 1e-5 {
+                return "-".to_owned();
+            }
+            let gain = 10.0 * (self.after[band].max(1e-12) / self.before[band]).log10();
+            format!("{gain:.1}")
+        };
+        Some(format!("{}/{}/{}", band(0), band(1), band(2)))
+    }
 }
 
 /// Runs RNNoise on one block in place. It expects 16-bit-range samples.
@@ -359,6 +395,24 @@ impl Processor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn echo_gain_reads_per_band_and_leaves_out_silent_bands() {
+        let mut energy = EchoEnergy::default();
+        assert_eq!(energy.gain(), None);
+        energy.add(EchoEnergy {
+            before: [1.0, 0.5, 0.0],
+            after: [1.0, 0.25, 0.0],
+        });
+        energy.add(EchoEnergy {
+            before: [1.0, 0.5, 1e-6],
+            after: [1.0, 0.25, 0.0],
+        });
+        assert_eq!(energy.gain().as_deref(), Some("0.0/-3.0/-"));
+        energy.before[2] = 1.0;
+        energy.after[2] = 0.0;
+        assert_eq!(energy.gain().as_deref(), Some("0.0/-3.0/-120.0"));
+    }
+
     use super::*;
 
     #[test]
