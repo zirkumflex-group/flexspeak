@@ -305,6 +305,8 @@ pub struct UiState {
     pub streams_idle: bool,
     /// The pointer is over a stream's bar or the toolbar, which keeps the overlays up.
     pub streams_bar_hover: bool,
+    /// The stream tile under the pointer, which shows its bar over its picture.
+    pub stream_hover: Option<String>,
     /// The last click on a stream landed on the stage, so a double-click there began there,
     /// not on the grid tile it replaced.
     pub stage_click: bool,
@@ -396,6 +398,7 @@ impl Default for UiState {
             streams_moved: Instant::now(),
             streams_idle: false,
             streams_bar_hover: false,
+            stream_hover: None,
             stage_click: false,
             fullscreen: None,
             window_fullscreen: false,

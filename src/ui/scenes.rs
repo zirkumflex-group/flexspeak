@@ -237,6 +237,10 @@ pub const SCENES: &[Scene] = &[
     ("watching-five-beside-drag", watching_five_beside_drag),
     ("watching-grid", watching_grid),
     ("watching-focus", watching_focus),
+    ("watching-grid-live", watching_grid_live),
+    ("watching-grid-hover", watching_grid_hover),
+    ("watching-grid-hover-light", watching_grid_hover_light),
+    ("watching-focus-hover", watching_focus_hover),
     ("watching-stats", watching_stats),
     ("watching-trouble-yours", watching_trouble_yours),
     ("watching-trouble-streamer", watching_trouble_streamer),
@@ -3430,6 +3434,39 @@ fn watching_grid(s: &mut App) {
     );
 }
 
+/// Every stream playing: pictures fill their boxes, no bar under them.
+fn watching_grid_live(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(
+        s,
+        &[
+            ("s1", 2, "Mara’s screen", Phase::Receiving),
+            ("s2", 4, "Ines’s game", Phase::Receiving),
+            ("s3", 3, "Theo’s window", Phase::Receiving),
+        ],
+    );
+}
+
+/// The pointer over one stream in the grid: its bar floats over the bottom of its picture.
+fn watching_grid_hover(s: &mut App) {
+    watching_grid_live(s);
+    s.ui.streams_hover = true;
+    s.ui.stream_hover = Some("s2".into());
+}
+
+/// The pointer over the stream on the stage: its bar floats over its picture.
+fn watching_grid_hover_light(s: &mut App) {
+    watching_grid_hover(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+}
+
+fn watching_focus_hover(s: &mut App) {
+    watching_grid_live(s);
+    s.server_mut().streaming.focused = Some("s1".into());
+    s.ui.streams_hover = true;
+    s.ui.stream_hover = Some("s1".into());
+}
+
 fn watching_focus(s: &mut App) {
     watching_grid(s);
     s.server_mut().streaming.focused = Some("s2".into());
@@ -4887,6 +4924,12 @@ mod tests {
         panic!("{key} never came into view");
     }
 
+    fn hover(rt: &mut Runtime<App>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key}"));
+        rt.pointer_move(x, y);
+        settle(rt);
+    }
+
     fn click(rt: &mut Runtime<App>, key: &str) {
         let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key}"));
         rt.pointer_move(x, y);
@@ -5571,9 +5614,13 @@ mod tests {
         assert_eq!(row_of(&normal, "s1"), row_of(&normal, "s2"), "two across");
         assert!(row_of(&normal, "s3") > row_of(&normal, "s1"));
         assert!(normal.find("streams-scroll").is_none(), "all five fit");
+        // Bars float over the pictures, so all five fit even the smallest window.
         let mut small = runtime(watching_five, crate::MIN_SIZE);
         settle(&mut small);
-        assert!(small.find("streams-scroll").is_some(), "too small to fit");
+        assert!(
+            small.find("streams-scroll").is_none(),
+            "fits the smallest window"
+        );
     }
 
     #[test]
@@ -5686,6 +5733,8 @@ mod tests {
         click(&mut rt, "fullscreen");
         assert_eq!(rt.state.ui.fullscreen, None);
         assert!(!rt.state.server().streaming.others_hidden);
+        // A stream's bar floats over it only while the pointer is over that stream.
+        hover(&mut rt, "tile-s4");
         click(&mut rt, "unfocus");
         assert_eq!(rt.state.server().streaming.focused, None);
 
@@ -5694,6 +5743,7 @@ mod tests {
         click(&mut rt, "layout-grid");
         assert_eq!(rt.state.server().streaming.focused, None);
 
+        hover(&mut rt, "tile-s1");
         click(&mut rt, "focus");
         assert!(
             rt.state.server().streaming.focused.is_some(),

@@ -1123,8 +1123,6 @@ const MAX_STRIP: usize = 4;
 const STRIP_HEIGHT: f32 = 132.0;
 const SCROLLED_ROW_HEIGHT: f32 = 240.0;
 const GRID_GAP: f32 = 10.0;
-/// The name and controls under a picture.
-const TILE_BAR: f32 = 46.0;
 /// Below this picture width the grid stops squeezing streams in and scrolls instead.
 const MIN_PICTURE_WIDTH: f32 = 200.0;
 /// Everything around the stage in the window: header, footer and margins.
@@ -1153,7 +1151,7 @@ fn cell_width(room: (f32, f32), columns: usize) -> f32 {
 /// How wide a 16:9 picture gets with this many columns.
 fn picture_width(count: usize, columns: usize, (width, height): (f32, f32)) -> f32 {
     let rows = count.div_ceil(columns) as f32;
-    let cell_height = (height - GRID_GAP * (rows - 1.0)) / rows - TILE_BAR;
+    let cell_height = (height - GRID_GAP * (rows - 1.0)) / rows;
     cell_width((width, height), columns).min(cell_height * 16.0 / 9.0)
 }
 
@@ -1210,9 +1208,9 @@ fn row_spans(rows: &[usize], fitted: bool) -> Vec<usize> {
     }
 }
 
-/// The height a row of `boxes` wants: a 16:9 picture as wide as its box, over the bar.
+/// The height a row of `boxes` wants: a 16:9 picture as wide as its box, its bar floating over it.
 fn row_height(pane: (f32, f32), boxes: usize) -> f32 {
-    cell_width(pane, boxes) * 9.0 / 16.0 + TILE_BAR
+    cell_width(pane, boxes) * 9.0 / 16.0
 }
 
 /// The grid: `rows` boxes to a row. Fitted rows that have the height they want take exactly
@@ -1484,7 +1482,10 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
                 .child(trouble(t, problem, mode == Mode::Thumbnail)),
         );
     }
-    if mode == Mode::Grid {
+    // In a grid or on the stage the bar floats over the bottom of the picture while the pointer
+    // is over this stream, and stays while it connects, so the picture has the whole box.
+    let bar_up = overlays(s) && s.ui.stream_hover.as_deref() == Some(id.as_str());
+    if mode == Mode::Grid && bar_up {
         video = video.child(
             row()
                 .key("maximize")
@@ -1589,7 +1590,33 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
             )),
         )
     } else {
-        frame.child(controls(s, t, watch, mode, width))
+        let hover_id = id.clone();
+        frame = frame.on_hover_change(move |s: &mut App, hovering, _| {
+            if hovering {
+                s.ui.stream_hover = Some(hover_id.clone());
+            } else if s.ui.stream_hover.as_deref() == Some(hover_id.as_str()) {
+                s.ui.stream_hover = None;
+            }
+        });
+        let overlay = (bar_up || !receiving).then(|| {
+            col()
+                .key("tile-overlay")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .justify_end()
+                .padding(8.0)
+                .child(
+                    holds_overlays(controls(s, t, watch, mode, width - 16.0))
+                        .key("tile-bar")
+                        .radius(radius::CARD)
+                        .fill(t.surface.alpha(0.86))
+                        .border(1.0, t.hairline)
+                        .backdrop_blur(12.0),
+                )
+                .transition(Transition::opacity())
+        });
+        frame.children(overlay)
     }
 }
 
