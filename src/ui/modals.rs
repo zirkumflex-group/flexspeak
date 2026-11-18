@@ -454,9 +454,22 @@ const USER_VOLUME: Range = Range {
     key_step: 5,
 };
 
-/// One person's volume, for you alone. Their voice is amplified above 100%.
+/// One person's volume, for you alone. Their voice is amplified above 100%. While voices are
+/// evened out, it also leaves this person out of that, for a music bot that wasn't recognised.
 fn user_volume(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, target: &UserVolumeTarget) {
-    let percent = s.user_audio(&target.uid).volume_percent;
+    let audio = s.user_audio(&target.uid);
+    let percent = audio.volume_percent;
+    let even_out = s.even_out_voices.then(|| {
+        let on = audio.even_out;
+        Checkbox::new(on)
+            .label("Even Out With Everyone Else")
+            .on_toggle_tx(move |s: &mut App, tx| {
+                super::dispatch(s, tx, Message::UserEvenOut(!on));
+            })
+            .build(k)
+            .key("user-even-out")
+            .help("Turn off for a music bot, so it stays as quiet as it was set.")
+    });
     let body = col()
         .w_full()
         .px(16.0)
@@ -484,6 +497,7 @@ fn user_volume(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>, target: &UserVo
                 )))
                 .child(text(format!("{percent}%")).font(ty::NUMERIC).color(t.text)),
         )
+        .children(even_out)
         .child(
             row()
                 .w_full()

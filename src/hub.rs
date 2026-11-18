@@ -10,7 +10,7 @@
 //! outcome from [`Link::trouble`].
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -25,6 +25,7 @@ use tsclientlib::{ClientId, audio::AudioHandler};
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf};
 
 use crate::audio::{AudioEngine, Chime, DeviceChoice, PlaybackVolume};
+use crate::leveler::Leveler;
 use crate::profiler::{self, Category};
 use crate::streaming::Surfaces;
 
@@ -86,10 +87,77 @@ pub struct Retune {
     pub transmission: crate::transmission::Settings,
 }
 
+/// How one person's voice is played, as the connection knows it when their packet arrives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Playback {
+    /// The volume you set for them; 0 when you muted them.
+    pub gain: f32,
+    /// Whether their level is evened out with everyone else's.
+    pub even_out: bool,
+    /// Whether this packet used the music codec, for the log.
+    pub music: bool,
+    /// Tells one person from the next on the same client id, when their identity is known.
+    pub who: Option<u64>,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            even_out: false,
+            music: false,
+            who: None,
+        }
+    }
+}
+
+/// One person on a server, for as long as the connection lasts: a pause in speech drops their
+/// queue, and what was learned about their level must outlive it.
+#[derive(Debug, Default)]
+struct Talker {
+    playback: Playback,
+    leveler: Leveler,
+}
+
+impl Talker {
+    /// Takes what came with their packet. Someone new on this client id starts over.
+    fn set(&mut self, playback: Playback) {
+        if playback.who != self.playback.who {
+            self.leveler = Leveler::default();
+        }
+        self.playback = playback;
+    }
+
+    /// How they are played, for the log.
+    fn played(&self) -> crate::voice_levels::Played {
+        crate::voice_levels::Played {
+            volume: self.playback.gain,
+            evened: self.playback.even_out.then(|| self.leveler.gain_db()),
+            music: self.playback.music,
+        }
+    }
+
+    /// What their decoded audio is multiplied by.
+    fn volume(&self) -> f32 {
+        self.playback.gain * self.leveler.gain()
+    }
+
+    /// Their audio as decoded, on its way into the mix.
+    fn heard(&mut self, stereo: &[f32]) {
+        if self.playback.even_out {
+            self.leveler.hear(stereo);
+        } else {
+            self.leveler.rest(stereo.len() / 2);
+        }
+    }
+}
+
 /// One server's end of the hub.
 struct Line {
     id: u64,
     incoming: Mutex<AudioHandler>,
+    /// Everyone heard on this server so far. Locked after `incoming`.
+    talkers: Mutex<HashMap<ClientId, Talker>>,
     /// Deafened or not connected: its voices are not played.
     silent: AtomicBool,
     can_send: AtomicBool,
@@ -102,13 +170,16 @@ impl Line {
         &self,
         id: ClientId,
         packet: InAudioBuf,
-        gain: f32,
+        playback: Playback,
     ) -> Result<Option<ClientId>, tsclientlib::audio::Error> {
         let mut incoming = self.incoming.lock().unwrap();
         let result = incoming.handle_packet(id, packet);
+        let mut talkers = self.talkers.lock().unwrap();
+        let talker = talkers.entry(id).or_default();
+        talker.set(playback);
         // Set on every packet, because a pause in speech drops the queue and its volume.
         if let Some(queue) = incoming.get_mut_queues().get_mut(&id) {
-            queue.volume = gain;
+            queue.volume = talker.volume();
         }
         result
     }
@@ -246,6 +317,7 @@ impl Line {
             Arc::new(Self {
                 id: id.0,
                 incoming: Mutex::new(AudioHandler::new()),
+                talkers: Mutex::default(),
                 silent: AtomicBool::new(true),
                 can_send: AtomicBool::new(false),
                 codec: Mutex::new((CodecType::OpusVoice, 7)),
@@ -388,13 +460,13 @@ impl Link {
         *self.line.codec.lock().unwrap() = (codec, quality);
     }
 
-    pub fn receive(&self, packet: InAudioBuf, gain: f32) {
+    pub fn receive(&self, packet: InAudioBuf, playback: Playback) {
         let _trace = profiler::scope(Category::AudioProcessing, "audio.receive");
         let id = match packet.data().data() {
             AudioData::S2C { from, .. } | AudioData::S2CWhisper { from, .. } => ClientId(*from),
             _ => return,
         };
-        let result = self.line.hear(id, packet, gain);
+        let result = self.line.hear(id, packet, playback);
         if let Err(error) = result {
             tracing::debug!(%error, "Dropped incoming audio packet");
         }
@@ -754,15 +826,25 @@ impl Core {
                 .filter(|line| !line.silent.load(Ordering::Acquire))
             {
                 let mut incoming = line.incoming.lock().unwrap();
-                if !metered {
-                    incoming.fill_buffer(stereo);
-                    continue;
-                }
+                let mut talkers = line.talkers.lock().unwrap();
                 incoming.fill_buffer_with_proc(stereo, |id, samples| {
-                    levels.heard(line.id, id.0, samples);
+                    if metered {
+                        levels.heard(line.id, id.0, samples);
+                    }
+                    if let Some(talker) = talkers.get_mut(id) {
+                        talker.heard(samples);
+                    }
                 });
-                for (id, queue) in incoming.get_queues() {
-                    levels.volume(line.id, id.0, queue.volume);
+                // The gain each block is played at was settled by the block before it: 10 ms
+                // late, at a few dB a second.
+                for (id, queue) in incoming.get_mut_queues() {
+                    let Some(talker) = talkers.get(id) else {
+                        continue;
+                    };
+                    queue.volume = talker.volume();
+                    if metered {
+                        levels.played(line.id, id.0, talker.played());
+                    }
                 }
             }
             surfaces.mix_audio(stereo);
@@ -952,6 +1034,11 @@ mod tests {
     }
 
     fn talking_packets(count: u16) -> Vec<InAudioBuf> {
+        talking_packets_at(count, 0.25)
+    }
+
+    /// A 440 Hz tone from client 42 in 20 ms packets, at `amplitude`.
+    fn talking_packets_at(count: u16, amplitude: f32) -> Vec<InAudioBuf> {
         let encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip).unwrap();
         (0..count)
             .map(|id| {
@@ -960,7 +1047,7 @@ mod tests {
                         ((id as usize * FRAME + i) as f32 * 440.0 * std::f32::consts::TAU
                             / RATE as f32)
                             .sin()
-                            * 0.25
+                            * amplitude
                     })
                     .collect();
                 let mut encoded = [0; 1275];
@@ -1080,7 +1167,11 @@ mod tests {
         rig.hub.set_active(Some(SessionId(1)));
         let mut heard_at = |gain: f32| {
             for packet in talking_packets(40) {
-                a.hear(ClientId(42), packet, gain).unwrap();
+                let playback = Playback {
+                    gain,
+                    ..Playback::default()
+                };
+                a.hear(ClientId(42), packet, playback).unwrap();
             }
             let heard = rig.heard(30);
             *a.incoming.lock().unwrap() = AudioHandler::new();
@@ -1091,6 +1182,71 @@ mod tests {
         assert_eq!(heard_at(0.0), 0.0, "muted for you");
         let half = heard_at(0.5);
         assert!(half > 0.0 && half < full, "{half} against {full}");
+    }
+
+    #[test]
+    fn a_quiet_person_is_turned_up_only_while_evened_out_and_under_your_volume() {
+        let mut rig = rig(crate::transmission::Settings::default());
+        let (a, _voice) = rig.line(1);
+        rig.hub.set_active(Some(SessionId(1)));
+        // Three seconds of a voice 40 dB under full scale, then how loud the last second was.
+        let mut heard_with = |client: u16, playback: Playback| {
+            let mut last = 0.0;
+            // A pause: their queue is gone, what was learned about them is not.
+            *a.incoming.lock().unwrap() = AudioHandler::new();
+            for (index, packet) in talking_packets_at(150, 0.01).into_iter().enumerate() {
+                a.hear(ClientId(client), packet, playback).unwrap();
+                let heard = rig.heard(2);
+                if index >= 100 {
+                    last += heard;
+                }
+            }
+            last
+        };
+        let plain = heard_with(1, Playback::default());
+        let even = Playback {
+            even_out: true,
+            who: Some(7),
+            ..Playback::default()
+        };
+        let evened = heard_with(2, even);
+        assert!(evened > plain * 5.0, "{evened} against {plain}");
+        // Your own volume for them still counts, and muting them still silences them.
+        let halved = heard_with(2, Playback { gain: 0.5, ..even });
+        assert!(
+            (halved / evened - 0.5).abs() < 0.05,
+            "{halved} against {evened}"
+        );
+        assert_eq!(heard_with(2, Playback { gain: 0.0, ..even }), 0.0);
+        let talkers = a.talkers.lock().unwrap();
+        assert!(talkers[&ClientId(2)].leveler.gain_db() > 15.0);
+        assert_eq!(talkers[&ClientId(1)].leveler.gain_db(), 0.0);
+    }
+
+    #[test]
+    fn someone_new_on_a_client_id_is_measured_afresh() {
+        let mut talker = Talker::default();
+        let even = Playback {
+            even_out: true,
+            who: Some(1),
+            ..Playback::default()
+        };
+        talker.set(even);
+        for _ in 0..300 {
+            talker.heard(&[0.01; 960]);
+        }
+        assert!(talker.leveler.gain_db() > 10.0);
+        talker.set(Playback {
+            music: true,
+            ..even
+        });
+        assert!(talker.leveler.gain_db() > 10.0, "the same person keeps it");
+        talker.set(Playback {
+            who: Some(2),
+            ..even
+        });
+        assert_eq!(talker.leveler.gain_db(), 0.0);
+        assert_eq!(talker.volume(), 1.0);
     }
 
     #[test]

@@ -22,6 +22,10 @@ pub struct Settings {
     pub server_address: String,
     pub nickname: String,
     pub playback_volume_percent: u8,
+    /// Brings everyone you hear to one level (`crate::leveler`). People can be left out one
+    /// by one in `user_audio`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub even_out_voices: bool,
     pub audio_processing: crate::audio_processing::Settings,
     pub transmission: crate::transmission::Settings,
     pub keybinds: Keybinds,
@@ -433,6 +437,9 @@ pub struct UserAudio {
     pub volume_percent: u16,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// Whether "Even out voices" applies to them; off for a music bot it didn't recognise.
+    #[serde(skip_serializing_if = "is_true")]
+    pub even_out: bool,
 }
 
 impl Default for UserAudio {
@@ -440,6 +447,7 @@ impl Default for UserAudio {
         Self {
             volume_percent: 100,
             muted: false,
+            even_out: true,
         }
     }
 }
@@ -521,6 +529,12 @@ pub struct Synced {
         skip_serializing_if = "Option::is_none"
     )]
     pub sound_cues: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub even_out_voices: Option<bool>,
     #[serde(
         default,
         deserialize_with = "lenient",
@@ -618,6 +632,7 @@ impl Synced {
             custom_themes: Some(settings.custom_themes.clone()),
             chat: Some(settings.chat),
             sound_cues: Some(settings.sound_cues),
+            even_out_voices: Some(settings.even_out_voices),
             sounds: Some(settings.sounds.clone()),
             share: Some(settings.share),
             stream_view: Some(settings.stream_view),
@@ -691,6 +706,9 @@ impl Synced {
         if let Some(on) = self.sound_cues {
             settings.sound_cues = on;
         }
+        if let Some(on) = self.even_out_voices {
+            settings.even_out_voices = on;
+        }
         if let Some(sounds) = self.sounds {
             settings.sounds = sounds;
         }
@@ -732,6 +750,7 @@ impl Default for Settings {
             server_address: String::new(),
             nickname: "Flexspeak".into(),
             playback_volume_percent: 100,
+            even_out_voices: false,
             audio_processing: crate::audio_processing::Settings::default(),
             transmission: crate::transmission::Settings::default(),
             keybinds: Keybinds::default(),
@@ -1113,11 +1132,13 @@ mod tests {
             footer_hidden: true,
             close_button: CloseButton::Quit,
             sound_cues: false,
+            even_out_voices: true,
             user_audio: BTreeMap::from([(
                 "uid-1".into(),
                 UserAudio {
                     volume_percent: 150,
                     muted: true,
+                    even_out: false,
                 },
             )]),
             stream_volumes: BTreeMap::from([("uid-2".into(), 60)]),
@@ -1137,6 +1158,7 @@ mod tests {
         assert!(onto.footer_hidden);
         assert_eq!(onto.close_button, CloseButton::Quit);
         assert!(!onto.sound_cues);
+        assert!(onto.even_out_voices);
         assert_eq!(onto.user_audio, from.user_audio);
         assert_eq!(onto.stream_volumes, from.stream_volumes);
         assert_eq!(onto.servers.len(), 2);

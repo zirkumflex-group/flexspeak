@@ -852,30 +852,12 @@ impl Bank {
 /// the way hearing is (the filter of ITU-R BS.1770, whose numbers are for 48 kHz).
 fn loudness(samples: &[f32]) -> Option<f32> {
     const _: () = assert!(RATE == 48_000);
-    /// Each stage's `b0 b1 b2 a1 a2`: a high shelf, then a high-pass.
-    const STAGES: [[f64; 5]; 2] = [
-        [
-            1.535_124_859_586_97,
-            -2.691_696_189_406_38,
-            1.198_392_810_852_85,
-            -1.690_659_293_182_41,
-            0.732_480_774_215_85,
-        ],
-        [1.0, -2.0, 1.0, -1.990_047_454_833_98, 0.990_072_250_366_21],
-    ];
-    let mut memory = [[0.0_f64; 4]; 2];
+    let mut filter = crate::leveler::K_WEIGHTING;
     let power: Vec<f64> = samples
         .iter()
         .map(|&sample| {
-            let mut x = f64::from(sample);
-            for (stage, [x1, x2, y1, y2]) in STAGES.iter().zip(&mut memory) {
-                let y = stage[0] * x + stage[1] * *x1 + stage[2] * *x2
-                    - stage[3] * *y1
-                    - stage[4] * *y2;
-                (*x2, *x1, *y2, *y1) = (*x1, x, *y1, y);
-                x = y;
-            }
-            x * x
+            let weighted = crate::leveler::k_weighted(&mut filter, sample);
+            weighted * weighted
         })
         .collect();
     let window = power.len().min(RATE / 5);

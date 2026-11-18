@@ -14,6 +14,7 @@ mod diagnostics;
 mod hub;
 mod icons;
 mod install;
+mod leveler;
 mod memory;
 mod monster;
 mod monster_api;
@@ -202,8 +203,10 @@ struct App {
     /// Saved straight to settings when changed, like `footer_hidden`.
     appearance: settings::Appearance,
     user_audio: BTreeMap<String, settings::UserAudio>,
-    /// `user_audio` as the voice threads read it.
-    user_gains: client::UserGains,
+    /// Settings > Audio > Even out voices. Saved straight away when changed.
+    even_out_voices: bool,
+    /// `user_audio` and `even_out_voices` as the voice threads read them.
+    listening: Arc<client::Listening>,
     /// Each streamer's stream volume, by identity, as saved.
     stream_volumes: BTreeMap<String, u16>,
     /// When a stream volume last changed without being saved; saved a moment after a drag.
@@ -1312,6 +1315,9 @@ enum Message {
     /// Opens the volume dialog for a person in the channel tree.
     OpenUserVolume(u16),
     UserVolume(u16),
+    /// Whether "Even out voices" applies to the person the volume dialog is open for.
+    UserEvenOut(bool),
+    EvenOutVoices(bool),
     CloseUserVolume,
     /// Silences or restores a person for you alone.
     ToggleUserMute(u16),
@@ -1616,7 +1622,8 @@ impl App {
             sidebar_width: ui::SIDEBAR_WIDTH,
             appearance: settings::Appearance::default(),
             user_audio: BTreeMap::new(),
-            user_gains: client::UserGains::default(),
+            even_out_voices: false,
+            listening: Arc::default(),
             stream_volumes: BTreeMap::new(),
             stream_volumes_changed: None,
             auto_watch: BTreeSet::new(),
@@ -2319,12 +2326,15 @@ impl App {
         self.commit_nickname();
     }
 
-    /// What the voice threads play each person at. Everyone unset stays out of the map.
-    fn sync_user_gains(&self) {
-        *self.user_gains.lock().unwrap() = self
+    /// How the voice threads play each person. Everyone unset stays out of the map.
+    fn sync_listening(&self) {
+        self.listening
+            .even_out
+            .store(self.even_out_voices, Ordering::Relaxed);
+        *self.listening.people.lock().unwrap() = self
             .user_audio
             .iter()
-            .map(|(uid, audio)| (uid.clone(), audio.gain()))
+            .map(|(uid, audio)| (uid.clone(), *audio))
             .collect();
     }
 
@@ -2341,7 +2351,7 @@ impl App {
         } else {
             self.user_audio.insert(uid, audio);
         }
-        self.sync_user_gains();
+        self.sync_listening();
     }
 
     /// Saves the streams' layout and details toggle as they are on screen now.
@@ -2434,6 +2444,7 @@ impl App {
                     streams_adjusted = saved.stream_volumes.len(),
                     auto_watch = saved.auto_watch.len(),
                     sound_cues = saved.sound_cues,
+                    even_out_voices = saved.even_out_voices,
                     interface_size = saved.interface_size,
                     close_button = ?saved.close_button,
                     auto_download_updates = saved.auto_download_updates,
@@ -2946,7 +2957,8 @@ impl App {
         self.updater.auto_download = saved.auto_download_updates;
         self.appearance = saved.appearance;
         self.user_audio = saved.user_audio;
-        self.sync_user_gains();
+        self.even_out_voices = saved.even_out_voices;
+        self.sync_listening();
         self.stream_volumes = saved.stream_volumes;
         self.auto_watch = saved.auto_watch;
         self.sound_cues = saved.sound_cues;
@@ -3003,6 +3015,7 @@ impl App {
             stream_volumes: self.stream_volumes.clone(),
             auto_watch: self.auto_watch.clone(),
             sound_cues: self.sound_cues,
+            even_out_voices: self.even_out_voices,
             sounds: self.sounds.clone(),
             share: self.share_defaults,
             streaming: self.stream_options,
@@ -3884,7 +3897,7 @@ impl App {
         let visible = self.home.streaming.visible.clone();
         let config = client::Config {
             id,
-            user_gains: self.user_gains.clone(),
+            listening: self.listening.clone(),
             hub: self.hub.clone(),
             playback_volume: self.playback_volume.clone(),
             audio_processing: self.audio_processing,
@@ -5485,6 +5498,19 @@ impl App {
                         audio.volume_percent = percent.min(settings::UserAudio::MAX_PERCENT);
                     });
                 }
+            }
+            Message::UserEvenOut(on) => {
+                if let Some(uid) = self.ui.user_volume.as_ref().map(|t| t.uid.clone()) {
+                    self.change_user_audio(uid, |audio| audio.even_out = on);
+                }
+            }
+            Message::EvenOutVoices(on) => {
+                self.even_out_voices = on;
+                self.sync_listening();
+                self.save_preference(
+                    |saved| saved.even_out_voices = on,
+                    "Evening out voices applies for now but was not saved",
+                );
             }
             // Saved here rather than on every step of the slider.
             Message::CloseUserVolume => {
@@ -8161,7 +8187,15 @@ mod tests {
             .find(|member| !member.is_self)
             .unwrap()
             .clone();
-        let gain = |app: &App| app.user_gains.lock().unwrap().get(&other.uid).copied();
+        let person = |app: &App| {
+            app.listening
+                .people
+                .lock()
+                .unwrap()
+                .get(&other.uid)
+                .copied()
+        };
+        let gain = |app: &App| person(app).map(|person| person.gain());
         assert_eq!(gain(&app), None, "full volume by default");
 
         let _ = app.update(Message::OpenUserVolume(other.id));
@@ -8184,6 +8218,18 @@ mod tests {
         let _ = app.update(Message::UserVolume(100));
         assert_eq!(gain(&app), None, "back to normal is forgotten");
         assert!(app.edited_settings().user_audio.is_empty());
+
+        // Leaving one person out of evening out, which itself starts off.
+        assert!(!app.listening.even_out.load(Ordering::Relaxed));
+        let _ = app.update(Message::EvenOutVoices(true));
+        assert!(app.listening.even_out.load(Ordering::Relaxed));
+        assert!(app.edited_settings().even_out_voices);
+        let _ = app.update(Message::OpenUserVolume(other.id));
+        let _ = app.update(Message::UserEvenOut(false));
+        assert_eq!(person(&app).map(|person| person.even_out), Some(false));
+        assert_eq!(gain(&app), Some(1.0));
+        let _ = app.update(Message::UserEvenOut(true));
+        assert_eq!(person(&app), None);
     }
 
     #[test]
