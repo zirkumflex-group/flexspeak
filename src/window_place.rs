@@ -115,6 +115,7 @@ pub fn apply() {
     };
     if !FRAME_FIXED.swap(true, Ordering::Relaxed) {
         fix_full_screen_frame(hwnd);
+        refresh_frame(hwnd);
     }
     if !MAXIMIZE.load(Ordering::Relaxed) {
         return;
@@ -133,6 +134,36 @@ pub fn apply() {}
 
 #[cfg(windows)]
 static FRAME_FIXED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Windows works out a new window's frame once while creating it, before winit's borderless
+/// handling can answer, so the first frame has a native title bar and borders. Rune's winit
+/// no longer refreshes the frame after creation (rune#760), so a window opened at its saved
+/// size and place kept Windows' title bar above the header until a resize, such as
+/// maximizing. Asking again once hands the whole window to the client area.
+#[cfg(windows)]
+fn refresh_frame(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowPos,
+    };
+    // SAFETY: `hwnd` is a live window owned by this UI thread; nothing moves or resizes.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED
+                | SWP_NOMOVE
+                | SWP_NOSIZE
+                | SWP_NOZORDER
+                | SWP_NOACTIVATE
+                | SWP_NOOWNERZORDER,
+        );
+    }
+}
 
 /// Full screen, the whole window is the picture. Rune's frame treats a window that was
 /// maximized before going full screen as still maximized and keeps the sizing border's band at
