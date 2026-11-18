@@ -803,9 +803,7 @@ fn trace_event(id: hub::SessionId, event: &client::Event) {
 fn trace_stream(session: u64, event: &streaming::Event) {
     use streaming::Event;
     match event {
-        Event::Publishing(status) => {
-            tracing::info!(target: "flexspeak::stream", session, ?status, "publishing")
-        }
+        Event::Publishing(status) => trace_publishing(session, status),
         Event::Notice(notice) => {
             tracing::info!(target: "flexspeak::stream", session, notice = notice.as_str(), "notice")
         }
@@ -855,6 +853,82 @@ fn trace_stream(session: u64, event: &streaming::Event) {
             tracing::debug!(target: "flexspeak::stream", session, ?streamers, "streamers")
         }
     }
+}
+
+/// What a share's log line says. Names and the source's title stay out: a window title can
+/// hold private text, and viewers are told apart by client id.
+#[derive(Debug, Clone, PartialEq)]
+struct PublishingSummary {
+    active: bool,
+    live: bool,
+    detail: String,
+    access: streaming::publishing::Access,
+    kind: Option<streaming::publishing::SourceKind>,
+    system_audio: bool,
+    quality: streaming::publishing::Quality,
+    preview: bool,
+    requests: Vec<u16>,
+    viewers: Vec<(u16, bool)>,
+}
+
+impl PublishingSummary {
+    fn of(status: &streaming::publishing::Status) -> Self {
+        Self {
+            active: status.active,
+            live: status.live,
+            detail: status.detail.clone(),
+            access: status.access,
+            kind: status.kind.clone(),
+            system_audio: status.system_audio,
+            quality: status.quality,
+            preview: status.preview,
+            requests: status.requests.iter().map(|(id, _)| *id).collect(),
+            viewers: status
+                .viewers
+                .iter()
+                .map(|(id, _, on)| (*id, *on))
+                .collect(),
+        }
+    }
+}
+
+/// A share's status comes about once a second; it is logged only when it changes.
+fn trace_publishing(session: u64, status: &streaming::publishing::Status) {
+    static LAST: std::sync::Mutex<Vec<((u64, u64), PublishingSummary)>> =
+        std::sync::Mutex::new(Vec::new());
+    let summary = PublishingSummary::of(status);
+    let key = (session, status.key);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let index = last.iter().position(|(k, _)| *k == key);
+        if index.is_some_and(|i| last[i].1 == summary) {
+            return;
+        }
+        // One entry per share this run; a share that ended keeps its last line, so a repeat
+        // of it stays quiet too.
+        match index {
+            Some(i) => last[i].1 = summary.clone(),
+            None => last.push((key, summary.clone())),
+        }
+    }
+    tracing::info!(
+        target: "flexspeak::stream",
+        session,
+        key = status.key,
+        active = summary.active,
+        live = summary.live,
+        detail = summary.detail.as_str(),
+        access = ?summary.access,
+        kind = ?summary.kind,
+        system_audio = summary.system_audio,
+        quality = ?summary.quality,
+        preview = summary.preview,
+        requests = ?summary.requests,
+        viewers = ?summary.viewers,
+        video_frames = status.video_frames,
+        audio_frames = status.audio_frames,
+        "publishing"
+    );
 }
 
 /// Which sound a channel change deserves. Connecting isn't a change, and neither is losing it.

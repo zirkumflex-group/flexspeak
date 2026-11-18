@@ -38,6 +38,15 @@ const STAT_SECONDS: u64 = 1;
 const UDP_HEADER_SIZE: u32 = 8;
 /// Size of an IPv4 header in bytes.
 const IPV4_HEADER_SIZE: u32 = 20;
+/// The shortest wait before a packet is sent again. On a link with a ping under a
+/// millisecond, srtt + 4 * srtt_dev comes to about 1 ms, so an ack that is a moment late
+/// counted as a loss: the packet went out twice, srtt doubled and the send window shrank.
+const MIN_RTO: Duration = Duration::from_millis(200);
+
+/// How long to wait for an ack before sending a packet again.
+fn retransmission_timeout(srtt: Duration, srtt_dev: Duration, max: Duration) -> Duration {
+	(srtt + srtt_dev * 4).clamp(MIN_RTO, max)
+}
 // TODO Use correct IPv6 header size to compute bandwidth
 // Size of an IPv6 header in bytes.
 //const IPV6_HEADER_SIZE: u32 = 40;
@@ -714,11 +723,11 @@ impl Resender {
 			let now = Instant::now();
 			let window = con.resender.get_window();
 
-			// Retransmission timeout
-			let mut rto: Duration = con.resender.config.srtt + con.resender.config.srtt_dev * 4;
-			if rto > max_send_rto {
-				rto = max_send_rto;
-			}
+			let rto = retransmission_timeout(
+				con.resender.config.srtt,
+				con.resender.config.srtt_dev,
+				max_send_rto,
+			);
 			let last_threshold = now - rto;
 
 			let mut rec = if let Some(rec) = con.resender.send_queue.peek_mut() {
@@ -1101,5 +1110,31 @@ impl PacketStat {
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn retransmission_timeout_has_a_floor_on_fast_links() {
+		let rto = retransmission_timeout(
+			Duration::from_micros(430),
+			Duration::from_micros(160),
+			Duration::from_secs(1),
+		);
+		assert_eq!(rto, MIN_RTO);
+	}
+
+	#[test]
+	fn retransmission_timeout_follows_rtt_and_is_capped() {
+		let max = Duration::from_secs(1);
+		let rto =
+			retransmission_timeout(Duration::from_millis(100), Duration::from_millis(50), max);
+		assert_eq!(rto, Duration::from_millis(300));
+		let rto =
+			retransmission_timeout(Duration::from_millis(335), Duration::from_millis(247), max);
+		assert_eq!(rto, max);
 	}
 }
