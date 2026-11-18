@@ -1,10 +1,15 @@
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include "api/audio/builtin_audio_processing_builder.h"
+#include "api/audio/echo_canceller3_config.h"
+#include "api/audio/echo_control.h"
 #include "api/environment/environment_factory.h"
 #include "api/field_trials_view.h"
 #include "common_audio/vad/include/webrtc_vad.h"
+#include "modules/audio_processing/aec3/echo_canceller3.h"
+#include "modules/audio_processing/audio_buffer.h"
 
 namespace {
 // Echo cancellation's HMM transparent mode. The default (legacy) detector needs several
@@ -22,8 +27,121 @@ public:
     }
 };
 
+// Energy going into and out of echo cancellation since it was last read, in the mic line's
+// bands: below 1 kHz, 1-4 kHz and above 4 kHz. Only what is sent counts, as for the rest of the
+// mic line. Written and read on the voice worker only.
+struct EchoEnergy {
+    double before[3] = {};
+    double after[3] = {};
+    // Set from `flex_apm_set_output_muted`. The processor rebuilds echo cancellation on its first
+    // frame and doesn't tell the new one, so `SetCaptureOutputUsage` can't be relied on here.
+    bool sent = true;
+};
+
+// A second-order low or high pass (RBJ cookbook, Q = 1/sqrt 2) at 16 kHz, the rate of the lowest
+// of the three bands echo cancellation works in at 48 kHz.
+struct Biquad {
+    double b[3], a[2], z[2] = {};
+    Biquad(bool high_pass, double frequency) {
+        const double w = 6.283185307179586 * frequency / 16000.0;
+        const double cos = std::cos(w), alpha = std::sin(w) * 0.7071067811865476;
+        const double a0 = 1.0 + alpha, edge = (high_pass ? 1.0 + cos : 1.0 - cos) / 2.0;
+        b[0] = edge / a0;
+        b[1] = (high_pass ? -(1.0 + cos) : 1.0 - cos) / a0;
+        b[2] = edge / a0;
+        a[0] = -2.0 * cos / a0;
+        a[1] = (1.0 - alpha) / a0;
+    }
+    double run(double x) {
+        const double y = b[0] * x + z[0];
+        z[0] = b[1] * x - a[0] * y + z[1];
+        z[1] = b[2] * x - a[1] * y;
+        return y;
+    }
+};
+
+// Splits the lowest band (0-8 kHz) at 1 and 4 kHz with fourth-order filters, as the mic line
+// does in src/voice_levels.rs; the bands above 8 kHz count to the treble whole.
+class BandMeter {
+public:
+    void add(const webrtc::AudioBuffer& buffer, double* energy) {
+        const float* const* bands = buffer.split_bands_const(0);
+        for (size_t i = 0; i < buffer.num_frames_per_band(); ++i) {
+            const double x = bands[0][i] / 32768.0;
+            const double low = low_[1].run(low_[0].run(x));
+            const double mid = mid_[3].run(mid_[2].run(mid_[1].run(mid_[0].run(x))));
+            const double high = high_[1].run(high_[0].run(x));
+            energy[0] += low * low;
+            energy[1] += mid * mid;
+            energy[2] += high * high;
+            for (size_t band = 1; band < buffer.num_bands(); ++band) {
+                const double y = bands[band][i] / 32768.0;
+                energy[2] += y * y;
+            }
+        }
+    }
+
+private:
+    Biquad low_[2] = {{false, 1000.0}, {false, 1000.0}};
+    Biquad mid_[4] = {{true, 1000.0}, {true, 1000.0}, {false, 4000.0}, {false, 4000.0}};
+    Biquad high_[2] = {{true, 4000.0}, {true, 4000.0}};
+};
+
+// Echo cancellation as WebRTC builds it, measured on the way through. Its own figures leave out
+// what it does to the voice, and a headset voice it mistakes for echo loses its treble there.
+class MeasuredEcho : public webrtc::EchoControl {
+public:
+    MeasuredEcho(std::unique_ptr<webrtc::EchoControl> inner, std::shared_ptr<EchoEnergy> energy)
+        : inner_(std::move(inner)), energy_(std::move(energy)) {}
+    void AnalyzeRender(webrtc::AudioBuffer* render) override { inner_->AnalyzeRender(render); }
+    void AnalyzeCapture(webrtc::AudioBuffer* capture) override { inner_->AnalyzeCapture(capture); }
+    void ProcessCapture(webrtc::AudioBuffer* capture, bool level_change) override {
+        if (energy_->sent) before_.add(*capture, energy_->before);
+        inner_->ProcessCapture(capture, level_change);
+        if (energy_->sent) after_.add(*capture, energy_->after);
+    }
+    void ProcessCapture(webrtc::AudioBuffer* capture, webrtc::AudioBuffer* linear_output,
+                        bool level_change) override {
+        if (energy_->sent) before_.add(*capture, energy_->before);
+        inner_->ProcessCapture(capture, linear_output, level_change);
+        if (energy_->sent) after_.add(*capture, energy_->after);
+    }
+    Metrics GetMetrics() const override { return inner_->GetMetrics(); }
+    void SetAudioBufferDelay(int delay_ms) override { inner_->SetAudioBufferDelay(delay_ms); }
+    void SetCaptureOutputUsage(bool used) override { inner_->SetCaptureOutputUsage(used); }
+    bool ActiveProcessing() const override { return inner_->ActiveProcessing(); }
+
+private:
+    std::unique_ptr<webrtc::EchoControl> inner_;
+    std::shared_ptr<EchoEnergy> energy_;
+    BandMeter before_, after_;
+};
+
+// The echo canceller the processor builds without a factory: the default configuration, for mono
+// and stereo playback alike, adjusted to the field trials. Wrapped in `MeasuredEcho`.
+class MeasuredEchoFactory : public webrtc::EchoControlFactory {
+public:
+    explicit MeasuredEchoFactory(std::shared_ptr<EchoEnergy> energy) : energy_(std::move(energy)) {}
+    std::unique_ptr<webrtc::EchoControl> Create(const webrtc::Environment& env, int rate,
+                                                int render_channels, int capture_channels) override {
+        return Create(env, rate, render_channels, capture_channels, nullptr);
+    }
+    std::unique_ptr<webrtc::EchoControl> Create(
+        const webrtc::Environment& env, int rate, int render_channels, int capture_channels,
+        webrtc::NeuralResidualEchoEstimator* estimator) override {
+        return std::make_unique<MeasuredEcho>(
+            std::make_unique<webrtc::EchoCanceller3>(env, webrtc::EchoCanceller3Config(), std::nullopt,
+                                                     estimator, rate, render_channels, capture_channels),
+            energy_);
+    }
+
+private:
+    std::shared_ptr<EchoEnergy> energy_;
+};
+
 struct Processor {
     webrtc::scoped_refptr<webrtc::AudioProcessing> apm;
+    std::shared_ptr<EchoEnergy> echo = std::make_shared<EchoEnergy>();
 };
 }
 
@@ -32,8 +150,10 @@ extern "C" void* flex_apm_create(bool echo, bool gain, bool noise, int level) no
     if (level < 0 || level > 3) return nullptr;
     try {
         auto processor = std::make_unique<Processor>();
-        processor->apm = webrtc::BuiltinAudioProcessingBuilder().Build(
-            webrtc::CreateEnvironment(std::make_unique<FieldTrials>()));
+        webrtc::BuiltinAudioProcessingBuilder builder;
+        // With a factory the processor always cancels echo, so it gets one only when asked to.
+        if (echo) builder.SetEchoControlFactory(std::make_unique<MeasuredEchoFactory>(processor->echo));
+        processor->apm = builder.Build(webrtc::CreateEnvironment(std::make_unique<FieldTrials>()));
         if (!processor->apm) return nullptr;
         webrtc::AudioProcessing::Config config;
         config.echo_canceller.enabled = echo;
@@ -73,7 +193,9 @@ extern "C" int flex_apm_render(void* processor, int16_t* pcm) noexcept {
 extern "C" int flex_apm_set_output_muted(void* processor, bool muted) noexcept {
     if (!processor) return -1;
     try {
-        static_cast<Processor*>(processor)->apm->set_output_will_be_muted(muted);
+        auto* self = static_cast<Processor*>(processor);
+        self->apm->set_output_will_be_muted(muted);
+        self->echo->sent = !muted;
         return 0;
     } catch (...) { return -1; }
 }
@@ -86,13 +208,23 @@ struct FlexEchoStats {
     int32_t delay_ms;
     // Bit per field above, in order, set when WebRTC reported it.
     uint32_t present;
+    // Energy into and out of echo cancellation since the last read, low/mid/high as in
+    // `EchoEnergy`; zero while it is off or its output is not used.
+    double echo_in[3];
+    double echo_out[3];
 };
 
 extern "C" int flex_apm_stats(void* processor, FlexEchoStats* out) noexcept {
     if (!processor || !out) return -1;
     try {
-        const auto stats = static_cast<Processor*>(processor)->apm->GetStatistics();
+        auto* self = static_cast<Processor*>(processor);
+        const auto stats = self->apm->GetStatistics();
         *out = {};
+        for (int band = 0; band < 3; ++band) {
+            out->echo_in[band] = self->echo->before[band];
+            out->echo_out[band] = self->echo->after[band];
+        }
+        *self->echo = {.sent = self->echo->sent};
         if (stats.echo_return_loss) { out->erl = *stats.echo_return_loss; out->present |= 1; }
         if (stats.echo_return_loss_enhancement) { out->erle = *stats.echo_return_loss_enhancement; out->present |= 2; }
         if (stats.divergent_filter_fraction) { out->divergent_filter_fraction = *stats.divergent_filter_fraction; out->present |= 4; }

@@ -4,8 +4,9 @@
 //! heard is measured, since the people talking may use another client.
 //!
 //! Your own microphone is measured too, while it is not muted: in three bands at three points
-//! (as captured, after WebRTC's processing, as sent), with echo cancellation's own figures. A
-//! voice that sounds muffled or weak then shows which stage took it away.
+//! (as captured, after WebRTC's processing, as sent), with echo cancellation's own figures and
+//! what it let through in each band (`echo_gain`). A voice that sounds muffled or weak then
+//! shows which stage took it away.
 
 use std::{
     collections::BTreeMap,
@@ -194,6 +195,8 @@ pub struct EngineLevels {
     pub sent_frames: usize,
     /// Echo cancellation's figures as last read, when it is on.
     pub echo: Option<crate::audio_processing::EchoStats>,
+    /// Your microphone into and out of echo cancellation since the last report.
+    pub echo_energy: crate::audio_processing::EchoEnergy,
 }
 
 /// One person heard on one server.
@@ -279,6 +282,7 @@ fn report_mic(engine: &mut EngineLevels) {
     let processed = engine.mic.processed.take();
     let sent = engine.mic.sent.take();
     let sent_frames = std::mem::take(&mut engine.sent_frames);
+    let echo_gain = std::mem::take(&mut engine.echo_energy).gain();
     let Some(captured) = captured else {
         return;
     };
@@ -290,6 +294,7 @@ fn report_mic(engine: &mut EngineLevels) {
         processed = processed.map(tracing::field::display),
         sent = sent.map(tracing::field::display),
         sent_ms = sent_frames * 20,
+        echo_gain = echo_gain.as_deref(),
         erle = round(echo.erle),
         erl = round(echo.erl),
         echo_delay_ms = echo.delay_ms,

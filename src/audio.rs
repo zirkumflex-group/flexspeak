@@ -344,6 +344,10 @@ pub struct AudioEngine {
     last_frame: Option<Instant>,
     /// Whether processed microphone audio goes on to the voice gate and encoder.
     sending: bool,
+    /// Microphone audio dropped for piling up since `gaps_logged`, which keeps the log line to
+    /// one a second when the worker can't keep up for a while.
+    gaps: u32,
+    gaps_logged: Option<Instant>,
     reference: Option<Reference>,
     input_clock: ResampleClock,
     input_device_rate: u32,
@@ -542,6 +546,8 @@ impl AudioEngine {
             packet_boundary: crate::transmission::PacketBoundary::default(),
             last_frame: None,
             sending: false,
+            gaps: 0,
+            gaps_logged: None,
             reference,
             input_clock: ResampleClock::default(),
             input_device_rate,
@@ -635,6 +641,7 @@ impl AudioEngine {
             })?;
         self.encoder.set_bitrate(Bitrate::BitsPerSecond(bitrate))?;
         self.codec = codec;
+        tracing::info!(?codec, quality, bitrate, "voice codec");
         Ok(())
     }
 
@@ -700,6 +707,17 @@ impl AudioEngine {
             bail!("Audio device failed: {error}");
         }
         if self.capture.discontinuity.swap(false, Ordering::AcqRel) {
+            self.gaps += 1;
+            if self
+                .gaps_logged
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+            {
+                tracing::info!(
+                    times = std::mem::take(&mut self.gaps),
+                    "Microphone audio piled up unprocessed; dropped and started over"
+                );
+                self.gaps_logged = Some(Instant::now());
+            }
             self.reset_capture(false)?;
         }
         if let Some(reference) = &mut self.reference {
@@ -737,6 +755,9 @@ impl AudioEngine {
         }
         if self.levels.on && self.sending {
             self.levels.echo = self.processor.echo_stats();
+            if let Some(echo) = self.levels.echo {
+                self.levels.echo_energy.add(echo.energy);
+            }
         }
         if !self.sending {
             // Processed and dropped: nothing is sent while muted.
