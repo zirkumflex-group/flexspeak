@@ -128,6 +128,9 @@ fn fullscreen_button(s: &App, t: &Theme) -> El {
         },
         if on {
             "Leave full screen (Esc)"
+        } else if s.server().streaming.watching.len() > 1 {
+            // F takes every stream full screen; this button takes only this one.
+            "This stream alone, full screen"
         } else {
             "Full screen (F)"
         },
@@ -370,7 +373,38 @@ fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
                     Some(Message::StreamLayout(layout)),
                 ));
             }
-            if watched > 1 {
+            let on = fullscreen(s);
+            bar = bar.child(icon_button(
+                t,
+                "fullscreen-all",
+                if on {
+                    &icons::MINIMIZE
+                } else {
+                    &icons::MAXIMIZE
+                },
+                if on {
+                    "Leave full screen (Esc)"
+                } else {
+                    "Every stream full screen, as laid out here (F)"
+                },
+                Variant::Ghost,
+                Some(if on {
+                    Message::StreamFullscreen(false)
+                } else {
+                    Message::StreamsFullscreen
+                }),
+            ));
+            // In a narrow window Stop All gives up its words, so the tools still fit.
+            if watched > 1 && s.window_size.0 < NARROW_TOOLS {
+                bar = bar.child(icon_button(
+                    t,
+                    "stop-all",
+                    &icons::STOP,
+                    "Stop watching every stream",
+                    Variant::Secondary,
+                    Some(Message::StopWatching(None)),
+                ));
+            } else if watched > 1 {
                 bar = bar.child(button(
                     t,
                     "stop-all",
@@ -391,6 +425,9 @@ fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
         supported.then_some(Message::RefreshStreams),
     ))
 }
+
+/// Below this window width the stage's tools drop their words.
+const NARROW_TOOLS: f32 = 1280.0;
 
 /// The channel you are in, and beside it on its baseline how many streams or people are there.
 fn channel_title(s: &App, t: &Theme, count: String) -> El {
@@ -980,24 +1017,32 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32), header
     }
     let Some(main) = s.server().streaming.stage() else {
         let count = watching.len() + available.len();
-        let columns = grid_columns(count, space);
-        let rows = grid_rows(count, columns, space);
-        let widths: Vec<f32> = rows
+        let layout = grid_layout(count, space);
+        let sizes: Vec<(f32, f32)> = layout
+            .rows
             .iter()
-            .zip(row_spans(&rows, columns.is_some()))
-            .flat_map(|(boxes, span)| std::iter::repeat_n(cell_width(space, span), *boxes))
+            .zip(&layout.cells)
+            .flat_map(|(boxes, size)| std::iter::repeat_n(*size, *boxes))
             .collect();
-        let cells = watching
+        let shapes = watching
             .iter()
-            .zip(&widths)
-            .map(|(watch, width)| tile(s, t, watch, Mode::Grid, *width))
+            .map(aspect)
+            .chain(available.iter().map(|_| WIDE));
+        let boxes = watching
+            .iter()
+            .zip(&sizes)
+            .map(|(watch, size)| tile(s, t, watch, Mode::Grid, fitted_width(*size, aspect(watch))))
             .chain(
                 available
                     .iter()
                     .map(|stream| preview(s, t, stream, supported, Mode::Grid)),
-            )
+            );
+        let cells = boxes
+            .zip(shapes)
+            .zip(&sizes)
+            .map(|((content, shape), size)| cell(content, *size, shape))
             .collect::<Vec<_>>();
-        return area.child(grid(k, cells, &rows, columns.is_some(), space));
+        return area.child(grid(k, cells, &layout));
     };
     let others: Vec<&Watching> = watching
         .iter()
@@ -1005,50 +1050,105 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32), header
         .collect();
     let room = MAX_STRIP.saturating_sub(others.len()).min(available.len());
     let (previews, overflow) = available.split_at(room);
-    let thumbnails: Vec<El> = others
-        .into_iter()
-        .map(|watch| tile(s, t, watch, Mode::Thumbnail, 0.0))
-        .chain(
-            previews
-                .iter()
-                .map(|stream| preview(s, t, stream, supported, Mode::Thumbnail)),
-        )
-        .collect();
-    let strip_width = (space.0 * 0.22).clamp(140.0, 280.0);
-    let stage_width = match s.server().streaming.strip {
-        Strip::Beside if !thumbnails.is_empty() => space.0 - strip_width - GRID_GAP,
-        _ => space.0,
-    };
-    let main = tile(s, t, main, Mode::Stage, stage_width);
-    area = match s.server().streaming.strip {
-        Strip::Below if thumbnails.is_empty() => area.child(main),
-        Strip::Below => area.child(main).child(
-            row()
-                .key("strip")
-                .w_full()
-                .h(STRIP_HEIGHT)
-                .gap(10.0)
-                .children(thumbnails),
-        ),
+    let shape = aspect(main);
+    let small = others.len() + previews.len();
+    let count = small.max(1) as f32;
+    let (width, height) = space;
+    // The large stream takes all it can use and at least two thirds of the pane; the others
+    // share what it leaves, at least a strip's worth, and no more than fills the pane's width
+    // or height with them.
+    let layout = s.server().streaming.strip;
+    let (stage_room, strip) = match layout {
+        _ if small == 0 => (space, 0.0),
+        Strip::Below => {
+            let across = (width - GRID_GAP * (count - 1.0)) / count;
+            let strip = (height - GRID_GAP - width / shape)
+                .min(across / WIDE)
+                .min((height - GRID_GAP) / 3.0)
+                .max(STRIP_HEIGHT);
+            ((width, height - GRID_GAP - strip), strip)
+        }
         Strip::Beside => {
-            let mut stage = row()
-                .key("stage-row")
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .gap(10.0)
-                .child(main);
-            if !thumbnails.is_empty() {
-                stage = stage.child(
-                    col()
+            let down = (height - GRID_GAP * (count - 1.0)) / count;
+            let least = (width * 0.2).clamp(160.0, 320.0);
+            let strip = (width - GRID_GAP - height * shape)
+                .min(down * WIDE)
+                .min((width - GRID_GAP) / 3.0)
+                .max(least);
+            ((width - GRID_GAP - strip, height), strip)
+        }
+    };
+    // A stream not yet watched gets the full offer where its box has room for it.
+    let roomy = match layout {
+        Strip::Below => strip,
+        Strip::Beside => strip / WIDE,
+    } >= 220.0;
+    let thumbnails: Vec<(El, f32)> = others
+        .into_iter()
+        .map(|watch| (tile(s, t, watch, Mode::Thumbnail, 0.0), aspect(watch)))
+        .chain(previews.iter().map(|stream| {
+            let mode = if roomy { Mode::Grid } else { Mode::Thumbnail };
+            (preview(s, t, stream, supported, mode), WIDE)
+        }))
+        .collect();
+    let main = col()
+        .key("stage-room")
+        .min_w(0.0)
+        .min_h(0.0)
+        .center()
+        .child(
+            tile(s, t, main, Mode::Stage, fitted_width(stage_room, shape))
+                .grow(0.0)
+                .aspect_fit(shape),
+        );
+    area = match layout {
+        _ if thumbnails.is_empty() => area.child(main.w_full().grow(1.0)),
+        Strip::Below => {
+            let size = (strip * WIDE, strip);
+            // Both sized to what they show and centred together, so what neither can use
+            // gathers at the pane's edges rather than between them.
+            let stage = stage_room.1.min(width / shape);
+            area.justify_center()
+                .child(main.w_full().h(stage).shrink())
+                .child(
+                    row()
                         .key("strip")
-                        .w(strip_width)
-                        .h_full()
-                        .gap(10.0)
-                        .children(thumbnails),
-                );
-            }
-            area.child(stage)
+                        .w_full()
+                        .h(strip)
+                        .gap(GRID_GAP)
+                        .justify_center()
+                        .children(
+                            thumbnails
+                                .into_iter()
+                                .map(|(content, shape)| cell(content, size, shape)),
+                        ),
+                )
+        }
+        Strip::Beside => {
+            let size = (strip, strip / WIDE);
+            area.child(
+                row()
+                    .key("stage-row")
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .w_full()
+                    .gap(GRID_GAP)
+                    .justify_center()
+                    .child(main.h_full().w(stage_room.0.min(height * shape)).shrink())
+                    .child(
+                        col()
+                            .key("strip")
+                            .w(strip)
+                            .h_full()
+                            .gap(GRID_GAP)
+                            .justify_center()
+                            .children(
+                                thumbnails
+                                    .into_iter()
+                                    .map(|(content, shape)| cell(content, size, shape)),
+                            ),
+                    ),
+            )
         }
     };
     if !overflow.is_empty() {
@@ -1120,8 +1220,8 @@ fn show_others(t: &Theme, count: usize) -> El {
 
 /// Tiles that fit beneath the stage; further unjoined streams become "Also live" chips.
 const MAX_STRIP: usize = 4;
-const STRIP_HEIGHT: f32 = 132.0;
-const SCROLLED_ROW_HEIGHT: f32 = 240.0;
+/// The least height the streams under the large one get: a picture this tall.
+const STRIP_HEIGHT: f32 = 120.0;
 const GRID_GAP: f32 = 10.0;
 /// Below this picture width the grid stops squeezing streams in and scrolls instead.
 const MIN_PICTURE_WIDTH: f32 = 200.0;
@@ -1143,119 +1243,148 @@ fn pane_size(s: &App, cx: &mut Cx<App>) -> (f32, f32) {
     )
 }
 
-fn cell_width(room: (f32, f32), columns: usize) -> f32 {
-    let columns = columns as f32;
-    (room.0 - GRID_GAP * (columns - 1.0)) / columns
+/// The shape a box is laid out for until a picture says otherwise: 16:9, as most screens and
+/// games are.
+const WIDE: f32 = 16.0 / 9.0;
+
+/// A watched stream's picture shape, width over height: its own once a frame has arrived
+/// (turned when the picture is turned a quarter), 16:9 before that.
+fn aspect(watch: &Watching) -> f32 {
+    watch
+        .frame
+        .as_ref()
+        .filter(|frame| frame.width > 0 && frame.height > 0)
+        .map_or(WIDE, |frame| {
+            let (width, height) = (frame.width as f32, frame.height as f32);
+            let quarters = (frame.rotation / std::f32::consts::FRAC_PI_2).round() as i32;
+            if quarters % 2 == 0 {
+                width / height
+            } else {
+                height / width
+            }
+        })
 }
 
-/// How wide a 16:9 picture gets with this many columns.
-fn picture_width(count: usize, columns: usize, (width, height): (f32, f32)) -> f32 {
-    let rows = count.div_ceil(columns) as f32;
-    let cell_height = (height - GRID_GAP * (rows - 1.0)) / rows;
-    cell_width((width, height), columns).min(cell_height * 16.0 / 9.0)
+/// How the grid lays its streams out: how many boxes each row holds, the size of each row's
+/// boxes, and whether it all fits the pane or scrolls.
+#[derive(Debug, Clone, PartialEq)]
+struct GridLayout {
+    rows: Vec<usize>,
+    cells: Vec<(f32, f32)>,
+    fitted: bool,
 }
 
-/// The column count that makes the pictures largest, or `None` when even that is too small
-/// to share the pane and the grid should scroll.
-fn grid_columns(count: usize, pane: (f32, f32)) -> Option<usize> {
-    let best = (1..=count.clamp(1, 3))
-        .max_by(|a, b| picture_width(count, *a, pane).total_cmp(&picture_width(count, *b, pane)))?;
-    (picture_width(count, best, pane) >= MIN_PICTURE_WIDTH).then_some(best)
-}
-
-/// How many boxes each row of the grid holds. A count that doesn't divide evenly leaves a short
-/// row. In two rows it leads and fills the width, larger than the row under it: one stream over
-/// two, two over three. In more rows that would shrink the rest too far, so it comes last, its
-/// boxes the size of the others. A scrolling list keeps pairs.
-fn grid_rows(count: usize, columns: Option<usize>, pane: (f32, f32)) -> Vec<usize> {
-    let Some(mut columns) = columns else {
-        let mut rows = vec![2; count / 2];
-        if count % 2 == 1 {
-            rows.push(1);
+/// The arrangement that makes the smallest picture largest, with every box hugging a 16:9
+/// picture so the pane has no bands beside the pictures. Each column count from one to all of
+/// them is tried; a short row comes last, centred, its boxes the size of the others. In two
+/// rows a short row leads instead, wider than the rest, where the pane has the height for it
+/// (one over two, two over three). When even the best leaves pictures too small to share the
+/// pane, the grid scrolls in pairs. Chosen from the count and the pane only, so the streams
+/// don't reshuffle as their pictures arrive.
+fn grid_layout(count: usize, (width, height): (f32, f32)) -> GridLayout {
+    let count = count.max(1);
+    let across = |columns: usize| (width - GRID_GAP * (columns as f32 - 1.0)) / columns as f32;
+    let mut best: Option<(f32, f32, GridLayout)> = None;
+    for columns in 1..=count {
+        let lines = count.div_ceil(columns);
+        let tall = (height - GRID_GAP * (lines as f32 - 1.0)) / lines as f32;
+        let picture = (across(columns) / WIDE).min(tall);
+        if picture <= 0.0 {
+            continue;
         }
-        return rows;
-    };
-    // Five as two over three, where three still fit side by side, rather than three rows.
-    if count == 5
-        && columns == 2
-        && pane.0 > pane.1
-        && picture_width(count, 3, pane) >= MIN_PICTURE_WIDTH
-    {
-        columns = 3;
+        let mut rows = vec![columns; count / columns];
+        if !count.is_multiple_of(columns) {
+            rows.push(count % columns);
+        }
+        let mut cells = vec![(picture * WIDE, picture); rows.len()];
+        if rows.len() == 2 && rows[1] < rows[0] {
+            let lead = (across(rows[1]) / WIDE).min(height - GRID_GAP - picture);
+            if lead > picture * 1.05 {
+                rows.swap(0, 1);
+                cells[0] = (lead * WIDE, lead);
+            }
+        }
+        let area: f32 = rows
+            .iter()
+            .zip(&cells)
+            .map(|(boxes, (w, h))| *boxes as f32 * w * h)
+            .sum();
+        let better = best.as_ref().is_none_or(|(smallest, total, _)| {
+            picture > smallest + 0.5 || (picture > smallest - 0.5 && area > *total)
+        });
+        if better {
+            best = Some((
+                picture,
+                area,
+                GridLayout {
+                    rows,
+                    cells,
+                    fitted: true,
+                },
+            ));
+        }
     }
-    let columns = columns.clamp(1, count.max(1));
-    let mut rows = vec![columns; count / columns];
-    if !count.is_multiple_of(columns) {
-        let at = if rows.len() == 1 { 0 } else { rows.len() };
-        rows.insert(at, count % columns);
-    }
-    rows
-}
-
-/// Whether the grid's short row leads and fills the width: only fitted, in two rows.
-fn lead_row(rows: &[usize], fitted: bool) -> bool {
-    fitted && rows.len() == 2 && rows[0] < rows[1]
-}
-
-/// How many boxes wide each row of the grid is laid out as: its own count where a short row
-/// leads, and the fullest row's everywhere else, so boxes are one size.
-fn row_spans(rows: &[usize], fitted: bool) -> Vec<usize> {
-    let widest = rows.iter().copied().max().unwrap_or(1);
-    if lead_row(rows, fitted) {
-        rows.to_vec()
-    } else {
-        vec![widest; rows.len()]
+    match best {
+        Some((picture, _, layout)) if picture * WIDE >= MIN_PICTURE_WIDTH => layout,
+        // Too many to share the pane: pairs, each as large as half the width allows.
+        _ => {
+            let columns = count.min(2);
+            let cell = (across(columns), across(columns) / WIDE);
+            let mut rows = vec![columns; count / columns];
+            if !count.is_multiple_of(columns) {
+                rows.push(count % columns);
+            }
+            let cells = vec![cell; rows.len()];
+            GridLayout {
+                rows,
+                cells,
+                fitted: false,
+            }
+        }
     }
 }
 
-/// The height a row of `boxes` wants: a 16:9 picture as wide as its box, its bar floating over it.
-fn row_height(pane: (f32, f32), boxes: usize) -> f32 {
-    cell_width(pane, boxes) * 9.0 / 16.0
+/// The widest a box of this shape gets in a cell, for sizing what floats over it.
+fn fitted_width((width, height): (f32, f32), aspect: f32) -> f32 {
+    width.min(height * aspect)
 }
 
-/// The grid: `rows` boxes to a row. Fitted rows that have the height they want take exactly
-/// that and sit in the middle, so boxes hug their pictures; short of it they share the height in
-/// the same proportions. A short row that doesn't lead is centred. Unfitted, the rows scroll at
-/// one height.
-fn grid(k: &Kit, cells: Vec<El>, rows: &[usize], fitted: bool, pane: (f32, f32)) -> El {
-    let spans = row_spans(rows, fitted);
+/// A cell of the given size that holds a box of the given shape, as large as fits, in its
+/// middle. A stale pane size can make the cell larger than its row; it then shrinks, and the
+/// box with it.
+fn cell(content: El, (width, height): (f32, f32), aspect: f32) -> El {
+    col()
+        .w(width)
+        .h(height)
+        .min_w(0.0)
+        .min_h(0.0)
+        .shrink()
+        .center()
+        .child(content.grow(0.0).aspect_fit(aspect))
+}
+
+/// The grid: rows of cells, each the size its row was given, centred in the pane. A fitted grid
+/// sits in the middle of the pane; one that doesn't fit scrolls.
+fn grid(k: &Kit, cells: Vec<El>, layout: &GridLayout) -> El {
     let mut grid = col().key("grid").w_full().gap(GRID_GAP);
-    let wanted: f32 = spans
-        .iter()
-        .map(|span| row_height(pane, *span))
-        .sum::<f32>()
-        + GRID_GAP * rows.len().saturating_sub(1) as f32;
-    let roomy = wanted <= pane.1;
-    if fitted {
+    if layout.fitted {
         grid = grid.grow(1.0).min_h(0.0).justify_center();
     }
     let mut cells = cells.into_iter();
-    for (index, (boxes, span)) in rows.iter().zip(&spans).enumerate() {
-        let mut line = row()
-            .key(format!("grid-row-{index}"))
-            .w_full()
-            .gap(GRID_GAP);
-        line = if fitted && roomy {
-            line.h(row_height(pane, *span))
-        } else if fitted {
-            line.grow(row_height(pane, *span)).min_h(0.0)
-        } else {
-            line.h(SCROLLED_ROW_HEIGHT)
-        };
-        // A short row's spacers take the missing boxes' room less the gap each adds, so its
-        // boxes come out as wide as a full row's.
-        let margin = (span - boxes) as f32 / 2.0;
-        let spacer = (margin * (cell_width(pane, *span) + GRID_GAP) - GRID_GAP).max(0.0);
-        if margin > 0.0 {
-            line = line.child(el().w(spacer).min_w(0.0));
-        }
-        line = line.children(cells.by_ref().take(*boxes));
-        if margin > 0.0 {
-            line = line.child(el().w(spacer).min_w(0.0));
-        }
-        grid = grid.child(line);
+    for (index, (boxes, (_, height))) in layout.rows.iter().zip(&layout.cells).enumerate() {
+        grid = grid.child(
+            row()
+                .key(format!("grid-row-{index}"))
+                .w_full()
+                .h(*height)
+                .min_h(0.0)
+                .shrink()
+                .gap(GRID_GAP)
+                .justify_center()
+                .children(cells.by_ref().take(*boxes)),
+        );
     }
-    if fitted {
+    if layout.fitted {
         grid
     } else {
         scroll_page(k, "streams-scroll", grid)
@@ -1283,9 +1412,8 @@ fn watched_in_path(s: &App, path: &str) -> Option<String> {
 /// double-click on a grid tile lands on the stage it just moved to, so it counts there only
 /// when the first click did too.
 fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
-    let id = stream.id.clone();
     let on_stage = matches!(mode, Mode::Stage | Mode::Solo);
-    video
+    moves(video, stream, mode)
         .role("button")
         .label(format!("Move or focus {}", stream.name))
         .help(if on_stage {
@@ -1293,6 +1421,15 @@ fn movable(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
         } else {
             "Click to make this the large stream · drag onto another stream to swap"
         })
+}
+
+/// What a press on a stream does, without naming the element: the picture is the stream's
+/// button, while its floating bar passes presses between its own buttons on to the same
+/// actions, so the bar costs the picture none of its clicks or drags.
+fn moves(video: El, stream: &streaming::StreamInfo, mode: Mode) -> El {
+    let id = stream.id.clone();
+    let on_stage = matches!(mode, Mode::Stage | Mode::Solo);
+    video
         .cursor(rune::Cursor::Pointer)
         .on_pointer_move_local(|s: &mut App, p, tx: &mut Tx| {
             s.ui.row_origin = (p.window_x - p.x, p.window_y - p.y);
@@ -1438,13 +1575,14 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
                     (1.0, Color::WHITE.alpha(0.0)),
                 ],
             )
-            .child(
-                col().gap(10.0).center().child(pulse(t.accent)).child(
+            // A small tile's bar shows it connecting with its pulsing dot.
+            .child(col().gap(10.0).center().child(pulse(t.accent)).children(
+                (mode != Mode::Thumbnail).then(|| {
                     text(watch.phase.label())
                         .font(ty::SMALL)
-                        .color(Color::WHITE.alpha(0.7)),
-                ),
-            ),
+                        .color(Color::WHITE.alpha(0.7))
+                }),
+            )),
         None => video.child(
             col().gap(10.0).center().child(pulse(t.accent)).child(
                 text(watch.phase.label())
@@ -1482,8 +1620,7 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
                 .child(trouble(t, problem, mode == Mode::Thumbnail)),
         );
     }
-    // In a grid or on the stage the bar floats over the bottom of the picture while the pointer
-    // is over this stream, and stays while it connects, so the picture has the whole box.
+    // Whether this stream's bar and buttons float over its picture: while the pointer is on it.
     let bar_up = overlays(s) && s.ui.stream_hover.as_deref() == Some(id.as_str());
     if mode == Mode::Grid && bar_up {
         video = video.child(
@@ -1492,14 +1629,14 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
                 .absolute(0.0, 0.0)
                 .w_full()
                 .padding(6.0)
-                .child(icon_button(
+                .child(holds_overlays(icon_button(
                     t,
                     "focus",
                     &icons::ZOOM_IN,
                     "Make this the large stream",
                     Variant::Secondary,
                     Some(Message::FocusStream(Some(id.clone()))),
-                ))
+                )))
                 .child(el().grow(1.0)),
         );
     }
@@ -1565,59 +1702,69 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
     if drag.is_some_and(|drag| drag.id == id) {
         frame = frame.opacity(0.45);
     }
-    if mode == Mode::Thumbnail {
+    let hover_id = id.clone();
+    frame = frame.on_hover_change(move |s: &mut App, hovering, _| {
+        if hovering {
+            s.ui.stream_hover = Some(hover_id.clone());
+        } else if s.ui.stream_hover.as_deref() == Some(hover_id.as_str()) {
+            s.ui.stream_hover = None;
+        }
+    });
+    // A small tile's bar is just who it is and their sound; a larger one's has the controls.
+    let thumbnail = mode == Mode::Thumbnail;
+    let bar = if thumbnail {
         let dot = if receiving {
             lit_dot(t.live)
         } else {
             pulse(t.fair)
         };
-        if let Some(key) = watch.own {
-            return frame.child(
-                label_row(
-                    t,
-                    own_share(s, key).map_or("You", share_title).to_owned(),
-                    dot,
-                )
-                .child(hide_preview_button(t, key)),
-            );
-        }
-        frame.child(
-            thumbnail_label(s, t, watch.stream.publisher, dot).child(mute_button(
+        match watch.own {
+            Some(key) => label_row(
+                t,
+                own_share(s, key).map_or("You", share_title).to_owned(),
+                dot,
+            )
+            .child(hide_preview_button(t, key)),
+            None => thumbnail_label(s, t, watch.stream.publisher, dot).child(mute_button(
                 s,
                 t,
                 watch,
                 Variant::Ghost,
             )),
-        )
+        }
     } else {
-        let hover_id = id.clone();
-        frame = frame.on_hover_change(move |s: &mut App, hovering, _| {
-            if hovering {
-                s.ui.stream_hover = Some(hover_id.clone());
-            } else if s.ui.stream_hover.as_deref() == Some(hover_id.as_str()) {
-                s.ui.stream_hover = None;
-            }
-        });
-        let overlay = (bar_up || !receiving).then(|| {
-            col()
-                .key("tile-overlay")
-                .absolute(0.0, 0.0)
-                .w_full()
-                .h_full()
-                .justify_end()
-                .padding(8.0)
-                .child(
-                    holds_overlays(controls(s, t, watch, mode, width - 16.0))
-                        .key("tile-bar")
-                        .radius(radius::CARD)
-                        .fill(t.surface.alpha(0.86))
-                        .border(1.0, t.hairline)
-                        .backdrop_blur(12.0),
-                )
-                .transition(Transition::opacity())
-        });
-        frame.children(overlay)
-    }
+        controls(s, t, watch, mode, width - 16.0)
+    };
+    let bar = if several {
+        moves(bar, &watch.stream, mode)
+    } else {
+        bar
+    };
+    // The bar floats over the bottom of the picture while the pointer is over this stream, and
+    // stays while it connects, so the picture has the whole box.
+    let overlay = (bar_up || !receiving).then(|| {
+        col()
+            .key("tile-overlay")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .justify_end()
+            .padding(if thumbnail { 4.0 } else { 8.0 })
+            .child(
+                holds_overlays(bar)
+                    .key("tile-bar")
+                    .radius(if thumbnail {
+                        radius::CONTROL
+                    } else {
+                        radius::CARD
+                    })
+                    .fill(t.surface.alpha(0.86))
+                    .border(1.0, t.hairline)
+                    .backdrop_blur(12.0),
+            )
+            .transition(Transition::opacity())
+    });
+    frame.children(overlay)
 }
 
 /// The box around a stream's picture. A preview and its watched tile share the key, so pressing
@@ -1702,12 +1849,26 @@ fn preview(s: &App, t: &Theme, stream: &streaming::StreamInfo, supported: bool, 
         )
         .center();
     if thumbnail {
-        return tile_frame(t, &stream.id, t.hairline, video.child(watch)).child(thumbnail_label(
-            s,
+        // Who it is over the way in, inside the box, so the box is all picture once watched.
+        let name = row()
+            .gap(6.0)
+            .center_y()
+            .min_w(0.0)
+            .px(8.0)
+            .child(lit_dot(t.live))
+            .child(
+                text(publisher_name(s, stream.publisher))
+                    .font(ty::SMALL)
+                    .color(Color::WHITE.alpha(0.86))
+                    .truncate_fade()
+                    .min_w(0.0),
+            );
+        return tile_frame(
             t,
-            stream.publisher,
-            lit_dot(t.live),
-        ));
+            &stream.id,
+            t.hairline,
+            video.child(col().gap(8.0).center().min_w(0.0).child(name).child(watch)),
+        );
     }
     let viewers = match stream.viewers {
         1 => "1 viewer".to_owned(),
@@ -1781,7 +1942,6 @@ const STREAM_VOLUME: Range = Range {
     key_step: 5,
 };
 
-/// Under a stream: who and what, its volume, focus and stop.
 /// A stream's two lines: what it shows over who shares it, or the publisher first when the
 /// stream's own name only says it is a screen share.
 fn stream_lines(s: &App, stream: &streaming::StreamInfo) -> (String, String) {

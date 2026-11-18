@@ -1408,6 +1408,8 @@ enum Message {
     HideOtherStreams(bool),
     /// The large stream fills the screen, or comes back into the window.
     StreamFullscreen(bool),
+    /// Every stream fills the screen as the stage lays them out now.
+    StreamsFullscreen,
     /// Trades two watched streams' places.
     SwapStreams(String, String),
     /// A publisher's stream volume, in percent, up to `streaming::MAX_VOLUME`.
@@ -4376,6 +4378,12 @@ impl App {
                     }
                     let hidden = std::mem::replace(&mut streaming.others_hidden, true);
                     self.ui.fullscreen = Some(hidden);
+                }
+            }
+            // The whole stage takes the screen as it is, every stream where it was.
+            Message::StreamsFullscreen => {
+                if self.ui.fullscreen.is_none() && ui::fullscreen_allowed(self) {
+                    self.ui.fullscreen = Some(self.server().streaming.others_hidden);
                 }
             }
             Message::StreamFullscreen(false) => {

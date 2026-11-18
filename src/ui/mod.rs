@@ -891,7 +891,8 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         dispatch(s, tx, Message::StreamFullscreen(false));
         return true;
     }
-    // F takes the large stream full screen, or brings it back, as video players do.
+    // F takes the streams full screen as they are laid out, or brings them back, as video
+    // players do.
     if matches!(&key.key, rune::Key::Text(typed) if typed.eq_ignore_ascii_case("f"))
         && !key.mods.cmd
         && !key.mods.alt
@@ -899,7 +900,12 @@ fn on_key(s: &mut App, key: &rune::KeyEvent, tx: &mut Tx) -> bool {
         && s.settings_page.is_none()
         && streams::fullscreen_allowed(s)
     {
-        dispatch(s, tx, Message::StreamFullscreen(s.ui.fullscreen.is_none()));
+        let message = if s.ui.fullscreen.is_none() {
+            Message::StreamsFullscreen
+        } else {
+            Message::StreamFullscreen(false)
+        };
+        dispatch(s, tx, message);
         return true;
     }
     if key.key == rune::Key::Escape && s.ui.rail_peek.unpin() {
