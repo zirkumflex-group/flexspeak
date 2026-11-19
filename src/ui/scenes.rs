@@ -61,6 +61,9 @@ pub const SCENES: &[Scene] = &[
     ("monster-empty", monster_empty),
     ("monster-board", monster_board),
     ("monster-add-confirm", monster_add_confirm),
+    ("monster-add-all", monster_add_all),
+    ("monster-caffeine", monster_caffeine),
+    ("monster-caffeine-light", monster_caffeine_light),
     ("monster-connected", monster_connected),
     ("monster-unboxed", monster_unboxed),
     ("monster-unboxed-rare", monster_unboxed_rare),
@@ -1641,6 +1644,36 @@ fn monster_add_confirm(s: &mut App) {
     stocked(s);
     let (khaotic, _) = crate::monster::flavour_by_id("khaotic").unwrap();
     s.monster.confirming = Some(khaotic);
+}
+
+/// Show More pressed: every flavour is listed under the favourites.
+fn monster_add_all(s: &mut App) {
+    stocked(s);
+    s.ui.monster_all_flavours = true;
+}
+
+/// Three cans today, five hours, two hours and ten minutes ago: the caffeine chart is still
+/// climbing from the last one.
+fn monster_caffeine(s: &mut App) {
+    use crate::monster::{Can, Rarity};
+    stocked(s);
+    let now = chrono::Utc::now().timestamp();
+    for (flavour, minutes) in [("ultra-white", 300), ("mango-loco", 120), ("original", 10)] {
+        let id = s.monster.cans.len() as i64 + 1;
+        s.monster.cans.push(Can {
+            id,
+            flavour: flavour.into(),
+            at: now - minutes * 60,
+            rarity: Rarity::Common,
+            seed: 0,
+        });
+    }
+}
+
+fn monster_caffeine_light(s: &mut App) {
+    monster_caffeine(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+    s.appearance.light_theme = settings::ThemeName::Ocean;
 }
 
 /// Mara opens a Legendary: her row lights up in its colour and the channel gets the card.
@@ -5500,6 +5533,70 @@ mod tests {
         assert!(
             rt.find("monster-flavour-original").is_some(),
             "all flavours, nothing drunk yet"
+        );
+    }
+
+    #[test]
+    fn rare_flavours_stay_folded_until_asked_for_or_searched() {
+        let mut rt = runtime(monster_board, (1100.0, 1500.0));
+        settle(&mut rt);
+        let favourites: Vec<usize> = crate::monster::favourites(&rt.state.monster.cans, "")
+            .iter()
+            .take(6)
+            .map(|(index, _)| *index)
+            .collect();
+        // A flavour that is neither a favourite here nor a common one.
+        let (rare, flavour) = crate::monster::FLAVOURS
+            .iter()
+            .enumerate()
+            .find(|(index, _)| !crate::monster::common(*index) && !favourites.contains(index))
+            .unwrap();
+        let chip = format!("monster-flavour-{}", flavour.id);
+        assert!(rt.find(&chip).is_none(), "folded away");
+        for index in favourites {
+            let id = crate::monster::FLAVOURS[index].id;
+            assert!(rt.find(&format!("monster-flavour-{id}")).is_some());
+        }
+        assert!(rt.find("monster-flavour-mango-loco").is_some(), "common");
+
+        click(&mut rt, "monster-all-flavours");
+        settle(&mut rt);
+        assert!(rt.find(&chip).is_some(), "Show More lists it");
+        click(&mut rt, "monster-all-flavours");
+        settle(&mut rt);
+        assert!(rt.find(&chip).is_none(), "Show Fewer folds it again");
+
+        assert!(!crate::monster::common(rare));
+
+        // A search looks through every flavour, folded or not, and needs no Show More.
+        let (lh44, _) = crate::monster::flavour_by_id("lh44").unwrap();
+        assert!(!crate::monster::common(lh44));
+        let mut rt = runtime(monster_search_alias, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-flavour-lh44").is_some());
+        assert!(rt.find("monster-all-flavours").is_none());
+    }
+
+    #[test]
+    fn the_caffeine_chart_shows_on_your_board_and_rests_without_recent_cans() {
+        let mut rt = runtime(monster_caffeine, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-caffeine-chart").is_some());
+        assert!(rt.find("monster-caffeine-now").is_some());
+
+        let mut rt = runtime(monster_empty, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-caffeine").is_some());
+        assert!(
+            rt.find("monster-caffeine-chart").is_none(),
+            "one quiet line"
+        );
+
+        let mut rt = runtime(monster_person, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(
+            rt.find("monster-caffeine").is_none(),
+            "not on someone else's"
         );
     }
 

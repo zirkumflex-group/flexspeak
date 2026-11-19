@@ -1373,6 +1373,8 @@ enum Message {
     MonsterConfirm(Option<usize>),
     MonsterAdd(usize),
     MonsterSearch(String),
+    /// Shows every flavour in the Add panel, or only the common ones again.
+    MonsterAllFlavours(bool),
     MonsterRevealTick(u64),
     /// Moves lit rows on through their pulse and puts out the ones that are over.
     UnboxTick,
@@ -4226,6 +4228,7 @@ impl App {
             }
             Message::CloseSettings => self.close_settings(),
             Message::MonsterSearch(query) => self.monster.query = query,
+            Message::MonsterAllFlavours(all) => self.ui.monster_all_flavours = all,
             Message::MonsterConfirm(flavour) => {
                 // Nothing is asked while a can is being added or opened.
                 let busy = self.monster.reveal.is_some() || self.monster.adding;

@@ -3,11 +3,15 @@
 //! A card is a stack of rune-fx layers (see `fx::CardFx`) around a can built from more of them.
 //! Cards sit on a fixed dark cabinet in every theme, because their glow and fire are light.
 
-use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
-use rune::{Color, Cx, Drag, El, TextStyle, Transition, Tx, col, el, icon, row, text};
+use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone, Timelike};
+use rune::{
+    Color, Cx, Drag, El, LineCap, Shape, TextStyle, Transition, Tx, canvas, col, el, icon, row,
+    text,
+};
 use rune_kit::Kit;
 
 use super::can3d::{self, HOVERED, REDUCED, SHOWCASE};
+use super::charts::color_key;
 use super::fx::{CardFx, card_fx, card_layers};
 use super::theme::{Theme, motion, radius, rgb, size, ty};
 use super::widgets::{
@@ -16,8 +20,8 @@ use super::widgets::{
 };
 use super::{icons, send};
 use crate::monster::{
-    self, Action, Beat, Board, CARDS, Can, FLAVOURS, Flavour, Gate, Notice, Ranking, Rarity,
-    Reveal, Section, Standing,
+    self, Action, Beat, Board, CARDS, Caffeine, Can, FLAVOURS, Flavour, Gate, Notice, Ranking,
+    Rarity, Reveal, Section, Standing,
 };
 use crate::{App, Message};
 
@@ -48,7 +52,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     let today = Local::now().date_naive();
     let section = s.monster.section;
     let (key, sections) = match section {
-        Section::Overview => ("overview".to_owned(), overview(s, t, k, today, reduced)),
+        Section::Overview => ("overview".to_owned(), overview(s, cx, t, k, today, reduced)),
         Section::Flavours => ("flavours".to_owned(), flavour_list(s, t, reduced)),
         Section::Flavour(index) => (
             format!("flavour-{index}"),
@@ -840,7 +844,7 @@ fn person_page(s: &App, t: &Theme, user: i64, today: NaiveDate, reduced: bool) -
     };
     vec![
         header,
-        profile(s, t, &format!("{name}'s Board"), &board, today),
+        profile(s, t, &format!("{name}'s Board"), &board, today, None),
         collection,
     ]
 }
@@ -983,7 +987,14 @@ fn sync_choice(s: &App, t: &Theme) -> Option<El> {
     )
 }
 
-fn overview(s: &App, t: &Theme, k: &Kit, today: NaiveDate, reduced: bool) -> Vec<El> {
+fn overview(
+    s: &App,
+    cx: &mut Cx<App>,
+    t: &Theme,
+    k: &Kit,
+    today: NaiveDate,
+    reduced: bool,
+) -> Vec<El> {
     let board = Board::new(&s.monster.cans, today, |at| local_date(at).unwrap_or(today));
     vec![
         row()
@@ -992,7 +1003,7 @@ fn overview(s: &App, t: &Theme, k: &Kit, today: NaiveDate, reduced: bool) -> Vec
             .flex_wrap()
             .child(showcase(s, reduced))
             .child(add_panel(s, t, k)),
-        profile(s, t, "Your Board", &board, today),
+        profile(s, t, "Your Board", &board, today, Some(caffeine(s, cx, t))),
         collection(s, t, reduced),
     ]
 }
@@ -1284,6 +1295,14 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
             .count()
     };
     let (favourites, rest) = order.split_at(favourite_count);
+    // Until a search or Show All, only the common flavours follow the favourites.
+    let all = searching || s.ui.monster_all_flavours;
+    let offered: Vec<(usize, u32)> = rest
+        .iter()
+        .copied()
+        .filter(|(index, _)| all || monster::common(*index))
+        .collect();
+    let folded = rest.len() - offered.len();
     let mut panel = col()
         .key("monster-add")
         .grow(1.0)
@@ -1304,7 +1323,7 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
                 k,
                 &s.ui.monster_search,
                 |s: &mut App| &mut s.ui.monster_search,
-                "Search flavours",
+                &format!("Search all {} flavours", FLAVOURS.len()),
                 Some(Message::MonsterSearch),
                 // Enter takes the first match, so a search and Enter is the quickest way in.
                 order
@@ -1318,13 +1337,15 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
             .child(group_title(t, "Your Favourites").mt(4.0))
             .child(flavour_buttons(t, favourites, open));
     }
-    if rest.is_empty() {
+    if offered.is_empty() {
         if searching {
             panel = panel.child(muted(t, "No flavour by that name. Try “Other”.").mt(4.0));
         }
     } else {
         let label = if searching {
             "Matches"
+        } else if !all {
+            "Popular Flavours"
         } else if favourites.is_empty() {
             "Flavours"
         } else {
@@ -1332,7 +1353,22 @@ fn add_panel(s: &App, t: &Theme, k: &Kit) -> El {
         };
         panel = panel
             .child(group_title(t, label).mt(4.0))
-            .child(flavour_buttons(t, rest, open));
+            .child(flavour_buttons(t, &offered, open));
+    }
+    if !searching {
+        let (label, glyph) = if all {
+            ("Show Fewer".to_owned(), &icons::CHEVRON_UP)
+        } else {
+            (format!("Show {folded} More"), &icons::CHEVRON_DOWN)
+        };
+        panel = panel.child(row().child(button(
+            t,
+            "monster-all-flavours",
+            label,
+            Some(glyph),
+            Variant::Secondary,
+            Some(Message::MonsterAllFlavours(!all)),
+        )));
     }
     panel = panel.child(notice(s, t));
     if let Some(error) = &tracker.load_error {
@@ -1494,15 +1530,197 @@ fn odds(s: &App, t: &Theme) -> El {
 
 // ---------------------------------------------------------------- the board
 
-fn profile(s: &App, t: &Theme, heading: &str, board: &Board, today: NaiveDate) -> El {
+/// `now` is the caffeine chart, on your own board only: it says how you are, not what you own.
+fn profile(
+    s: &App,
+    t: &Theme,
+    heading: &str,
+    board: &Board,
+    today: NaiveDate,
+    now: Option<El>,
+) -> El {
     col()
         .key("monster-board")
         .w_full()
         .gap(14.0)
         .child(title(t, heading))
         .child(stats(t, board))
+        .children(now)
         .child(heatmap(s, t, board, today))
         .child(flavours(t, board))
+}
+
+/// The caffeine chart's canvas, whose width layout decides.
+const CAFFEINE_CHART: &str = "monster-caffeine-chart";
+const CAFFEINE_HEIGHT: f32 = 72.0;
+/// How far the chart looks back and ahead, in seconds, and how far apart its points are.
+const CAFFEINE_BEFORE: i64 = 6 * 3600;
+const CAFFEINE_AFTER: i64 = 18 * 3600;
+const CAFFEINE_STEP: i64 = 300;
+
+/// Caffeine in your body from six hours ago to eighteen ahead, estimated from when each can
+/// was added: the past as a line over a fill, what's still to come fainter. It follows the
+/// clock a minute at a time and never animates.
+fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
+    let now = chrono::Utc::now().timestamp() / 60 * 60;
+    let caffeine = Caffeine::new(&s.monster.cans, now);
+    let (start, end) = (now - CAFFEINE_BEFORE, now + CAFFEINE_AFTER);
+    let samples: Vec<(i64, f32)> = (start..=end)
+        .step_by(CAFFEINE_STEP as usize)
+        .map(|at| (at, caffeine.mg(at)))
+        .collect();
+    let peak = samples.iter().map(|(_, mg)| *mg).fold(0.0, f32::max);
+    let about = format!(
+        "An estimate: {} mg a can, drunk over {} minutes, halving every {} hours. People vary.",
+        monster::CAFFEINE_MG_PER_CAN,
+        monster::DRINKING_MINUTES,
+        monster::CAFFEINE_HALF_LIFE_HOURS
+    );
+    let head = row()
+        .gap(6.0)
+        .center_y()
+        .grow(1.0)
+        .child(heading(t, "Caffeine in Your System"))
+        .child(
+            el().key("monster-caffeine-about")
+                .size(14.0, 16.0)
+                .center()
+                .help(about)
+                .child(icon(&icons::INFO, 12.0).color(t.faint).a11y_hidden()),
+        );
+    let frame = well(t).key("monster-caffeine").w_full().gap(6.0);
+    if peak < 1.0 {
+        return frame
+            .px(14.0)
+            .py(10.0)
+            .label("Caffeine in your system: none from your cans right now")
+            .child(
+                row()
+                    .w_full()
+                    .gap(size::GAP)
+                    .center_y()
+                    .child(head)
+                    .child(faint(t, "None from your cans right now")),
+            );
+    }
+    let level = caffeine.mg(now);
+    // A round top, so the scale reads at a glance: 200 mg holds one can, then it grows by hundreds.
+    let top = ((peak * 1.1 / 100.0).ceil() * 100.0).max(200.0);
+    let w = cx
+        .layout_size(CAFFEINE_CHART)
+        .map_or(size::CHART_MIN_WIDTH, |[w, _]| w);
+    let h = CAFFEINE_HEIGHT;
+    let x = move |at: i64| 1.0 + (w - 2.0).max(1.0) * (at - start) as f32 / (end - start) as f32;
+    let y = move |mg: f32| 2.0 + (h - 4.0) * (1.0 - (mg / top).clamp(0.0, 1.0));
+    let (ink, grid, marker) = (t.accent, t.wash(0.05), t.wash(0.16));
+    let chart = rune::memo(
+        "chart-monster-caffeine",
+        (
+            now,
+            &caffeine,
+            w.to_bits(),
+            color_key(ink),
+            color_key(grid),
+            color_key(marker),
+        ),
+        || {
+            let mut shape = Shape::new();
+            for mg in [0.0, top / 2.0, top] {
+                shape = shape.line([0.0, y(mg)], [w, y(mg)], 1.0, LineCap::Butt, grid);
+            }
+            shape = shape.line([x(now), 0.0], [x(now), h], 1.0, LineCap::Butt, marker);
+            let point = |(at, mg): &(i64, f32)| [x(*at), y(*mg)];
+            let past: Vec<[f32; 2]> = samples
+                .iter()
+                .filter(|(at, _)| *at <= now)
+                .map(point)
+                .collect();
+            let ahead: Vec<[f32; 2]> = samples
+                .iter()
+                .filter(|(at, _)| *at >= now)
+                .map(point)
+                .collect();
+            let mut area = vec![[x(start), y(0.0)]];
+            area.extend_from_slice(&past);
+            area.push([x(now), y(0.0)]);
+            shape = shape
+                .fill(area, ink.alpha(0.12))
+                .stroke(past, 1.6, ink)
+                .stroke(ahead, 1.6, ink.alpha(0.45));
+            let here = [x(now), y(level)];
+            canvas(shape.line(here, here, 6.0, LineCap::Round, ink))
+        },
+    )
+    .key(CAFFEINE_CHART)
+    .grow(1.0)
+    .min_w(0.0)
+    .h(h)
+    .a11y_hidden();
+
+    let small = TextStyle::new(10.0, 400.0).features("'tnum' 1");
+    let mut scale = el().size(WEEKDAY_COLUMN, h).a11y_hidden();
+    for (mg, at) in [(top, 0.0), (top / 2.0, h / 2.0 - 6.0), (0.0, h - 12.0)] {
+        scale = scale.child(
+            text(format!("{mg:.0}"))
+                .font(small)
+                .color(t.faint)
+                .absolute(0.0, at),
+        );
+    }
+    // Clock hours under the chart, every three, or every six when there's little room.
+    let every = if w < 420.0 { 6 } else { 3 };
+    let mut times = el().grow(1.0).min_w(0.0).h(14.0).a11y_hidden();
+    let label = |at: i64, name: String, color: Color| {
+        el().absolute(x(at) - 24.0, 0.0)
+            .w(48.0)
+            .center()
+            .child(text(name).font(small).color(color))
+    };
+    // From the first whole hour on the local clock, which a half-hour time zone puts off UTC's.
+    let into_hour = Local
+        .timestamp_opt(start, 0)
+        .earliest()
+        .map_or(0, |time| i64::from(time.minute() * 60 + time.second()));
+    let mut hour = start + (3600 - into_hour) % 3600;
+    while hour < end {
+        let clear = (x(hour) - x(now)).abs() >= 34.0 && x(hour) >= 20.0 && x(hour) <= w - 20.0;
+        if let Some(time) = Local.timestamp_opt(hour, 0).earliest()
+            && clear
+            && time.hour() % every == 0
+            && time.minute() == 0
+        {
+            times = times.child(label(hour, time.format("%H:%M").to_string(), t.faint));
+        }
+        hour += 3600;
+    }
+    times = times.child(label(now, "Now".to_owned(), t.muted));
+
+    frame
+        .padding(14.0)
+        .label(format!(
+            "Caffeine in your system: about {level:.0} milligrams now"
+        ))
+        .child(
+            row().w_full().gap(size::GAP).center_y().child(head).child(
+                row()
+                    .key("monster-caffeine-now")
+                    .gap(4.0)
+                    .center_y()
+                    .child(
+                        text(format!("≈ {level:.0} mg"))
+                            .font(ty::NUMERIC)
+                            .color(t.text),
+                    )
+                    .child(faint(t, "now")),
+            ),
+        )
+        .child(row().w_full().child(scale).child(chart))
+        .child(
+            row()
+                .w_full()
+                .child(el().w(WEEKDAY_COLUMN).h(14.0))
+                .child(times),
+        )
 }
 
 fn days(n: u32) -> String {
