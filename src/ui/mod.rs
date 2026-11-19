@@ -249,6 +249,10 @@ pub struct UiState {
     pub can_spin: can3d::Spin,
     /// The card the pointer is over there, by its key, whose can leans toward it.
     pub can_hover: Option<String>,
+    /// The Add panel lists every flavour, not only the common ones.
+    pub monster_all_flavours: bool,
+    /// The minute the Monster page was last drawn for; its caffeine chart follows the clock.
+    pub monster_minute: i64,
     pub server_name: TextEdit,
     pub server_address: TextEdit,
     pub server_password: TextEdit,
@@ -365,6 +369,8 @@ impl Default for UiState {
             monster_login_code: TextEdit::new(""),
             can_spin: can3d::Spin::default(),
             can_hover: None,
+            monster_all_flavours: false,
+            monster_minute: 0,
             server_name: TextEdit::new(""),
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
@@ -768,6 +774,10 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
             s.omarchy = Some(current);
         }
         s.next_usage_tick = now + usage::REFRESH_INTERVAL;
+        // The caffeine chart moves on a minute at a time, and only while its page shows.
+        let minute = chrono::Utc::now().timestamp() / 60;
+        changed |=
+            s.tab == Tab::Monster && std::mem::replace(&mut s.ui.monster_minute, minute) != minute;
         changed |= ticking_view
             || connection != s.footer_connection_status()
             || resources != footer::resources(s)

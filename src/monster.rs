@@ -30,7 +30,87 @@ mod online;
 pub const PAGE: usize = 48;
 /// A standard can, for the board's totals.
 const LITRES_PER_CAN: f32 = 0.5;
-const CAFFEINE_MG_PER_CAN: u32 = 160;
+pub const CAFFEINE_MG_PER_CAN: u32 = 160;
+/// How long a can takes to drink, for the caffeine estimate: most take 15 to 30 minutes.
+pub const DRINKING_MINUTES: u32 = 20;
+/// How long the body takes to clear half its caffeine. Three to seven hours in healthy
+/// adults; five is the usual middle.
+pub const CAFFEINE_HALF_LIFE_HOURS: u32 = 5;
+/// Past this a can has under a hundredth of its caffeine left, and is left out of the sum.
+const CAFFEINE_REACH: i64 = 40 * 3600;
+
+/// The flavours on most shelves, which the Add panel offers before a search or Show All. Ids
+/// from `FLAVOURS`; the catch-all is among them so there's always something to tap.
+const COMMON: &[&str] = &[
+    "original",
+    "zero-sugar",
+    "the-doctor",
+    "ultra-white",
+    "ultra-paradise",
+    "ultra-fiesta",
+    "ultra-watermelon",
+    "ultra-rosa",
+    "ultra-peachy-keen",
+    "ultra-strawberry",
+    "mango-loco",
+    "pipeline-punch",
+    "pacific-punch",
+    "aussie-lemonade",
+    "khaotic",
+    "bad-apple",
+    "other",
+];
+
+/// Whether the flavour at this place in `FLAVOURS` is one of the common ones.
+pub fn common(index: usize) -> bool {
+    FLAVOURS
+        .get(index)
+        .is_some_and(|flavour| COMMON.contains(&flavour.id))
+}
+
+/// The caffeine one can leaves in the body `seconds` after it was opened, in mg. It goes in at
+/// a steady rate while the can is drunk and leaves by half-life all the while, so the level
+/// tops out as the can empties and halves every `CAFFEINE_HALF_LIFE_HOURS` after that.
+fn caffeine_from_can(seconds: f64) -> f64 {
+    if seconds <= 0.0 {
+        return 0.0;
+    }
+    let leaving = std::f64::consts::LN_2 / (f64::from(CAFFEINE_HALF_LIFE_HOURS) * 3600.0);
+    let drinking = f64::from(DRINKING_MINUTES) * 60.0;
+    let rate = f64::from(CAFFEINE_MG_PER_CAN) / drinking;
+    let drunk_for = seconds.min(drinking);
+    let level = rate / leaving * (1.0 - (-leaving * drunk_for).exp());
+    level * (-leaving * (seconds - drunk_for)).exp()
+}
+
+/// The caffeine in someone's body over time, estimated from when their cans were added.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Caffeine {
+    /// When each can that still counts was opened, in Unix seconds.
+    opened: Vec<i64>,
+}
+
+impl Caffeine {
+    /// The cans that still matter at `now`. A can dated after `now` (a clock that's off)
+    /// counts as opened now.
+    pub fn new(cans: &[Can], now: i64) -> Self {
+        Self {
+            opened: cans
+                .iter()
+                .filter(|can| can.at > now - CAFFEINE_REACH)
+                .map(|can| can.at.min(now))
+                .collect(),
+        }
+    }
+
+    /// Milligrams in the body at `at`, which may be ahead of now: no further cans are assumed.
+    pub fn mg(&self, at: i64) -> f32 {
+        self.opened
+            .iter()
+            .map(|opened| caffeine_from_can((at - opened) as f64))
+            .sum::<f64>() as f32
+    }
+}
 
 /// The luck of a can saved by the scanning version, from its barcode and printed codes, so
 /// those cards keep the rarity they were opened with.
@@ -1140,6 +1220,50 @@ mod tests {
         assert_eq!(names("m-80"), ["Ripper"]);
         assert!(names("no such drink").is_empty());
         assert_eq!(names("  ").len(), FLAVOURS.len());
+    }
+
+    #[test]
+    fn every_common_flavour_exists_and_the_catch_all_is_one() {
+        for id in COMMON {
+            assert!(flavour_by_id(id).is_some(), "{id}");
+        }
+        assert!(common(0), "Original");
+        assert!(common(FLAVOURS.len() - 1), "Another Flavour");
+        assert!(!common(FLAVOURS.len()));
+        assert!(COMMON.len() < FLAVOURS.len() / 4, "a short list");
+    }
+
+    #[test]
+    fn caffeine_rises_while_the_can_is_drunk_and_halves_every_half_life() {
+        let hour = 3600;
+        let cans = on_days(&[1000]);
+        let caffeine = Caffeine::new(&cans, 1000);
+        assert_eq!(caffeine.mg(999), 0.0, "nothing before the can");
+        assert_eq!(caffeine.mg(1000), 0.0);
+        let emptied = 1000 + i64::from(DRINKING_MINUTES) * 60;
+        let peak = caffeine.mg(emptied);
+        assert!(caffeine.mg(1000 + 300) < caffeine.mg(1000 + 600));
+        assert!(caffeine.mg(emptied - 60) < peak && caffeine.mg(emptied + 60) < peak);
+        // A little has already left by the time the can is empty.
+        assert!(peak > 150.0 && peak < 160.0, "{peak}");
+        let half_life = i64::from(CAFFEINE_HALF_LIFE_HOURS) * hour;
+        let later = caffeine.mg(emptied + half_life);
+        assert!((later - peak / 2.0).abs() < 0.01, "{later} against {peak}");
+        assert!((caffeine.mg(emptied + 2 * half_life) - peak / 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn caffeine_adds_up_over_cans_and_forgets_old_ones() {
+        let hour = 3600;
+        let now = 100 * hour;
+        let one = Caffeine::new(&on_days(&[now - 2 * hour]), now);
+        let two = Caffeine::new(&on_days(&[now - 2 * hour, now - 2 * hour]), now);
+        assert!((two.mg(now) - 2.0 * one.mg(now)).abs() < 0.001);
+        // Two days on, a can is gone from the sum; one dated ahead counts from now.
+        let old = Caffeine::new(&on_days(&[now - 48 * hour, now + hour]), now);
+        assert_eq!(old.opened, [now]);
+        assert_eq!(old.mg(now), 0.0);
+        assert!(old.mg(now + hour) > 100.0);
     }
 
     #[test]

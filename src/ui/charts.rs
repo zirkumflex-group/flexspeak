@@ -7,7 +7,7 @@ use super::widgets::{card, faint, well};
 use crate::connection_charts::{ChartPaint, ConnectionHistory, Metric};
 use crate::{App, usage};
 
-fn color_key(color: Color) -> [u32; 4] {
+pub(super) fn color_key(color: Color) -> [u32; 4] {
     [
         color.r.to_bits(),
         color.g.to_bits(),
