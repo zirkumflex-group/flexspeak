@@ -37,7 +37,14 @@ pub const DRINKING_MINUTES: u32 = 20;
 /// adults; five is the usual middle.
 pub const CAFFEINE_HALF_LIFE_HOURS: u32 = 5;
 /// Past this a can has under a hundredth of its caffeine left, and is left out of the sum.
-const CAFFEINE_REACH: i64 = 40 * 3600;
+const CAFFEINE_REACH: i64 = api::CAFFEINE_REACH;
+/// The level the low-caffeine notice starts at unless changed: half a can.
+pub const CAFFEINE_LOW_MG: u32 = 80;
+/// The levels the notice can be set to, and how far one press moves it.
+pub const CAFFEINE_LOW_RANGE: std::ops::RangeInclusive<u32> = 20..=200;
+pub const CAFFEINE_LOW_STEP: u32 = 10;
+/// Under this a level reads as nothing, beside a name and on the chart.
+pub const CAFFEINE_TRACE_MG: f32 = 1.0;
 
 /// The flavours on most shelves, which the Add panel offers before a search or Show All. Ids
 /// from `FLAVOURS`; the catch-all is among them so there's always something to tap.
@@ -94,13 +101,44 @@ impl Caffeine {
     /// The cans that still matter at `now`. A can dated after `now` (a clock that's off)
     /// counts as opened now.
     pub fn new(cans: &[Can], now: i64) -> Self {
+        Self::from_opened(cans.iter().map(|can| can.at), now)
+    }
+
+    /// From the times alone, which is all the server tells about someone else.
+    pub fn from_opened(opened: impl IntoIterator<Item = i64>, now: i64) -> Self {
         Self {
-            opened: cans
-                .iter()
-                .filter(|can| can.at > now - CAFFEINE_REACH)
-                .map(|can| can.at.min(now))
+            opened: opened
+                .into_iter()
+                .filter(|at| *at > now - CAFFEINE_REACH)
+                .map(|at| at.min(now))
                 .collect(),
         }
+    }
+
+    /// When each can that still counts was opened.
+    pub fn opened(&self) -> &[i64] {
+        &self.opened
+    }
+
+    /// When the level next falls under `mg`, looking on from `from`; `None` if it is under it
+    /// and stays there. While a can is still being drunk the level only rises, so the fall
+    /// is looked for from the moment the last one is empty, where it is a plain half-life.
+    pub fn falls_below(&self, mg: f32, from: i64) -> Option<i64> {
+        if mg <= 0.0 {
+            return None;
+        }
+        let emptied = self
+            .opened
+            .iter()
+            .map(|opened| opened + i64::from(DRINKING_MINUTES) * 60)
+            .max()?;
+        let start = from.max(emptied);
+        let level = f64::from(self.mg(start));
+        if level < f64::from(mg) {
+            return None;
+        }
+        let leaving = std::f64::consts::LN_2 / (f64::from(CAFFEINE_HALF_LIFE_HOURS) * 3600.0);
+        Some(start + ((level / f64::from(mg)).ln() / leaving).ceil() as i64)
     }
 
     /// Milligrams in the body at `at`, which may be ahead of now: no further cans are assumed.
@@ -110,6 +148,137 @@ impl Caffeine {
             .map(|opened| caffeine_from_can((at - opened) as f64))
             .sum::<f64>() as f32
     }
+}
+
+/// How often other people's cans are asked for again while they show.
+pub const LEVELS_EVERY: StdDuration = StdDuration::from_secs(5 * 60);
+/// How soon after a reason to (a new face, a card opened in the channel) they are asked for,
+/// so a channel filling up is one request and the server has the new can by then.
+pub const LEVELS_SOON: StdDuration = StdDuration::from_secs(4);
+
+/// When the people around you on TeamSpeak drank their recent cans, as the collection server
+/// tells it, for the caffeine beside their names. Kept by uid as a member row carries it.
+#[derive(Debug, Default)]
+pub struct Levels {
+    opened: std::collections::HashMap<String, Vec<i64>>,
+    /// Everyone asked about last time, so only a new face is a reason to ask early.
+    asked: HashSet<String>,
+    /// When to ask next, if something is waiting.
+    due: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+    waiting: bool,
+}
+
+impl Levels {
+    /// The request to send now, if one is due, for the uids of `members` (as member rows
+    /// carry them). Call it with everyone in view: it asks soon after a new face or
+    /// [`Levels::stale`], and every [`LEVELS_EVERY`] otherwise.
+    pub fn request(
+        &mut self,
+        members: &[&str],
+        now: std::time::Instant,
+    ) -> Option<api::CaffeineQuery> {
+        if self.waiting || members.is_empty() {
+            return None;
+        }
+        if members.iter().any(|uid| !self.asked.contains(*uid)) {
+            let soon = now + LEVELS_SOON;
+            self.due = Some(self.due.map_or(soon, |due| due.min(soon)));
+            self.asked
+                .extend(members.iter().map(|uid| (*uid).to_owned()));
+        }
+        let every = self.last.map(|last| last + LEVELS_EVERY);
+        let due = match (self.due, every) {
+            (Some(due), Some(every)) => due.min(every),
+            (Some(due), None) | (None, Some(due)) => due,
+            (None, None) => now,
+        };
+        if now < due {
+            return None;
+        }
+        let uids: Vec<String> = members
+            .iter()
+            .filter_map(|uid| server_uid(uid))
+            .take(api::CAFFEINE_UIDS)
+            .collect();
+        if uids.is_empty() {
+            return None;
+        }
+        self.asked = members.iter().map(|uid| (*uid).to_owned()).collect();
+        self.due = None;
+        self.last = Some(now);
+        self.waiting = true;
+        Some(api::CaffeineQuery { uids })
+    }
+
+    /// Someone may have just drunk a can: ask again soon.
+    pub fn stale(&mut self, now: std::time::Instant) {
+        self.due = Some(now + LEVELS_SOON);
+    }
+
+    /// The server's answer. A failure keeps what was known, and the next round asks again:
+    /// a server from before this call answers 404 until it is updated, with the app running.
+    pub fn answer(&mut self, result: Result<api::CaffeineLevels, api::Problem>) {
+        self.waiting = false;
+        match result {
+            Ok(levels) => {
+                self.opened = levels
+                    .people
+                    .into_iter()
+                    .filter_map(|person| Some((member_uid(&person.uid)?, person.opened)))
+                    .collect();
+            }
+            Err(problem) => tracing::debug!(
+                target: "flexspeak::monster",
+                error = %problem.error,
+                "caffeine levels not fetched"
+            ),
+        }
+    }
+
+    /// Signed out, or the setting turned off: nothing is known and nothing shows.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The caffeine in the member with this uid, if the server told of their cans.
+    pub fn of(&self, member_uid: &str, now: i64) -> Option<Caffeine> {
+        let opened = self.opened.get(&member_uid.to_ascii_lowercase())?;
+        Some(Caffeine::from_opened(opened.iter().copied(), now))
+    }
+
+    /// For previews: this member drank cans at these times.
+    #[cfg_attr(not(any(test, feature = "tooling")), allow(dead_code))]
+    pub fn set(&mut self, member_uid: &str, opened: Vec<i64>) {
+        self.opened.insert(member_uid.to_ascii_lowercase(), opened);
+    }
+}
+
+/// A member row's uid (hex) as the collection server writes it (base64).
+fn server_uid(member: &str) -> Option<String> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    if member.is_empty() || !member.len().is_multiple_of(2) || !member.is_ascii() {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..member.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&member[at..at + 2], 16).ok())
+        .collect();
+    Some(STANDARD.encode(bytes?))
+}
+
+/// The other way round.
+fn member_uid(server: &str) -> Option<String> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    STANDARD
+        .decode(server)
+        .ok()
+        .map(|bytes| crate::client::uid_key(&bytes))
+}
+
+/// How a level reads beside a name and over the chart: whole milligrams.
+pub fn caffeine_text(mg: f32) -> String {
+    format!("{mg:.0} mg")
 }
 
 /// The luck of a can saved by the scanning version, from its barcode and printed codes, so
@@ -715,6 +884,9 @@ pub struct Tracker {
     db: Option<Connection>,
     /// The roll key; made in memory when there's no database, as in previews.
     key: Option<[u8; 32]>,
+    /// The cans were asked for at launch, not by the page: a failure stays quiet, and the
+    /// page asks again when it opens.
+    warming: bool,
     /// What the page asked of the server, for tests, which run nothing.
     #[cfg(test)]
     pub sent: Vec<Effect>,
@@ -726,6 +898,12 @@ impl Tracker {
     pub fn open(&mut self, settings: Option<&Path>) {
         self.shown = self.shown.max(PAGE);
         self.section = Section::Overview;
+        self.read(settings);
+    }
+
+    /// What `open` reads, without showing the page: at launch, so the caffeine from your
+    /// cans is known before it is ever opened.
+    pub fn read(&mut self, settings: Option<&Path>) {
         if self.server.is_some() {
             if !self.local_read
                 && let Some(settings) = settings
@@ -1264,6 +1442,85 @@ mod tests {
         assert_eq!(old.opened, [now]);
         assert_eq!(old.mg(now), 0.0);
         assert!(old.mg(now + hour) > 100.0);
+    }
+
+    #[test]
+    fn the_fall_under_a_level_is_found_to_the_second() {
+        let hour = 3600;
+        let now = 100 * hour;
+        let caffeine = Caffeine::new(&on_days(&[now - hour]), now);
+        let at = caffeine.falls_below(80.0, now).unwrap();
+        assert!(caffeine.mg(at) < 80.0 && caffeine.mg(at - 2) >= 80.0);
+        // About one half-life after the peak of a single can.
+        assert!((at - now - 4 * hour).abs() < hour, "{}", at - now);
+        assert_eq!(caffeine.falls_below(80.0, at + 1), None, "under it already");
+        assert_eq!(caffeine.falls_below(0.0, now), None);
+        assert_eq!(Caffeine::new(&[], now).falls_below(80.0, now), None);
+        // A can only just opened is under the level but on its way over it: the fall is the
+        // one after it is empty, never a moment while it still rises.
+        let fresh = Caffeine::new(&on_days(&[now - 60]), now);
+        assert!(fresh.mg(now) < 80.0);
+        let at = fresh.falls_below(80.0, now).unwrap();
+        assert!(at > now + 4 * hour && fresh.mg(at) < 80.0 && fresh.mg(at - 2) >= 80.0);
+        assert_eq!(
+            fresh.falls_below(200.0, now),
+            None,
+            "one can never gets there"
+        );
+    }
+
+    #[test]
+    fn levels_are_asked_for_a_new_face_then_only_now_and_then() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let start = std::time::Instant::now();
+        let mut levels = Levels::default();
+        assert_eq!(levels.request(&[], start), None);
+        assert_eq!(levels.request(&["ab01"], start), None, "a moment for more");
+        let asked = levels
+            .request(&["ab01", "", "zz"], start + LEVELS_SOON)
+            .unwrap();
+        assert_eq!(asked.uids, [STANDARD.encode([0xab, 0x01])]);
+        assert_eq!(
+            levels.request(&["ab01"], start + LEVELS_SOON),
+            None,
+            "one at a time"
+        );
+        levels.answer(Ok(api::CaffeineLevels {
+            people: vec![api::CaffeinePerson {
+                uid: STANDARD.encode([0xab, 0x01]),
+                opened: vec![100],
+            }],
+        }));
+        assert!(levels.of("AB01", 100 + 3600).unwrap().mg(100 + 3600) > 100.0);
+        assert!(levels.of("ab02", 100).is_none());
+        let later = start + LEVELS_SOON + StdDuration::from_secs(60);
+        assert_eq!(levels.request(&["ab01"], later), None, "nothing new");
+        levels.stale(later);
+        assert!(levels.request(&["ab01"], later).is_none());
+        assert!(levels.request(&["ab01"], later + LEVELS_SOON).is_some());
+        levels.answer(Err(api::Problem {
+            error: api::problem::SERVER.into(),
+            message: String::new(),
+            tries_left: None,
+        }));
+        assert!(levels.of("ab01", 200).is_some(), "a failure keeps it");
+        let much_later = later + LEVELS_SOON + LEVELS_EVERY;
+        assert!(levels.request(&["ab01"], much_later).is_some());
+        // An older server has no such call yet; once it is updated the next round finds it.
+        levels.answer(Err(api::Problem {
+            error: api::problem::NOT_FOUND.into(),
+            message: String::new(),
+            tries_left: None,
+        }));
+        assert!(
+            levels
+                .request(&["ab01"], much_later + LEVELS_EVERY)
+                .is_some()
+        );
+        // What is asked for is the uid as linking writes it, and the answer maps back.
+        let asked = server_uid("ab01ff10").unwrap();
+        assert!(same_uid(&asked, "ab01ff10"));
+        assert_eq!(member_uid(&asked).as_deref(), Some("ab01ff10"));
     }
 
     #[test]

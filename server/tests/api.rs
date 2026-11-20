@@ -5,7 +5,10 @@ mod common;
 use axum::http::{Method, StatusCode};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{CODE, Server};
-use monster_core::{Rarity, Standing, api::link_message};
+use monster_core::{
+    Rarity, Standing,
+    api::{CAFFEINE_REACH, CAFFEINE_UIDS, link_message},
+};
 use serde_json::{Value, json};
 use tsproto_types::crypto::EccKeyPrivP256;
 
@@ -49,6 +52,7 @@ async fn calls_need_a_session() {
         (Method::GET, "/v1/cans"),
         (Method::GET, "/v1/leaderboard"),
         (Method::POST, "/v1/identities/challenge"),
+        (Method::POST, "/v1/caffeine"),
     ] {
         let answer = server.send(method, path, None, None, None).await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{path}");
@@ -743,6 +747,103 @@ async fn an_identity_belongs_to_one_account() {
         )
         .await;
     assert_eq!(link(&server, &kim, &key).await.status, StatusCode::OK);
+}
+
+async fn caffeine(server: &Server, session: &str, uids: &[&str]) -> common::Answer {
+    server
+        .post("/v1/caffeine", Some(session), json!({ "uids": uids }))
+        .await
+}
+
+#[tokio::test]
+async fn caffeine_comes_from_the_recent_cans_behind_each_linked_uid() {
+    let server = Server::new(false);
+    let (sam, _) = server.sign_in("sam@example.com").await;
+    server.clock.advance(61);
+    let (kim, _) = server.sign_in("kim@example.com").await;
+    let (laptop, desktop) = (EccKeyPrivP256::create(), EccKeyPrivP256::create());
+    assert_eq!(link(&server, &sam, &laptop).await.status, StatusCode::OK);
+    assert_eq!(link(&server, &sam, &desktop).await.status, StatusCode::OK);
+    let (laptop, desktop) = (laptop.to_pub().get_uid(), desktop.to_pub().get_uid());
+
+    // A legacy can counts; one from before the reach doesn't.
+    let hour_ago = common::START - 3600;
+    let cans = json!({ "cans": [
+        { "flavour": "khaotic", "at": common::START - CAFFEINE_REACH - 3600, "rarity": "common", "seed": 1 },
+        { "flavour": "ultra-gold", "at": hour_ago, "rarity": "common", "seed": 2 },
+    ]});
+    let imported = server.post("/v1/cans/import", Some(&sam), cans).await;
+    assert_eq!(imported.status, StatusCode::OK, "{:?}", imported.body);
+    let now = server.add_can(&sam, "original", "k1").await.body["at"].clone();
+    server.clock.advance(5);
+    let removed = server.add_can(&sam, "nitro", "k2").await.body["id"].clone();
+    server.delete(&format!("/v1/cans/{removed}"), &sam).await;
+
+    let levels = caffeine(&server, &kim, &[&desktop, "unknown", &laptop, &desktop]).await;
+    assert_eq!(levels.status, StatusCode::OK, "{:?}", levels.body);
+    assert_eq!(
+        levels.body,
+        json!({ "people": [
+            { "uid": desktop, "opened": [hour_ago, now] },
+            { "uid": laptop, "opened": [hour_ago, now] },
+        ]})
+    );
+
+    // Past the reach the person is still there, with nothing left.
+    server.clock.advance(CAFFEINE_REACH);
+    let later = caffeine(&server, &kim, &[&laptop]).await;
+    assert_eq!(
+        later.body,
+        json!({ "people": [{ "uid": laptop, "opened": [] }] })
+    );
+}
+
+#[tokio::test]
+async fn caffeine_leaves_out_hidden_people_but_not_yourself() {
+    let server = Server::new(false);
+    let (dan, _) = server.sign_in("dan@example.com").await;
+    server.clock.advance(61);
+    let (kim, _) = server.sign_in("kim@example.com").await;
+    let (dan_key, kim_key) = (EccKeyPrivP256::create(), EccKeyPrivP256::create());
+    link(&server, &dan, &dan_key).await;
+    link(&server, &kim, &kim_key).await;
+    let (dan_uid, kim_uid) = (dan_key.to_pub().get_uid(), kim_key.to_pub().get_uid());
+    let at = server.add_can(&dan, "original", "k1").await.body["at"].clone();
+    server
+        .send(
+            Method::PATCH,
+            "/v1/me",
+            Some(&dan),
+            None,
+            Some(json!({ "hidden": true })),
+        )
+        .await;
+
+    let seen_by_kim = caffeine(&server, &kim, &[&dan_uid, &kim_uid]).await;
+    assert_eq!(
+        seen_by_kim.body,
+        json!({ "people": [{ "uid": kim_uid, "opened": [] }] })
+    );
+    let seen_by_dan = caffeine(&server, &dan, &[&dan_uid]).await;
+    assert_eq!(
+        seen_by_dan.body,
+        json!({ "people": [{ "uid": dan_uid, "opened": [at] }] })
+    );
+}
+
+#[tokio::test]
+async fn a_caffeine_query_is_limited_in_size() {
+    let server = Server::new(false);
+    let (sam, _) = server.sign_in("sam@example.com").await;
+    let empty = caffeine(&server, &sam, &[]).await;
+    assert_eq!(empty.status, StatusCode::OK);
+    assert_eq!(empty.body, json!({ "people": [] }));
+    let uids = vec!["someone"; CAFFEINE_UIDS + 1];
+    let too_many = caffeine(&server, &sam, &uids).await;
+    assert_eq!(too_many.status, StatusCode::BAD_REQUEST);
+    assert_eq!(too_many.error(), "invalid");
+    let uids = vec!["someone"; CAFFEINE_UIDS];
+    assert_eq!(caffeine(&server, &sam, &uids).await.status, StatusCode::OK);
 }
 
 #[tokio::test]

@@ -6,8 +6,8 @@ use axum::{Json, extract::State, http::StatusCode};
 use monster_core::{
     Rarity, Standing,
     api::{
-        AddCan, Can, Cans, Collection, Import, Imported, Leaderboard, LeaderboardQuery,
-        LeaderboardRow,
+        AddCan, CAFFEINE_REACH, CAFFEINE_UIDS, CaffeineLevels, CaffeinePerson, CaffeineQuery, Can,
+        Cans, Collection, Import, Imported, Leaderboard, LeaderboardQuery, LeaderboardRow,
     },
     draw, flavour_by_id,
 };
@@ -305,4 +305,47 @@ pub async fn collection(
             "That person isn't here, or keeps their board hidden.",
         )),
     }
+}
+
+pub async fn caffeine(
+    State(state): State<AppState>,
+    caller: Caller,
+    Body(req): Body<CaffeineQuery>,
+) -> ApiResult<Json<CaffeineLevels>> {
+    if req.uids.len() > CAFFEINE_UIDS {
+        return Err(ApiError::invalid(format!(
+            "A caffeine query asks about at most {CAFFEINE_UIDS} people."
+        )));
+    }
+    let since = state.now() - CAFFEINE_REACH;
+    let db = state.db();
+    // Hidden and unlinked look the same from outside: both are just absent.
+    let mut owner = db.prepare(
+        "SELECT u.id FROM identities i JOIN users u ON u.id = i.user_id
+         WHERE i.uid = ?1 AND (u.hidden = 0 OR u.id = ?2)",
+    )?;
+    let mut recent = db.prepare(
+        "SELECT at FROM cans WHERE user_id = ?1 AND removed_at IS NULL AND at > ?2
+         ORDER BY at, number",
+    )?;
+    let mut people: Vec<CaffeinePerson> = Vec::new();
+    for uid in &req.uids {
+        if people.iter().any(|p| &p.uid == uid) {
+            continue;
+        }
+        let Some(user) = owner
+            .query_row(params![uid, caller.user], |row| row.get::<_, i64>(0))
+            .optional()?
+        else {
+            continue;
+        };
+        let opened = recent
+            .query_map(params![user, since], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        people.push(CaffeinePerson {
+            uid: uid.clone(),
+            opened,
+        });
+    }
+    Ok(Json(CaffeineLevels { people }))
 }

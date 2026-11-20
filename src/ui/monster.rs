@@ -8,22 +8,22 @@ use rune::{
     Color, Cx, Drag, El, LineCap, Shape, TextStyle, Transition, Tx, canvas, col, el, icon, row,
     text,
 };
-use rune_kit::Kit;
+use rune_kit::{Kit, Switch};
 
 use super::can3d::{self, HOVERED, REDUCED, SHOWCASE};
 use super::charts::color_key;
 use super::fx::{CardFx, card_fx, card_layers};
-use super::theme::{Theme, motion, radius, rgb, size, ty};
+use super::theme::{Theme, motion, radius, rgb, shadow, size, ty};
 use super::widgets::{
-    Variant, button, error_text, faint, field, group_note, group_title, heading, muted,
-    scroll_page, title, well,
+    Range, Variant, button, divider, error_text, faint, field, form_row, group_note, group_title,
+    heading, icon_button, muted, scroll_page, slider, title, well,
 };
 use super::{icons, send};
 use crate::monster::{
     self, Action, Beat, Board, CARDS, Caffeine, Can, FLAVOURS, Flavour, Gate, Notice, Ranking,
     Rarity, Reveal, Section, Standing,
 };
-use crate::{App, Message};
+use crate::{App, Message, settings};
 
 const CABINET: u32 = 0x0b0c10;
 const LARGE_CARD: f32 = 236.0;
@@ -711,7 +711,7 @@ fn leaderboard(s: &App, t: &Theme) -> Vec<El> {
             .child(
                 muted(
                     t,
-                    "Anyone on the leaderboard can open your board: your stats, heatmap and cards.",
+                    "Anyone on the leaderboard can open your board (your stats, heatmap and cards) and see your caffeine beside your name.",
                 )
                 .grow(1.0),
             )
@@ -1003,7 +1003,14 @@ fn overview(
             .flex_wrap()
             .child(showcase(s, reduced))
             .child(add_panel(s, t, k)),
-        profile(s, t, "Your Board", &board, today, Some(caffeine(s, cx, t))),
+        profile(
+            s,
+            t,
+            "Your Board",
+            &board,
+            today,
+            Some(caffeine(s, cx, t, k)),
+        ),
         collection(s, t, reduced),
     ]
 }
@@ -1552,16 +1559,54 @@ fn profile(
 
 /// The caffeine chart's canvas, whose width layout decides.
 const CAFFEINE_CHART: &str = "monster-caffeine-chart";
-const CAFFEINE_HEIGHT: f32 = 72.0;
+const CAFFEINE_HEIGHT: f32 = 96.0;
 /// How far the chart looks back and ahead, in seconds, and how far apart its points are.
 const CAFFEINE_BEFORE: i64 = 6 * 3600;
 const CAFFEINE_AFTER: i64 = 18 * 3600;
 const CAFFEINE_STEP: i64 = 300;
+/// How far an arrow key moves the reading along the chart.
+const CAFFEINE_KEY_STEP: i64 = 15 * 60;
+/// The reading that follows the pointer: its width, and its height of two lines.
+const CAFFEINE_TIP: (f32, f32) = (136.0, 38.0);
+
+/// A moment on the chart as the clock shows it, with the day when it isn't today's.
+fn clock(at: i64, now: i64) -> String {
+    let (Some(time), Some(today)) = (
+        Local.timestamp_opt(at, 0).earliest(),
+        Local.timestamp_opt(now, 0).earliest(),
+    ) else {
+        return String::new();
+    };
+    let hour = time.format("%H:%M");
+    match (time.date_naive() - today.date_naive()).num_days() {
+        0 => hour.to_string(),
+        1 => format!("{hour} tomorrow"),
+        -1 => format!("{hour} yesterday"),
+        _ => time.format("%H:%M on %A").to_string(),
+    }
+}
+
+/// How far a moment is from now, in words: "in 3 h 5 min", "40 min ago", "now".
+fn from_now(at: i64, now: i64) -> String {
+    let minutes = (at - now).abs() / 60;
+    let span = match (minutes / 60, minutes % 60) {
+        (0, 0) => return "now".to_owned(),
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
+    };
+    if at > now {
+        format!("in {span}")
+    } else {
+        format!("{span} ago")
+    }
+}
 
 /// Caffeine in your body from six hours ago to eighteen ahead, estimated from when each can
-/// was added: the past as a line over a fill, what's still to come fainter. It follows the
-/// clock a minute at a time and never animates.
-fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
+/// was added: the past as a line over a fill, what's still to come fainter. The pointer, or
+/// the arrow keys, read off the level at any moment along it. It follows the clock a minute
+/// at a time and never animates.
+fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     let now = chrono::Utc::now().timestamp() / 60 * 60;
     let caffeine = Caffeine::new(&s.monster.cans, now);
     let (start, end) = (now - CAFFEINE_BEFORE, now + CAFFEINE_AFTER);
@@ -1569,7 +1614,13 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
         .step_by(CAFFEINE_STEP as usize)
         .map(|at| (at, caffeine.mg(at)))
         .collect();
-    let peak = samples.iter().map(|(_, mg)| *mg).fold(0.0, f32::max);
+    let (peak_at, peak) =
+        samples.iter().copied().fold(
+            (now, 0.0),
+            |best, sample| {
+                if sample.1 > best.1 { sample } else { best }
+            },
+        );
     let about = format!(
         "An estimate: {} mg a can, drunk over {} minutes, halving every {} hours. People vary.",
         monster::CAFFEINE_MG_PER_CAN,
@@ -1588,45 +1639,87 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                 .help(about)
                 .child(icon(&icons::INFO, 12.0).color(t.faint).a11y_hidden()),
         );
-    let frame = well(t).key("monster-caffeine").w_full().gap(6.0);
-    if peak < 1.0 {
+    let frame = well(t).key("monster-caffeine").w_full();
+    // The switches stay folded behind this until asked for: the chart is what the well is for.
+    let open = s.ui.caffeine_options;
+    let gear = icon_button(
+        t,
+        "monster-caffeine-options-toggle",
+        &icons::SETTINGS,
+        if open {
+            "Hide Caffeine Options"
+        } else {
+            "Caffeine Options"
+        },
+        if open {
+            Variant::Active
+        } else {
+            Variant::Ghost
+        },
+        Some(Message::CaffeineOptionsOpen(!open)),
+    )
+    .expanded(open)
+    .mt(-6.0)
+    .mb(-6.0)
+    .mr(-6.0);
+    let options = open.then(|| caffeine_options(s, t, k));
+    if peak < monster::CAFFEINE_TRACE_MG {
         return frame
-            .px(14.0)
-            .py(10.0)
             .label("Caffeine in your system: none from your cans right now")
             .child(
                 row()
                     .w_full()
+                    .px(14.0)
+                    .py(10.0)
                     .gap(size::GAP)
                     .center_y()
                     .child(head)
-                    .child(faint(t, "None from your cans right now")),
-            );
+                    .child(faint(t, "None from your cans right now"))
+                    .child(gear),
+            )
+            .children(options);
     }
     let level = caffeine.mg(now);
+    let low = s.caffeine.low();
+    let low_at = caffeine.falls_below(low as f32, now);
     // A round top, so the scale reads at a glance: 200 mg holds one can, then it grows by hundreds.
     let top = ((peak * 1.1 / 100.0).ceil() * 100.0).max(200.0);
     let w = cx
         .layout_size(CAFFEINE_CHART)
         .map_or(size::CHART_MIN_WIDTH, |[w, _]| w);
     let h = CAFFEINE_HEIGHT;
-    let x = move |at: i64| 1.0 + (w - 2.0).max(1.0) * (at - start) as f32 / (end - start) as f32;
+    let span = (w - 2.0).max(1.0);
+    let x = move |at: i64| 1.0 + span * (at - start) as f32 / (end - start) as f32;
     let y = move |mg: f32| 2.0 + (h - 4.0) * (1.0 - (mg / top).clamp(0.0, 1.0));
     let (ink, grid, marker) = (t.accent, t.wash(0.05), t.wash(0.16));
-    let chart = rune::memo(
+    // The level the notice goes by is drawn only while the notice is on.
+    let line = s.caffeine.low_notice.then_some(low);
+    let dashes = t.wash(0.26);
+    let curve = rune::memo(
         "chart-monster-caffeine",
         (
             now,
             &caffeine,
             w.to_bits(),
+            line,
             color_key(ink),
             color_key(grid),
             color_key(marker),
+            color_key(dashes),
         ),
         || {
             let mut shape = Shape::new();
             for mg in [0.0, top / 2.0, top] {
                 shape = shape.line([0.0, y(mg)], [w, y(mg)], 1.0, LineCap::Butt, grid);
+            }
+            if let Some(low) = line {
+                let at = y(low as f32);
+                let mut from = 0.0;
+                while from < w {
+                    let to = (from + 4.0).min(w);
+                    shape = shape.line([from, at], [to, at], 1.0, LineCap::Butt, dashes);
+                    from += 8.0;
+                }
             }
             shape = shape.line([x(now), 0.0], [x(now), h], 1.0, LineCap::Butt, marker);
             let point = |(at, mg): &(i64, f32)| [x(*at), y(*mg)];
@@ -1647,25 +1740,158 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
                 .fill(area, ink.alpha(0.12))
                 .stroke(past, 1.6, ink)
                 .stroke(ahead, 1.6, ink.alpha(0.45));
+            // A tick on the baseline where each can was opened, which is where a rise starts.
+            for opened in caffeine.opened().iter().filter(|at| **at >= start) {
+                let at = x(*opened);
+                shape = shape.line([at, h - 1.0], [at, h - 7.0], 2.0, LineCap::Round, ink);
+            }
             let here = [x(now), y(level)];
             canvas(shape.line(here, here, 6.0, LineCap::Round, ink))
         },
     )
-    .key(CAFFEINE_CHART)
-    .grow(1.0)
-    .min_w(0.0)
+    .absolute(0.0, 0.0)
+    .w(w)
     .h(h)
     .a11y_hidden();
 
+    // The moment read off the chart, while it is still on it: the clock moves the chart on.
+    let read = s.ui.caffeine_hover.filter(|at| (start..=end).contains(at));
+    let to_time = move |at_x: f32| {
+        let share = ((at_x - 1.0) / span).clamp(0.0, 1.0);
+        let at = start + (share * (end - start) as f32) as i64;
+        // Close to the marker, it is now that is meant.
+        if (at_x - x(now)).abs() <= 4.0 {
+            now
+        } else {
+            (at + 30) / 60 * 60
+        }
+    };
+    let mut chart = el()
+        .key(CAFFEINE_CHART)
+        .grow(1.0)
+        .min_w(0.0)
+        .h(h)
+        .role("slider")
+        .label("Caffeine at a moment")
+        .a11y_value(match read {
+            Some(at) => format!(
+                "About {:.0} milligrams at {}, {}",
+                caffeine.mg(at),
+                clock(at, now),
+                from_now(at, now)
+            ),
+            None => format!("About {level:.0} milligrams now"),
+        })
+        .focusable(true)
+        .focus_ring(2.0, 2.0, t.accent.alpha(0.7))
+        .cursor(rune::Cursor::Crosshair)
+        .on_pointer_move_local(move |s: &mut App, p: rune::PointerEvent, tx: &mut Tx| {
+            let at = Some(to_time(p.x));
+            if s.ui.caffeine_hover == at {
+                tx.live_only();
+            }
+            s.ui.caffeine_hover = at;
+        })
+        .on_hover_change(|s: &mut App, inside, _| {
+            if !inside {
+                s.ui.caffeine_hover = None;
+            }
+        })
+        .on_key(move |s: &mut App, key: &rune::KeyEvent, _: &mut Tx| {
+            let from = s.ui.caffeine_hover.unwrap_or(now);
+            s.ui.caffeine_hover = match key.key {
+                rune::Key::Left => Some((from - CAFFEINE_KEY_STEP).max(start)),
+                rune::Key::Right => Some((from + CAFFEINE_KEY_STEP).min(end)),
+                rune::Key::Home => Some(now),
+                rune::Key::Escape if s.ui.caffeine_hover.is_some() => None,
+                _ => return false,
+            };
+            true
+        })
+        .child(curve);
+    if let Some(at) = read {
+        let mg = caffeine.mg(at);
+        let (at_x, at_y) = (x(at), y(mg));
+        let (tip_w, tip_h) = CAFFEINE_TIP;
+        // Beside the line, on whichever side has room, and clear of the point it reads.
+        let tip_x = if at_x + 8.0 + tip_w <= w {
+            at_x + 8.0
+        } else {
+            (at_x - 8.0 - tip_w).max(0.0)
+        };
+        let tip_y = if at_y < h / 2.0 { h - tip_h - 2.0 } else { 2.0 };
+        chart = chart
+            .child(
+                el().absolute(at_x - 0.5, 0.0)
+                    .w(1.0)
+                    .h(h)
+                    .fill(t.wash(0.38))
+                    .inert(),
+            )
+            .child(
+                el().absolute(at_x - 4.5, at_y - 4.5)
+                    .size(9.0, 9.0)
+                    .radius(4.5)
+                    .fill(ink)
+                    .border(2.0, t.recess)
+                    .inert(),
+            )
+            .child(
+                col()
+                    .key("monster-caffeine-reading")
+                    .absolute(tip_x, tip_y)
+                    .w(tip_w)
+                    .h(tip_h)
+                    .px(8.0)
+                    .center_y()
+                    .gap(1.0)
+                    .radius(radius::CONTROL)
+                    .fill(t.raised)
+                    .border_gradient(1.0, t.bevel_top, t.bevel_bottom)
+                    .box_shadow(shadow(0.0, 4.0, 12.0, Color::BLACK.alpha(0.3)))
+                    .child(
+                        row()
+                            .gap(4.0)
+                            .center_y()
+                            .child(
+                                text(format!("≈ {}", monster::caffeine_text(mg)))
+                                    .font(ty::NUMERIC)
+                                    .color(t.text),
+                            )
+                            .child(
+                                text(clock(at, now).split(' ').next().unwrap_or("").to_owned())
+                                    .font(ty::NUMERIC)
+                                    .color(t.muted),
+                            ),
+                    )
+                    .child(text(from_now(at, now)).font(ty::CAPTION).color(t.faint))
+                    .a11y_hidden()
+                    .inert(),
+            );
+    }
+
     let small = TextStyle::new(10.0, 400.0).features("'tnum' 1");
     let mut scale = el().size(WEEKDAY_COLUMN, h).a11y_hidden();
-    for (mg, at) in [(top, 0.0), (top / 2.0, h / 2.0 - 6.0), (0.0, h - 12.0)] {
+    let marks = [(top, 0.0), (top / 2.0, h / 2.0 - 6.0), (0.0, h - 12.0)];
+    for (mg, at) in marks {
         scale = scale.child(
             text(format!("{mg:.0}"))
                 .font(small)
                 .color(t.faint)
                 .absolute(0.0, at),
         );
+    }
+    // The notice's level is named on the scale too, where the round marks leave it room.
+    if let Some(low) = line {
+        let at = y(low as f32) - 6.0;
+        if marks.iter().all(|(_, mark)| (mark - at).abs() >= 11.0) {
+            scale = scale.child(
+                text(low.to_string())
+                    .font(small)
+                    .color(t.muted)
+                    .absolute(0.0, at),
+            );
+        }
     }
     // Clock hours under the chart, every three, or every six when there's little room.
     let every = if w < 420.0 { 6 } else { 3 };
@@ -1695,32 +1921,147 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme) -> El {
     }
     times = times.child(label(now, "Now".to_owned(), t.muted));
 
+    // What the curve comes to, in words: its top, and when it runs low.
+    let mut facts = vec![format!(
+        "{} ≈ {} at {}",
+        if peak_at > now { "Peaks" } else { "Peaked" },
+        monster::caffeine_text(peak),
+        clock(peak_at, now)
+    )];
+    if let Some(at) = low_at {
+        facts.push(format!("Under {low} mg at about {}", clock(at, now)));
+    }
+    let facts = facts.join("  ·  ");
+
     frame
-        .padding(14.0)
         .label(format!(
-            "Caffeine in your system: about {level:.0} milligrams now"
+            "Caffeine in your system: about {level:.0} milligrams now. {facts}"
         ))
         .child(
-            row().w_full().gap(size::GAP).center_y().child(head).child(
-                row()
-                    .key("monster-caffeine-now")
-                    .gap(4.0)
-                    .center_y()
-                    .child(
-                        text(format!("≈ {level:.0} mg"))
-                            .font(ty::NUMERIC)
-                            .color(t.text),
-                    )
-                    .child(faint(t, "now")),
-            ),
-        )
-        .child(row().w_full().child(scale).child(chart))
-        .child(
-            row()
+            col()
                 .w_full()
-                .child(el().w(WEEKDAY_COLUMN).h(14.0))
-                .child(times),
+                .padding(14.0)
+                .gap(6.0)
+                .child(
+                    row()
+                        .w_full()
+                        .gap(size::GAP)
+                        .center_y()
+                        .child(head)
+                        .child(
+                            row()
+                                .key("monster-caffeine-now")
+                                .gap(4.0)
+                                .center_y()
+                                .child(
+                                    text(format!("≈ {}", monster::caffeine_text(level)))
+                                        .font(ty::NUMERIC)
+                                        .color(t.text),
+                                )
+                                .child(faint(t, "now")),
+                        )
+                        .child(gear),
+                )
+                .child(row().w_full().child(scale).child(chart))
+                .child(
+                    row()
+                        .w_full()
+                        .child(el().w(WEEKDAY_COLUMN).h(14.0))
+                        .child(times),
+                )
+                .child(
+                    faint(t, facts)
+                        .key("monster-caffeine-facts")
+                        .ml(WEEKDAY_COLUMN)
+                        .a11y_hidden(),
+                ),
         )
+        .children(options)
+}
+
+/// The two switches the well's gear opens under the chart: what the estimate does outside
+/// this page. They live here, not in Settings, which doesn't know the page.
+fn caffeine_options(s: &App, t: &Theme, k: &Kit) -> El {
+    let options = s.caffeine;
+    let signed_in = s.monster.online() && s.monster.session.is_some();
+    let beside = if signed_in {
+        "Yours, and anyone's who isn't hidden from the leaderboard."
+    } else if s.monster.online() {
+        "Yours. Other people's show once you're signed in."
+    } else {
+        "Yours, from the cans you add here."
+    };
+    let switch = |key: &'static str, label: &str, on: bool, next: settings::Caffeine| {
+        Switch::new(on)
+            .label(label)
+            .hide_label()
+            .on_toggle_tx(move |s: &mut App, tx| {
+                super::dispatch(s, tx, Message::CaffeineOptions(next));
+            })
+            .build(k)
+            .key(key)
+    };
+    let low = options.low();
+    let mut warn = row().gap(12.0).center_y();
+    if options.low_notice {
+        warn = warn.child(
+            slider(
+                t,
+                "monster-caffeine-low",
+                "Low caffeine level",
+                low as i32,
+                format!("{low} milligrams"),
+                Range {
+                    min: *monster::CAFFEINE_LOW_RANGE.start() as i32,
+                    max: *monster::CAFFEINE_LOW_RANGE.end() as i32,
+                    step: monster::CAFFEINE_LOW_STEP as i32,
+                    key_step: monster::CAFFEINE_LOW_STEP as i32,
+                },
+                |s| s.caffeine.low() as i32,
+                move |value| {
+                    Message::CaffeineOptions(settings::Caffeine {
+                        low_mg: value.max(0) as u32,
+                        ..options
+                    })
+                },
+            )
+            .w(160.0),
+        );
+    }
+    warn = warn.child(switch(
+        "monster-caffeine-warn",
+        "Warn when caffeine runs low",
+        options.low_notice,
+        settings::Caffeine {
+            low_notice: !options.low_notice,
+            ..options
+        },
+    ));
+    col()
+        .key("monster-caffeine-options")
+        .w_full()
+        .child(divider(t))
+        .child(form_row(
+            t,
+            "Show caffeine beside names",
+            Some(beside),
+            switch(
+                "monster-caffeine-names",
+                "Show caffeine beside names",
+                options.beside_names,
+                settings::Caffeine {
+                    beside_names: !options.beside_names,
+                    ..options
+                },
+            ),
+        ))
+        .child(el().h(1.0).w_full().px(size::CARD_PAD).child(divider(t)))
+        .child(form_row(
+            t,
+            "Warn when caffeine runs low",
+            Some(&format!("A notice once you fall under {low} mg.")),
+            warn,
+        ))
 }
 
 fn days(n: u32) -> String {

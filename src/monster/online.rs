@@ -209,6 +209,17 @@ impl Tracker {
         vec![Effect::Me, Effect::Cans]
     }
 
+    /// What launch asks of the server, with a session kept from before: the account and its
+    /// cans, so the caffeine from them is known before the page is opened. Without a session
+    /// nothing, and no sign-in step either: that waits for the page.
+    pub fn warm(&mut self) -> Vec<Effect> {
+        if !self.online() || self.session.is_none() || self.gate.is_some() {
+            return Vec::new();
+        }
+        self.warming = true;
+        vec![Effect::Me, Effect::Cans]
+    }
+
     /// Settings sync heard from the server that the session has ended: the page asks to sign
     /// in again, as it does when its own requests hear it.
     pub fn session_ended(&mut self) -> Vec<Effect> {
@@ -614,7 +625,10 @@ impl Tracker {
                     return Vec::new();
                 }
                 self.loading = false;
+                let warming = std::mem::take(&mut self.warming);
                 match result {
+                    // Nobody asked yet: the page says so if it fails again once opened.
+                    Err(problem) if warming && !signed_out(&problem) => Vec::new(),
                     Ok(cans) => {
                         self.cans = cans.cans.into_iter().map(Can::from).collect();
                         let picked = self.selected.as_deref();
@@ -835,6 +849,23 @@ mod tests {
         let mut t = online();
         assert!(t.connect(None).is_empty());
         assert_eq!(t.gate, Some(Gate::Email));
+    }
+
+    #[test]
+    fn launch_asks_for_the_cans_of_a_kept_session_and_never_for_a_sign_in() {
+        let mut t = online();
+        assert!(t.warm().is_empty());
+        assert_eq!(t.gate, None, "signing in waits for the page");
+        t.session = Some("s1".into());
+        assert_eq!(t.warm(), [Effect::Me, Effect::Cans]);
+        // Offline at launch is nothing to report on a page nobody has opened.
+        t.answer(Answer::Cans(Err(Problem {
+            error: problem::SERVER.into(),
+            message: "down".into(),
+            tries_left: None,
+        })));
+        assert_eq!(t.notice, None);
+        assert!(Tracker::default().warm().is_empty(), "no server, no call");
     }
 
     #[test]

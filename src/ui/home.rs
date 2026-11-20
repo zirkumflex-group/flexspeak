@@ -2095,6 +2095,11 @@ fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let _ = menu.build(k, layer);
 }
 
+/// The height of a member's name and what follows it on its line.
+const NAME_LINE: f32 = 20.0;
+/// The height of the caffeine level's line under a name.
+const LEVEL_LINE: f32 = 13.0;
+
 fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El {
     let mic_muted =
         member.mic_muted || (member.is_self && s.microphone_icon() == crate::Icon::MicOff);
@@ -2116,21 +2121,42 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
         .center_y()
         .radius(radius::ROW)
         .transition(Transition::opacity().combined(Transition::offset(-6.0, 0.0)))
-        .child(voice_icon(t, talking, mic, sound_muted))
-        .child(
-            text(member.name.clone())
-                // Someone talking reads in a heavier weight as well as by the ring.
-                .font(if talking { ty::TREE_MEDIUM } else { ty::TREE })
-                .color(t.text)
-                .truncate_fade()
-                // Gives way to "(you)" and the badges after it when the name is long.
-                .shrink(),
-        );
+        .child(voice_icon(t, talking, mic, sound_muted));
+    let mut name = row().gap(7.0).center_y().h(NAME_LINE).shrink().child(
+        text(member.name.clone())
+            // Someone talking reads in a heavier weight as well as by the ring.
+            .font(if talking { ty::TREE_MEDIUM } else { ty::TREE })
+            .color(t.text)
+            .truncate_fade()
+            // Gives way to "(you)" and the badges after it when the name is long.
+            .shrink(),
+    );
     // "(you)" is a note about the name, not part of it, so it steps back.
     if member.is_self {
-        entry = entry.child(text("(you)").font(ty::TREE).color(t.muted).a11y_hidden());
+        name = name.child(text("(you)").font(ty::TREE).color(t.muted).a11y_hidden());
     }
-    entry = entry.child(el().grow(1.0).a11y_hidden());
+    let mut named = col().grow(1.0).min_w(0.0).child(name);
+    // The caffeine estimate is a note about the person too, quieter still, in whole milligrams.
+    // It gets a line of its own under the name, so a long name gives up no room for it; the
+    // row grows by that line.
+    if let Some(mg) = s.caffeine_beside(member, chrono::Utc::now().timestamp()) {
+        let level = crate::monster::caffeine_text(mg);
+        let whose = if member.is_self { "your" } else { "their" };
+        entry = entry.h(size::TREE_ROW + LEVEL_LINE);
+        named = named.child(
+            row().h(LEVEL_LINE).child(
+                text(level.clone())
+                    .key(format!("member-caffeine-{}", member.id))
+                    .font(ty::NUMERIC)
+                    .color(t.faint)
+                    .help(format!(
+                        "About {level} of caffeine, estimated from {whose} cans"
+                    ))
+                    .label(format!("about {level} of caffeine")),
+            ),
+        );
+    }
+    entry = entry.child(named);
     if let Some(lit) = s.server().unboxed.get(&member.id)
         && let Some(level) = lit.glow(Instant::now() - lit.at)
     {

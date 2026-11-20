@@ -297,6 +297,18 @@ struct App {
     ram_history: usage::MetricHistory,
     tab: Tab,
     monster: monster::Tracker,
+    /// The switches under the Monster page's caffeine chart.
+    caffeine: settings::Caffeine,
+    /// When the people around you drank their recent cans, for the level beside their names.
+    levels: monster::Levels,
+    /// When your level falls under the notice's, in Unix seconds, if it is above it now.
+    caffeine_low_at: Option<i64>,
+    /// The low-caffeine notice is up.
+    caffeine_low: bool,
+    /// The mark was slid and waits to be saved.
+    caffeine_unsaved: bool,
+    /// Your cans were asked for at launch, so the level and the notice don't wait for the page.
+    monster_warmed: bool,
     /// Keeps the travelling settings the same as the collection server account's.
     settings_sync: settings_sync::SettingsSync,
     /// What settings sync asked of the server, for tests, which run nothing.
@@ -708,6 +720,8 @@ fn trace_message(message: &Message) {
             | Message::UsageTick
             | Message::MonsterRevealTick(_)
             | Message::UnboxTick
+            | Message::CaffeineAsk(_)
+            | Message::CaffeineLevels(_)
             | Message::SettingsTargetSeen(_)
             | Message::Address(_)
             | Message::Nickname(_)
@@ -1388,6 +1402,19 @@ enum Message {
     MonsterAnswer(monster::Answer),
     MonsterRanking(monster::Ranking),
     MonsterHidden(bool),
+    /// Once at launch: read your cans, so your caffeine is known before the page opens.
+    MonsterWarm,
+    /// The gear on the caffeine chart: unfold or fold its switches.
+    CaffeineOptionsOpen(bool),
+    /// A switch or the level under the caffeine chart.
+    CaffeineOptions(settings::Caffeine),
+    /// Your level has fallen under the notice's.
+    CaffeineLow,
+    /// The low-caffeine notice was closed; `true` goes on to the Monster page to add a can.
+    CaffeineLowClose(bool),
+    /// Time to ask the collection server about the people in view.
+    CaffeineAsk(monster_api::api::CaffeineQuery),
+    CaffeineLevels(Result<monster_api::api::CaffeineLevels, monster_api::Problem>),
     /// A sign-in field was typed in; the field itself holds the text.
     MonsterSignInTyped,
     /// Which copy to keep when this computer's settings and the account's first differ.
@@ -1692,6 +1719,12 @@ impl App {
             ram_history,
             tab: Tab::Home,
             monster: monster::Tracker::default(),
+            caffeine: settings::Caffeine::default(),
+            levels: monster::Levels::default(),
+            caffeine_low_at: None,
+            caffeine_low: false,
+            caffeine_unsaved: false,
+            monster_warmed: false,
             settings_sync: settings_sync::SettingsSync::new(0),
             #[cfg(test)]
             settings_sync_sent: Vec::new(),
@@ -2327,7 +2360,20 @@ impl App {
         if self.audio_unsaved {
             self.save_audio();
         }
+        self.save_caffeine();
         self.commit_nickname();
+    }
+
+    /// Saves the caffeine switches and mark, if they changed since they were last saved.
+    fn save_caffeine(&mut self) {
+        if !std::mem::take(&mut self.caffeine_unsaved) || self.onboarding.is_some() {
+            return;
+        }
+        let options = self.caffeine;
+        self.save_preference(
+            |saved| saved.caffeine = options,
+            "The caffeine choice applies for now but was not saved",
+        );
     }
 
     /// How the voice threads play each person. Everyone unset stays out of the map.
@@ -2976,6 +3022,8 @@ impl App {
             apply_stream_view(&mut session.streaming, saved.stream_view);
         }
         self.chat_options = saved.chat;
+        self.caffeine = saved.caffeine;
+        self.watch_caffeine();
         self.share_defaults = if saved.share.quality.validate().is_ok() {
             saved.share.upgraded()
         } else {
@@ -3027,6 +3075,7 @@ impl App {
             debug_logging: self.debug_logging,
             interface_size: self.interface_size,
             chat: self.chat_options,
+            caffeine: self.caffeine,
             skip_install_prompt: self.never_install
                 || self
                     .saved
@@ -3967,12 +4016,19 @@ impl App {
             self.commit_nickname();
         }
         let session = self.monster.session.clone();
+        let cans = self.monster.cans.len();
         trace_message(&message);
         let task = self.update_inner(message);
+        // A can added, or the collection arriving, moves when the level falls low.
+        if self.monster.cans.len() != cans {
+            self.watch_caffeine();
+        }
         // Whatever the message added to a conversation goes to the history on disk.
         self.chat_persist();
         // Signing in or out of the collection server starts or stops settings sync.
         if self.monster.session != session {
+            // Other people's levels belong to the account that asked for them.
+            self.levels.clear();
             let now = Instant::now();
             let sync = if self.monster.session.is_some() {
                 self.with_settings_sync(|sync, ctx| sync.signed_in(now, ctx))
@@ -4205,6 +4261,7 @@ impl App {
                     self.select_client(None);
                 }
                 let mut task = Task::none();
+                self.save_caffeine();
                 if tab == Tab::Monster {
                     self.monster.open(self.settings_path.as_deref());
                     let saved = (self.monster.online() && !self.monster.session_read)
@@ -4311,6 +4368,79 @@ impl App {
             Message::MonsterHidden(hidden) => {
                 let effects = self.monster.hide(hidden);
                 return self.monster_effects(effects);
+            }
+            Message::MonsterWarm => {
+                if self.onboarding.is_some() {
+                    return Task::none();
+                }
+                let effects = if self.monster.online() {
+                    self.monster.warm()
+                } else {
+                    // Only a collection already kept: launch never makes the file.
+                    if let Some(path) = self.settings_path.as_deref()
+                        && monster::path(path).exists()
+                    {
+                        self.monster.read(Some(path));
+                    }
+                    Vec::new()
+                };
+                self.watch_caffeine();
+                return self.monster_effects(effects);
+            }
+            Message::CaffeineOptionsOpen(open) => {
+                self.ui.caffeine_options = open;
+                self.save_caffeine();
+            }
+            Message::CaffeineOptions(options) => {
+                if !options.beside_names {
+                    self.levels.clear();
+                }
+                // The mark is saved as its options fold away or the app quits, not at every
+                // step of the slider; a switch is saved at once.
+                let slid = settings::Caffeine {
+                    low_mg: self.caffeine.low_mg,
+                    ..options
+                } == self.caffeine;
+                self.caffeine = options;
+                self.caffeine_unsaved = true;
+                self.watch_caffeine();
+                if !slid {
+                    self.save_caffeine();
+                }
+            }
+            Message::CaffeineLow => {
+                let was_due = self.caffeine_low_at.is_some();
+                self.watch_caffeine();
+                // Still above it (the clock was set back): the new time stands.
+                if was_due && self.caffeine_low_at.is_none() && self.caffeine.low_notice {
+                    self.caffeine_low = true;
+                    tracing::info!(
+                        target: "flexspeak::monster",
+                        under_mg = self.caffeine.low(),
+                        "caffeine low"
+                    );
+                    self.background_attention(Some((
+                        "Caffeine running dangerously low".to_owned(),
+                        format!("You're under {} mg. Time for a can?", self.caffeine.low()),
+                    )));
+                }
+            }
+            Message::CaffeineLowClose(add) => {
+                self.caffeine_low = false;
+                if add {
+                    return self.update(Message::ShowTab(Tab::Monster));
+                }
+            }
+            Message::CaffeineAsk(query) => return self.ask_levels(query),
+            Message::CaffeineLevels(result) => {
+                if let Err(problem) = &result
+                    && problem.error == monster_api::problem::SIGNED_OUT
+                {
+                    self.levels.answer(result);
+                    let effects = self.monster.session_ended();
+                    return self.monster_effects(effects);
+                }
+                self.levels.answer(result);
             }
             Message::MonsterSignInTyped => {
                 self.monster.gate_problem = None;
@@ -6278,9 +6408,90 @@ impl App {
             self.chat_arrived(id, entry);
         }
         if let Some((client, own, card)) = unboxed {
+            // A card opened is a can drunk: their level beside their name is out of date.
+            if !own {
+                self.levels.stale(Instant::now());
+            }
             return self.card_heard(id, client, own, card);
         }
         Task::none()
+    }
+
+    /// Your caffeine at `now` (Unix seconds), from your own cans.
+    fn own_caffeine(&self, now: i64) -> monster::Caffeine {
+        monster::Caffeine::new(&self.monster.cans, now)
+    }
+
+    /// The level to show beside this member's name, in mg: yours from your cans, anyone
+    /// else's from what the collection server told. `None` when the setting is off, nothing
+    /// is known, or there is next to none.
+    fn caffeine_beside(&self, member: &client::Member, now: i64) -> Option<f32> {
+        if !self.caffeine.beside_names {
+            return None;
+        }
+        let level = if member.is_self {
+            self.own_caffeine(now).mg(now)
+        } else {
+            self.levels.of(&member.uid, now)?.mg(now)
+        };
+        (level >= monster::CAFFEINE_TRACE_MG).then_some(level)
+    }
+
+    /// Works out again when your level falls under the notice's, after your cans or the
+    /// switches changed. Heading back above it, or switched off, a notice still up goes away.
+    fn watch_caffeine(&mut self) {
+        let now = chrono::Utc::now().timestamp();
+        let own = self.own_caffeine(now);
+        let low = self.caffeine.low() as f32;
+        self.caffeine_low_at = self
+            .caffeine
+            .low_notice
+            .then(|| own.falls_below(low, now))
+            .flatten();
+        // A can just opened is still under it, and on its way back over.
+        if !self.caffeine.low_notice || self.caffeine_low_at.is_some() {
+            self.caffeine_low = false;
+        }
+    }
+
+    /// What the caffeine estimate needs done at this tick: the low notice once its time has
+    /// come, and a request for the levels of the people in view when one is due.
+    fn caffeine_tick(&mut self, now: Instant) -> Vec<Message> {
+        let mut due = Vec::new();
+        if self
+            .caffeine_low_at
+            .is_some_and(|at| chrono::Utc::now().timestamp() >= at)
+        {
+            due.push(Message::CaffeineLow);
+        }
+        if self.caffeine.beside_names && self.monster.online() && self.monster.session.is_some() {
+            let members: Vec<&str> = self
+                .sessions
+                .iter()
+                .chain(std::iter::once(&self.home))
+                .filter(|session| session.connected)
+                .flat_map(|session| &session.state.channels)
+                .flat_map(|channel| &channel.members)
+                .filter(|member| !member.is_self && !member.uid.is_empty())
+                .map(|member| member.uid.as_str())
+                .collect();
+            if let Some(query) = self.levels.request(&members, now) {
+                due.push(Message::CaffeineAsk(query));
+            }
+        }
+        due
+    }
+
+    /// Asks the collection server when the people in view drank their recent cans.
+    fn ask_levels(&mut self, query: monster_api::api::CaffeineQuery) -> Task {
+        let Some(base) = self.monster.server.clone() else {
+            return Task::none();
+        };
+        let server = monster_api::Server::new(&base, self.monster.session.clone());
+        Task::perform(
+            async move { server.caffeine(&query).await },
+            Message::CaffeineLevels,
+        )
     }
 
     /// Someone's card line arrived: their row lights up and, for anyone but you, the chime
@@ -9848,6 +10059,95 @@ mod tests {
         let _ = app.update(Message::Deafen);
         assert!(app.server().muted && !app.server().deafened);
         assert!(commands.try_recv().is_err());
+    }
+
+    fn drank(app: &mut App, minutes_ago: i64) {
+        let id = app.monster.cans.len() as i64 + 1;
+        app.monster.cans.push(monster::Can {
+            id,
+            flavour: "original".into(),
+            at: chrono::Utc::now().timestamp() - minutes_ago * 60,
+            rarity: monster::Rarity::Common,
+            seed: 0,
+        });
+        app.watch_caffeine();
+    }
+
+    #[test]
+    fn the_low_caffeine_notice_comes_once_on_the_way_down_and_never_at_launch() {
+        let tick = |app: &mut App| app.caffeine_tick(Instant::now());
+        // Launched already under the mark: nothing to say.
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        drank(&mut app, 6 * 60);
+        assert_eq!(app.caffeine_low_at, None);
+        assert!(tick(&mut app).is_empty() && !app.caffeine_low);
+
+        // Above it, the fall is ahead, and nothing shows before its time.
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        drank(&mut app, 60);
+        let now = chrono::Utc::now().timestamp();
+        assert!(app.caffeine_low_at.is_some_and(|at| at > now + 3600));
+        assert!(tick(&mut app).is_empty());
+        // Told too early (the clock was set back), it only works the time out again.
+        let _ = app.update(Message::CaffeineLow);
+        assert!(!app.caffeine_low && app.caffeine_low_at.is_some());
+
+        // Its time has come: the notice, and a system one while the window is behind others.
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        app.window_focused = false;
+        drank(&mut app, 6 * 60);
+        app.caffeine_low_at = Some(now - 1);
+        assert!(matches!(tick(&mut app)[..], [Message::CaffeineLow]));
+        let _ = app.update(Message::CaffeineLow);
+        assert!(app.caffeine_low);
+        assert_eq!(app.shown_toasts, ["Caffeine running dangerously low"]);
+        assert!(tick(&mut app).is_empty(), "once");
+        // A can puts it away, and sets the next fall.
+        drank(&mut app, 0);
+        assert!(!app.caffeine_low && app.caffeine_low_at.is_some());
+
+        // Switched off, nothing is waited for and a notice still up goes.
+        app.caffeine_low = true;
+        let _ = app.update(Message::CaffeineOptions(settings::Caffeine {
+            low_notice: false,
+            ..app.caffeine
+        }));
+        assert!(!app.caffeine_low && app.caffeine_low_at.is_none());
+        // A higher mark moves the fall earlier.
+        let _ = app.update(Message::CaffeineOptions(settings::Caffeine::default()));
+        let at_80 = app.caffeine_low_at.unwrap();
+        let _ = app.update(Message::CaffeineOptions(settings::Caffeine {
+            low_mg: 120,
+            ..app.caffeine
+        }));
+        assert!(app.caffeine_low_at.unwrap() < at_80);
+        assert_eq!(app.edited_settings().caffeine.low_mg, 120);
+    }
+
+    #[test]
+    fn caffeine_beside_a_name_is_yours_from_your_cans_and_theirs_from_the_server() {
+        let mut app = App::with_devices(audio::Devices::default(), None);
+        let now = chrono::Utc::now().timestamp();
+        let member = |uid: &str, is_self| client::Member {
+            uid: uid.into(),
+            is_self,
+            ..client::Member::default()
+        };
+        assert_eq!(app.caffeine_beside(&member("aa", true), now), None, "none");
+        drank(&mut app, 60);
+        assert!(app.caffeine_beside(&member("aa", true), now).unwrap() > 100.0);
+        assert_eq!(app.caffeine_beside(&member("bb", false), now), None);
+        app.levels.set("bb", vec![now - 3600, now - 3600]);
+        assert!(app.caffeine_beside(&member("bb", false), now).unwrap() > 200.0);
+        // Long gone reads as nothing, not as 0 mg.
+        app.levels.set("cc", vec![now - 39 * 3600]);
+        assert_eq!(app.caffeine_beside(&member("cc", false), now), None);
+        let _ = app.update(Message::CaffeineOptions(settings::Caffeine {
+            beside_names: false,
+            ..app.caffeine
+        }));
+        assert_eq!(app.caffeine_beside(&member("aa", true), now), None);
+        assert_eq!(app.caffeine_beside(&member("bb", false), now), None);
     }
 
     #[test]

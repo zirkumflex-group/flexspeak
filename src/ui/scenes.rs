@@ -64,6 +64,18 @@ pub const SCENES: &[Scene] = &[
     ("monster-add-all", monster_add_all),
     ("monster-caffeine", monster_caffeine),
     ("monster-caffeine-light", monster_caffeine_light),
+    ("monster-caffeine-reading", monster_caffeine_reading),
+    (
+        "monster-caffeine-reading-light",
+        monster_caffeine_reading_light,
+    ),
+    ("monster-caffeine-options", monster_caffeine_options),
+    ("monster-caffeine-quiet", monster_caffeine_quiet),
+    ("caffeine-names", caffeine_names),
+    ("caffeine-names-light", caffeine_names_light),
+    ("caffeine-names-long", caffeine_names_long),
+    ("caffeine-low", caffeine_low),
+    ("caffeine-low-light", caffeine_low_light),
     ("monster-connected", monster_connected),
     ("monster-unboxed", monster_unboxed),
     ("monster-unboxed-rare", monster_unboxed_rare),
@@ -1672,6 +1684,92 @@ fn monster_caffeine(s: &mut App) {
 
 fn monster_caffeine_light(s: &mut App) {
     monster_caffeine(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+    s.appearance.light_theme = settings::ThemeName::Ocean;
+}
+
+/// The pointer rests on the chart three hours and twenty minutes ahead: a line, a point on
+/// the curve and the level it reads there.
+fn monster_caffeine_reading(s: &mut App) {
+    monster_caffeine(s);
+    s.ui.caffeine_hover = Some(chrono::Utc::now().timestamp() / 60 * 60 + 200 * 60);
+}
+
+fn monster_caffeine_reading_light(s: &mut App) {
+    monster_caffeine_light(s);
+    s.ui.caffeine_hover = Some(chrono::Utc::now().timestamp() / 60 * 60 + 200 * 60);
+}
+
+/// The gear on the chart pressed: the two switches unfold under it.
+fn monster_caffeine_options(s: &mut App) {
+    monster_caffeine(s);
+    s.ui.caffeine_options = true;
+}
+
+/// Both switches under the chart off: no level line on it, and no slider beside the switch.
+fn monster_caffeine_quiet(s: &mut App) {
+    monster_caffeine_options(s);
+    s.caffeine.beside_names = false;
+    s.caffeine.low_notice = false;
+}
+
+/// Caffeine beside names in the tree: yours from your cans, Mara's and Theo's as the
+/// collection server tells them.
+fn caffeine_names(s: &mut App) {
+    use crate::monster::{Can, Rarity};
+    connected(s);
+    let now = chrono::Utc::now().timestamp();
+    s.monster.cans.push(Can {
+        id: 1,
+        flavour: "ultra-white".into(),
+        at: now - 90 * 60,
+        rarity: Rarity::Common,
+        seed: 0,
+    });
+    s.levels.set("uid-2", vec![now - 4 * 3600, now - 40 * 60]);
+    s.levels.set("uid-3", vec![now - 11 * 3600]);
+}
+
+/// Long names in the usual 260 pt sidebar, some sharing or muted: the level sits under the
+/// name, so the name keeps the room it has without one.
+fn caffeine_names_long(s: &mut App) {
+    caffeine_names(s);
+    let names = [
+        "Tristan_Wild1",
+        "Low Cortisol | Es eskaliert",
+        "Totalverweigerer Florian",
+    ];
+    let state = &mut s.server_mut().state;
+    for channel in state.channels.iter_mut().chain(state.current.as_mut()) {
+        for (member, name) in channel.members.iter_mut().zip(names) {
+            member.name = name.into();
+        }
+    }
+    s.server_mut().streaming.streamers.insert(3);
+}
+
+fn caffeine_names_light(s: &mut App) {
+    caffeine_names(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+    s.appearance.light_theme = settings::ThemeName::Ocean;
+}
+
+/// Your level has just fallen under the mark: the notice offers to add a can.
+fn caffeine_low(s: &mut App) {
+    use crate::monster::{Can, Rarity};
+    connected(s);
+    s.monster.cans.push(Can {
+        id: 1,
+        flavour: "original".into(),
+        at: chrono::Utc::now().timestamp() - 5 * 3600 - 20 * 60,
+        rarity: Rarity::Common,
+        seed: 0,
+    });
+    s.caffeine_low = true;
+}
+
+fn caffeine_low_light(s: &mut App) {
+    caffeine_low(s);
     s.appearance.scheme = settings::ColorScheme::Light;
     s.appearance.light_theme = settings::ThemeName::Ocean;
 }
@@ -5598,6 +5696,88 @@ mod tests {
             rt.find("monster-caffeine").is_none(),
             "not on someone else's"
         );
+    }
+
+    #[test]
+    fn the_pointer_reads_a_level_off_the_caffeine_chart_and_leaving_puts_it_away() {
+        let mut rt = runtime(monster_caffeine, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.find("monster-caffeine-reading").is_none());
+        let (x, y) = rt.find("monster-caffeine-chart").expect("the chart");
+        rt.pointer_move(x + 60.0, y);
+        settle(&mut rt);
+        assert!(rt.find("monster-caffeine-reading").is_some());
+        let now = chrono::Utc::now().timestamp();
+        let read = rt.state.ui.caffeine_hover.expect("a moment");
+        assert!(read > now && read < now + 18 * 3600, "{}", read - now);
+        // Moving along it reads another moment.
+        rt.pointer_move(x + 120.0, y);
+        settle(&mut rt);
+        assert!(rt.state.ui.caffeine_hover.expect("a moment") > read);
+        let (off_x, off_y) = rt.find("monster-caffeine-about").expect("the heading");
+        rt.pointer_move(off_x, off_y);
+        settle(&mut rt);
+        assert_eq!(rt.state.ui.caffeine_hover, None);
+        assert!(rt.find("monster-caffeine-reading").is_none());
+    }
+
+    #[test]
+    fn the_switches_under_the_caffeine_chart_turn_the_extras_off() {
+        let mut rt = runtime(monster_caffeine, (1100.0, 1500.0));
+        settle(&mut rt);
+        assert!(rt.state.caffeine.beside_names && rt.state.caffeine.low_notice);
+        assert!(rt.find("monster-caffeine-warn").is_none(), "folded away");
+        click(&mut rt, "monster-caffeine-options-toggle");
+        assert!(rt.find("monster-caffeine-low").is_some(), "the level");
+        click(&mut rt, "monster-caffeine-warn");
+        assert!(!rt.state.caffeine.low_notice);
+        assert!(rt.find("monster-caffeine-low").is_none());
+        click(&mut rt, "monster-caffeine-names");
+        assert!(!rt.state.caffeine.beside_names);
+        click(&mut rt, "monster-caffeine-options-toggle");
+        assert!(rt.find("monster-caffeine-names").is_none(), "folded again");
+        // The gear is there without any caffeine too.
+        let mut rt = runtime(monster_empty, (1100.0, 1500.0));
+        settle(&mut rt);
+        click(&mut rt, "monster-caffeine-options-toggle");
+        assert!(rt.find("monster-caffeine-names").is_some());
+    }
+
+    #[test]
+    fn caffeine_shows_beside_names_until_it_is_turned_off() {
+        let mut rt = runtime(caffeine_names, (900.0, 790.0));
+        settle(&mut rt);
+        for member in 1..=3 {
+            assert!(
+                rt.find(&format!("member-caffeine-{member}")).is_some(),
+                "member {member}"
+            );
+        }
+        let mut rt = runtime(
+            |s| {
+                caffeine_names(s);
+                s.caffeine.beside_names = false;
+            },
+            (900.0, 790.0),
+        );
+        settle(&mut rt);
+        assert!(rt.find("member-caffeine-1").is_none());
+        assert!(rt.find("member-caffeine-2").is_none());
+    }
+
+    #[test]
+    fn the_low_caffeine_notice_closes_or_goes_on_to_add_a_can() {
+        let mut rt = runtime(caffeine_low, (900.0, 790.0));
+        settle(&mut rt);
+        assert!(rt.find("notice-caffeine").is_some());
+        click(&mut rt, "notice-caffeine-close");
+        assert!(rt.find("notice-caffeine").is_none());
+
+        let mut rt = runtime(caffeine_low, (900.0, 790.0));
+        settle(&mut rt);
+        click(&mut rt, "notice-caffeine-add");
+        assert!(rt.find("notice-caffeine").is_none());
+        assert_eq!(rt.state.tab, crate::Tab::Monster);
     }
 
     #[test]

@@ -89,6 +89,9 @@ pub struct Settings {
     /// Settings > Chat. Saved straight away when changed, like `footer_hidden`.
     #[serde(skip_serializing_if = "Chat::is_default")]
     pub chat: Chat,
+    /// The switches under the Monster page's caffeine chart. Saved straight away when changed.
+    #[serde(skip_serializing_if = "Caffeine::is_default")]
+    pub caffeine: Caffeine,
     /// The collection server typed in Settings before the address was built into the app
     /// (`FLEXSPEAK_COLLECTION_SERVER`). Read so older files still load, and so a session from
     /// another server is dropped; never written again.
@@ -162,6 +165,42 @@ pub struct WindowPlace {
     pub height: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub maximized: bool,
+}
+
+/// What the caffeine estimate does outside the Monster page. Both are on unless turned off,
+/// so a file from before them gets them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(default, deny_unknown_fields)]
+pub struct Caffeine {
+    /// The level shows beside names in the channel tree: yours, and other people's.
+    pub beside_names: bool,
+    /// A notice says when your level falls under `low_mg`.
+    pub low_notice: bool,
+    pub low_mg: u32,
+}
+
+impl Default for Caffeine {
+    fn default() -> Self {
+        Self {
+            beside_names: true,
+            low_notice: true,
+            low_mg: crate::monster::CAFFEINE_LOW_MG,
+        }
+    }
+}
+
+impl Caffeine {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The level the notice goes by, kept inside what the page offers whatever the file says.
+    pub fn low(&self) -> u32 {
+        self.low_mg.clamp(
+            *crate::monster::CAFFEINE_LOW_RANGE.start(),
+            *crate::monster::CAFFEINE_LOW_RANGE.end(),
+        )
+    }
 }
 
 /// How text chat shows, and what happens while its column is hidden (Settings > Chat).
@@ -583,6 +622,12 @@ pub struct Synced {
         skip_serializing_if = "Option::is_none"
     )]
     pub stream_volumes: Option<BTreeMap<String, u16>>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub caffeine: Option<Caffeine>,
 }
 
 /// A saved server as it travels: never its password, which stays sealed on its computer.
@@ -641,6 +686,7 @@ impl Synced {
             auto_download_updates: Some(settings.auto_download_updates),
             user_audio: Some(settings.user_audio.clone()),
             stream_volumes: Some(settings.stream_volumes.clone()),
+            caffeine: Some(settings.caffeine),
         }
     }
 
@@ -733,6 +779,9 @@ impl Synced {
         if let Some(volumes) = self.stream_volumes {
             settings.stream_volumes = volumes;
         }
+        if let Some(caffeine) = self.caffeine {
+            settings.caffeine = caffeine;
+        }
     }
 
     /// Whether taking this copy would change nothing on a computer with `settings`.
@@ -775,6 +824,7 @@ impl Default for Settings {
             close_button: CloseButton::default(),
             window: None,
             chat: Chat::default(),
+            caffeine: Caffeine::default(),
             monster_server: None,
             monster_session: None,
             retired_settings_sync: None,
@@ -888,6 +938,43 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_caffeine_extras_are_on_until_turned_off_and_travel_with_the_account() {
+        // A file from before them gets both, at the usual level, and stays as short.
+        let old: Settings = serde_json::from_str(r#"{"nickname":"Sam"}"#).unwrap();
+        assert_eq!(old.caffeine, Caffeine::default());
+        assert!(old.caffeine.beside_names && old.caffeine.low_notice);
+        assert_eq!(old.caffeine.low(), crate::monster::CAFFEINE_LOW_MG);
+        assert!(!serde_json::to_string(&old).unwrap().contains("caffeine"));
+
+        let changed = Settings {
+            caffeine: Caffeine {
+                beside_names: false,
+                low_notice: true,
+                low_mg: 120,
+            },
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&changed).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Settings>(&text).unwrap().caffeine,
+            changed.caffeine
+        );
+        // One switch written alone leaves the other on.
+        let part: Settings = serde_json::from_str(r#"{"caffeine":{"low_notice":false}}"#).unwrap();
+        assert!(part.caffeine.beside_names && !part.caffeine.low_notice);
+        // A level from a hand-edited file is kept inside what the page offers.
+        let wild = Caffeine {
+            low_mg: 5000,
+            ..Caffeine::default()
+        };
+        assert_eq!(wild.low(), *crate::monster::CAFFEINE_LOW_RANGE.end());
+
+        let mut onto = Settings::default();
+        Synced::from_settings(&changed).apply(&mut onto);
+        assert_eq!(onto.caffeine, changed.caffeine);
+    }
 
     #[test]
     fn a_remembered_password_round_trips_sealed_and_is_left_out_when_not_remembered() {
