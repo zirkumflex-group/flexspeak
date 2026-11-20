@@ -209,6 +209,17 @@ impl Tracker {
         vec![Effect::Me, Effect::Cans]
     }
 
+    /// What launch asks of the server, with a session kept from before: the account and its
+    /// cans, so the caffeine from them is known before the page is opened. Without a session
+    /// nothing, and no sign-in step either: that waits for the page.
+    pub fn warm(&mut self) -> Vec<Effect> {
+        if !self.online() || self.session.is_none() || self.gate.is_some() {
+            return Vec::new();
+        }
+        self.loading = self.cans.is_empty();
+        vec![Effect::Me, Effect::Cans]
+    }
+
     /// Settings sync heard from the server that the session has ended: the page asks to sign
     /// in again, as it does when its own requests hear it.
     pub fn session_ended(&mut self) -> Vec<Effect> {
@@ -835,6 +846,16 @@ mod tests {
         let mut t = online();
         assert!(t.connect(None).is_empty());
         assert_eq!(t.gate, Some(Gate::Email));
+    }
+
+    #[test]
+    fn launch_asks_for_the_cans_of_a_kept_session_and_never_for_a_sign_in() {
+        let mut t = online();
+        assert!(t.warm().is_empty());
+        assert_eq!(t.gate, None, "signing in waits for the page");
+        t.session = Some("s1".into());
+        assert_eq!(t.warm(), [Effect::Me, Effect::Cans]);
+        assert!(Tracker::default().warm().is_empty(), "no server, no call");
     }
 
     #[test]

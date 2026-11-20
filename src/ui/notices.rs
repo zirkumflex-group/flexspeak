@@ -23,8 +23,9 @@ const LIMIT: usize = 200;
 pub fn stack(s: &App, t: &Theme) -> Option<El> {
     let update = super::updates::notice(s, t);
     let message = super::chat::toast(s, t);
+    let caffeine = caffeine_low(s, t);
     let visible = s.alerts.visible();
-    if update.is_none() && message.is_none() && visible.is_empty() {
+    if update.is_none() && message.is_none() && caffeine.is_none() && visible.is_empty() {
         return None;
     }
     let hidden = visible.len().saturating_sub(SHOWN);
@@ -34,6 +35,7 @@ pub fn stack(s: &App, t: &Theme) -> Option<El> {
         .gap(8.0)
         .children(update)
         .children(message)
+        .children(caffeine)
         .children(
             visible
                 .iter()
@@ -129,6 +131,42 @@ pub fn top(
                 .mt(-4.0)
                 .mr(-6.0),
         )
+}
+
+/// Your caffeine has fallen under the level set on the Monster page. Not a problem of the
+/// app's, so it takes the accent rather than a health colour, and stays out of the Error Log.
+fn caffeine_low(s: &App, t: &Theme) -> Option<El> {
+    if !s.caffeine_low {
+        return None;
+    }
+    let title = "Caffeine running dangerously low";
+    let now = chrono::Utc::now().timestamp();
+    let detail = format!(
+        "You're down to about {}, under your {} mg mark.",
+        crate::monster::caffeine_text(s.own_caffeine(now).mg(now)),
+        s.caffeine.low()
+    );
+    Some(
+        card(t, "notice-caffeine", title)
+            .child(top(
+                t,
+                &icons::CAN,
+                t.accent,
+                title,
+                detail,
+                None,
+                "notice-caffeine-close",
+                Some(Message::CaffeineLowClose(false)),
+            ))
+            .child(row().w_full().justify_end().child(button(
+                t,
+                "notice-caffeine-add",
+                "Add a Can",
+                Some(&icons::PLUS),
+                Variant::Primary,
+                Some(Message::CaffeineLowClose(true)),
+            ))),
+    )
 }
 
 fn shorten(detail: &str) -> String {

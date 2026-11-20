@@ -214,6 +214,15 @@ impl Server {
             .await
     }
 
+    /// When the people with these TeamSpeak uids drank their recent cans; whoever is hidden or
+    /// has no account is left out.
+    pub async fn caffeine(
+        &self,
+        query: &api::CaffeineQuery,
+    ) -> Result<api::CaffeineLevels, Problem> {
+        self.call(Method::POST, "/v1/caffeine", Some(query)).await
+    }
+
     /// The account's synced settings, or `None` when none were saved yet (404).
     pub async fn settings(&self) -> Result<Option<SyncedSettings>, Problem> {
         match self.call(Method::GET, "/v1/settings", None::<&()>).await {

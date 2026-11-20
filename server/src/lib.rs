@@ -148,6 +148,7 @@ pub fn router(state: AppState) -> Router {
         .route("/cans/{id}", delete(shelf::remove))
         .route("/leaderboard", get(shelf::leaderboard))
         .route("/users/{id}/cans", get(shelf::collection))
+        .route("/caffeine", post(shelf::caffeine))
         .route("/settings", get(settings::get).put(settings::put))
         .route("/passkeys/options", post(passkey::options))
         .route("/passkeys/finish", post(passkey::finish));

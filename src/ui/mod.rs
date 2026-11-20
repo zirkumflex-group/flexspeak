@@ -251,8 +251,13 @@ pub struct UiState {
     pub can_hover: Option<String>,
     /// The Add panel lists every flavour, not only the common ones.
     pub monster_all_flavours: bool,
-    /// The minute the Monster page was last drawn for; its caffeine chart follows the clock.
+    /// The minute the caffeine figures were last drawn for; they follow the clock.
     pub monster_minute: i64,
+    /// The moment being read off the caffeine chart, by the pointer or the arrow keys, in
+    /// Unix seconds.
+    pub caffeine_hover: Option<i64>,
+    /// The switches under the caffeine chart are unfolded.
+    pub caffeine_options: bool,
     pub server_name: TextEdit,
     pub server_address: TextEdit,
     pub server_password: TextEdit,
@@ -371,6 +376,8 @@ impl Default for UiState {
             can_hover: None,
             monster_all_flavours: false,
             monster_minute: 0,
+            caffeine_hover: None,
+            caffeine_options: false,
             server_name: TextEdit::new(""),
             server_address: TextEdit::new(""),
             server_password: TextEdit::new("").secure(),
@@ -774,10 +781,16 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
             s.omarchy = Some(current);
         }
         s.next_usage_tick = now + usage::REFRESH_INTERVAL;
-        // The caffeine chart moves on a minute at a time, and only while its page shows.
+        // The caffeine chart moves on a minute at a time, and only while its page shows; so
+        // do the levels beside names, while a server's tree is there to show them.
         let minute = chrono::Utc::now().timestamp() / 60;
-        changed |=
-            s.tab == Tab::Monster && std::mem::replace(&mut s.ui.monster_minute, minute) != minute;
+        let caffeine_shows =
+            s.tab == Tab::Monster || (s.caffeine.beside_names && s.server().connected);
+        changed |= std::mem::replace(&mut s.ui.monster_minute, minute) != minute && caffeine_shows;
+        for message in s.caffeine_tick(now) {
+            dispatch(s, tx, message);
+            changed = true;
+        }
         changed |= ticking_view
             || connection != s.footer_connection_status()
             || resources != footer::resources(s)
@@ -787,6 +800,10 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
         s.resume_started = true;
         dispatch(s, tx, Message::Resume);
         changed = true;
+    }
+    // A preview keeps the cans its scene gave it.
+    if !std::mem::replace(&mut s.monster_warmed, true) && !snapping() {
+        dispatch(s, tx, Message::MonsterWarm);
     }
     // Once, at launch. A restart for an update already returns to where you were.
     if !std::mem::replace(&mut s.auto_connect_checked, true)

@@ -2130,6 +2130,21 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
     if member.is_self {
         entry = entry.child(text("(you)").font(ty::TREE).color(t.muted).a11y_hidden());
     }
+    // The caffeine estimate is a note about the person too, quieter still, in whole milligrams.
+    if let Some(mg) = s.caffeine_beside(member, chrono::Utc::now().timestamp()) {
+        let level = crate::monster::caffeine_text(mg);
+        let whose = if member.is_self { "your" } else { "their" };
+        entry = entry.child(
+            text(level.clone())
+                .key(format!("member-caffeine-{}", member.id))
+                .font(ty::NUMERIC)
+                .color(t.faint)
+                .help(format!(
+                    "About {level} of caffeine, estimated from {whose} cans"
+                ))
+                .label(format!("about {level} of caffeine")),
+        );
+    }
     entry = entry.child(el().grow(1.0).a11y_hidden());
     if let Some(lit) = s.server().unboxed.get(&member.id)
         && let Some(level) = lit.glow(Instant::now() - lit.at)

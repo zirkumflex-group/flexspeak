@@ -22,6 +22,7 @@
 //! | `POST /v1/cans/import` | [`Import`] | [`Imported`]; once for each account |
 //! | `GET /v1/leaderboard?by=collection` | | [`Leaderboard`], best first |
 //! | `GET /v1/users/{id}/cans` | | [`Collection`]; 404 if that person is hidden |
+//! | `POST /v1/caffeine` | [`CaffeineQuery`] | [`CaffeineLevels`]; hidden people are left out |
 //! | `GET /v1/settings` | | [`SyncedSettings`]; 404 if nothing was saved yet |
 //! | `PUT /v1/settings` | [`PutSettings`] | [`SettingsSaved`]; 409 `conflict` if another computer saved first |
 //! | `GET /health` | | 200 |
@@ -285,6 +286,36 @@ pub struct Collection {
     pub name: String,
     /// Oldest first.
     pub cans: Vec<Can>,
+}
+
+/// The most TeamSpeak uids one [`CaffeineQuery`] can carry.
+pub const CAFFEINE_UIDS: usize = 200;
+/// How far back a can still counts toward someone's caffeine, in seconds. Past this it has
+/// under a hundredth of its caffeine left.
+pub const CAFFEINE_REACH: i64 = 40 * 3600;
+
+/// The people the app can see on a TeamSpeak server, asked about by their uids, so their
+/// caffeine can show beside their names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaffeineQuery {
+    /// TeamSpeak uids as [`LinkedIdentity::uid`] writes them; at most [`CAFFEINE_UIDS`].
+    pub uids: Vec<String>,
+}
+
+/// The recent cans of those asked about who have that identity linked and aren't hidden. The
+/// account asking is included even when hidden. Anyone else is simply absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaffeineLevels {
+    pub people: Vec<CaffeinePerson>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaffeinePerson {
+    /// The uid as it was asked for.
+    pub uid: String,
+    /// When each can of the last [`CAFFEINE_REACH`] was drunk, in Unix seconds, oldest first.
+    /// Empty when there are none.
+    pub opened: Vec<i64>,
 }
 
 /// The most settings an account can keep, as JSON text. Far above what the app sends.
