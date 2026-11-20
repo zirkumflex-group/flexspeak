@@ -216,7 +216,7 @@ impl Tracker {
         if !self.online() || self.session.is_none() || self.gate.is_some() {
             return Vec::new();
         }
-        self.loading = self.cans.is_empty();
+        self.warming = true;
         vec![Effect::Me, Effect::Cans]
     }
 
@@ -625,7 +625,10 @@ impl Tracker {
                     return Vec::new();
                 }
                 self.loading = false;
+                let warming = std::mem::take(&mut self.warming);
                 match result {
+                    // Nobody asked yet: the page says so if it fails again once opened.
+                    Err(problem) if warming && !signed_out(&problem) => Vec::new(),
                     Ok(cans) => {
                         self.cans = cans.cans.into_iter().map(Can::from).collect();
                         let picked = self.selected.as_deref();
@@ -855,6 +858,13 @@ mod tests {
         assert_eq!(t.gate, None, "signing in waits for the page");
         t.session = Some("s1".into());
         assert_eq!(t.warm(), [Effect::Me, Effect::Cans]);
+        // Offline at launch is nothing to report on a page nobody has opened.
+        t.answer(Answer::Cans(Err(Problem {
+            error: problem::SERVER.into(),
+            message: "down".into(),
+            tries_left: None,
+        })));
+        assert_eq!(t.notice, None);
         assert!(Tracker::default().warm().is_empty(), "no server, no call");
     }
 

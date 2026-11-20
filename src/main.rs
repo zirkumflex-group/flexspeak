@@ -305,6 +305,8 @@ struct App {
     caffeine_low_at: Option<i64>,
     /// The low-caffeine notice is up.
     caffeine_low: bool,
+    /// The mark was slid and waits to be saved.
+    caffeine_unsaved: bool,
     /// Your cans were asked for at launch, so the level and the notice don't wait for the page.
     monster_warmed: bool,
     /// Keeps the travelling settings the same as the collection server account's.
@@ -1721,6 +1723,7 @@ impl App {
             levels: monster::Levels::default(),
             caffeine_low_at: None,
             caffeine_low: false,
+            caffeine_unsaved: false,
             monster_warmed: false,
             settings_sync: settings_sync::SettingsSync::new(0),
             #[cfg(test)]
@@ -2357,7 +2360,20 @@ impl App {
         if self.audio_unsaved {
             self.save_audio();
         }
+        self.save_caffeine();
         self.commit_nickname();
+    }
+
+    /// Saves the caffeine switches and mark, if they changed since they were last saved.
+    fn save_caffeine(&mut self) {
+        if !std::mem::take(&mut self.caffeine_unsaved) || self.onboarding.is_some() {
+            return;
+        }
+        let options = self.caffeine;
+        self.save_preference(
+            |saved| saved.caffeine = options,
+            "The caffeine choice applies for now but was not saved",
+        );
     }
 
     /// How the voice threads play each person. Everyone unset stays out of the map.
@@ -4245,6 +4261,7 @@ impl App {
                     self.select_client(None);
                 }
                 let mut task = Task::none();
+                self.save_caffeine();
                 if tab == Tab::Monster {
                     self.monster.open(self.settings_path.as_deref());
                     let saved = (self.monster.online() && !self.monster.session_read)
@@ -4359,24 +4376,36 @@ impl App {
                 let effects = if self.monster.online() {
                     self.monster.warm()
                 } else {
-                    self.monster.read(self.settings_path.as_deref());
+                    // Only a collection already kept: launch never makes the file.
+                    if let Some(path) = self.settings_path.as_deref()
+                        && monster::path(path).exists()
+                    {
+                        self.monster.read(Some(path));
+                    }
                     Vec::new()
                 };
                 self.watch_caffeine();
                 return self.monster_effects(effects);
             }
-            Message::CaffeineOptionsOpen(open) => self.ui.caffeine_options = open,
+            Message::CaffeineOptionsOpen(open) => {
+                self.ui.caffeine_options = open;
+                self.save_caffeine();
+            }
             Message::CaffeineOptions(options) => {
                 if !options.beside_names {
                     self.levels.clear();
                 }
+                // The mark is saved as its options fold away or the app quits, not at every
+                // step of the slider; a switch is saved at once.
+                let slid = settings::Caffeine {
+                    low_mg: self.caffeine.low_mg,
+                    ..options
+                } == self.caffeine;
                 self.caffeine = options;
+                self.caffeine_unsaved = true;
                 self.watch_caffeine();
-                if self.onboarding.is_none() {
-                    self.save_preference(
-                        |saved| saved.caffeine = options,
-                        "The caffeine choice applies for now but was not saved",
-                    );
+                if !slid {
+                    self.save_caffeine();
                 }
             }
             Message::CaffeineLow => {

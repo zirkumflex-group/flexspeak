@@ -167,8 +167,6 @@ pub struct Levels {
     due: Option<std::time::Instant>,
     last: Option<std::time::Instant>,
     waiting: bool,
-    /// The server is older than this call: asking again would only fail again.
-    unsupported: bool,
 }
 
 impl Levels {
@@ -180,7 +178,7 @@ impl Levels {
         members: &[&str],
         now: std::time::Instant,
     ) -> Option<api::CaffeineQuery> {
-        if self.waiting || self.unsupported || members.is_empty() {
+        if self.waiting || members.is_empty() {
             return None;
         }
         if members.iter().any(|uid| !self.asked.contains(*uid)) {
@@ -218,8 +216,8 @@ impl Levels {
         self.due = Some(now + LEVELS_SOON);
     }
 
-    /// The server's answer. A failure keeps what was known; a server without the call is not
-    /// asked again.
+    /// The server's answer. A failure keeps what was known, and the next round asks again:
+    /// a server from before this call answers 404 until it is updated, with the app running.
     pub fn answer(&mut self, result: Result<api::CaffeineLevels, api::Problem>) {
         self.waiting = false;
         match result {
@@ -230,7 +228,6 @@ impl Levels {
                     .filter_map(|person| Some((member_uid(&person.uid)?, person.opened)))
                     .collect();
             }
-            Err(problem) if problem.error == api::problem::NOT_FOUND => self.unsupported = true,
             Err(problem) => tracing::debug!(
                 target: "flexspeak::monster",
                 error = %problem.error,
@@ -887,6 +884,9 @@ pub struct Tracker {
     db: Option<Connection>,
     /// The roll key; made in memory when there's no database, as in previews.
     key: Option<[u8; 32]>,
+    /// The cans were asked for at launch, not by the page: a failure stays quiet, and the
+    /// page asks again when it opens.
+    warming: bool,
     /// What the page asked of the server, for tests, which run nothing.
     #[cfg(test)]
     pub sent: Vec<Effect>,
@@ -1506,16 +1506,21 @@ mod tests {
         assert!(levels.of("ab01", 200).is_some(), "a failure keeps it");
         let much_later = later + LEVELS_SOON + LEVELS_EVERY;
         assert!(levels.request(&["ab01"], much_later).is_some());
-        // An older server has no such call, and isn't asked again.
+        // An older server has no such call yet; once it is updated the next round finds it.
         levels.answer(Err(api::Problem {
             error: api::problem::NOT_FOUND.into(),
             message: String::new(),
             tries_left: None,
         }));
-        assert_eq!(
-            levels.request(&["ab01", "ab02"], much_later + LEVELS_EVERY),
-            None
+        assert!(
+            levels
+                .request(&["ab01"], much_later + LEVELS_EVERY)
+                .is_some()
         );
+        // What is asked for is the uid as linking writes it, and the answer maps back.
+        let asked = server_uid("ab01ff10").unwrap();
+        assert!(same_uid(&asked, "ab01ff10"));
+        assert_eq!(member_uid(&asked).as_deref(), Some("ab01ff10"));
     }
 
     #[test]
