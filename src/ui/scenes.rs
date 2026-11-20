@@ -73,6 +73,7 @@ pub const SCENES: &[Scene] = &[
     ("monster-caffeine-quiet", monster_caffeine_quiet),
     ("caffeine-names", caffeine_names),
     ("caffeine-names-light", caffeine_names_light),
+    ("caffeine-names-long", caffeine_names_long),
     ("caffeine-low", caffeine_low),
     ("caffeine-low-light", caffeine_low_light),
     ("monster-connected", monster_connected),
@@ -1727,6 +1728,24 @@ fn caffeine_names(s: &mut App) {
     });
     s.levels.set("uid-2", vec![now - 4 * 3600, now - 40 * 60]);
     s.levels.set("uid-3", vec![now - 11 * 3600]);
+}
+
+/// Long names in the usual 260 pt sidebar, some sharing or muted: the name gives way, and the
+/// level and the badges after it stay whole.
+fn caffeine_names_long(s: &mut App) {
+    caffeine_names(s);
+    let names = [
+        "Tristan_Wild1",
+        "Low Cortisol | Es eskaliert",
+        "Totalverweigerer Florian",
+    ];
+    let state = &mut s.server_mut().state;
+    for channel in state.channels.iter_mut().chain(state.current.as_mut()) {
+        for (member, name) in channel.members.iter_mut().zip(names) {
+            member.name = name.into();
+        }
+    }
+    s.server_mut().streaming.streamers.insert(3);
 }
 
 fn caffeine_names_light(s: &mut App) {
