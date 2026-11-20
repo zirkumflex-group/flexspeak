@@ -20,6 +20,12 @@ use crate::{
     secret,
 };
 
+/// The uid a TeamSpeak 6 server gives a key, written as TeamSpeak writes it (`to_ts`): base64
+/// of its SHA-256, where TeamSpeak 3 takes the SHA-1.
+pub fn uid6(public_key: &str) -> String {
+    STANDARD.encode(sha2::Sha256::digest(public_key.as_bytes()))
+}
+
 /// How long a challenge works.
 pub const CHALLENGE_SECONDS: i64 = 5 * 60;
 
@@ -91,6 +97,11 @@ impl TsPublicKey {
     /// The TeamSpeak uid: base64 of the SHA-1 of the key as TeamSpeak writes it.
     pub fn uid(&self) -> String {
         STANDARD.encode(Sha1::digest(self.to_ts().as_bytes()))
+    }
+
+    /// The uid a TeamSpeak 6 server gives the key: see [`uid6`].
+    pub fn uid6(&self) -> String {
+        uid6(&self.to_ts())
     }
 
     /// Checks a DER-encoded ECDSA P-256 signature, with SHA-256, over `data`.
@@ -199,9 +210,9 @@ pub async fn link(
         Some(_) => {}
         None => {
             db.execute(
-                "INSERT INTO identities (uid, user_id, public_key, source, linked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![uid, caller.user, key.to_ts(), source, now],
+                "INSERT INTO identities (uid, user_id, public_key, source, linked_at, uid6)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![uid, caller.user, key.to_ts(), source, now, key.uid6()],
             )?;
         }
     }
