@@ -319,10 +319,11 @@ pub async fn caffeine(
     }
     let since = state.now() - CAFFEINE_REACH;
     let db = state.db();
-    // Hidden and unlinked look the same from outside: both are just absent.
+    // Hidden and unlinked look the same from outside: both are just absent. A TeamSpeak 6
+    // server shows the app the SHA-256 form of a uid, a TeamSpeak 3 one the SHA-1 form.
     let mut owner = db.prepare(
         "SELECT u.id FROM identities i JOIN users u ON u.id = i.user_id
-         WHERE i.uid = ?1 AND (u.hidden = 0 OR u.id = ?2)",
+         WHERE (i.uid = ?1 OR i.uid6 = ?1) AND (u.hidden = 0 OR u.id = ?2)",
     )?;
     let mut recent = db.prepare(
         "SELECT at FROM cans WHERE user_id = ?1 AND removed_at IS NULL AND at > ?2

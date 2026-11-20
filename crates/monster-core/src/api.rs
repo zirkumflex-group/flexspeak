@@ -298,7 +298,9 @@ pub const CAFFEINE_REACH: i64 = 40 * 3600;
 /// caffeine can show beside their names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaffeineQuery {
-    /// TeamSpeak uids as [`LinkedIdentity::uid`] writes them; at most [`CAFFEINE_UIDS`].
+    /// TeamSpeak uids as the TeamSpeak server shows them: base64 of the SHA-1 of the key on
+    /// TeamSpeak 3, as [`LinkedIdentity::uid`] writes them, or of its SHA-256 on TeamSpeak 6.
+    /// At most [`CAFFEINE_UIDS`].
     pub uids: Vec<String>,
 }
 

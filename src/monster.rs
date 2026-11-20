@@ -1001,6 +1001,20 @@ impl Tracker {
         })
     }
 
+    /// Whether the account has the identity with this public key linked, and `member_uid` is
+    /// that identity's row. A TeamSpeak 3 server shows a row by the SHA-1 of the key, as the
+    /// account keeps it; a TeamSpeak 6 server by its SHA-256.
+    pub fn linked_key(&self, key: &tsproto_types::crypto::EccKeyPubP256, member_uid: &str) -> bool {
+        use sha2::Digest;
+        let ts3 = key.get_uid();
+        let ts6 = crate::client::uid_key(&sha2::Sha256::digest(key.to_ts().as_bytes()));
+        let linked = self
+            .me
+            .as_ref()
+            .is_some_and(|me| me.identities.iter().any(|identity| identity.uid == ts3));
+        linked && (same_uid(&ts3, member_uid) || ts6.eq_ignore_ascii_case(member_uid))
+    }
+
     pub fn start_reveal(&mut self, identity: String) -> Option<Reveal> {
         let rarity = self
             .cans
@@ -1668,6 +1682,35 @@ mod tests {
         assert!(!same_uid(&linked, "ab01ff11"));
         assert!(!same_uid(&linked, ""));
         assert!(!same_uid("not base64!", "ab01ff10"));
+    }
+
+    #[test]
+    fn your_linked_key_matches_your_row_on_teamspeak_3_and_6() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use sha2::Digest;
+        let key = tsproto_types::crypto::EccKeyPrivP256::create().to_pub();
+        let ts3 = crate::client::uid_key(&STANDARD.decode(key.get_uid()).unwrap());
+        let ts6 = crate::client::uid_key(&sha2::Sha256::digest(key.to_ts().as_bytes()));
+        let mut t = Tracker::default();
+        assert!(!t.linked_key(&key, &ts6), "signed out");
+        t.me = Some(api::Me {
+            id: 1,
+            name: "me".into(),
+            email: "me@example.com".into(),
+            hidden: false,
+            imported: true,
+            identities: vec![api::LinkedIdentity {
+                uid: key.get_uid(),
+                source: OWN_SOURCE.into(),
+                linked_at: 0,
+            }],
+        });
+        assert!(t.linked_key(&key, &ts3));
+        assert!(t.linked_key(&key, &ts6.to_ascii_uppercase()));
+        assert!(!t.linked(&ts6), "the uid alone can't tell on TeamSpeak 6");
+        assert!(!t.linked_key(&key, "ab01ff10"), "someone else's row");
+        let other = tsproto_types::crypto::EccKeyPrivP256::create().to_pub();
+        assert!(!t.linked_key(&other, &ts6), "not linked");
     }
 
     #[test]

@@ -2882,7 +2882,12 @@ impl App {
         else {
             return Task::none();
         };
-        if !self.monster.linked(&own.1) {
+        // You're connected with Flexspeak's own identity; a TeamSpeak 6 server shows its row
+        // by a uid the account doesn't keep, so the key decides.
+        let linked = self.monster.linked(&own.1)
+            || client::load_identity()
+                .is_ok_and(|identity| self.monster.linked_key(&identity.key().to_pub(), &own.1));
+        if !linked {
             return Task::none();
         }
         let target = if card.server_wide() {

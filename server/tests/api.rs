@@ -798,6 +798,33 @@ async fn caffeine_comes_from_the_recent_cans_behind_each_linked_uid() {
     );
 }
 
+/// The uid a TeamSpeak 6 server shows for this key: base64 of the SHA-256 of its public key.
+fn ts6_uid(key: &EccKeyPrivP256) -> String {
+    use sha2::Digest;
+    STANDARD.encode(sha2::Sha256::digest(key.to_pub().to_ts().as_bytes()))
+}
+
+#[tokio::test]
+async fn caffeine_knows_people_by_the_uid_a_teamspeak_6_server_shows() {
+    let server = Server::new(false);
+    let (sam, _) = server.sign_in("sam@example.com").await;
+    server.clock.advance(61);
+    let (kim, _) = server.sign_in("kim@example.com").await;
+    let key = EccKeyPrivP256::create();
+    assert_eq!(link(&server, &sam, &key).await.status, StatusCode::OK);
+    let at = server.add_can(&sam, "original", "k1").await.body["at"].clone();
+    let (ts3, ts6) = (key.to_pub().get_uid(), ts6_uid(&key));
+    assert_ne!(ts3, ts6);
+    let levels = caffeine(&server, &kim, &[&ts6, &ts3]).await;
+    assert_eq!(
+        levels.body,
+        json!({ "people": [
+            { "uid": ts6, "opened": [at] },
+            { "uid": ts3, "opened": [at] },
+        ]})
+    );
+}
+
 #[tokio::test]
 async fn caffeine_leaves_out_hidden_people_but_not_yourself() {
     let server = Server::new(false);

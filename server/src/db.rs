@@ -66,12 +66,15 @@ CREATE TABLE IF NOT EXISTS challenges (
     expires_at INTEGER NOT NULL
 );
 
+-- `uid` is the TeamSpeak 3 uid (SHA-1). A TeamSpeak 6 server tells clients apart by `uid6`
+-- instead (SHA-256 of the same key), filled in by `open` for rows from before it existed.
 CREATE TABLE IF NOT EXISTS identities (
     uid TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     public_key TEXT NOT NULL,
     source TEXT NOT NULL,
-    linked_at INTEGER NOT NULL
+    linked_at INTEGER NOT NULL,
+    uid6 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS cans (
@@ -107,7 +110,30 @@ pub fn open(dir: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
+    add_uid6(&conn)?;
     Ok(conn)
+}
+
+/// Gives `identities` its TeamSpeak 6 uid column, in a database made before it, and fills it
+/// in from each row's key.
+fn add_uid6(conn: &Connection) -> rusqlite::Result<()> {
+    let has_column = conn
+        .prepare("SELECT 1 FROM pragma_table_info('identities') WHERE name = 'uid6'")?
+        .exists([])?;
+    if !has_column {
+        conn.execute_batch("ALTER TABLE identities ADD COLUMN uid6 TEXT")?;
+    }
+    let missing: Vec<(String, String)> = conn
+        .prepare("SELECT uid, public_key FROM identities WHERE uid6 IS NULL")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    for (uid, public_key) in missing {
+        conn.execute(
+            "UPDATE identities SET uid6 = ?1 WHERE uid = ?2",
+            rusqlite::params![crate::identity::uid6(&public_key), uid],
+        )?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS identities_uid6 ON identities (uid6)")
 }
 
 /// Drops rows that have run out, so the small tables stay small.
@@ -174,4 +200,44 @@ pub fn delete_account(dir: &Path, email: &str) -> Result<bool, String> {
     };
     crate::me::delete_account(&mut conn, user).map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod uid6_tests {
+    use super::*;
+
+    #[test]
+    fn a_database_from_before_teamspeak_6_uids_gets_them_on_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "MEwDAgcAAgEgAiEA1gnT0Rq6nPc0bPQZ6Zr2rS/0H6bYQ3Nn6v1X0e4H5Q0CIBuh0Yx2p2u1w8Yw3l2jvH7m3Yq5yZx6e5o2j8e1t3cU";
+        {
+            let conn = Connection::open(dir.path().join(FILE)).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY);
+                 INSERT INTO users (id) VALUES (1);
+                 CREATE TABLE identities (
+                     uid TEXT PRIMARY KEY,
+                     user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                     public_key TEXT NOT NULL,
+                     source TEXT NOT NULL,
+                     linked_at INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO identities VALUES ('old', 1, ?1, 'Flexspeak', 0)",
+                [key],
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            let conn = open(dir.path()).unwrap();
+            let uid6: String = conn
+                .query_row("SELECT uid6 FROM identities WHERE uid = 'old'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(uid6, crate::identity::uid6(key));
+        }
+    }
 }
