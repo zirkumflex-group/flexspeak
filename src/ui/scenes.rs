@@ -1730,8 +1730,8 @@ fn caffeine_names(s: &mut App) {
     s.levels.set("uid-3", vec![now - 11 * 3600]);
 }
 
-/// Long names in the usual 260 pt sidebar, some sharing or muted: the name gives way, and the
-/// level and the badges after it stay whole.
+/// Long names in the usual 260 pt sidebar, some sharing or muted: the level sits under the
+/// name, so the name keeps the room it has without one.
 fn caffeine_names_long(s: &mut App) {
     caffeine_names(s);
     let names = [

@@ -2097,6 +2097,8 @@ fn channel_menu(s: &App, k: &Kit, layer: &mut Vec<El>) {
 
 /// The height of a member's name and what follows it on its line.
 const NAME_LINE: f32 = 20.0;
+/// The height of the caffeine level's line under a name.
+const LEVEL_LINE: f32 = 13.0;
 
 fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El {
     let mic_muted =
@@ -2133,35 +2135,26 @@ fn member_row(s: &App, t: &Theme, member: &client::Member, current: bool) -> El 
     if member.is_self {
         name = name.child(text("(you)").font(ty::TREE).color(t.muted).a11y_hidden());
     }
-    // One line's worth of a wrapping row: what doesn't fit beside the name wraps to a second
-    // line that is clipped away. So the caffeine estimate shows only where the whole name
-    // fits too, and a long name is never cut short to make room for it.
-    let mut named = row()
-        .grow(1.0)
-        .min_w(0.0)
-        .h(NAME_LINE)
-        .gap(7.0)
-        .flex_wrap()
-        .clip_rounded(0.0)
-        .child(name);
-    // The estimate is a note about the person too, quieter still, in whole milligrams.
+    let mut named = col().grow(1.0).min_w(0.0).child(name);
+    // The caffeine estimate is a note about the person too, quieter still, in whole milligrams.
+    // It gets a line of its own under the name, so a long name gives up no room for it; the
+    // row grows by that line.
     if let Some(mg) = s.caffeine_beside(member, chrono::Utc::now().timestamp()) {
         let level = crate::monster::caffeine_text(mg);
         let whose = if member.is_self { "your" } else { "their" };
-        // The tooltip covers the whole name, so the level can be had where it didn't fit.
-        named = named
-            .help(format!(
-                "About {level} of caffeine, estimated from {whose} cans"
-            ))
-            .child(
-                row().h(NAME_LINE).center_y().child(
-                    text(level.clone())
-                        .key(format!("member-caffeine-{}", member.id))
-                        .font(ty::NUMERIC)
-                        .color(t.faint)
-                        .label(format!("about {level} of caffeine")),
-                ),
-            );
+        entry = entry.h(size::TREE_ROW + LEVEL_LINE);
+        named = named.child(
+            row().h(LEVEL_LINE).child(
+                text(level.clone())
+                    .key(format!("member-caffeine-{}", member.id))
+                    .font(ty::NUMERIC)
+                    .color(t.faint)
+                    .help(format!(
+                        "About {level} of caffeine, estimated from {whose} cans"
+                    ))
+                    .label(format!("about {level} of caffeine")),
+            ),
+        );
     }
     entry = entry.child(named);
     if let Some(lit) = s.server().unboxed.get(&member.id)
