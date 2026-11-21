@@ -806,14 +806,15 @@ pub fn save_bundle(report: Report) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Blanks every value that would let someone in: passwords, sessions, tokens and keys.
+/// Blanks every value that would let someone in (passwords, sessions, tokens and keys), and
+/// the body weight given for the caffeine estimate, which is no one else's business.
 fn redact(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, value) in map.iter_mut() {
                 let key = key.to_ascii_lowercase();
                 let secret = [
-                    "password", "session", "token", "secret", "identity", "private",
+                    "password", "session", "token", "secret", "identity", "private", "weight",
                 ]
                 .iter()
                 .any(|word| key.contains(word));
@@ -846,6 +847,7 @@ mod tests {
             "servers": [{"address": "ts.example", "password": "sealed", "name": "A"},
                         {"address": "b", "password": ""}],
             "keybinds": {"toggle_mute": "F1"},
+            "caffeine_weight_kg": 82,
             "settings_sync_version": 4
         });
         redact(&mut value);
@@ -855,6 +857,7 @@ mod tests {
         assert_eq!(value["servers"][0]["address"], "ts.example");
         assert_eq!(value["servers"][1]["password"], "");
         assert_eq!(value["keybinds"]["toggle_mute"], "F1");
+        assert_eq!(value["caffeine_weight_kg"], "(removed)");
         assert_eq!(value["settings_sync_version"], 4);
     }
 

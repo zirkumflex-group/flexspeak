@@ -20,8 +20,8 @@ use super::widgets::{
 };
 use super::{icons, send};
 use crate::monster::{
-    self, Action, Beat, Board, CARDS, Caffeine, Can, FLAVOURS, Flavour, Gate, Notice, Ranking,
-    Rarity, Reveal, Section, Standing,
+    self, Action, Beat, Board, CARDS, Can, FLAVOURS, Flavour, Gate, Notice, Ranking, Rarity,
+    Reveal, Section, Standing,
 };
 use crate::{App, Message, settings};
 
@@ -1551,7 +1551,7 @@ fn profile(
         .w_full()
         .gap(14.0)
         .child(title(t, heading))
-        .child(stats(t, board))
+        .child(stats(s, t, board))
         .children(now)
         .child(heatmap(s, t, board, today))
         .child(flavours(t, board))
@@ -1608,7 +1608,7 @@ fn from_now(at: i64, now: i64) -> String {
 /// at a time and never animates.
 fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     let now = chrono::Utc::now().timestamp() / 60 * 60;
-    let caffeine = Caffeine::new(&s.monster.cans, now);
+    let caffeine = s.own_caffeine(now);
     let (start, end) = (now - CAFFEINE_BEFORE, now + CAFFEINE_AFTER);
     let samples: Vec<(i64, f32)> = (start..=end)
         .step_by(CAFFEINE_STEP as usize)
@@ -1622,10 +1622,15 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
             },
         );
     let about = format!(
-        "An estimate: {} mg a can, drunk over {} minutes, halving every {} hours. People vary.",
+        "An estimate: {} mg a can, drunk over {} minutes and taken up within the hour, then \
+         halving every {}. Sleep-ready is under {} mg. People vary.",
         monster::CAFFEINE_MG_PER_CAN,
         monster::DRINKING_MINUTES,
-        monster::CAFFEINE_HALF_LIFE_HOURS
+        match s.caffeine_weight {
+            Some(_) => format!("{:.1} hours at your weight", caffeine.half_life_hours()),
+            None => format!("{} hours", monster::CAFFEINE_HALF_LIFE_HOURS),
+        },
+        monster::CAFFEINE_SLEEP_MG
     );
     let head = row()
         .gap(6.0)
@@ -1682,6 +1687,8 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
     let level = caffeine.mg(now);
     let low = s.caffeine.low();
     let low_at = caffeine.falls_below(low as f32, now);
+    // When what's left stops getting in the way of sleep, as far as the cans so far go.
+    let sleep_at = caffeine.falls_below(monster::CAFFEINE_SLEEP_MG as f32, now);
     // A round top, so the scale reads at a glance: 200 mg holds one can, then it grows by hundreds.
     let top = ((peak * 1.1 / 100.0).ceil() * 100.0).max(200.0);
     let w = cx
@@ -1907,9 +1914,16 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         .timestamp_opt(start, 0)
         .earliest()
         .map_or(0, |time| i64::from(time.minute() * 60 + time.second()));
+    // A moon on the hours where sleep comes easily again, when that is on the chart and
+    // clear of Now.
+    let moon =
+        sleep_at.filter(|at| *at < end && (x(*at) - x(now)).abs() >= 30.0 && x(*at) <= w - 8.0);
     let mut hour = start + (3600 - into_hour) % 3600;
     while hour < end {
-        let clear = (x(hour) - x(now)).abs() >= 34.0 && x(hour) >= 20.0 && x(hour) <= w - 20.0;
+        let clear = (x(hour) - x(now)).abs() >= 34.0
+            && x(hour) >= 20.0
+            && x(hour) <= w - 20.0
+            && moon.is_none_or(|at| (x(hour) - x(at)).abs() >= 26.0);
         if let Some(time) = Local.timestamp_opt(hour, 0).earliest()
             && clear
             && time.hour() % every == 0
@@ -1920,6 +1934,20 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         hour += 3600;
     }
     times = times.child(label(now, "Now".to_owned(), t.muted));
+    if let Some(at) = moon {
+        times = times.child(
+            el().key("monster-caffeine-sleep")
+                .absolute(x(at) - 7.0, 0.0)
+                .size(14.0, 14.0)
+                .center()
+                .help(format!(
+                    "Sleep-ready {}: under {} mg",
+                    from_now(at, now),
+                    monster::CAFFEINE_SLEEP_MG
+                ))
+                .child(icon(&icons::MOON, 11.0).color(t.muted)),
+        );
+    }
 
     // What the curve comes to, in words: its top, and when it runs low.
     let mut facts = vec![format!(
@@ -1928,9 +1956,17 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         monster::caffeine_text(peak),
         clock(peak_at, now)
     )];
-    if let Some(at) = low_at {
+    if let Some(at) = low_at.filter(|at| Some(*at) != sleep_at) {
         facts.push(format!("Under {low} mg at about {}", clock(at, now)));
     }
+    facts.push(match sleep_at {
+        Some(at) => format!(
+            "Sleep-ready {}, around {}",
+            from_now(at, now),
+            clock(at, now)
+        ),
+        None => "Sleep-ready now".to_owned(),
+    });
     let facts = facts.join("  ·  ");
 
     frame
@@ -1979,7 +2015,7 @@ fn caffeine(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit) -> El {
         .children(options)
 }
 
-/// The two switches the well's gear opens under the chart: what the estimate does outside
+/// The rows the well's gear opens under the chart: your weight, and what the estimate does outside
 /// this page. They live here, not in Settings, which doesn't know the page.
 fn caffeine_options(s: &App, t: &Theme, k: &Kit) -> El {
     let options = s.caffeine;
@@ -2037,6 +2073,50 @@ fn caffeine_options(s: &App, t: &Theme, k: &Kit) -> El {
             ..options
         },
     ));
+    // Your weight, for a half-life nearer your own. Off, the estimate is for 70 kg.
+    let weight = s.caffeine_weight;
+    let mut weigh = row().gap(12.0).center_y();
+    if let Some(kg) = weight {
+        weigh = weigh.child(
+            slider(
+                t,
+                "monster-caffeine-weight",
+                "Your weight",
+                kg as i32,
+                format!("{kg} kilograms"),
+                Range {
+                    min: *monster::CAFFEINE_WEIGHT_RANGE.start() as i32,
+                    max: *monster::CAFFEINE_WEIGHT_RANGE.end() as i32,
+                    step: 1,
+                    key_step: 1,
+                },
+                |s| s.caffeine_weight.unwrap_or(monster::CAFFEINE_WEIGHT_KG) as i32,
+                |value| Message::CaffeineWeight(Some(value.max(0) as u32)),
+            )
+            .w(160.0),
+        );
+    }
+    weigh = weigh.child(
+        Switch::new(weight.is_some())
+            .label("Use my weight")
+            .hide_label()
+            .on_toggle_tx(move |s: &mut App, tx| {
+                let next = match weight {
+                    Some(_) => None,
+                    None => Some(monster::CAFFEINE_WEIGHT_KG),
+                };
+                super::dispatch(s, tx, Message::CaffeineWeight(next));
+            })
+            .build(k)
+            .key("monster-caffeine-weigh"),
+    );
+    let weighing = match weight {
+        Some(kg) => format!(
+            "{kg} kg: half is gone every {:.1} hours. Kept on this computer.",
+            monster::caffeine_half_life_hours(weight)
+        ),
+        None => "A heavier body holds caffeine a little longer. Kept on this computer.".to_owned(),
+    };
     col()
         .key("monster-caffeine-options")
         .w_full()
@@ -2062,6 +2142,8 @@ fn caffeine_options(s: &App, t: &Theme, k: &Kit) -> El {
             Some(&format!("A notice once you fall under {low} mg.")),
             warn,
         ))
+        .child(el().h(1.0).w_full().px(size::CARD_PAD).child(divider(t)))
+        .child(form_row(t, "Use my weight", Some(&weighing), weigh))
 }
 
 fn days(n: u32) -> String {
@@ -2072,6 +2154,19 @@ fn days(n: u32) -> String {
     }
 }
 
+/// A whole number with its thousands parted, as a total reads: 12,480.
+fn thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (place, digit) in digits.chars().enumerate() {
+        if place > 0 && (digits.len() - place).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 fn stat(t: &Theme, label: &str, value: String) -> El {
     col()
         .gap(2.0)
@@ -2079,12 +2174,29 @@ fn stat(t: &Theme, label: &str, value: String) -> El {
         .child(muted(t, label))
 }
 
-fn stats(t: &Theme, board: &Board) -> El {
-    let stat = |label: &str, value: String| stat(t, label, value).grow(1.0).min_w(104.0);
+/// The board's ten figures in even columns: two rows of five (the habit over what it added
+/// up to), or pairs in a narrow window. Every column is as wide as the next, so a wrapped
+/// row lines up under the one above.
+fn stats(s: &App, t: &Theme, board: &Board) -> El {
+    const GAP: f32 = 16.0;
+    let room = (s.window_size.0.min(1100.0) - size::PAGE * 2.0).max(0.0);
+    // A column holds the widest figure a board comes to, such as "≈ 163,550".
+    let columns = if room >= 5.0 * 124.0 + 4.0 * GAP {
+        5.0
+    } else {
+        2.0
+    };
+    // What is counted is exact; what is worked out from labels is about, unless it is nothing.
+    let about = |n: u32| match n {
+        0 => "0".to_owned(),
+        n => format!("≈ {}", thousands(n)),
+    };
+    let w = ((room - (columns - 1.0) * GAP) / columns).floor().max(1.0);
+    let stat = |label: &str, value: String| stat(t, label, value).w(w);
     row()
         .key("monster-stats")
         .w_full()
-        .gap(16.0)
+        .gap(GAP)
         .flex_wrap()
         .child(stat("Cans", board.total.to_string()))
         .child(stat(
@@ -2093,9 +2205,21 @@ fn stats(t: &Theme, board: &Board) -> El {
         ))
         .child(stat("Current Streak", days(board.current_streak)))
         .child(stat("Longest Streak", days(board.longest_streak)))
+        .child(stat("Longest Break", days(board.longest_break)))
         .child(stat("Best Day", board.best_day.to_string()))
         .child(stat("Drunk", format!("{:.1} L", board.litres)))
         .child(stat("Caffeine", format!("{:.1} g", board.caffeine_g)))
+        .child(
+            stat("Sugar Cubes", about(board.sugar_g / monster::SUGAR_CUBE_G))
+                .key("monster-stat-sugar")
+                .help(format!(
+                    "About {:.1} kg of sugar, at {} g a cube. What is typical for each flavour's \
+                 line; recipes vary by country.",
+                    board.sugar_g as f32 / 1000.0,
+                    monster::SUGAR_CUBE_G
+                )),
+        )
+        .child(stat("Kilocalories", about(board.kcal)))
 }
 
 fn format_date(date: NaiveDate) -> String {

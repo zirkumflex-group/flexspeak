@@ -92,6 +92,10 @@ pub struct Settings {
     /// The switches under the Monster page's caffeine chart. Saved straight away when changed.
     #[serde(skip_serializing_if = "Caffeine::is_default")]
     pub caffeine: Caffeine,
+    /// Your weight in kilograms, if you gave it under the caffeine chart, for a half-life
+    /// nearer your own. Kept on this computer: it is no part of `Synced`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caffeine_weight_kg: Option<u32>,
     /// The collection server typed in Settings before the address was built into the app
     /// (`FLEXSPEAK_COLLECTION_SERVER`). Read so older files still load, and so a session from
     /// another server is dropped; never written again.
@@ -825,6 +829,7 @@ impl Default for Settings {
             window: None,
             chat: Chat::default(),
             caffeine: Caffeine::default(),
+            caffeine_weight_kg: None,
             monster_server: None,
             monster_session: None,
             retired_settings_sync: None,
@@ -974,6 +979,28 @@ mod tests {
         let mut onto = Settings::default();
         Synced::from_settings(&changed).apply(&mut onto);
         assert_eq!(onto.caffeine, changed.caffeine);
+    }
+
+    #[test]
+    fn a_body_weight_is_saved_here_and_never_travels_with_the_account() {
+        let weighed = Settings {
+            caffeine_weight_kg: Some(82),
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&weighed).unwrap();
+        let read: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.caffeine_weight_kg, Some(82));
+        assert!(
+            !serde_json::to_string(&Settings::default())
+                .unwrap()
+                .contains("caffeine_weight_kg")
+        );
+
+        let travelling = serde_json::to_string(&Synced::from_settings(&weighed)).unwrap();
+        assert!(!travelling.contains("82") && !travelling.contains("weight"));
+        let mut onto = Settings::default();
+        Synced::from_settings(&weighed).apply(&mut onto);
+        assert_eq!(onto.caffeine_weight_kg, None);
     }
 
     #[test]

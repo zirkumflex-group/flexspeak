@@ -299,6 +299,8 @@ struct App {
     monster: monster::Tracker,
     /// The switches under the Monster page's caffeine chart.
     caffeine: settings::Caffeine,
+    /// Your weight in kg, if given under the chart: your own half-life goes by it.
+    caffeine_weight: Option<u32>,
     /// When the people around you drank their recent cans, for the level beside their names.
     levels: monster::Levels,
     /// When your level falls under the notice's, in Unix seconds, if it is above it now.
@@ -722,6 +724,7 @@ fn trace_message(message: &Message) {
             | Message::UnboxTick
             | Message::CaffeineAsk(_)
             | Message::CaffeineLevels(_)
+            | Message::CaffeineWeight(_)
             | Message::SettingsTargetSeen(_)
             | Message::Address(_)
             | Message::Nickname(_)
@@ -1408,6 +1411,8 @@ enum Message {
     CaffeineOptionsOpen(bool),
     /// A switch or the level under the caffeine chart.
     CaffeineOptions(settings::Caffeine),
+    /// Your weight in kg for the estimate, from the row under the chart; `None` puts it away.
+    CaffeineWeight(Option<u32>),
     /// Your level has fallen under the notice's.
     CaffeineLow,
     /// The low-caffeine notice was closed; `true` goes on to the Monster page to add a can.
@@ -1720,6 +1725,7 @@ impl App {
             tab: Tab::Home,
             monster: monster::Tracker::default(),
             caffeine: settings::Caffeine::default(),
+            caffeine_weight: None,
             levels: monster::Levels::default(),
             caffeine_low_at: None,
             caffeine_low: false,
@@ -2369,9 +2375,12 @@ impl App {
         if !std::mem::take(&mut self.caffeine_unsaved) || self.onboarding.is_some() {
             return;
         }
-        let options = self.caffeine;
+        let (options, weight) = (self.caffeine, self.caffeine_weight);
         self.save_preference(
-            |saved| saved.caffeine = options,
+            |saved| {
+                saved.caffeine = options;
+                saved.caffeine_weight_kg = weight;
+            },
             "The caffeine choice applies for now but was not saved",
         );
     }
@@ -3028,6 +3037,13 @@ impl App {
         }
         self.chat_options = saved.chat;
         self.caffeine = saved.caffeine;
+        // A weight from a hand-edited file is kept inside what the page offers.
+        self.caffeine_weight = saved.caffeine_weight_kg.map(|kg| {
+            kg.clamp(
+                *monster::CAFFEINE_WEIGHT_RANGE.start(),
+                *monster::CAFFEINE_WEIGHT_RANGE.end(),
+            )
+        });
         self.watch_caffeine();
         self.share_defaults = if saved.share.quality.validate().is_ok() {
             saved.share.upgraded()
@@ -3081,6 +3097,7 @@ impl App {
             interface_size: self.interface_size,
             chat: self.chat_options,
             caffeine: self.caffeine,
+            caffeine_weight_kg: self.caffeine_weight,
             skip_install_prompt: self.never_install
                 || self
                     .saved
@@ -4410,6 +4427,22 @@ impl App {
                 self.caffeine_unsaved = true;
                 self.watch_caffeine();
                 if !slid {
+                    self.save_caffeine();
+                }
+            }
+            Message::CaffeineWeight(weight) => {
+                // As with the mark: a drag is saved once its options fold away or the app
+                // quits, and the switch at once.
+                let switched = weight.is_some() != self.caffeine_weight.is_some();
+                self.caffeine_weight = weight.map(|kg| {
+                    kg.clamp(
+                        *monster::CAFFEINE_WEIGHT_RANGE.start(),
+                        *monster::CAFFEINE_WEIGHT_RANGE.end(),
+                    )
+                });
+                self.caffeine_unsaved = true;
+                self.watch_caffeine();
+                if switched {
                     self.save_caffeine();
                 }
             }
@@ -6424,7 +6457,7 @@ impl App {
 
     /// Your caffeine at `now` (Unix seconds), from your own cans.
     fn own_caffeine(&self, now: i64) -> monster::Caffeine {
-        monster::Caffeine::new(&self.monster.cans, now)
+        monster::Caffeine::new(&self.monster.cans, now).weighing(self.caffeine_weight)
     }
 
     /// The level to show beside this member's name, in mg: yours from your cans, anyone
