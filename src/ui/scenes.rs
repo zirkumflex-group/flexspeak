@@ -71,6 +71,14 @@ pub const SCENES: &[Scene] = &[
     ),
     ("monster-caffeine-options", monster_caffeine_options),
     ("monster-caffeine-quiet", monster_caffeine_quiet),
+    ("monster-caffeine-sleep", monster_caffeine_sleep),
+    ("monster-caffeine-sleep-light", monster_caffeine_sleep_light),
+    ("monster-caffeine-sleep-now", monster_caffeine_sleep_now),
+    ("monster-caffeine-weight", monster_caffeine_weight),
+    (
+        "monster-caffeine-weight-light",
+        monster_caffeine_weight_light,
+    ),
     ("caffeine-names", caffeine_names),
     ("caffeine-names-light", caffeine_names_light),
     ("caffeine-names-long", caffeine_names_long),
@@ -1700,17 +1708,61 @@ fn monster_caffeine_reading_light(s: &mut App) {
     s.ui.caffeine_hover = Some(chrono::Utc::now().timestamp() / 60 * 60 + 200 * 60);
 }
 
-/// The gear on the chart pressed: the two switches unfold under it.
+/// The gear on the chart pressed: its rows unfold under it, Use My Weight still off.
 fn monster_caffeine_options(s: &mut App) {
     monster_caffeine(s);
     s.ui.caffeine_options = true;
 }
 
-/// Both switches under the chart off: no level line on it, and no slider beside the switch.
+/// The switches under the chart off: no level line on it, and no slider beside a switch.
 fn monster_caffeine_quiet(s: &mut App) {
     monster_caffeine_options(s);
     s.caffeine.beside_names = false;
     s.caffeine.low_notice = false;
+}
+
+/// One can two hours ago and nothing else in the last two days: the chart runs down to
+/// sleep-ready within its hours, so the moon stands on them.
+fn monster_caffeine_sleep(s: &mut App) {
+    use crate::monster::{Can, Rarity};
+    stocked(s);
+    let now = chrono::Utc::now().timestamp();
+    s.monster.cans.retain(|can| can.at < now - 48 * 3600);
+    let id = s.monster.cans.len() as i64 + 1;
+    s.monster.cans.push(Can {
+        id,
+        flavour: "mango-loco".into(),
+        at: now - 2 * 3600,
+        rarity: Rarity::Common,
+        seed: 0,
+    });
+}
+
+/// The one can was twelve hours ago: what is left is under the sleep mark already.
+fn monster_caffeine_sleep_now(s: &mut App) {
+    monster_caffeine_sleep(s);
+    if let Some(can) = s.monster.cans.last_mut() {
+        can.at -= 10 * 3600;
+    }
+}
+
+fn monster_caffeine_sleep_light(s: &mut App) {
+    monster_caffeine_sleep(s);
+    s.appearance.scheme = settings::ColorScheme::Light;
+    s.appearance.light_theme = settings::ThemeName::Ocean;
+}
+
+/// Use My Weight switched on under the chart, at 86 kg: its slider, and the half-life it
+/// comes to.
+fn monster_caffeine_weight(s: &mut App) {
+    monster_caffeine_options(s);
+    s.caffeine_weight = Some(86);
+}
+
+fn monster_caffeine_weight_light(s: &mut App) {
+    monster_caffeine_light(s);
+    s.ui.caffeine_options = true;
+    s.caffeine_weight = Some(86);
 }
 
 /// Caffeine beside names in the tree: yours from your cans, Mara's and Theo's as the

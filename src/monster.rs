@@ -33,9 +33,20 @@ const LITRES_PER_CAN: f32 = 0.5;
 pub const CAFFEINE_MG_PER_CAN: u32 = 160;
 /// How long a can takes to drink, for the caffeine estimate: most take 15 to 30 minutes.
 pub const DRINKING_MINUTES: u32 = 20;
-/// How long the body takes to clear half its caffeine. Three to seven hours in healthy
-/// adults; five is the usual middle.
+/// How long the body takes to clear half its caffeine, at `CAFFEINE_WEIGHT_KG`. Three to
+/// seven hours in healthy adults; five is the usual middle.
 pub const CAFFEINE_HALF_LIFE_HOURS: u32 = 5;
+/// How fast the gut passes caffeine on to the blood, as a rate per hour: studies of caffeine
+/// in drinks find about 3, which puts the top of the curve near an hour after the first sip.
+const CAFFEINE_ABSORBED_PER_HOUR: f64 = 3.0;
+/// The body weight the half-life is for, and the weights the page offers. Caffeine spreads
+/// through a volume that grows with weight while the liver clears it only a little faster
+/// (weight to the power 0.75, the usual scaling), so a heavier body holds it somewhat longer.
+pub const CAFFEINE_WEIGHT_KG: u32 = 70;
+pub const CAFFEINE_WEIGHT_RANGE: std::ops::RangeInclusive<u32> = 40..=150;
+/// Under this much, sleep comes about as easily as without: a rough mark, since the studies
+/// only agree that a few hundred milligrams at bedtime cost sleep and a few dozen don't.
+pub const CAFFEINE_SLEEP_MG: u32 = 50;
 /// Past this a can has under a hundredth of its caffeine left, and is left out of the sum.
 const CAFFEINE_REACH: i64 = api::CAFFEINE_REACH;
 /// The level the low-caffeine notice starts at unless changed: half a can.
@@ -43,6 +54,8 @@ pub const CAFFEINE_LOW_MG: u32 = 80;
 /// The levels the notice can be set to, and how far one press moves it.
 pub const CAFFEINE_LOW_RANGE: std::ops::RangeInclusive<u32> = 20..=200;
 pub const CAFFEINE_LOW_STEP: u32 = 10;
+/// What a sugar cube weighs, in grams, for counting a board's sugar in cubes.
+pub const SUGAR_CUBE_G: u32 = 3;
 /// Under this a level reads as nothing, beside a name and on the chart.
 pub const CAFFEINE_TRACE_MG: f32 = 1.0;
 
@@ -68,6 +81,30 @@ const COMMON: &[&str] = &[
     "other",
 ];
 
+/// About how much sugar (g) and energy (kcal) a can of this flavour holds: what is typical
+/// of its line in Europe, and by name where a flavour leaves its line's recipe. Original,
+/// The Doctor, LH44, the zero-sugar cans, Ultra, Juice, Reserve and Rehab are from labels;
+/// Java, Espresso, Lo-Carb, Import Light and the light Javas are estimates. Recipes differ
+/// between countries and years, so it is shown as "about".
+pub fn nutrition(flavour: &Flavour) -> (u32, u32) {
+    match flavour.id {
+        "zero-sugar" | "absolutely-zero" | "lando-norris" | "lewis-hamilton" | "mule" => (0, 10),
+        "lo-carb" | "import-light" => (5, 45),
+        "lh44" => (21, 95),
+        "the-doctor" => (50, 220),
+        "java-vanilla-light" | "java-lo-ball" => (15, 100),
+        _ => match flavour.line {
+            "Ultra" => (0, 10),
+            "Juice" => (42, 180),
+            "Reserve" => (30, 130),
+            "Rehab" => (10, 50),
+            "Java" => (35, 220),
+            "Espresso" => (22, 150),
+            _ => (55, 235),
+        },
+    }
+}
+
 /// Whether the flavour at this place in `FLAVOURS` is one of the common ones.
 pub fn common(index: usize) -> bool {
     FLAVOURS
@@ -75,19 +112,34 @@ pub fn common(index: usize) -> bool {
         .is_some_and(|flavour| COMMON.contains(&flavour.id))
 }
 
-/// The caffeine one can leaves in the body `seconds` after it was opened, in mg. It goes in at
-/// a steady rate while the can is drunk and leaves by half-life all the while, so the level
-/// tops out as the can empties and halves every `CAFFEINE_HALF_LIFE_HOURS` after that.
-fn caffeine_from_can(seconds: f64) -> f64 {
+/// The half-life for a body of this weight, in hours: `CAFFEINE_HALF_LIFE_HOURS` without one.
+pub fn caffeine_half_life_hours(weight_kg: Option<u32>) -> f64 {
+    let kg = weight_kg.map_or(CAFFEINE_WEIGHT_KG, |kg| {
+        kg.clamp(*CAFFEINE_WEIGHT_RANGE.start(), *CAFFEINE_WEIGHT_RANGE.end())
+    });
+    f64::from(CAFFEINE_HALF_LIFE_HOURS) * (f64::from(kg) / f64::from(CAFFEINE_WEIGHT_KG)).powf(0.25)
+}
+
+/// The caffeine one can leaves in the blood `seconds` after it was opened, in mg, clearing
+/// at `leaving` a second. It reaches the gut at a steady rate while the can is drunk, the
+/// gut passes it on at `CAFFEINE_ABSORBED_PER_HOUR`, and the body clears it by half-life all
+/// the while: the level tops out near an hour after the first sip, at about 85% of the can.
+fn caffeine_from_can(seconds: f64, leaving: f64) -> f64 {
     if seconds <= 0.0 {
         return 0.0;
     }
-    let leaving = std::f64::consts::LN_2 / (f64::from(CAFFEINE_HALF_LIFE_HOURS) * 3600.0);
+    let absorbing = CAFFEINE_ABSORBED_PER_HOUR / 3600.0;
     let drinking = f64::from(DRINKING_MINUTES) * 60.0;
     let rate = f64::from(CAFFEINE_MG_PER_CAN) / drinking;
+    // In the gut and in the blood at the last sip, or now if the can isn't empty yet.
     let drunk_for = seconds.min(drinking);
-    let level = rate / leaving * (1.0 - (-leaving * drunk_for).exp());
-    level * (-leaving * (seconds - drunk_for)).exp()
+    let (gone, taken) = ((-leaving * drunk_for).exp(), (-absorbing * drunk_for).exp());
+    let gut = rate / absorbing * (1.0 - taken);
+    let blood = rate * ((1.0 - gone) / leaving - (taken - gone) / (leaving - absorbing));
+    // From there the gut only empties, into blood that only clears.
+    let since = seconds - drunk_for;
+    let (gone, taken) = ((-leaving * since).exp(), (-absorbing * since).exp());
+    blood * gone + gut * absorbing / (absorbing - leaving) * (gone - taken)
 }
 
 /// The caffeine in someone's body over time, estimated from when their cans were added.
@@ -95,6 +147,8 @@ fn caffeine_from_can(seconds: f64) -> f64 {
 pub struct Caffeine {
     /// When each can that still counts was opened, in Unix seconds.
     opened: Vec<i64>,
+    /// Their weight, where it is known: yours, if you gave it. No one else's ever is.
+    weight_kg: Option<u32>,
 }
 
 impl Caffeine {
@@ -112,7 +166,14 @@ impl Caffeine {
                 .filter(|at| *at > now - CAFFEINE_REACH)
                 .map(|at| at.min(now))
                 .collect(),
+            weight_kg: None,
         }
+    }
+
+    /// The same cans in a body of this weight, which changes the half-life a little.
+    pub fn weighing(mut self, weight_kg: Option<u32>) -> Self {
+        self.weight_kg = weight_kg;
+        self
     }
 
     /// When each can that still counts was opened.
@@ -120,33 +181,68 @@ impl Caffeine {
         &self.opened
     }
 
+    /// How long this body takes to clear half its caffeine, in hours.
+    pub fn half_life_hours(&self) -> f64 {
+        caffeine_half_life_hours(self.weight_kg)
+    }
+
     /// When the level next falls under `mg`, looking on from `from`; `None` if it is under it
-    /// and stays there. While a can is still being drunk the level only rises, so the fall
-    /// is looked for from the moment the last one is empty, where it is a plain half-life.
+    /// and stays there. A can still being drunk or taken up is on its way up, so the fall is
+    /// looked for on the far side of the top the cans so far lead to.
     pub fn falls_below(&self, mg: f32, from: i64) -> Option<i64> {
         if mg <= 0.0 {
             return None;
         }
+        let mg = f64::from(mg);
         let emptied = self
             .opened
             .iter()
             .map(|opened| opened + i64::from(DRINKING_MINUTES) * 60)
             .max()?;
-        let start = from.max(emptied);
-        let level = f64::from(self.mg(start));
-        if level < f64::from(mg) {
+        // Once the last can is empty the level has one top and falls from it for good. The
+        // gut is as good as empty four hours on, so the top is within them.
+        let (mut low, mut high) = (emptied, emptied + 4 * 3600);
+        while high - low > 2 {
+            let (a, b) = (low + (high - low) / 3, high - (high - low) / 3);
+            if self.level(a) < self.level(b) {
+                low = a;
+            } else {
+                high = b;
+            }
+        }
+        let top = (low..=high).max_by(|a, b| self.level(*a).total_cmp(&self.level(*b)))?;
+        let start = from.max(top);
+        if self.level(start) < mg {
             return None;
         }
-        let leaving = std::f64::consts::LN_2 / (f64::from(CAFFEINE_HALF_LIFE_HOURS) * 3600.0);
-        Some(start + ((level / f64::from(mg)).ln() / leaving).ceil() as i64)
+        // The first second under it, between a moment over it and one under it.
+        let half_life = (self.half_life_hours() * 3600.0).ceil() as i64;
+        let (mut over, mut under) = (start, start + half_life);
+        while self.level(under) >= mg {
+            (over, under) = (under, under + half_life);
+        }
+        while under - over > 1 {
+            let middle = over + (under - over) / 2;
+            if self.level(middle) >= mg {
+                over = middle;
+            } else {
+                under = middle;
+            }
+        }
+        Some(under)
     }
 
     /// Milligrams in the body at `at`, which may be ahead of now: no further cans are assumed.
     pub fn mg(&self, at: i64) -> f32 {
+        self.level(at) as f32
+    }
+
+    fn level(&self, at: i64) -> f64 {
+        let leaving = std::f64::consts::LN_2 / (self.half_life_hours() * 3600.0);
         self.opened
             .iter()
-            .map(|opened| caffeine_from_can((at - opened) as f64))
-            .sum::<f64>() as f32
+            .map(|opened| caffeine_from_can((at - opened) as f64, leaving))
+            .sum()
     }
 }
 
@@ -1083,6 +1179,11 @@ pub struct Board {
     pub past_year: u32,
     pub litres: f32,
     pub caffeine_g: f32,
+    /// About how much sugar and energy the cans held, by `nutrition`.
+    pub sugar_g: u32,
+    pub kcal: u32,
+    /// The most days in a row without a can, between the first can and today.
+    pub longest_break: u32,
     pub days: BTreeMap<NaiveDate, u32>,
     /// Most-drunk first; ties by name.
     pub by_flavour: Vec<(&'static Flavour, u32)>,
@@ -1096,7 +1197,11 @@ impl Board {
         let mut by_rarity = [0; 5];
         let mut flavours: BTreeMap<&str, u32> = BTreeMap::new();
         let mut seen = HashSet::new();
+        let (mut sugar_g, mut kcal) = (0, 0);
         for can in cans {
+            let (sugar, energy) = nutrition(can.flavour());
+            sugar_g += sugar;
+            kcal += energy;
             *days.entry(date_of(can.at)).or_insert(0) += 1;
             by_rarity[can.rarity().index()] += 1;
             *flavours.entry(can.flavour().id).or_insert(0) += 1;
@@ -1119,6 +1224,9 @@ impl Board {
             past_year: days.range(year_start..=today).map(|(_, n)| n).sum(),
             litres: total as f32 * LITRES_PER_CAN,
             caffeine_g: (total * CAFFEINE_MG_PER_CAN) as f32 / 1000.0,
+            sugar_g,
+            kcal,
+            longest_break: longest_break(&days, today),
             days,
             by_flavour,
             by_rarity,
@@ -1143,6 +1251,21 @@ fn streaks(days: &BTreeMap<NaiveDate, u32>, today: NaiveDate) -> (u32, u32) {
     }
     let alive = last.is_some_and(|day| day == today || day == today - Duration::days(1));
     (if alive { run } else { 0 }, longest)
+}
+
+/// The most days in a row without a can, from the first can on. The days since the last one
+/// count too, but not today, which isn't over.
+fn longest_break(days: &BTreeMap<NaiveDate, u32>, today: NaiveDate) -> u32 {
+    let between = |from: NaiveDate, to: NaiveDate| ((to - from).num_days() - 1).max(0) as u32;
+    let mut longest = 0;
+    let mut last: Option<NaiveDate> = None;
+    for &day in days.keys() {
+        if let Some(before) = last {
+            longest = longest.max(between(before, day));
+        }
+        last = Some(day);
+    }
+    last.map_or(0, |day| longest.max(between(day, today)))
 }
 
 #[cfg(test)]
@@ -1426,22 +1549,76 @@ mod tests {
     }
 
     #[test]
-    fn caffeine_rises_while_the_can_is_drunk_and_halves_every_half_life() {
+    fn caffeine_tops_out_within_the_hour_and_then_halves_every_half_life() {
         let hour = 3600;
         let cans = on_days(&[1000]);
         let caffeine = Caffeine::new(&cans, 1000);
         assert_eq!(caffeine.mg(999), 0.0, "nothing before the can");
         assert_eq!(caffeine.mg(1000), 0.0);
+        // The gut is still passing it on when the can is empty: under half is in the blood.
         let emptied = 1000 + i64::from(DRINKING_MINUTES) * 60;
-        let peak = caffeine.mg(emptied);
-        assert!(caffeine.mg(1000 + 300) < caffeine.mg(1000 + 600));
-        assert!(caffeine.mg(emptied - 60) < peak && caffeine.mg(emptied + 60) < peak);
-        // A little has already left by the time the can is empty.
-        assert!(peak > 150.0 && peak < 160.0, "{peak}");
+        assert!(caffeine.mg(emptied) > 40.0 && caffeine.mg(emptied) < 80.0);
+        let (top_at, top) = (1000..1000 + 4 * hour)
+            .step_by(60)
+            .map(|at| (at, caffeine.mg(at)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        let after = top_at - 1000;
+        assert!(after > 45 * 60 && after < 90 * 60, "top after {after} s");
+        assert!(top > 128.0 && top < 142.0, "{top}");
+        // Nothing is lost on the way: what the body clears adds up to the can.
+        let leaving = std::f64::consts::LN_2 / (5.0 * 3600.0);
+        let cleared: f64 = (0..60 * hour)
+            .map(|second| caffeine_from_can(second as f64, leaving) * leaving)
+            .sum();
+        assert!((cleared - 160.0).abs() < 1.0, "{cleared}");
+        // Well past the top the gut is empty and it is a plain half-life.
         let half_life = i64::from(CAFFEINE_HALF_LIFE_HOURS) * hour;
-        let later = caffeine.mg(emptied + half_life);
-        assert!((later - peak / 2.0).abs() < 0.01, "{later} against {peak}");
-        assert!((caffeine.mg(emptied + 2 * half_life) - peak / 4.0).abs() < 0.01);
+        let (late, later) = (1000 + 6 * hour, 1000 + 6 * hour + half_life);
+        let ratio = caffeine.mg(later) / caffeine.mg(late);
+        assert!((ratio - 0.5).abs() < 0.0001, "{ratio}");
+    }
+
+    #[test]
+    fn a_heavier_body_holds_caffeine_a_little_longer() {
+        assert_eq!(caffeine_half_life_hours(None), 5.0);
+        assert_eq!(caffeine_half_life_hours(Some(CAFFEINE_WEIGHT_KG)), 5.0);
+        let (light, heavy) = (
+            caffeine_half_life_hours(Some(50)),
+            caffeine_half_life_hours(Some(110)),
+        );
+        assert!(light > 4.5 && light < 4.7, "{light}");
+        assert!(heavy > 5.5 && heavy < 5.7, "{heavy}");
+        // A weight from a hand-edited file is kept inside what the page offers.
+        assert_eq!(
+            caffeine_half_life_hours(Some(900)),
+            caffeine_half_life_hours(Some(*CAFFEINE_WEIGHT_RANGE.end()))
+        );
+        let hour = 3600;
+        let now = 100 * hour;
+        let cans = on_days(&[now - 8 * hour]);
+        let usual = Caffeine::new(&cans, now);
+        let heavy = usual.clone().weighing(Some(110));
+        assert!(heavy.mg(now) > usual.mg(now));
+        assert!(heavy.falls_below(50.0, now) > usual.falls_below(50.0, now));
+        assert_ne!(heavy, usual, "the chart is drawn again for it");
+    }
+
+    #[test]
+    fn sugar_and_energy_follow_the_flavour_and_breaks_are_counted() {
+        assert_eq!(nutrition(flavour_or_other("original")), (55, 235));
+        assert_eq!(nutrition(flavour_or_other("zero-sugar")), (0, 10));
+        assert_eq!(nutrition(flavour_or_other("ultra-white")), (0, 10));
+        assert_eq!(nutrition(flavour_or_other("mango-loco")), (42, 180));
+        let day = |n: i64| date(2026, 1, 1) + Duration::days(n);
+        let mut cans = on_days(&[0, 1, 6, 7]);
+        cans[1].flavour = "ultra-white".into();
+        let board = Board::new(&cans, day(7), day);
+        assert_eq!((board.sugar_g, board.kcal), (165, 715));
+        assert_eq!(board.longest_break, 4, "days 2 to 5");
+        // The days since the last can count, but not today.
+        assert_eq!(Board::new(&cans, day(20), day).longest_break, 12);
+        assert_eq!(Board::new(&[], day(20), day).longest_break, 0);
     }
 
     #[test]
@@ -1464,18 +1641,21 @@ mod tests {
         let now = 100 * hour;
         let caffeine = Caffeine::new(&on_days(&[now - hour]), now);
         let at = caffeine.falls_below(80.0, now).unwrap();
-        assert!(caffeine.mg(at) < 80.0 && caffeine.mg(at - 2) >= 80.0);
-        // About one half-life after the peak of a single can.
+        assert!(caffeine.mg(at) < 80.0 && caffeine.mg(at - 1) >= 80.0);
+        // The top of a single can is near 138 mg, an hour in: most of a half-life from there.
         assert!((at - now - 4 * hour).abs() < hour, "{}", at - now);
         assert_eq!(caffeine.falls_below(80.0, at + 1), None, "under it already");
         assert_eq!(caffeine.falls_below(0.0, now), None);
         assert_eq!(Caffeine::new(&[], now).falls_below(80.0, now), None);
-        // A can only just opened is under the level but on its way over it: the fall is the
-        // one after it is empty, never a moment while it still rises.
+        // A can only just opened, or just emptied, is under the level but on its way over
+        // it: the fall is the one after its top, never a moment while it still rises.
+        for ago in [60, 5 * 60, 25 * 60] {
+            let fresh = Caffeine::new(&on_days(&[now - ago]), now);
+            assert!(fresh.mg(now) < 80.0, "{ago} s in");
+            let at = fresh.falls_below(80.0, now).unwrap();
+            assert!(at > now + 3 * hour && fresh.mg(at) < 80.0 && fresh.mg(at - 1) >= 80.0);
+        }
         let fresh = Caffeine::new(&on_days(&[now - 60]), now);
-        assert!(fresh.mg(now) < 80.0);
-        let at = fresh.falls_below(80.0, now).unwrap();
-        assert!(at > now + 4 * hour && fresh.mg(at) < 80.0 && fresh.mg(at - 2) >= 80.0);
         assert_eq!(
             fresh.falls_below(200.0, now),
             None,
