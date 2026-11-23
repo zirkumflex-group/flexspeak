@@ -8,6 +8,7 @@ mod publish_media;
 pub mod publishing;
 mod rtc;
 mod session;
+mod signals;
 #[cfg(target_os = "windows")]
 mod wgc;
 pub use publish_media::Live as LiveShare;

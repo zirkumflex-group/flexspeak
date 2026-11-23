@@ -2,6 +2,7 @@ use super::{
     AVAILABLE, Event, MAX_CANDIDATES, MAX_WATCHES, Phase, StreamInfo, Surfaces,
     protocol::{self, Input},
     rtc,
+    signals::Backlog,
 };
 use crate::{
     alerts::Source,
@@ -51,6 +52,8 @@ struct Watch {
     started: Instant,
     phase: Phase,
     candidates: Vec<Input>,
+    /// Our own connection candidates still to reach the publisher.
+    outgoing: Backlog,
     receiver: Option<rtc::Receiver>,
 }
 
@@ -62,6 +65,8 @@ enum Pending {
         channel: Option<ChannelId>,
     },
     Control(u64),
+    /// One of a watch's connection candidates.
+    Candidate(u64),
 }
 
 pub struct Session {
@@ -311,14 +316,56 @@ impl Session {
         }
     }
 
-    fn send(&mut self, command: OutCommand, pending: Pending, operation: Operation) -> Result<()> {
+    fn send(
+        &mut self,
+        command: OutCommand,
+        pending: Pending,
+        operation: Operation,
+    ) -> Result<Ticket> {
         ensure!(
             self.pending.len() < 128,
             "Too many outstanding streaming commands"
         );
         let handle = self.flow.borrow_mut().enqueue(command, operation)?;
         self.pending.insert(handle, (pending, Instant::now()));
-        Ok(())
+        Ok(handle)
+    }
+    /// The server answered, or never did, the command that carried one of a watch's
+    /// connection candidates. `again`: it did not take it, so it goes once more. Whether the
+    /// watch is still waiting for its connection, which a lost candidate may cost it.
+    fn candidate_reply(&mut self, generation: u64, ticket: Ticket, again: bool) -> bool {
+        self.watches
+            .iter_mut()
+            .find(|watch| watch.generation == generation)
+            .is_some_and(|watch| {
+                watch.outgoing.reply(ticket, again);
+                !again && !watch.outgoing.up()
+            })
+    }
+    /// Hands each watch's next connection candidate to the command queue, once the one
+    /// before it has gone out. A full queue only makes them wait.
+    fn send_candidates(&mut self) {
+        let now = Instant::now();
+        for index in 0..self.watches.len() {
+            let Some(next) = self.watches[index].outgoing.next(&self.flow.borrow(), now) else {
+                continue;
+            };
+            let generation = self.watches[index].generation;
+            let Ok(packet) = protocol::signal(&self.watches[index].info, next.value()) else {
+                continue;
+            };
+            match self.send(
+                packet,
+                Pending::Candidate(generation),
+                Operation::StreamCandidate,
+            ) {
+                Ok(ticket) => self.watches[index].outgoing.sent(ticket, next),
+                Err(_) => {
+                    self.watches[index].outgoing.put_back(next);
+                    break;
+                }
+            }
+        }
     }
 
     pub fn watch(&mut self, connection: &mut Connection, id: &str) -> Result<()> {
@@ -356,6 +403,7 @@ impl Session {
             started: Instant::now(),
             phase: Phase::Requesting,
             candidates: Vec::new(),
+            outgoing: Backlog::default(),
             receiver: None,
         });
         self.state(generation, Phase::Requesting, "The publisher may need to accept your request. Stream audio follows playback volume and deafen.");
@@ -412,7 +460,9 @@ impl Session {
             let watch = self.watches.remove(index);
             self.surfaces.get(watch.slot).end(watch.generation);
             self.pending.retain(|ticket, (kind, _)| {
-                if matches!(kind, Pending::Control(generation) if *generation == watch.generation) {
+                if matches!(kind, Pending::Control(generation) | Pending::Candidate(generation)
+                    if *generation == watch.generation)
+                {
                     self.flow.borrow_mut().cancel(*ticket);
                     false
                 } else {
@@ -493,8 +543,18 @@ impl Session {
             .collect();
         for (handle, kind) in expired {
             self.pending.remove(&handle);
-            self.flow.borrow_mut().cancel(handle);
-            if let Pending::Control(generation) = kind
+            let unsent = self.flow.borrow_mut().cancel(handle);
+            if let Pending::Candidate(generation) = kind {
+                // One that never left, as while the server asks to slow down, waits on.
+                if self.candidate_reply(generation, handle, unsent) {
+                    self.stop_one(
+                        connection,
+                        generation,
+                        Phase::Failed,
+                        "The server did not acknowledge stream signaling",
+                    );
+                }
+            } else if let Pending::Control(generation) = kind
                 && self.find(generation).is_some()
             {
                 self.stop_one(
@@ -505,6 +565,7 @@ impl Session {
                 );
             }
         }
+        self.send_candidates();
         if visible
             && self.supported
             && let Some(&id) = self.discovery.front()
@@ -554,6 +615,23 @@ impl Session {
         let Some((kind, _)) = self.pending.remove(&handle) else {
             return false;
         };
+        if let Pending::Candidate(generation) = kind {
+            // One the server was too busy for goes again after the wait.
+            let again = result
+                .as_ref()
+                .is_err_and(|error| error.error == tsclientlib::TsError::ClientIsFlooding);
+            if self.candidate_reply(generation, handle, again)
+                && let Err(error) = result
+            {
+                self.stop_one(
+                    connection,
+                    generation,
+                    Phase::Failed,
+                    &format!("The server rejected stream signaling: {}", error.error),
+                );
+            }
+            return true;
+        }
         if let Err(error) = result {
             if error.error == tsclientlib::TsError::ClientIsFlooding {
                 if let Pending::Control(generation) = kind
@@ -590,7 +668,7 @@ impl Session {
                         &format!("The server rejected stream signaling: {}", error.error),
                     );
                 }
-                Pending::Control(_) | Pending::Metadata => {}
+                Pending::Control(_) | Pending::Candidate(_) | Pending::Metadata => {}
             }
         } else if matches!(kind, Pending::Discovery { .. })
             && !self.discovery_failed
@@ -614,7 +692,16 @@ impl Session {
         let Some((kind, _)) = self.pending.remove(&ticket) else {
             return false;
         };
-        if let Pending::Control(generation) = kind
+        if let Pending::Candidate(generation) = kind {
+            if self.candidate_reply(generation, ticket, false) {
+                self.stop_one(
+                    connection,
+                    generation,
+                    Phase::Failed,
+                    "The server did not acknowledge video negotiation",
+                );
+            }
+        } else if let Pending::Control(generation) = kind
             && self.find(generation).is_some()
         {
             self.stop_one(
@@ -844,6 +931,17 @@ impl Session {
         };
         match event {
             Some(rtc::Output::Signal(value)) => {
+                // Candidates wait their turn; only the answer must go out at once.
+                if value["cmd"] == "iceCandidate" {
+                    if let Some(watch) = self
+                        .watches
+                        .iter_mut()
+                        .find(|watch| watch.generation == generation)
+                    {
+                        watch.outgoing.push(value);
+                    }
+                    return;
+                }
                 let packet = protocol::signal(&watch.info, &value);
                 if packet
                     .and_then(|packet| {
@@ -863,11 +961,29 @@ impl Session {
                     );
                 }
             }
-            Some(rtc::Output::TransportConnected) => self.state(
-                generation,
-                Phase::Negotiating,
-                "Video transport connected; waiting for decoded frames",
-            ),
+            Some(rtc::Output::TransportConnected) => {
+                if let Some(watch) = self
+                    .watches
+                    .iter_mut()
+                    .find(|watch| watch.generation == generation)
+                    && !watch.outgoing.up()
+                {
+                    watch.outgoing.connected();
+                    let (gathered, sent) = watch.outgoing.counts();
+                    tracing::info!(
+                        target: "flexspeak::stream",
+                        publisher = watch.info.publisher,
+                        gathered,
+                        sent,
+                        "watch connected"
+                    );
+                }
+                self.state(
+                    generation,
+                    Phase::Negotiating,
+                    "Video transport connected; waiting for decoded frames",
+                );
+            }
             Some(rtc::Output::Playing) => {
                 if let Some(watch) = self
                     .watches
@@ -964,9 +1080,71 @@ mod tests {
             started: Instant::now(),
             phase: Phase::Requesting,
             candidates: vec![],
+            outgoing: Backlog::default(),
             receiver: None,
         });
         generation
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_watchs_candidates_wait_their_turn_and_cannot_end_it() {
+        let (mut session, mut connection, _output) = fixture();
+        session.notification(
+            &mut connection,
+            "notifystreaminfo",
+            "notifystreaminfo id=stream-a clid=7 name=Window",
+        );
+        let generation = active(&mut session);
+        let out = |session: &Session| -> Vec<Ticket> {
+            session
+                .pending
+                .iter()
+                .filter_map(|(ticket, (kind, _))| {
+                    matches!(kind, Pending::Candidate(_)).then_some(*ticket)
+                })
+                .collect()
+        };
+        // More than the command queue holds.
+        for index in 0..70 {
+            let candidate = serde_json::json!({"cmd":"iceCandidate","args":{
+                "sdp": format!("candidate:{index} 1 udp 1 192.0.2.1 {} typ host", 5000 + index),
+                "mid": "0",
+                "mLine": 0,
+            }});
+            session.media_event(
+                &mut connection,
+                generation,
+                Some(rtc::Output::Signal(candidate)),
+            );
+        }
+        session.tick(&mut connection);
+        session.tick(&mut connection);
+        assert_eq!(session.watches.len(), 1);
+        let waiting = out(&session);
+        assert_eq!(waiting.len(), 1, "One at a time");
+        // The server was too busy for it: it goes again, and the watch carries on.
+        session.flow.borrow_mut().cancel(waiting[0]);
+        let slow_down = Err(CommandError {
+            error: tsclientlib::TsError::ClientIsFlooding,
+            missing_permission: None,
+        });
+        assert!(session.message_result(&mut connection, waiting[0], &slow_down));
+        assert_eq!(session.watches.len(), 1);
+        session.tick(&mut connection);
+        let waiting = out(&session);
+        assert_eq!(waiting.len(), 1);
+        // Once the connection is up the rest are not sent.
+        session.media_event(
+            &mut connection,
+            generation,
+            Some(rtc::Output::TransportConnected),
+        );
+        session.flow.borrow_mut().cancel(waiting[0]);
+        assert!(session.message_result(&mut connection, waiting[0], &Ok(())));
+        session.tick(&mut connection);
+        assert!(out(&session).is_empty());
+        assert_eq!(session.watches.len(), 1);
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
