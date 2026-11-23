@@ -1,4 +1,4 @@
-use super::{Event, MAX_SHARES, Surface, Surfaces, protocol, publish_media};
+use super::{Event, MAX_SHARES, Surface, Surfaces, protocol, publish_media, signals::Backlog};
 use crate::{
     alerts::Source,
     audio::DeviceChoice,
@@ -385,6 +385,160 @@ mod tests {
         assert_eq!(share(&publisher).viewers[&2].key, second);
         assert!(!share(&publisher).viewers[&2].ready);
         assert!(publisher.link.pending.is_empty());
+    }
+    fn candidate(index: usize) -> serde_json::Value {
+        serde_json::json!({"cmd":"iceCandidate","args":{
+            "sdp": format!("candidate:{index} 1 udp 1 192.0.2.1 {} typ host", 5000 + index),
+            "mid": "0",
+            "mLine": 0,
+        }})
+    }
+    /// The commands carrying a viewer's candidate that the server has not answered.
+    fn candidates_out(publisher: &Publisher) -> Vec<Ticket> {
+        publisher
+            .link
+            .pending
+            .iter()
+            .filter_map(|(ticket, kind)| matches!(kind, Pending::Candidate(..)).then_some(*ticket))
+            .collect()
+    }
+    /// The server took these commands.
+    fn taken(publisher: &mut Publisher, tickets: Vec<Ticket>) {
+        for ticket in tickets {
+            publisher.link.flow.borrow_mut().cancel(ticket);
+            assert!(publisher.result(ticket, &Ok(())));
+        }
+    }
+    fn slow_down() -> std::result::Result<(), CommandError> {
+        Err(CommandError {
+            error: tsclientlib::TsError::ClientIsFlooding,
+            missing_permission: None,
+        })
+    }
+    /// One viewer, admitted, with the offer on its way.
+    fn admitted(
+        publisher: &mut Publisher,
+        commands: &mut mpsc::Receiver<publish_media::Input>,
+    ) -> PeerKey {
+        notify(publisher, "notifyjoinstreamrequest", "id=ours clid=2");
+        publisher.decide(1, 2, true).unwrap();
+        let publish_media::Input::Add(key) = commands.try_recv().unwrap() else {
+            panic!("Expected admitted viewer")
+        };
+        publisher
+            .media_event(1, publish_media::Output::Offer(key, "v=0\r\n".into()))
+            .unwrap();
+        key
+    }
+    #[test]
+    fn viewers_who_join_the_moment_a_share_starts_cannot_end_it() {
+        let (mut publisher, mut commands, _output) = fixture();
+        publisher.shares[0].options.access = Access::Public;
+        publisher.link.members = (1..=4).map(|id| (id, format!("Viewer {id}"))).collect();
+        // Two people who join streams by themselves ask as soon as this one appears, and
+        // each connection gathers more candidates than the command queue holds.
+        for id in [2, 3] {
+            notify(
+                &mut publisher,
+                "notifyjoinstreamrequest",
+                &format!("id=ours clid={id}"),
+            );
+        }
+        let mut keys = Vec::new();
+        while let Ok(publish_media::Input::Add(key)) = commands.try_recv() {
+            keys.push(key);
+        }
+        assert_eq!(keys.len(), 2);
+        for key in &keys {
+            publisher
+                .media_event(1, publish_media::Output::Offer(*key, "v=0\r\n".into()))
+                .unwrap();
+            for index in 0..40 {
+                publisher
+                    .media_event(1, publish_media::Output::Signal(*key, candidate(index)))
+                    .unwrap();
+            }
+        }
+        publisher.tick(true);
+        assert!(publisher.active());
+        assert_eq!(share(&publisher).viewers.len(), 2);
+        let out = candidates_out(&publisher);
+        assert_eq!(out.len(), 2, "One a viewer at a time");
+        publisher.tick(true);
+        assert_eq!(candidates_out(&publisher).len(), 2);
+        assert!(publisher.link.flow.borrow().has_room());
+        taken(&mut publisher, out);
+        publisher.tick(true);
+        assert_eq!(candidates_out(&publisher).len(), 2, "The next ones follow");
+        // A viewer whose connection is up needs no more of them.
+        publisher
+            .media_event(1, publish_media::Output::Connected(keys[0]))
+            .unwrap();
+        let out = candidates_out(&publisher);
+        taken(&mut publisher, out);
+        publisher.tick(true);
+        assert_eq!(candidates_out(&publisher).len(), 1);
+        assert!(publisher.active());
+    }
+    #[test]
+    fn a_full_command_queue_costs_a_viewer_their_turn_and_not_the_share() {
+        let (mut publisher, mut commands, _output) = fixture();
+        notify(&mut publisher, "notifyjoinstreamrequest", "id=ours clid=2");
+        publisher.decide(1, 2, true).unwrap();
+        let publish_media::Input::Add(key) = commands.try_recv().unwrap() else {
+            panic!("Expected admitted viewer")
+        };
+        while publisher
+            .link
+            .flow
+            .borrow_mut()
+            .enqueue(protocol::stop("other"), Operation::Chat)
+            .is_ok()
+        {}
+        publisher
+            .media_event(1, publish_media::Output::Offer(key, "v=0\r\n".into()))
+            .unwrap();
+        assert!(publisher.active());
+        assert!(share(&publisher).viewers.is_empty());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(publish_media::Input::Remove(removed)) if removed == key
+        ));
+    }
+    #[test]
+    fn a_server_asking_to_slow_down_keeps_the_share_and_the_candidate_goes_again() {
+        let (mut publisher, mut commands, _output) = fixture();
+        let key = admitted(&mut publisher, &mut commands);
+        publisher
+            .media_event(1, publish_media::Output::Signal(key, candidate(0)))
+            .unwrap();
+        publisher.tick(true);
+        let out = candidates_out(&publisher);
+        assert_eq!(out.len(), 1);
+        publisher.link.flow.borrow_mut().cancel(out[0]);
+        assert!(publisher.result(out[0], &slow_down()));
+        assert!(publisher.active());
+        assert_eq!(share(&publisher).viewers.len(), 1);
+        publisher.tick(true);
+        assert_eq!(candidates_out(&publisher).len(), 1, "It goes again");
+        // A candidate the server never answered ends a viewer still connecting, but not
+        // one who is watching already.
+        publisher
+            .media_event(1, publish_media::Output::Connected(key))
+            .unwrap();
+        let out = candidates_out(&publisher);
+        assert!(publisher.timeout(out[0]));
+        assert_eq!(share(&publisher).viewers.len(), 1);
+        // An offer the server was too busy for costs that viewer their turn only.
+        let offer = publisher
+            .link
+            .pending
+            .iter()
+            .find_map(|(ticket, kind)| matches!(kind, Pending::Peer(..)).then_some(*ticket))
+            .unwrap();
+        assert!(publisher.result(offer, &slow_down()));
+        assert!(publisher.active());
+        assert!(share(&publisher).viewers.is_empty());
     }
     #[test]
     fn denied_requests_stay_denied_and_requests_are_bounded() {
@@ -1389,12 +1543,16 @@ enum Pending {
     Setup(u64),
     Stop,
     Peer(u64, PeerKey),
+    /// One of a viewer's connection candidates.
+    Candidate(u64, PeerKey),
 }
 
 struct Viewer {
     name: String,
     ready: bool,
     key: PeerKey,
+    /// Connection candidates still to reach this viewer.
+    candidates: Backlog,
 }
 
 /// What every share goes through: the window, the server's command queue, and who is in the
@@ -1569,7 +1727,9 @@ impl Share {
         self.viewers.clear();
         self.denied.clear();
         let key = self.key;
-        link.cancel(|kind| matches!(kind, Pending::Peer(owner, _) if *owner == key));
+        link.cancel(|kind| {
+            matches!(kind, Pending::Peer(owner, _) | Pending::Candidate(owner, _) if *owner == key)
+        });
         if let Some(ticket) = self.setup.take() {
             if link.flow.borrow_mut().cancel(ticket) {
                 link.pending.remove(&ticket);
@@ -1666,6 +1826,7 @@ impl Share {
                     name,
                     ready: false,
                     key,
+                    candidates: Backlog::default(),
                 },
             );
         } else {
@@ -1693,19 +1854,31 @@ impl Share {
     }
     fn remove_viewer(&mut self, link: &mut Link, peer: u16) {
         self.requests.remove(&peer);
-        if let Some(viewer) = self.viewers.remove(&peer)
-            && self
+        if let Some(viewer) = self.viewers.remove(&peer) {
+            if !viewer.ready {
+                let (gathered, sent) = viewer.candidates.counts();
+                tracing::info!(
+                    target: "flexspeak::stream",
+                    viewer = peer,
+                    gathered,
+                    sent,
+                    "viewer gone before connecting"
+                );
+            }
+            if self
                 .command(publish_media::Input::Remove(viewer.key))
                 .is_err()
-            && self.active()
-        {
-            self.fail(link, "Could not stop a departing viewer; sharing stopped");
-            return;
+                && self.active()
+            {
+                self.fail(link, "Could not stop a departing viewer; sharing stopped");
+                return;
+            }
         }
         let key = self.key;
-        link.cancel(
-            |kind| matches!(kind, Pending::Peer(owner, p) if *owner == key && p.client == peer),
-        );
+        link.cancel(|kind| {
+            matches!(kind, Pending::Peer(owner, p) | Pending::Candidate(owner, p)
+                if *owner == key && p.client == peer)
+        });
         self.admit_waiting(link);
         self.emit(link);
     }
@@ -1756,18 +1929,21 @@ impl Share {
                 if let Some(peer) =
                     peer.filter(|id| self.viewers.contains_key(id) && link.members.contains_key(id))
                 {
-                    let result =
-                        protocol::incoming_signal(args.get("json").map_or("", String::as_str))
-                            .and_then(|signal| match signal {
-                                Some(
-                                    input @ (protocol::Input::Answer(_)
-                                    | protocol::Input::Candidate { .. }),
-                                ) => self.command(publish_media::Input::Signal(
-                                    self.viewers[&peer].key,
-                                    input,
-                                )),
-                                _ => Ok(()),
-                            });
+                    let signal =
+                        protocol::incoming_signal(args.get("json").map_or("", String::as_str));
+                    if let (Ok(Some(protocol::Input::Answer(sdp))), Some(viewer)) =
+                        (&signal, self.viewers.get_mut(&peer))
+                    {
+                        viewer.candidates.answered(sdp);
+                    }
+                    let result = signal.and_then(|signal| match signal {
+                        Some(
+                            input
+                            @ (protocol::Input::Answer(_) | protocol::Input::Candidate { .. }),
+                        ) => self
+                            .command(publish_media::Input::Signal(self.viewers[&peer].key, input)),
+                        _ => Ok(()),
+                    });
                     if let Err(error) = result {
                         self.remove_viewer(link, peer);
                         link.warn(format!("Viewer negotiation failed: {error}"));
@@ -1837,7 +2013,35 @@ impl Share {
             };
             if let Err(error) = self.media_event(link, event) {
                 self.fail(link, &error.to_string());
-                break;
+                return;
+            }
+        }
+        self.send_candidates(link);
+    }
+    /// Hands each viewer's next connection candidate to the command queue, once the one
+    /// before it has gone out. A full queue only makes them wait.
+    fn send_candidates(&mut self, link: &mut Link) {
+        let Some(id) = self.id.as_deref() else {
+            return;
+        };
+        let now = Instant::now();
+        for (client, viewer) in &mut self.viewers {
+            let Some(next) = viewer.candidates.next(&link.flow.borrow(), now) else {
+                continue;
+            };
+            let Ok(packet) = protocol::signal_to(id, *client, next.value()) else {
+                continue;
+            };
+            match link.send(
+                packet,
+                Pending::Candidate(self.key, viewer.key),
+                Operation::StreamCandidate,
+            ) {
+                Ok(ticket) => viewer.candidates.sent(ticket, next),
+                Err(_) => {
+                    viewer.candidates.put_back(next);
+                    break;
+                }
             }
         }
     }
@@ -1859,29 +2063,38 @@ impl Share {
                         .id
                         .as_deref()
                         .ok_or_else(|| anyhow!("Sharing has stopped"))?;
-                    link.send(
-                        protocol::admit(id, peer.client, Some(&sdp))?,
-                        Pending::Peer(self.key, peer),
-                        Operation::StreamAdmit,
-                    )?;
+                    let sent = protocol::admit(id, peer.client, Some(&sdp)).and_then(|packet| {
+                        link.send(
+                            packet,
+                            Pending::Peer(self.key, peer),
+                            Operation::StreamAdmit,
+                        )
+                    });
+                    // An offer that can't go out costs that viewer their turn, never the
+                    // share and the people already watching it.
+                    if let Err(error) = sent {
+                        self.remove_viewer(link, peer.client);
+                        link.warn(format!("Could not let a viewer in: {error}"));
+                    }
                 }
             }
             publish_media::Output::Signal(peer, value) => {
-                if self.current(peer) {
-                    let id = self
-                        .id
-                        .as_deref()
-                        .ok_or_else(|| anyhow!("Sharing has stopped"))?;
-                    link.send(
-                        protocol::signal_to(id, peer.client, &value)?,
-                        Pending::Peer(self.key, peer),
-                        Operation::StreamSignal,
-                    )?;
+                if let Some(viewer) = self.viewers.get_mut(&peer.client).filter(|v| v.key == peer) {
+                    viewer.candidates.push(value);
                 }
             }
             publish_media::Output::Connected(peer) => {
                 if let Some(viewer) = self.viewers.get_mut(&peer.client).filter(|v| v.key == peer) {
                     viewer.ready = true;
+                    viewer.candidates.connected();
+                    let (gathered, sent) = viewer.candidates.counts();
+                    tracing::info!(
+                        target: "flexspeak::stream",
+                        viewer = peer.client,
+                        gathered,
+                        sent,
+                        "viewer connected"
+                    );
                 }
                 self.emit(link);
             }
@@ -2247,14 +2460,30 @@ impl Publisher {
                     && self.shares[index].current(peer)
                     && let Err(error) = result
                 {
-                    let share = &mut self.shares[index];
-                    if flooding(error) {
-                        share.stop(
-                            &mut self.link,
-                            "Sharing stopped while the server limits requests",
-                        );
-                    } else {
-                        share.remove_viewer(&mut self.link, peer.client);
+                    // The viewer loses their turn; the share and its other viewers carry
+                    // on. A server asking to slow down has its own notice.
+                    self.shares[index].remove_viewer(&mut self.link, peer.client);
+                    if !flooding(error) {
+                        self.link
+                            .warn(format!("Viewer signaling rejected: {}", error.error));
+                    }
+                }
+            }
+            Pending::Candidate(key, peer) => {
+                if let Some(index) = self.index(key)
+                    && let Some(viewer) = self.shares[index]
+                        .viewers
+                        .get_mut(&peer.client)
+                        .filter(|viewer| viewer.key == peer)
+                {
+                    // One the server was too busy for goes again after the wait.
+                    let again = result.as_ref().is_err_and(flooding);
+                    viewer.candidates.reply(ticket, again);
+                    if let Err(error) = result
+                        && !again
+                        && !viewer.ready
+                    {
+                        self.shares[index].remove_viewer(&mut self.link, peer.client);
                         self.link
                             .warn(format!("Viewer signaling rejected: {}", error.error));
                     }
@@ -2287,6 +2516,20 @@ impl Publisher {
                 {
                     self.shares[index].remove_viewer(&mut self.link, peer.client);
                     self.link.warn("Viewer signaling timed out".into());
+                }
+            }
+            Pending::Candidate(key, peer) => {
+                if let Some(index) = self.index(key)
+                    && let Some(viewer) = self.shares[index]
+                        .viewers
+                        .get_mut(&peer.client)
+                        .filter(|viewer| viewer.key == peer)
+                {
+                    viewer.candidates.reply(ticket, false);
+                    if !viewer.ready {
+                        self.shares[index].remove_viewer(&mut self.link, peer.client);
+                        self.link.warn("Viewer signaling timed out".into());
+                    }
                 }
             }
         }

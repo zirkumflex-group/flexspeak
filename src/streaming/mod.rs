@@ -8,6 +8,7 @@ mod publish_media;
 pub mod publishing;
 mod rtc;
 mod session;
+mod signals;
 #[cfg(target_os = "windows")]
 mod wgc;
 pub use publish_media::Live as LiveShare;
@@ -309,6 +310,13 @@ impl View {
                 self.set_volume(publisher, 0);
                 self.unmuted.insert(publisher, volume);
             }
+        }
+    }
+    /// Starts a publisher's stream muted, as it was left, with `volume` to come back to.
+    pub fn start_muted(&mut self, publisher: u16, volume: u16) {
+        self.set_volume(publisher, 0);
+        if volume > 0 {
+            self.unmuted.insert(publisher, volume.min(MAX_VOLUME));
         }
     }
     /// Sets a publisher's stream volume, up to [`MAX_VOLUME`]; above 100% it is amplified.

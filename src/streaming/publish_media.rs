@@ -1030,9 +1030,11 @@ mod native {
             disconnected: None,
         };
         let tx = callbacks.clone();
-        let full = overflow.clone();
+        // A candidate there is no room for is left out: the connection has others, and a
+        // burst from several viewers at once must not end the share. A lost state change
+        // would, so only those count as overflow.
         peer.pc.on_ice_candidate(Some(Box::new(move |c| {
-            if tx.try_send(Callback::Candidate(id,serde_json::json!({"cmd":"iceCandidate","args":{"sdp":c.candidate(),"mid":c.sdp_mid(),"mLine":c.sdp_mline_index()}}))).is_err() { full.store(true,Ordering::Relaxed); }
+            let _ = tx.try_send(Callback::Candidate(id,serde_json::json!({"cmd":"iceCandidate","args":{"sdp":c.candidate(),"mid":c.sdp_mid(),"mLine":c.sdp_mline_index()}})));
         })));
         peer.pc
             .on_connection_state_change(Some(Box::new(move |state| {
@@ -1341,8 +1343,9 @@ mod native {
                     Some((id,result)) = negotiating.next(), if !negotiating.is_empty() => match result {
                         // A viewer removed meanwhile drops (and closes) its connection here.
                         Ok(Step::Offered(peer,offer)) => if let Some(gathered) = adding.remove(&id) {
-                            let sent = emit(events,Output::Offer(id,offer))
-                                .and_then(|()| gathered.into_iter().try_for_each(|value| emit(events,Output::Signal(id,value))));
+                            let sent = emit(events,Output::Offer(id,offer));
+                            // Candidates there is no room for are left out, as above.
+                            if sent.is_ok() { for value in gathered { let _ = emit(events,Output::Signal(id,value)); } }
                             match sent {
                                 Ok(()) => { peers.insert(id,peer); },
                                 Err(error) => leave(&mut peers, id, events, &error)?,
@@ -1362,8 +1365,8 @@ mod native {
                     Some(callback) = callback_rx.recv() => match callback {
                         Callback::Candidate(id,value) => if let Some(gathered) = adding.get_mut(&id) {
                             if gathered.len() < MAX_CANDIDATES { gathered.push(value); }
-                        } else if peers.contains_key(&id) && let Err(error) = emit(events,Output::Signal(id,value)) {
-                            leave(&mut peers, id, events, &error)?;
+                        } else if peers.contains_key(&id) {
+                            let _ = emit(events,Output::Signal(id,value));
                         },
                         Callback::State(id,PeerConnectionState::Connected) => if let Some(peer) = peers.get_mut(&id) {
                             peer.disconnected = None;

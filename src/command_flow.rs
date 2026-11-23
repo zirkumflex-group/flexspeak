@@ -1,5 +1,5 @@
 //! Bounded, paced TeamSpeak control commands. Voice packets bypass this scheduler.
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail};
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
@@ -20,6 +20,8 @@ pub enum Operation {
     StreamInfo,
     StreamJoin,
     StreamSignal,
+    /// One connection candidate of a stream; see `streaming::signals`.
+    StreamCandidate,
     StreamLeave,
     StreamStart,
     StreamStop,
@@ -42,6 +44,7 @@ impl Operation {
             Self::StreamInfo => "stream details",
             Self::StreamJoin => "stream viewing request",
             Self::StreamSignal => "video negotiation",
+            Self::StreamCandidate => "video connection details",
             Self::StreamLeave => "stop watching",
             Self::StreamStart => "start sharing",
             Self::StreamStop => "stop sharing",
@@ -63,7 +66,10 @@ impl Operation {
     /// Whether Flexspeak sends this again by itself after the server refuses it, so a refusal
     /// needs no one's attention.
     pub fn retried(self) -> bool {
-        matches!(self, Self::Controls | Self::Subscribe) || self.optional()
+        matches!(
+            self,
+            Self::Controls | Self::Subscribe | Self::StreamCandidate
+        ) || self.optional()
     }
     fn priority(self) -> u8 {
         match self {
@@ -101,15 +107,36 @@ pub struct Flow {
     cooldown: Option<Instant>,
     backoff: u64,
     pace_ms: u64,
+    /// When the server last asked to slow down, or the pace last eased since.
+    slowed: Option<Instant>,
     probe: Option<Ticket>,
 }
+/// Commands waiting or unanswered, past which ordinary ones are turned away.
+const LIMIT: usize = 56;
+/// How many of those a stream's connection candidates may take up, so what you ask for
+/// always finds room.
+const CANDIDATE_ROOM: usize = 40;
+/// How long the server must stay content before the pace it slowed halves again.
+const EASE: Duration = Duration::from_secs(60);
 impl Flow {
     pub fn enqueue(&mut self, command: OutCommand, operation: Operation) -> Result<Ticket> {
-        let limit = if operation.priority() == 0 { 64 } else { 56 };
-        ensure!(
-            self.queue.len() + self.pending.len() < limit,
-            "Too many pending server commands; wait before trying again"
-        );
+        let limit = if operation.priority() == 0 {
+            LIMIT + 8
+        } else {
+            LIMIT
+        };
+        if self.queue.len() + self.pending.len() >= limit {
+            tracing::warn!(
+                target: "flexspeak::connection",
+                operation = operation.label(),
+                queued = self.queue.len(),
+                unanswered = self.pending.len(),
+                pace_ms = self.pace_ms.max(250),
+                slowed = self.cooldown.is_some(),
+                "command queue full"
+            );
+            bail!("Too many pending server commands; wait before trying again");
+        }
         self.next += 1;
         let ticket = Ticket(self.next);
         self.queue.push_back(Queued {
@@ -123,6 +150,14 @@ impl Flow {
         let before = self.queue.len();
         self.queue.retain(|item| item.ticket != ticket);
         before != self.queue.len()
+    }
+    /// Whether this command still waits to be sent.
+    pub fn queued(&self, ticket: Ticket) -> bool {
+        self.queue.iter().any(|item| item.ticket == ticket)
+    }
+    /// Whether a stream's connection candidate may join the queue.
+    pub fn has_room(&self) -> bool {
+        self.queue.len() + self.pending.len() < CANDIDATE_ROOM
     }
     pub fn cooling_down(&self, now: Instant) -> bool {
         self.cooldown.is_some_and(|until| now < until)
@@ -202,14 +237,27 @@ impl Flow {
                 };
                 self.cooldown = Some(now + Duration::from_secs(self.backoff));
             }
-            false
-        } else if was_probe && success {
+            self.slowed = Some(now);
+            return false;
+        }
+        let recovered = was_probe && success;
+        if recovered {
             self.cooldown = None;
             self.backoff = 0;
-            true
-        } else {
-            false
         }
+        // The slower pace is for a server that is short of patience now, not for the rest of
+        // the connection: it eases while the server keeps taking commands.
+        if success
+            && self.cooldown.is_none()
+            && self.pace_ms > 250
+            && self
+                .slowed
+                .is_none_or(|at| now.saturating_duration_since(at) >= EASE)
+        {
+            self.pace_ms = (self.pace_ms / 2).max(250);
+            self.slowed = Some(now);
+        }
+        recovered
     }
     pub fn result(
         &mut self,
@@ -375,6 +423,7 @@ mod tests {
             Operation::Statistics,
             Operation::Discovery,
             Operation::PublisherInfo,
+            Operation::StreamCandidate,
         ] {
             assert!(operation.retried(), "{operation:?}");
         }
@@ -485,6 +534,33 @@ mod tests {
         flow.probe = Some(Ticket(5));
         assert!(flow.feedback(Ticket(5), false, true, now + Duration::from_secs(33)));
         assert!(flow.cooldown.is_none());
+    }
+    #[test]
+    fn a_slowed_pace_eases_once_the_server_is_content_again() {
+        let now = Instant::now();
+        let mut flow = Flow::default();
+        flow.feedback(Ticket(1), true, false, now);
+        flow.probe = Some(Ticket(2));
+        flow.feedback(Ticket(2), true, false, now + Duration::from_secs(11));
+        assert_eq!(flow.pace_ms, 1000);
+        flow.probe = Some(Ticket(3));
+        let later = now + Duration::from_secs(40);
+        assert!(flow.feedback(Ticket(3), false, true, later));
+        assert_eq!(flow.pace_ms, 1000, "Not straight after a slow-down");
+        assert!(!flow.feedback(Ticket(4), false, false, later + EASE));
+        assert_eq!(flow.pace_ms, 1000, "A refusal is no sign of patience");
+        flow.feedback(Ticket(5), false, true, later + EASE);
+        assert_eq!(flow.pace_ms, 500);
+        flow.feedback(
+            Ticket(6),
+            false,
+            true,
+            later + EASE + Duration::from_secs(1),
+        );
+        assert_eq!(flow.pace_ms, 500, "One step a minute");
+        flow.feedback(Ticket(7), false, true, later + EASE * 2);
+        flow.feedback(Ticket(8), false, true, later + EASE * 3);
+        assert_eq!(flow.pace_ms, 250);
     }
     #[test]
     fn toggles_coalesce_and_old_acknowledgements_cannot_unmute_newer_intent() {

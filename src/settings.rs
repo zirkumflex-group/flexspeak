@@ -48,6 +48,10 @@ pub struct Settings {
     /// Each streamer's stream volume in percent, by identity; streams at 100% stay out.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub stream_volumes: BTreeMap<String, u16>,
+    /// The streamers whose stream sound you muted, by identity. Their saved volume stays,
+    /// for when you unmute them.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub stream_muted: BTreeSet<String>,
     /// The people whose streams are joined as soon as they go live in your channel, by identity.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub auto_watch: BTreeSet<String>,
@@ -631,6 +635,12 @@ pub struct Synced {
         deserialize_with = "lenient",
         skip_serializing_if = "Option::is_none"
     )]
+    pub stream_muted: Option<BTreeSet<String>>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub caffeine: Option<Caffeine>,
 }
 
@@ -690,6 +700,7 @@ impl Synced {
             auto_download_updates: Some(settings.auto_download_updates),
             user_audio: Some(settings.user_audio.clone()),
             stream_volumes: Some(settings.stream_volumes.clone()),
+            stream_muted: Some(settings.stream_muted.clone()),
             caffeine: Some(settings.caffeine),
         }
     }
@@ -783,6 +794,9 @@ impl Synced {
         if let Some(volumes) = self.stream_volumes {
             settings.stream_volumes = volumes;
         }
+        if let Some(muted) = self.stream_muted {
+            settings.stream_muted = muted;
+        }
         if let Some(caffeine) = self.caffeine {
             settings.caffeine = caffeine;
         }
@@ -817,6 +831,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             user_audio: BTreeMap::new(),
             stream_volumes: BTreeMap::new(),
+            stream_muted: BTreeSet::new(),
             auto_watch: BTreeSet::new(),
             sound_cues: true,
             sounds: crate::sounds::Settings::default(),
@@ -1256,6 +1271,7 @@ mod tests {
                 },
             )]),
             stream_volumes: BTreeMap::from([("uid-2".into(), 60)]),
+            stream_muted: BTreeSet::from(["uid-3".into()]),
             ..Settings::default()
         }
     }
@@ -1275,6 +1291,7 @@ mod tests {
         assert!(onto.even_out_voices);
         assert_eq!(onto.user_audio, from.user_audio);
         assert_eq!(onto.stream_volumes, from.stream_volumes);
+        assert_eq!(onto.stream_muted, from.stream_muted);
         assert_eq!(onto.servers.len(), 2);
         assert!(onto.servers[0].auto_connect);
         assert_eq!(onto.servers[0].name, "Friends");
