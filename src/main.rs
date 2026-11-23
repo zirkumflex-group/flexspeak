@@ -211,6 +211,8 @@ struct App {
     stream_volumes: BTreeMap<String, u16>,
     /// When a stream volume last changed without being saved; saved a moment after a drag.
     stream_volumes_changed: Option<Instant>,
+    /// The streamers whose stream sound is muted, by identity, as saved.
+    stream_muted: BTreeSet<String>,
     /// The people whose streams you join by yourself, by identity, as saved.
     auto_watch: BTreeSet<String>,
     sound_cues: bool,
@@ -1662,6 +1664,7 @@ impl App {
             listening: Arc::default(),
             stream_volumes: BTreeMap::new(),
             stream_volumes_changed: None,
+            stream_muted: BTreeSet::new(),
             auto_watch: BTreeSet::new(),
             sound_cues: true,
             sounds: sounds::Settings::default(),
@@ -2438,6 +2441,31 @@ impl App {
         );
     }
 
+    /// Keeps whether a streamer's stream is muted, by identity, so it starts that way the
+    /// next time they share. Saved at once: a mute is one click, not a drag.
+    fn remember_stream_mute(&mut self, publisher: u16) {
+        let muted = self.server().streaming.volume(publisher) == 0;
+        let Some(uid) = self
+            .find_member(publisher)
+            .filter(|member| !member.uid.is_empty())
+            .map(|member| member.uid.clone())
+        else {
+            return;
+        };
+        let changed = if muted {
+            self.stream_muted.insert(uid)
+        } else {
+            self.stream_muted.remove(&uid)
+        };
+        if changed {
+            let muted = self.stream_muted.clone();
+            self.save_preference(
+                |saved| saved.stream_muted = muted,
+                "That stream mute applies for now but was not saved",
+            );
+        }
+    }
+
     fn save_user_audio(&mut self) {
         let audio = self.user_audio.clone();
         self.save_preference(
@@ -2501,6 +2529,7 @@ impl App {
                     // How many people have their own volume or mute; who stays out.
                     people_adjusted = saved.user_audio.len(),
                     streams_adjusted = saved.stream_volumes.len(),
+                    streams_muted = saved.stream_muted.len(),
                     auto_watch = saved.auto_watch.len(),
                     sound_cues = saved.sound_cues,
                     even_out_voices = saved.even_out_voices,
@@ -3024,6 +3053,7 @@ impl App {
         self.even_out_voices = saved.even_out_voices;
         self.sync_listening();
         self.stream_volumes = saved.stream_volumes;
+        self.stream_muted = saved.stream_muted;
         self.auto_watch = saved.auto_watch;
         self.sound_cues = saved.sound_cues;
         self.sounds = saved.sounds;
@@ -3086,6 +3116,7 @@ impl App {
             custom_themes: self.custom_themes.clone(),
             user_audio: self.user_audio.clone(),
             stream_volumes: self.stream_volumes.clone(),
+            stream_muted: self.stream_muted.clone(),
             auto_watch: self.auto_watch.clone(),
             sound_cues: self.sound_cues,
             even_out_voices: self.even_out_voices,
@@ -4599,10 +4630,14 @@ impl App {
                     }
                     self.stream_volumes_changed = Some(Instant::now());
                 }
+                // Moving the volume unmutes.
+                self.remember_stream_mute(publisher);
             }
-            // Muting is for now; the saved volume stays what it was.
+            // The mute is kept for this streamer; the saved volume stays what it was, for
+            // when they are unmuted.
             Message::ToggleStreamMute(publisher) => {
-                self.server_mut().streaming.toggle_mute(publisher)
+                self.server_mut().streaming.toggle_mute(publisher);
+                self.remember_stream_mute(publisher);
             }
             Message::ToggleStreamStats => {
                 self.server_mut().streaming.show_stats = !self.server().streaming.show_stats;
@@ -6208,18 +6243,26 @@ impl App {
                         }
                     }
                 }
-                // A streamer's stream starts at the volume saved for them.
+                // A streamer's stream starts at the volume saved for them, and muted if that
+                // is how you left it.
                 if let streaming::Event::State { stream, .. } = &event
                     && !session.streaming.volumes.contains_key(&stream.publisher)
-                    && let Some(volume) = session
+                    && let Some(uid) = session
                         .state
                         .channels
                         .iter()
                         .flat_map(|channel| &channel.members)
                         .find(|member| member.id == stream.publisher && !member.uid.is_empty())
-                        .and_then(|member| self.stream_volumes.get(&member.uid))
+                        .map(|member| &member.uid)
                 {
-                    session.streaming.volumes.insert(stream.publisher, *volume);
+                    let volume = self.stream_volumes.get(uid).copied();
+                    if self.stream_muted.contains(uid) {
+                        session
+                            .streaming
+                            .start_muted(stream.publisher, volume.unwrap_or(100));
+                    } else if let Some(volume) = volume {
+                        session.streaming.volumes.insert(stream.publisher, volume);
+                    }
                 }
                 // Your own Stop forgets the stream first, so only an end you didn't ask for
                 // finds it still on screen.
@@ -9372,12 +9415,14 @@ mod tests {
         assert_eq!(app.stream_volumes.get("uid-2"), Some(&250));
         assert!(app.stream_volumes_changed.is_some(), "saved a moment later");
 
-        // Muting is for now: unmuting brings 250% back, and the saved volume stays.
+        // Unmuting brings 250% back, and the saved volume stays through a mute.
         let _ = app.update(Message::ToggleStreamMute(2));
         assert_eq!(app.server().streaming.volume(2), 0);
         assert_eq!(app.stream_volumes.get("uid-2"), Some(&250));
+        assert!(app.stream_muted.contains("uid-2"));
         let _ = app.update(Message::ToggleStreamMute(2));
         assert_eq!(app.server().streaming.volume(2), 250);
+        assert!(app.stream_muted.is_empty());
 
         // A later session starts Mara's stream at her saved volume, even under a new client id.
         let (mut later, _commands) = session_fixture();
@@ -9389,6 +9434,42 @@ mod tests {
         // Back at 100% the streamer is forgotten again.
         let _ = later.update(Message::StreamVolume(2, 100));
         assert!(later.stream_volumes.is_empty());
+    }
+
+    #[test]
+    fn a_muted_stream_starts_muted_the_next_time_its_streamer_shares() {
+        let (mut app, _commands) = session_fixture();
+        let id = app.active.unwrap();
+        let _ = app.update(Message::Backend(id, watch_event(2, 900)));
+        let _ = app.update(Message::StreamVolume(2, 60));
+        let _ = app.update(Message::ToggleStreamMute(2));
+        assert!(app.stream_muted.contains("uid-2"));
+        assert!(app.edited_settings().stream_muted.contains("uid-2"));
+
+        // A later session: Mara's stream starts muted, and unmuting goes back to her volume.
+        let (mut later, _commands) = session_fixture();
+        later.stream_volumes = app.stream_volumes.clone();
+        later.stream_muted = app.stream_muted.clone();
+        let id = later.active.unwrap();
+        let _ = later.update(Message::Backend(id, watch_event(2, 901)));
+        assert_eq!(later.server().streaming.volume(2), 0);
+        assert!(later.server().streaming.surfaces.get(0).volume().abs() < 1e-6);
+        let _ = later.update(Message::ToggleStreamMute(2));
+        assert_eq!(later.server().streaming.volume(2), 60);
+        assert!(later.stream_muted.is_empty());
+
+        // Someone muted with no volume of their own comes back at 100%.
+        let (mut plain, _commands) = session_fixture();
+        plain.stream_muted.insert("uid-2".into());
+        let id = plain.active.unwrap();
+        let _ = plain.update(Message::Backend(id, watch_event(2, 902)));
+        assert_eq!(plain.server().streaming.volume(2), 0);
+        // Moving the volume unmutes, and that is remembered too.
+        let _ = plain.update(Message::StreamVolume(2, 80));
+        assert!(plain.stream_muted.is_empty());
+        let _ = plain.update(Message::ToggleStreamMute(2));
+        let _ = plain.update(Message::ToggleStreamMute(2));
+        assert_eq!(plain.server().streaming.volume(2), 80);
     }
 
     #[test]
