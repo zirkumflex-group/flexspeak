@@ -458,6 +458,16 @@ impl Session {
             .position(|watch| watch.generation == generation)
         {
             let watch = self.watches.remove(index);
+            if watch.receiver.is_some() && !watch.outgoing.up() {
+                let (gathered, sent) = watch.outgoing.counts();
+                tracing::info!(
+                    target: "flexspeak::stream",
+                    publisher = watch.info.publisher,
+                    gathered,
+                    sent,
+                    "watch ended before connecting"
+                );
+            }
             self.surfaces.get(watch.slot).end(watch.generation);
             self.pending.retain(|ticket, (kind, _)| {
                 if matches!(kind, Pending::Control(generation) | Pending::Candidate(generation)

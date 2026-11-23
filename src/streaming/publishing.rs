@@ -1854,14 +1854,25 @@ impl Share {
     }
     fn remove_viewer(&mut self, link: &mut Link, peer: u16) {
         self.requests.remove(&peer);
-        if let Some(viewer) = self.viewers.remove(&peer)
-            && self
+        if let Some(viewer) = self.viewers.remove(&peer) {
+            if !viewer.ready {
+                let (gathered, sent) = viewer.candidates.counts();
+                tracing::info!(
+                    target: "flexspeak::stream",
+                    viewer = peer,
+                    gathered,
+                    sent,
+                    "viewer gone before connecting"
+                );
+            }
+            if self
                 .command(publish_media::Input::Remove(viewer.key))
                 .is_err()
-            && self.active()
-        {
-            self.fail(link, "Could not stop a departing viewer; sharing stopped");
-            return;
+                && self.active()
+            {
+                self.fail(link, "Could not stop a departing viewer; sharing stopped");
+                return;
+            }
         }
         let key = self.key;
         link.cancel(|kind| {
@@ -2062,12 +2073,8 @@ impl Share {
                     // An offer that can't go out costs that viewer their turn, never the
                     // share and the people already watching it.
                     if let Err(error) = sent {
-                        let name = self
-                            .viewers
-                            .get(&peer.client)
-                            .map_or_else(|| "a viewer".to_owned(), |viewer| viewer.name.clone());
                         self.remove_viewer(link, peer.client);
-                        link.warn(format!("Could not let {name} watch: {error}"));
+                        link.warn(format!("Could not let a viewer in: {error}"));
                     }
                 }
             }
