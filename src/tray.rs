@@ -4,8 +4,9 @@
 //! screen, the one your microphone goes to, and shows the app's badge when that one isn't
 //! connected. A click brings the window forward; the menu mutes, deafens, shows or quits.
 //!
-//! Linux has none yet: Rune's own tray can't change its icon while it runs
-//! (anomalyco/rune#305), and the `tray-icon` crate would need GTK there.
+//! Windows uses Rune's own tray. macOS stays on the `tray-icon` crate: Rune's tray opens its
+//! menu on a secondary click there, where a menu bar item opens on any click. Linux has none
+//! yet; Rune's tray could give it one (StatusNotifierItem), but nobody has tried it there.
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -198,17 +199,16 @@ where
 {
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+/// Windows: Rune's tray, which keeps the icon on a thread of its own, puts it back when
+/// Explorer restarts and takes it off the taskbar as the app quits.
+#[cfg(windows)]
 mod native {
     use std::{
         cell::RefCell,
         time::{Duration, Instant},
     };
 
-    use tray_icon::{
-        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-        menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    };
+    use rune::{Tray, TrayEvent, TrayIcon, TrayItem, TraySpec};
 
     use super::{Action, State, Status, pixels};
 
@@ -216,17 +216,14 @@ mod native {
     const APPEARANCE_CHECK: Duration = Duration::from_secs(2);
 
     struct Live {
-        icon: TrayIcon,
-        mute: CheckMenuItem,
-        deafen: CheckMenuItem,
-        disconnect: MenuItem,
+        tray: Tray,
         shown: Status,
         dark: bool,
         checked_at: Instant,
     }
 
     thread_local! {
-        /// The tray's types aren't `Send`; they stay on the UI thread that made them.
+        /// Made, changed and dropped on the UI thread.
         static TRAY: RefCell<Option<Live>> = const { RefCell::new(None) };
     }
 
@@ -254,13 +251,12 @@ mod native {
         });
     }
 
-    fn icon(state: State, dark: bool) -> Option<Icon> {
+    fn icon(state: State, dark: bool) -> TrayIcon {
         let size = size();
-        Icon::from_rgba(pixels(state, dark, size), size, size).ok()
+        TrayIcon::rgba(size, size, pixels(state, dark, size))
     }
 
     /// The notification area's icon size at the system's scale: 16 px at 100%, 32 at 200%.
-    #[cfg(windows)]
     fn size() -> u32 {
         use windows_sys::Win32::UI::{
             HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi},
@@ -274,15 +270,8 @@ mod native {
             .unwrap_or(16)
     }
 
-    /// The menu bar draws its icons 18 pt tall; two pixels a point for Retina screens.
-    #[cfg(target_os = "macos")]
-    fn size() -> u32 {
-        36
-    }
-
     /// Whether the icon sits on a dark taskbar: Windows' "Windows mode" in Colours, which can
     /// differ from the app mode.
-    #[cfg(windows)]
     fn dark() -> bool {
         use windows_sys::Win32::System::Registry::{
             HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW,
@@ -308,7 +297,152 @@ mod native {
         status != 0 || light == 0
     }
 
-    #[cfg(target_os = "macos")]
+    /// The menu a right click opens. The ticks and greyed items are part of it, so it is
+    /// made again whenever they change.
+    pub(super) fn menu(status: &Status) -> Vec<TrayItem> {
+        let connected = status.connected();
+        vec![
+            TrayItem::check("mute", "Mute Microphone", status.muted).enabled(connected),
+            TrayItem::check("deafen", "Deafen", status.deafened).enabled(connected),
+            TrayItem::action("disconnect", "Disconnect").enabled(connected),
+            TrayItem::Separator,
+            TrayItem::action("show", "Show Flexspeak"),
+            TrayItem::action("quit", "Quit Flexspeak"),
+        ]
+    }
+
+    /// What a click on the icon or a pick from its menu asks for.
+    pub(super) fn action(event: &TrayEvent) -> Option<Action> {
+        match event {
+            TrayEvent::Activate { .. } => Some(Action::Show),
+            TrayEvent::Menu(id) => match id.as_str() {
+                "mute" => Some(Action::Mute),
+                "deafen" => Some(Action::Deafen),
+                "disconnect" => Some(Action::Disconnect),
+                "show" => Some(Action::Show),
+                "quit" => Some(Action::Quit),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    impl Live {
+        fn new(
+            status: Status,
+            actions: impl Fn(Action) + Send + Sync + 'static,
+        ) -> Result<Self, String> {
+            let dark = dark();
+            let spec = TraySpec::new("flexspeak", "Flexspeak", icon(status.state, dark))
+                .tooltip(status.tooltip())
+                .menu(menu(&status));
+            // Runs on the tray's own thread.
+            let tray = Tray::new(spec, move |event| {
+                if let Some(action) = action(&event) {
+                    actions(action);
+                }
+            })
+            .map_err(|error| error.to_string())?;
+            Ok(Self {
+                tray,
+                shown: status,
+                dark,
+                checked_at: Instant::now(),
+            })
+        }
+
+        fn show(&mut self, status: Status) {
+            let now = Instant::now();
+            let mut dark = self.dark;
+            if now.saturating_duration_since(self.checked_at) >= APPEARANCE_CHECK {
+                self.checked_at = now;
+                dark = self::dark();
+            }
+            if (status.state != self.shown.state || dark != self.dark)
+                && let Err(error) = self.tray.set_icon(icon(status.state, dark))
+            {
+                tracing::debug!("Tray icon not updated: {error}");
+            }
+            self.dark = dark;
+            if status == self.shown {
+                return;
+            }
+            if status.tooltip() != self.shown.tooltip() {
+                self.tray.set_tooltip(status.tooltip());
+            }
+            self.tray.set_menu(menu(&status));
+            self.shown = status;
+        }
+    }
+}
+
+/// macOS: the `tray-icon` crate, whose menu opens on a click as the menu bar's items do.
+#[cfg(target_os = "macos")]
+mod native {
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+
+    use tray_icon::{
+        Icon, TrayIcon, TrayIconBuilder,
+        menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    };
+
+    use super::{Action, State, Status, pixels};
+
+    /// How often the menu bar's light or dark mode is read again.
+    const APPEARANCE_CHECK: Duration = Duration::from_secs(2);
+
+    struct Live {
+        icon: TrayIcon,
+        mute: CheckMenuItem,
+        deafen: CheckMenuItem,
+        disconnect: MenuItem,
+        shown: Status,
+        dark: bool,
+        checked_at: Instant,
+    }
+
+    thread_local! {
+        /// The tray's types aren't `Send`; they stay on the UI thread that made them.
+        static TRAY: RefCell<Option<Live>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn sync<F>(status: Option<Status>, actions: impl FnOnce() -> Option<F>)
+    where
+        F: Fn(Action) + Send + Sync + 'static,
+    {
+        TRAY.with_borrow_mut(|tray| {
+            let Some(status) = status else {
+                // Dropping it takes the icon off the menu bar.
+                *tray = None;
+                return;
+            };
+            match tray {
+                Some(live) => live.show(status),
+                None => {
+                    if let Some(actions) = actions() {
+                        match Live::new(status, actions) {
+                            Ok(live) => *tray = Some(live),
+                            Err(error) => tracing::warn!("Tray icon not shown: {error}"),
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn icon(state: State, dark: bool) -> Option<Icon> {
+        let size = size();
+        Icon::from_rgba(pixels(state, dark, size), size, size).ok()
+    }
+
+    /// The menu bar draws its icons 18 pt tall; two pixels a point for Retina screens.
+    fn size() -> u32 {
+        36
+    }
+
     fn dark() -> bool {
         crate::system_appearance::is_dark().unwrap_or(true)
     }
@@ -341,8 +475,6 @@ mod native {
             let quit = MenuItem::with_id("quit", "Quit Flexspeak", true, None);
             menu.append_items(&[&mute, &deafen, &disconnect, &separator, &show, &quit])
                 .map_err(|error| error.to_string())?;
-            let actions = std::sync::Arc::new(actions);
-            let on_menu = actions.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 let action = match event.id.0.as_str() {
                     "mute" => Action::Mute,
@@ -352,25 +484,13 @@ mod native {
                     "quit" => Action::Quit,
                     _ => return,
                 };
-                on_menu(action);
-            }));
-            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-                // The Mac menu bar opens the menu on a click instead.
-                if let TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } = event
-                    && cfg!(windows)
-                {
-                    actions(Action::Show);
-                }
+                actions(action);
             }));
             let mut builder = TrayIconBuilder::new()
                 .with_id("flexspeak")
                 .with_tooltip(status.tooltip())
                 .with_menu(Box::new(menu))
-                .with_menu_on_left_click(cfg!(target_os = "macos"));
+                .with_menu_on_left_click(true);
             if let Some(icon) = icon(status.state, dark) {
                 builder = builder.with_icon(icon);
             }
@@ -546,6 +666,79 @@ mod tests {
             }
         }
         sheet.save_png(path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_menu_ticks_and_greys_what_the_status_says() {
+        use rune::TrayItem;
+        let mut status = Status {
+            state: State::Muted,
+            server: "ts.zirkumflex.io".into(),
+            muted: true,
+            deafened: false,
+        };
+        let menu = native::menu(&status);
+        assert!(matches!(
+            &menu[0],
+            TrayItem::Check { id, enabled: true, checked: true, .. } if id == "mute"
+        ));
+        assert!(matches!(
+            &menu[1],
+            TrayItem::Check { id, enabled: true, checked: false, .. } if id == "deafen"
+        ));
+        assert!(matches!(
+            &menu[2],
+            TrayItem::Action { id, enabled: true, .. } if id == "disconnect"
+        ));
+        status.state = State::Offline;
+        let menu = native::menu(&status);
+        for item in &menu[..3] {
+            assert!(matches!(
+                item,
+                TrayItem::Check { enabled: false, .. } | TrayItem::Action { enabled: false, .. }
+            ));
+        }
+        // Showing the window and quitting work without a server.
+        for item in &menu[4..] {
+            assert!(matches!(item, TrayItem::Action { enabled: true, .. }));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_click_shows_the_window_and_every_menu_item_has_its_action() {
+        use rune::{TrayEvent, TrayItem};
+        assert_eq!(
+            native::action(&TrayEvent::Activate { token: None }),
+            Some(Action::Show)
+        );
+        let status = Status {
+            state: State::Open,
+            server: "ts.zirkumflex.io".into(),
+            muted: false,
+            deafened: false,
+        };
+        let actions: Vec<Action> = native::menu(&status)
+            .into_iter()
+            .filter_map(|item| match item {
+                TrayItem::Check { id, .. } | TrayItem::Action { id, .. } => {
+                    Some(native::action(&TrayEvent::Menu(id)).expect("an action for every item"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                Action::Mute,
+                Action::Deafen,
+                Action::Disconnect,
+                Action::Show,
+                Action::Quit
+            ]
+        );
+        assert_eq!(native::action(&TrayEvent::Menu("other".into())), None);
     }
 
     fn premultiply(mut rgba: Vec<u8>) -> Vec<u8> {

@@ -75,13 +75,14 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSError", "NSString"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+# The menu bar icon (src/tray.rs). Windows uses Rune's own tray.
+tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 libwebrtc = "=0.4.1"
 # Named only to switch off libaom's software AV1 encoder: AV1 is then offered only
 # when a hardware encoder (NVENC) provides it, and sharing otherwise stays on VP8.
 webrtc-sys = { version = "=0.3.54", features = ["no-software-av1-encoder"] }
-tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Experimental fast capture (src/streaming/wgc.rs): Windows Graphics Capture and the D3D11
