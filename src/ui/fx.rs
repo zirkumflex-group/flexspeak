@@ -511,6 +511,22 @@ impl Compositor<App> for Effects {
         self.moving
     }
 
+    /// The graphics device is gone (a driver update, a GPU that was unplugged or reset).
+    /// Windows makes no new one while anything built on the old one is still held, so
+    /// everything here goes; the next frame builds it again for the new device.
+    fn release_gpu(&mut self) {
+        self.videos.release_gpu();
+        self.cans.release_gpu();
+        self.renderer = None;
+        // The thread building shaders ahead holds the device too. Hanging up starts it at
+        // once, on a lost device it has little to do, and what it built goes with it.
+        if let Some((_, start, thread)) = self.warming.take() {
+            drop(start);
+            let _ = thread.join();
+        }
+        self.warmed_for = None;
+    }
+
     fn render(&mut self, f: &mut Frame<'_, App>) {
         // The first frame built the frosted backdrop's pipelines; the next can drop the speck.
         f.rt.state.ui.warm_blur = false;

@@ -481,6 +481,11 @@ pub struct Seen {
 }
 
 impl Cans {
+    /// Drops the meshes, textures and pipelines; they are built again on the next device.
+    pub fn release_gpu(&mut self) {
+        self.gpu = None;
+    }
+
     /// Takes what `warm` built for the device `key`, unless that's already made.
     pub fn adopt(&mut self, key: DeviceKey, warm: Warm) {
         if self.gpu.as_ref().is_none_or(|(k, _)| *k != key) {
