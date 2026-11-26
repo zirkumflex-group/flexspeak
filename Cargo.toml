@@ -79,10 +79,10 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-libwebrtc = "=0.4.1"
+libwebrtc = "=0.4.2"
 # Named only to switch off libaom's software AV1 encoder: AV1 is then offered only
 # when a hardware encoder (NVENC) provides it, and sharing otherwise stays on VP8.
-webrtc-sys = { version = "=0.3.54", features = ["no-software-av1-encoder"] }
+webrtc-sys = { version = "=0.3.55", features = ["no-software-av1-encoder"] }
 
 [target.'cfg(windows)'.dependencies]
 # Experimental fast capture (src/streaming/wgc.rs): Windows Graphics Capture and the D3D11
@@ -110,8 +110,8 @@ embed-resource = "3"
 webrtc-sys-build = "=0.3.21"
 
 # webrtc-sys with the NVENC hardware encoders built on Windows, from
-# zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.54 (based on webrtc-sys v0.3.54).
-# The rev is also tagged flexspeak/webrtc-sys-v0.3.54-nvenc.1 there, so it stays fetchable.
+# zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.55 (based on webrtc-sys v0.3.55).
+# The rev is also tagged flexspeak/webrtc-sys-v0.3.55-nvenc.1 there, so it stays fetchable.
 [patch.crates-io]
 # Rune's own patched copies of these, from the same rev as rune above. A dependency's [patch]
 # doesn't reach the app that builds it, so each app repeats them; without winit's, macOS doesn't
@@ -124,8 +124,8 @@ accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "4918969f04
 naga = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
 sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
 accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
-webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "78bf1c5e8f889193f7eec2ac4ced0808de673251" }
-webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "78bf1c5e8f889193f7eec2ac4ced0808de673251" }
+webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "2647243225ea09e049216b238dbe3fac7537427a" }
+webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "2647243225ea09e049216b238dbe3fac7537427a" }
 # cpal 0.18.2 with one change: the macOS loopback tap leaves the app's own sound out, so
 # shared system audio does not echo the call back to viewers. Windows does the same in
 # src/streaming/process_audio.rs.
