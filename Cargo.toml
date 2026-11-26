@@ -33,6 +33,9 @@ rune-fx = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f6
 # No default features: they are rune-kit's code highlighter (80 lexers), and nothing here draws code.
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d", default-features = false }
 # The video compositor and rune-fx need wgpu's types; the same version and features Rune already builds.
+# Cargo.lock holds wgpu, wgpu-core, wgpu-types and wgpu-naga-bridge at 30.0.1, the release Rune's
+# own lock file and its patched wgpu-hal and naga are on; after `cargo update`, put them back with
+# `cargo update -p <crate> --precise 30.0.1`.
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 rubato = { version = "5.0.1", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
