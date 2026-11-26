@@ -57,6 +57,11 @@ pub struct Videos {
     gpu: Option<(DeviceKey, Gpu)>,
 }
 impl Videos {
+    /// Drops every texture, buffer and pipeline; `prepare` makes them again on the next device.
+    pub fn release_gpu(&mut self) {
+        self.gpu = None;
+    }
+
     pub fn prepare(&mut self, f: &Frame<'_, App>) -> bool {
         if let Some((_, gpu)) = &mut self.gpu {
             gpu.drawn = 0;

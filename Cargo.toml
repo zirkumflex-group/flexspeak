@@ -28,10 +28,14 @@ futures = "0.3"
 global-hotkey = "0.10"
 # Update checks and downloads. TLS through rustls on ring: no extra C toolchain on any platform.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
-rune = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
-rune-fx = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+rune-fx = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+# No default features: they are rune-kit's code highlighter (80 lexers), and nothing here draws code.
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d", default-features = false }
 # The video compositor and rune-fx need wgpu's types; the same version and features Rune already builds.
+# Cargo.lock holds wgpu, wgpu-core, wgpu-types and wgpu-naga-bridge at 30.0.1, the release Rune's
+# own lock file and its patched wgpu-hal and naga are on; after `cargo update`, put them back with
+# `cargo update -p <crate> --precise 30.0.1`.
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 rubato = { version = "5.0.1", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -74,13 +78,14 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSError", "NSString"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+# The menu bar icon (src/tray.rs). Windows uses Rune's own tray.
+tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-libwebrtc = "=0.4.1"
+libwebrtc = "=0.4.2"
 # Named only to switch off libaom's software AV1 encoder: AV1 is then offered only
 # when a hardware encoder (NVENC) provides it, and sharing otherwise stays on VP8.
-webrtc-sys = { version = "=0.3.54", features = ["no-software-av1-encoder"] }
-tray-icon = { version = "0.26.1", default-features = false }
+webrtc-sys = { version = "=0.3.55", features = ["no-software-av1-encoder"] }
 
 [target.'cfg(windows)'.dependencies]
 # Experimental fast capture (src/streaming/wgc.rs): Windows Graphics Capture and the D3D11
@@ -108,19 +113,22 @@ embed-resource = "3"
 webrtc-sys-build = "=0.3.21"
 
 # webrtc-sys with the NVENC hardware encoders built on Windows, from
-# zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.54 (based on webrtc-sys v0.3.54).
-# The rev is also tagged flexspeak/webrtc-sys-v0.3.54-nvenc.1 there, so it stays fetchable.
+# zirkumflex-group/rust-sdks, branch flexspeak/windows-nvenc-0.3.55 (based on webrtc-sys v0.3.55).
+# The rev is also tagged flexspeak/webrtc-sys-v0.3.55-nvenc.1 there, so it stays fetchable.
 [patch.crates-io]
 # Rune's own patched copies of these, from the same rev as rune above. A dependency's [patch]
 # doesn't reach the app that builds it, so each app repeats them; without winit's, macOS doesn't
 # build at all. Keep the rev in step with rune's when it is bumped.
-winit = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
-wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
-parley_engine = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
-accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6" }
-webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "78bf1c5e8f889193f7eec2ac4ced0808de673251" }
-webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "78bf1c5e8f889193f7eec2ac4ced0808de673251" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d" }
+webrtc-sys = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "2647243225ea09e049216b238dbe3fac7537427a" }
+webrtc-sys-build = { git = "https://github.com/zirkumflex-group/rust-sdks", rev = "2647243225ea09e049216b238dbe3fac7537427a" }
 # cpal 0.18.2 with one change: the macOS loopback tap leaves the app's own sound out, so
 # shared system audio does not echo the call back to viewers. Windows does the same in
 # src/streaming/process_audio.rs.

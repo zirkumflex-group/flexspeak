@@ -3,7 +3,7 @@
 //! view marks an element with [`card_fx`]; the compositor finds the marked instances each frame
 //! and draws the matching layer there.
 
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 
 use rune::El;
@@ -453,7 +453,7 @@ pub struct Effects {
     renderer: Option<(DeviceKey, FxRenderer)>,
     /// The card shaders being built ahead on another thread, for the device of that key, and
     /// the way to tell it to start at once.
-    warming: Option<(DeviceKey, Sender<()>, JoinHandle<Warmed>)>,
+    warming: Option<(DeviceKey, Sender<()>, JoinHandle<Option<Warmed>>)>,
     /// The device they were last built for, so each GPU the window lands on builds them once.
     warmed_for: Option<DeviceKey>,
     /// Whether a layer drawn last frame moves on its own, so the window keeps drawing.
@@ -474,9 +474,12 @@ impl Effects {
             match std::thread::Builder::new()
                 .name("card shaders".to_owned())
                 .spawn(move || {
-                    // Compiled alongside launch's own first frame, they doubled it.
-                    let _ = started.recv_timeout(WARM_AFTER);
-                    warm(&device, format, srgb)
+                    // Compiled alongside launch's own first frame, they doubled it. A hang-up
+                    // means the device is being let go, and nothing is built on it.
+                    if started.recv_timeout(WARM_AFTER) == Err(RecvTimeoutError::Disconnected) {
+                        return None;
+                    }
+                    Some(warm(&device, format, srgb))
                 }) {
                 Ok(thread) => self.warming = Some((key, start, thread)),
                 Err(error) => tracing::warn!("Card shaders aren't built ahead: {error}"),
@@ -494,8 +497,9 @@ impl Effects {
         let (built_for, _, thread) = self.warming.take().expect("checked above");
         match thread.join() {
             // The window moved to another GPU meanwhile: what it builds there is used.
-            Ok(_) if built_for != key => {}
-            Ok((fx, cans)) => {
+            Ok(Some(_)) if built_for != key => {}
+            Ok(None) => {}
+            Ok(Some((fx, cans))) => {
                 if self.renderer.as_ref().is_none_or(|(k, _)| *k != key) {
                     self.renderer = Some((key, fx));
                 }
@@ -509,6 +513,23 @@ impl Effects {
 impl Compositor<App> for Effects {
     fn animating(&self) -> bool {
         self.moving
+    }
+
+    /// Rune let its graphics device go: the window closed, or the device was lost (a driver
+    /// update, a GPU that was unplugged or reset). Windows makes no new device while anything
+    /// built on a lost one is still held, so everything here goes; the next frame builds it
+    /// again for the device it gets.
+    fn release_gpu(&mut self) {
+        self.videos.release_gpu();
+        self.cans.release_gpu();
+        self.renderer = None;
+        // The thread building shaders ahead holds the device too. Hung up on while it still
+        // waits, it builds nothing; one already building is waited for.
+        if let Some((_, start, thread)) = self.warming.take() {
+            drop(start);
+            let _ = thread.join();
+        }
+        self.warmed_for = None;
     }
 
     fn render(&mut self, f: &mut Frame<'_, App>) {
