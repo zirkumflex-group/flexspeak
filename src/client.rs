@@ -112,6 +112,8 @@ pub enum Command {
     SetGroups(Vec<u16>, GroupEdit),
     /// Asks for the group lists, for servers that haven't sent them.
     RequestGroups,
+    /// Asks what the server keeps about one client, for their Stats page.
+    MemberStats(u16),
     /// New devices or voice settings for the microphone test; a server takes them from the hub.
     Retune(hub::Retune),
     /// Drops the connection and connects again now, instead of waiting for it to time out.
@@ -191,6 +193,110 @@ pub struct Member {
     pub channel_group: u64,
     /// A server query login rather than a person: `serveradmin`, or a bot on the query port.
     pub system: bool,
+}
+
+/// What the server tells about one person when asked (`clientgetvariables` and
+/// `getconnectioninfo`), as the member menu's Stats page shows it. Anything the server left out
+/// stays `None`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MemberStats {
+    /// How long they had been connected when the server answered.
+    pub online: Option<Duration>,
+    /// How long they had been inactive when the server answered.
+    pub idle: Option<Duration>,
+    /// When the server first saw their identity, in Unix seconds.
+    pub first_seen: Option<i64>,
+    /// When they connected before this visit, in Unix seconds.
+    pub last_connected: Option<i64>,
+    pub connections: Option<u32>,
+    /// Their client's version without its build, and the system it runs on.
+    pub version: Option<String>,
+    pub platform: Option<String>,
+    /// Two letters, as the server reports them.
+    pub country: Option<String>,
+    pub month_down: Option<u64>,
+    pub month_up: Option<u64>,
+}
+
+/// One of the two questions a Stats page asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatsPart {
+    /// `clientgetvariables`: history and client.
+    Variables,
+    /// `getconnectioninfo`: online and idle time.
+    Connection,
+}
+
+/// Which answers a Stats request has, and which of them carry data rather than a refusal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StatsRequest {
+    variables: Option<bool>,
+    connection: Option<bool>,
+}
+
+impl StatsRequest {
+    fn slot(&mut self, part: StatsPart) -> &mut Option<bool> {
+        match part {
+            StatsPart::Variables => &mut self.variables,
+            StatsPart::Connection => &mut self.connection,
+        }
+    }
+    /// The server answered with data.
+    fn answer(&mut self, part: StatsPart) {
+        *self.slot(part) = Some(true);
+    }
+    /// The server refused, or the question couldn't be asked; an answer already in stands.
+    fn mark(&mut self, part: StatsPart) {
+        self.slot(part).get_or_insert(false);
+    }
+    fn unanswered(&mut self, part: StatsPart) -> bool {
+        self.slot(part).is_none()
+    }
+    fn complete(&self) -> bool {
+        self.variables.is_some() && self.connection.is_some()
+    }
+}
+
+/// A Stats page's figures from the book, taking only what this request has had answered, so a
+/// connection reading from an earlier poll doesn't pass for a fresh one.
+fn member_stats(client: &tsclientlib::data::Client, asked: &StatsRequest) -> MemberStats {
+    let span = |time: time::Duration| Duration::try_from(time).ok();
+    let unix = |at: time::OffsetDateTime| Some(at.unix_timestamp()).filter(|at| *at > 0);
+    let mut stats = MemberStats {
+        country: Some(client.country_code.trim().to_owned()).filter(|code| !code.is_empty()),
+        ..MemberStats::default()
+    };
+    if asked.connection == Some(true)
+        && let Some(data) = &client.connection_data
+    {
+        stats.online = data.connected_time.and_then(span);
+        stats.idle = span(data.idle_time);
+    }
+    if asked.variables == Some(true)
+        && let Some(data) = &client.optional_data
+    {
+        stats.first_seen = unix(data.created);
+        stats.last_connected = unix(data.last_connected);
+        stats.connections = Some(data.connections_total);
+        stats.version = Some(version_name(&data.version)).filter(|version| !version.is_empty());
+        stats.platform = Some(data.platform.trim().to_owned()).filter(|name| !name.is_empty());
+        stats.month_down = Some(data.bytes_downloaded_month);
+        stats.month_up = Some(data.bytes_uploaded_month);
+    }
+    stats
+}
+
+/// A client version without its build: "6.0.0-beta3 [Build: 1749...]" reads "6.0.0-beta3".
+fn version_name(version: &str) -> String {
+    version
+        .split(" [")
+        .next()
+        .unwrap_or(version)
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(40)
+        .collect()
 }
 
 /// A server or channel group someone can be put in.
@@ -514,6 +620,11 @@ pub enum Event {
     ClientUsage {
         id: u16,
         result: Result<ServerUsage, &'static str>,
+    },
+    /// What has come back so far for a Stats page; sent again as each answer arrives.
+    MemberStats {
+        id: u16,
+        stats: MemberStats,
     },
     Warning {
         source: Source,
@@ -1385,6 +1496,9 @@ async fn run_connection(
         enum Step { Network(Option<Result<StreamItem, tsclientlib::Error>>), Command(Option<Command>), Media(u64, Option<streaming::MediaEvent>), Voice(Option<Voice>), Tick }
         // Pokes and moves in flight, so their replies can be reported.
         let mut requests: HashMap<Ticket, Source> = HashMap::new();
+        // Stats pages waiting on the server: each question asked, and what has come back.
+        let mut stats_tickets: HashMap<Ticket, (ClientId, StatsPart)> = HashMap::new();
+        let mut stats_requests: HashMap<ClientId, StatsRequest> = HashMap::new();
         loop {
             let step = {
                 let mut stream = connection.events();
@@ -1407,7 +1521,7 @@ async fn run_connection(
                     if !connected { continue; }
                     let state = connection.get_state()?;
                     // These only queue a packet: nothing the tree shows can have changed yet.
-                    let tree_unchanged = matches!(command, Command::Chat(..) | Command::Poke(..) | Command::RequestGroups | Command::Retune(_));
+                    let tree_unchanged = matches!(command, Command::Chat(..) | Command::Poke(..) | Command::RequestGroups | Command::MemberStats(_) | Command::Retune(_));
                     match command {
                         Command::Mute(value) => {
                             controls.desired.muted = value;
@@ -1521,6 +1635,21 @@ async fn run_connection(
                                 }
                             }
                         },
+                        Command::MemberStats(id) => {
+                            let Some(client) = state.clients.get(&ClientId(id)) else { continue; };
+                            let mut asked = StatsRequest::default();
+                            for (packet, part) in [(client.variables().to_packet(), StatsPart::Variables), (client.connection_info().to_packet(), StatsPart::Connection)] {
+                                match flow.borrow_mut().enqueue(packet, Operation::MemberStats) {
+                                    Ok(ticket) => { stats_tickets.insert(ticket, (ClientId(id), part)); },
+                                    Err(_) => asked.mark(part),
+                                }
+                            }
+                            if asked.complete() {
+                                let _ = events.try_send(Event::MemberStats { id, stats: MemberStats::default() });
+                            } else {
+                                stats_requests.insert(ClientId(id), asked);
+                            }
+                        },
                         Command::StartSharing(options) => {
                             streams.sync(&mut connection);
                             let result = if !connected || !streams.foreground() {
@@ -1627,6 +1756,19 @@ async fn run_connection(
                                 } else if channel_polls.peers.contains_key(id) {
                                     let _ = events.try_send(Event::ClientUsage { id: id.0, result: Ok(sample) });
                                 }
+                            }
+                            let answered = match change {
+                                BookEvent::PropertyAdded { id: PropertyId::OptionalClientData(id), .. }
+                                    | BookEvent::PropertyChanged { id: PropertyId::OptionalClientData(id), .. } => Some((*id, StatsPart::Variables)),
+                                BookEvent::PropertyAdded { id: PropertyId::ConnectionClientData(id), .. }
+                                    | BookEvent::PropertyChanged { id: PropertyId::ConnectionClientData(id), .. } => Some((*id, StatsPart::Connection)),
+                                _ => None,
+                            };
+                            if let Some((id, part)) = answered && let Some(asked) = stats_requests.get_mut(&id) {
+                                asked.answer(part);
+                                let stats = state.clients.get(&id).map(|client| member_stats(client, asked)).unwrap_or_default();
+                                if asked.complete() { stats_requests.remove(&id); }
+                                let _ = events.try_send(Event::MemberStats { id: id.0, stats });
                             }
                         }
                         update_codec(&connection, &audio)?;
@@ -1737,6 +1879,17 @@ async fn run_connection(
                                         let _ = events.try_send(Event::Warning { source: Source::Join, detail: format!("Could not join channel: {error}") });
                                     }
                                 } else { let _ = events.try_send(Event::Recovered(Source::Join)); }
+                            } else if let Some((id, part)) = stats_tickets.remove(&ticket) {
+                                // An answer arrives as a book change before its acknowledgement.
+                                // Without one (refused, or a reply the book couldn't take whole)
+                                // that part stays unknown, so the page stops waiting for it.
+                                if let Some(asked) = stats_requests.get_mut(&id) && asked.unanswered(part) {
+                                    asked.mark(part);
+                                    let state = connection.get_state()?;
+                                    let stats = state.clients.get(&id).map(|client| member_stats(client, asked)).unwrap_or_default();
+                                    if asked.complete() { stats_requests.remove(&id); }
+                                    let _ = events.try_send(Event::MemberStats { id: id.0, stats });
+                                }
                             } else if pending_info.is_some_and(|(pending, _, _, _)| pending == ticket) {
                                 let (_, id, channel, _) = pending_info.take().unwrap();
                                 if reply.result.is_err() && !reply.flooded {
@@ -2034,6 +2187,32 @@ pub fn probe(address: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stats_request_is_done_once_both_questions_are_settled() {
+        let mut asked = StatsRequest::default();
+        assert!(!asked.complete());
+        asked.answer(StatsPart::Connection);
+        // The acknowledgement after an answer doesn't take the answer back.
+        assert!(!asked.unanswered(StatsPart::Connection));
+        asked.mark(StatsPart::Connection);
+        assert_eq!(asked.connection, Some(true));
+        assert!(!asked.complete());
+        assert!(asked.unanswered(StatsPart::Variables));
+        asked.mark(StatsPart::Variables);
+        assert_eq!(asked.variables, Some(false));
+        assert!(asked.complete());
+    }
+
+    #[test]
+    fn a_client_version_loses_its_build() {
+        assert_eq!(
+            version_name("6.0.0-beta3 [Build: 1749556733]"),
+            "6.0.0-beta3"
+        );
+        assert_eq!(version_name("3.6.2"), "3.6.2");
+        assert_eq!(version_name(" "), "");
+    }
 
     #[test]
     fn spacer_names_become_dividers_only_at_the_top_level() {
