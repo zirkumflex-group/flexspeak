@@ -358,10 +358,14 @@ fn sections(
     page: SettingsPage,
 ) -> Vec<Section> {
     match page {
-        SettingsPage::Server => vec![servers_section(s, t, k), identity_section(s, t, k)],
+        SettingsPage::Server => vec![
+            servers_section(s, t, k),
+            identity_section(s, t, k),
+            channel_tree_section(s, t, k),
+        ],
         SettingsPage::Appearance => appearance_sections(s, t, k),
         SettingsPage::Chat => chat_sections(s, t, k),
-        SettingsPage::Streaming => vec![streaming_section(s, t, k)],
+        SettingsPage::Streaming => vec![watching_section(s, t, k), streaming_section(s, t, k)],
         SettingsPage::Audio => vec![
             Section::boxed(
                 "audio",
@@ -1191,6 +1195,35 @@ fn identity_section(s: &App, t: &Theme, k: &Kit) -> Section {
     } else {
         section.note(group_note(t, "Disconnect to change your nickname."))
     }
+}
+
+/// Who the channel tree lists, on every server.
+fn channel_tree_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    Section::boxed(
+        "channel-tree",
+        "Channel Tree",
+        "channels list members people clients",
+        vec![item(
+            "Hide system clients",
+            "hide system clients serveradmin server query bot admin lobby",
+            form_row(
+                t,
+                "Hide system clients",
+                Some(
+                    "Leaves serveradmin, the server's own query login, out of the channel tree and the server log.",
+                ),
+                switch(
+                    "hide-system-clients",
+                    "Hide system clients",
+                    s.hide_system_clients
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    true,
+                    k,
+                    |_, on| Message::HideSystemClients(on),
+                ),
+            ),
+        )],
+    )
 }
 
 /// The Add or Edit Server dialog, above the Settings window.
@@ -2562,6 +2595,34 @@ fn processing_with(s: &App, change: impl FnOnce(&mut audio_processing::Settings)
     let mut next = s.audio_processing;
     change(&mut next);
     Message::AudioProcessing(next)
+}
+
+/// How the streams of others show on the stage.
+fn watching_section(s: &App, t: &Theme, k: &Kit) -> Section {
+    Section::boxed(
+        "watching",
+        "Watching",
+        "watch streams stage view",
+        vec![item(
+            "Hide streams you haven't joined",
+            "hide streams not joined unjoined unwatched others previews also live stage",
+            form_row(
+                t,
+                "Hide streams you haven't joined",
+                Some(
+                    "Only the streams you watch take room on the stage. The others wait in a row of buttons, one click from joining.",
+                ),
+                switch(
+                    "hide-unjoined",
+                    "Hide streams you haven't joined",
+                    s.stream_view.hide_unjoined,
+                    true,
+                    k,
+                    |_, on| Message::HideUnjoinedStreams(on),
+                ),
+            ),
+        )],
+    )
 }
 
 /// How your screen shares are encoded and captured. Both are Windows only.

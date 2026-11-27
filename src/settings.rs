@@ -58,6 +58,10 @@ pub struct Settings {
     /// Whether the app plays its short event sounds at all.
     #[serde(skip_serializing_if = "is_true")]
     pub sound_cues: bool,
+    /// Leaves server query logins (`serveradmin`, bots on the query port) out of the channel
+    /// tree and the activity feed.
+    #[serde(skip_serializing_if = "is_true")]
+    pub hide_system_clients: bool,
     #[serde(skip_serializing_if = "crate::sounds::Settings::is_default")]
     pub sounds: crate::sounds::Settings,
     /// The quality, access and sound screen sharing last used.
@@ -285,6 +289,9 @@ pub struct StreamView {
     pub beside: bool,
     /// Codec, resolution, frame rate and transport show over each stream.
     pub details: bool,
+    /// Streams in your channel that you haven't joined take no room on the stage, only a
+    /// button each in an "Also live" row.
+    pub hide_unjoined: bool,
 }
 
 impl StreamView {
@@ -581,6 +588,12 @@ pub struct Synced {
         deserialize_with = "lenient",
         skip_serializing_if = "Option::is_none"
     )]
+    pub hide_system_clients: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub even_out_voices: Option<bool>,
     #[serde(
         default,
@@ -691,6 +704,7 @@ impl Synced {
             custom_themes: Some(settings.custom_themes.clone()),
             chat: Some(settings.chat),
             sound_cues: Some(settings.sound_cues),
+            hide_system_clients: Some(settings.hide_system_clients),
             even_out_voices: Some(settings.even_out_voices),
             sounds: Some(settings.sounds.clone()),
             share: Some(settings.share),
@@ -767,6 +781,9 @@ impl Synced {
         if let Some(on) = self.sound_cues {
             settings.sound_cues = on;
         }
+        if let Some(on) = self.hide_system_clients {
+            settings.hide_system_clients = on;
+        }
         if let Some(on) = self.even_out_voices {
             settings.even_out_voices = on;
         }
@@ -834,6 +851,7 @@ impl Default for Settings {
             stream_muted: BTreeSet::new(),
             auto_watch: BTreeSet::new(),
             sound_cues: true,
+            hide_system_clients: true,
             sounds: crate::sounds::Settings::default(),
             share: Default::default(),
             streaming: Streaming::default(),
@@ -1261,6 +1279,7 @@ mod tests {
             footer_hidden: true,
             close_button: CloseButton::Quit,
             sound_cues: false,
+            hide_system_clients: false,
             even_out_voices: true,
             user_audio: BTreeMap::from([(
                 "uid-1".into(),
@@ -1288,6 +1307,7 @@ mod tests {
         assert!(onto.footer_hidden);
         assert_eq!(onto.close_button, CloseButton::Quit);
         assert!(!onto.sound_cues);
+        assert!(!onto.hide_system_clients);
         assert!(onto.even_out_voices);
         assert_eq!(onto.user_audio, from.user_audio);
         assert_eq!(onto.stream_volumes, from.stream_volumes);

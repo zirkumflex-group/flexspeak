@@ -62,6 +62,9 @@ pub struct Config {
     pub channel_health_visible: Arc<AtomicBool>,
     /// See every channel's members (subscribe to all), or only your own channel's.
     pub subscribe_all: Arc<AtomicBool>,
+    /// Settings > Server > Hide system clients: server query logins (`serveradmin`, bots run
+    /// over the query port) stay out of the tree and the activity feed.
+    pub hide_system_clients: Arc<AtomicBool>,
     pub streaming_visible: Arc<AtomicBool>,
     pub video_surfaces: Arc<streaming::Surfaces>,
     pub playback_volume: Arc<PlaybackVolume>,
@@ -113,6 +116,8 @@ pub enum Command {
     Retune(hub::Retune),
     /// Drops the connection and connects again now, instead of waiting for it to time out.
     Reconnect,
+    /// Sends the tree again, after a setting that shapes it changed.
+    Refresh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +189,8 @@ pub struct Member {
     /// Sorted server group ids.
     pub server_groups: Vec<u64>,
     pub channel_group: u64,
+    /// A server query login rather than a person: `serveradmin`, or a bot on the query port.
+    pub system: bool,
 }
 
 /// A server or channel group someone can be put in.
@@ -878,7 +885,32 @@ fn sender_playback(
     }
 }
 
-fn snapshot(connection: &Connection) -> Result<Snapshot> {
+/// Whether this client is a server query login rather than someone in a TeamSpeak client.
+fn is_system(client: &tsclientlib::data::Client) -> bool {
+    matches!(client.client_type, tsclientlib::ClientType::Query { .. })
+}
+
+/// Whether a change is about a system client, so it says nothing while they are hidden.
+fn about_system_client(state: &tsclientlib::data::Connection, change: &BookEvent) -> bool {
+    match change {
+        BookEvent::PropertyAdded {
+            id: PropertyId::Client(id),
+            ..
+        }
+        | BookEvent::PropertyChanged {
+            id: PropertyId::ClientChannel(id) | PropertyId::ClientIsRecording(id),
+            ..
+        } => state.clients.get(id).is_some_and(is_system),
+        BookEvent::PropertyRemoved {
+            old: PropertyValue::Client(client),
+            ..
+        } => is_system(client),
+        _ => false,
+    }
+}
+
+/// The tree as the window shows it; with `hide_system`, server query logins are left out.
+fn snapshot(connection: &Connection, hide_system: bool) -> Result<Snapshot> {
     let state = connection.get_state()?;
     let current_id = state
         .clients
@@ -886,6 +918,10 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
         .map(|client| client.channel);
     let mut members: BTreeMap<u64, Vec<Member>> = BTreeMap::new();
     for client in state.clients.values() {
+        let system = is_system(client);
+        if hide_system && system {
+            continue;
+        }
         let hint = |flag| client.permission_hints.map(|hints| hints.contains(flag));
         let mut server_groups: Vec<u64> = client.server_groups.iter().map(|id| id.0).collect();
         server_groups.sort_unstable();
@@ -909,6 +945,7 @@ fn snapshot(connection: &Connection) -> Result<Snapshot> {
             can_ban: hint(ClientPermissionHint::BAN),
             server_groups,
             channel_group: client.channel_group.0,
+            system,
         });
     }
     for clients in members.values_mut() {
@@ -1265,6 +1302,7 @@ async fn run_connection(
     mut commands: mpsc::Receiver<Command>,
     events: &mpsc::Sender<Event>,
 ) -> Result<()> {
+    let hide_system = config.hide_system_clients.clone();
     let _ = events.try_send(Event::Status(
         "Opening audio devices — allow microphone access if prompted…".into(),
     ));
@@ -1406,6 +1444,7 @@ async fn run_connection(
                         },
                         Command::RefreshStreams => streams.refresh(&mut connection),
                         Command::Reconnect => connection.reconnect(),
+                        Command::Refresh => {}
                         Command::WatchStream(id) => {
                             if flow.borrow().cooling_down(Instant::now()) {
                                 let _ = events.try_send(Event::Warning { source: Source::Flood, detail: flow.borrow().flood_detail(Operation::StreamJoin, Instant::now()) });
@@ -1506,7 +1545,7 @@ async fn run_connection(
                         Command::Stop => break,
                     }
                     if !tree_unchanged {
-                        let _ = events.try_send(Event::State(snapshot(&connection)?));
+                        let _ = events.try_send(Event::State(snapshot(&connection, hide_system.load(Ordering::Relaxed))?));
                     }
                 },
                 Step::Network(Some(Ok(event))) => match event {
@@ -1532,7 +1571,10 @@ async fn run_connection(
                         // What happened goes before the membership it led to, so a kick is known
                         // by the time your change of channel arrives and isn't heard as a move too.
                         if !first_batch {
-                            let happened: Vec<_> = changes.iter().filter_map(|change| activity(state, change)).collect();
+                            let hide = hide_system.load(Ordering::Relaxed);
+                            let happened: Vec<_> = changes.iter()
+                                .filter(|change| !(hide && about_system_client(state, change)))
+                                .filter_map(|change| activity(state, change)).collect();
                             sent_away = sent_away.or_else(|| happened.iter().find(|done| done.is_self).and_then(|done| match done.kind {
                                 ActivityKind::KickedFromServer => Some(Refusal::Kicked),
                                 ActivityKind::Banned => Some(Refusal::Banned),
@@ -1545,7 +1587,7 @@ async fn run_connection(
                         // Deliver membership first so new-channel samples cannot populate the old view.
                         // A batch of nothing but chat lines leaves the tree as it was.
                         if first_batch || !changes.iter().all(|change| matches!(change, BookEvent::Message { .. })) {
-                            let _ = events.try_send(Event::State(snapshot(&connection)?));
+                            let _ = events.try_send(Event::State(snapshot(&connection, hide_system.load(Ordering::Relaxed))?));
                         }
                         for change in &changes {
                             if let BookEvent::Message { target, invoker, message } = change {
@@ -1708,7 +1750,7 @@ async fn run_connection(
                             }
                         }
                     },
-                    StreamItem::AudioChange(_) => { let _ = events.try_send(Event::State(snapshot(&connection)?)); },
+                    StreamItem::AudioChange(_) => { let _ = events.try_send(Event::State(snapshot(&connection, hide_system.load(Ordering::Relaxed))?)); },
                     StreamItem::StreamCommand { name, content } => streams.notification(&mut connection, &name, &content),
                     _ => {},
                 },
@@ -1966,7 +2008,7 @@ pub fn probe(address: &str) -> Result<()> {
                     let event = connection.events().next().await;
                     match event {
                         Some(Ok(StreamItem::BookEvents(_))) => {
-                            let state = snapshot(&connection)?;
+                            let state = snapshot(&connection, false)?;
                             let Some(current) = state.current else {
                                 continue;
                             };
@@ -2217,7 +2259,7 @@ mod tests {
                                     "Server version: {} · platform: {} · protocol: {}",
                                     server.version, server.platform, server.protocol_version
                                 );
-                                return snapshot(&connection);
+                                return snapshot(&connection, false);
                             }
                         }
                     }
