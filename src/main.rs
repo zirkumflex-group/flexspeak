@@ -194,6 +194,9 @@ struct App {
     transmitting: bool,
     channel_health_visible: Arc<AtomicBool>,
     subscribe_all: Arc<AtomicBool>,
+    /// Settings > Server > Hide system clients, as the connections read it. Saved straight
+    /// away when changed.
+    hide_system_clients: Arc<AtomicBool>,
     /// Saved straight to settings when toggled, not held until the Settings page saves.
     footer_hidden: bool,
     /// The server log's size; saved when a resize ends or it folds, like `footer_hidden`.
@@ -1343,6 +1346,9 @@ enum Message {
     /// Starts or stops joining a person's streams as soon as they go live in your channel.
     ToggleAutoWatch(u16),
     SoundCues(bool),
+    HideSystemClients(bool),
+    /// Settings > Streaming > Hide streams you haven't joined, or the stage's eye button.
+    HideUnjoinedStreams(bool),
     SoundVolume(u8),
     SoundPack(sounds::Pack),
     SoundGroup(sounds::Group, bool),
@@ -1655,6 +1661,7 @@ impl App {
             transmitting: false,
             channel_health_visible: Arc::new(AtomicBool::new(true)),
             subscribe_all: Arc::new(AtomicBool::new(true)),
+            hide_system_clients: Arc::new(AtomicBool::new(true)),
             footer_hidden: false,
             log_pane: settings::LogPane::default(),
             sidebar_width: ui::SIDEBAR_WIDTH,
@@ -2421,6 +2428,7 @@ impl App {
         let view = settings::StreamView {
             beside: self.server().streaming.strip == streaming::Strip::Beside,
             details: self.server().streaming.show_stats,
+            hide_unjoined: self.stream_view.hide_unjoined,
         };
         if view == self.stream_view {
             return;
@@ -2532,6 +2540,7 @@ impl App {
                     streams_muted = saved.stream_muted.len(),
                     auto_watch = saved.auto_watch.len(),
                     sound_cues = saved.sound_cues,
+                    hide_system_clients = saved.hide_system_clients,
                     even_out_voices = saved.even_out_voices,
                     interface_size = saved.interface_size,
                     close_button = ?saved.close_button,
@@ -3056,6 +3065,8 @@ impl App {
         self.stream_muted = saved.stream_muted;
         self.auto_watch = saved.auto_watch;
         self.sound_cues = saved.sound_cues;
+        self.hide_system_clients
+            .store(saved.hide_system_clients, Ordering::Relaxed);
         self.sounds = saved.sounds;
         self.stream_options = saved.streaming;
         self.debug_logging = saved.debug_logging;
@@ -3119,6 +3130,7 @@ impl App {
             stream_muted: self.stream_muted.clone(),
             auto_watch: self.auto_watch.clone(),
             sound_cues: self.sound_cues,
+            hide_system_clients: self.hide_system_clients.load(Ordering::Relaxed),
             even_out_voices: self.even_out_voices,
             sounds: self.sounds.clone(),
             share: self.share_defaults,
@@ -4011,6 +4023,7 @@ impl App {
             ptt: self.ptt.clone(),
             channel_health_visible: self.channel_health_visible.clone(),
             subscribe_all: self.subscribe_all.clone(),
+            hide_system_clients: self.hide_system_clients.clone(),
             streaming_visible: visible.clone(),
             video_surfaces: surfaces.clone(),
             address: address.clone(),
@@ -5823,6 +5836,25 @@ impl App {
                 self.save_preference(
                     |saved| saved.sound_cues = on,
                     "The sound cue choice applies for now but was not saved",
+                );
+            }
+            Message::HideSystemClients(on) => {
+                self.hide_system_clients.store(on, Ordering::Relaxed);
+                // Every open connection sends its tree again, with them in or out.
+                let ids: Vec<_> = self.sessions.iter().map(|session| session.id).collect();
+                for id in ids {
+                    self.send_to(id, client::Command::Refresh);
+                }
+                self.save_preference(
+                    |saved| saved.hide_system_clients = on,
+                    "Hiding system clients applies for now but was not saved",
+                );
+            }
+            Message::HideUnjoinedStreams(on) => {
+                self.stream_view.hide_unjoined = on;
+                self.save_preference(
+                    |saved| saved.stream_view.hide_unjoined = on,
+                    "Hiding streams you haven't joined applies for now but was not saved",
                 );
             }
             Message::ToggleSubscribeAll => {

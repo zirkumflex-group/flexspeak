@@ -28,8 +28,7 @@ use crate::streaming::{
 use crate::{App, Message, usage};
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) -> El {
-    let connected = s.server().connected && !s.loopback && !s.server().stopping;
-    let supported = connected && s.server().state.server_version.starts_with("6.");
+    let supported = supported(s);
     share_dialog(s, cx, t, k, layer);
     drag_ghost(s, t, layer);
     let watching = s.server().streaming.active();
@@ -87,7 +86,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &Theme, k: &Kit, layer: &mut Vec<El>) 
 
 /// Whether streams fill the pane: one you watch, or one in the channel you could.
 pub fn on_stage(s: &App) -> bool {
-    s.server().streaming.active() || !unwatched(s).is_empty()
+    s.server().streaming.active() || !offered(s).is_empty()
+}
+
+/// Whether this server can carry streams at all: connected, and on TeamSpeak 6.
+fn supported(s: &App) -> bool {
+    let connected = s.server().connected && !s.loopback && !s.server().stopping;
+    connected && s.server().state.server_version.starts_with("6.")
 }
 
 /// How long the pointer rests on the streams before their toolbar and bar step aside.
@@ -416,6 +421,25 @@ fn tools(s: &App, t: &Theme, supported: bool, watching: bool) -> El {
             }
         }
     }
+    let hide = s.stream_view.hide_unjoined;
+    if hide || !unwatched(s).is_empty() {
+        bar = bar.child(icon_button(
+            t,
+            "hide-unjoined",
+            if hide { &icons::EYE_OFF } else { &icons::EYE },
+            if hide {
+                "Show streams you haven't joined"
+            } else {
+                "Hide streams you haven't joined"
+            },
+            if hide {
+                Variant::Active
+            } else {
+                Variant::Ghost
+            },
+            Some(Message::HideUnjoinedStreams(!hide)),
+        ));
+    }
     bar.child(icon_button(
         t,
         "refresh-streams",
@@ -459,6 +483,25 @@ fn unwatched(s: &App) -> Vec<&streaming::StreamInfo> {
         .iter()
         .filter(|stream| s.server().streaming.watching(&stream.id).is_none())
         .collect()
+}
+
+/// The streams you haven't joined that get a box of their own: all of them, or none while
+/// Hide streams you haven't joined is on.
+fn offered(s: &App) -> Vec<&streaming::StreamInfo> {
+    if s.stream_view.hide_unjoined {
+        Vec::new()
+    } else {
+        unwatched(s)
+    }
+}
+
+/// The streams you haven't joined that are hidden, each down to a button in the "Also live" row.
+fn tucked(s: &App) -> Vec<&streaming::StreamInfo> {
+    if s.stream_view.hide_unjoined {
+        unwatched(s)
+    } else {
+        Vec::new()
+    }
 }
 
 fn publisher_name(s: &App, id: u16) -> String {
@@ -548,6 +591,7 @@ fn go_live(s: &App, t: &Theme) -> El {
 fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
     let shares = &s.server().streaming.sharing.shares;
     let sharing = !shares.is_empty();
+    let hidden = tucked(s);
     let mut state = col()
         .key("no-streams")
         .grow(1.0)
@@ -558,10 +602,12 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
         .center()
         // One line and the ways to go live; the rules live in the tooltip.
         .child(
-            text(if sharing {
-                "Only you are sharing in this channel."
+            text(if !hidden.is_empty() {
+                hidden_words(s, &hidden)
+            } else if sharing {
+                "Only you are sharing in this channel.".to_owned()
             } else {
-                "No one in this channel is sharing."
+                "No one in this channel is sharing.".to_owned()
             })
             .font(ty::BODY)
             .color(t.muted)
@@ -569,7 +615,19 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
                 "Watch up to five streams at once. Switching channels stops watching and \
                  sharing; switching servers stops watching only.",
             ),
-        );
+        )
+        .children((!hidden.is_empty()).then(|| {
+            row()
+                .key("hidden-live")
+                .gap(8.0)
+                .center()
+                .flex_wrap()
+                .children(
+                    hidden
+                        .iter()
+                        .map(|stream| live_chip(s, t, supported, stream)),
+                )
+        }));
     if sharing {
         for share in shares {
             state = state.child(share_summary(
@@ -644,6 +702,17 @@ fn no_streams(s: &App, t: &Theme, supported: bool) -> El {
         )));
     }
     content.child(state)
+}
+
+/// What the empty pane says while the streams you haven't joined are hidden.
+fn hidden_words(s: &App, hidden: &[&streaming::StreamInfo]) -> String {
+    match hidden {
+        [stream] => format!(
+            "{} is live in this channel.",
+            publisher_name(s, stream.publisher)
+        ),
+        _ => format!("{} streams are live in this channel.", hidden.len()),
+    }
 }
 
 /// Who is live in other channels of this server, under the ways to go live: a stream there can
@@ -994,7 +1063,8 @@ fn request_row(t: &Theme, status: &Status, id: u16, name: &str) -> El {
 /// Streams watched and not yet joined: one on the stage with the rest beneath it, or a grid.
 fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32), header: bool) -> El {
     let watching = &s.server().streaming.watching;
-    let available = unwatched(s);
+    let available = offered(s);
+    let tucked = tucked(s);
     let mut area = col()
         .key("stage")
         .grow(1.0)
@@ -1042,7 +1112,9 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32), header
             .zip(&sizes)
             .map(|((content, shape), size)| cell(content, *size, shape))
             .collect::<Vec<_>>();
-        return area.child(grid(k, cells, &layout));
+        return area
+            .child(grid(k, cells, &layout))
+            .children(also_live(s, t, supported, &tucked));
     };
     let others: Vec<&Watching> = watching
         .iter()
@@ -1151,33 +1223,48 @@ fn stage(s: &App, t: &Theme, k: &Kit, supported: bool, space: (f32, f32), header
             )
         }
     };
-    if !overflow.is_empty() {
-        let mut chips = row()
-            .key("also-live")
-            .w_full()
-            .gap(8.0)
-            .center_y()
-            .flex_wrap()
-            .child(faint(t, "Also live:"));
-        for stream in overflow {
-            let blocked = watch_blocked(s, supported, stream);
-            chips = chips.child(
-                button(
-                    t,
-                    &format!("watch-{}", stream.id),
-                    format!("{} · {}", publisher_name(s, stream.publisher), stream.name),
-                    Some(&icons::MONITOR_PLAY),
-                    Variant::Secondary,
-                    blocked
-                        .is_none()
-                        .then(|| Message::WatchStream(stream.id.clone())),
-                )
-                .help(blocked.unwrap_or("Watch beside the others")),
-            );
-        }
-        area = area.child(chips);
+    let rest: Vec<_> = overflow.iter().chain(&tucked).copied().collect();
+    area.children(also_live(s, t, supported, &rest))
+}
+
+/// A row of buttons, one per stream with no box of its own on the stage: those past what fits
+/// under the large one, and every one you haven't joined while those are hidden.
+fn also_live(
+    s: &App,
+    t: &Theme,
+    supported: bool,
+    streams: &[&streaming::StreamInfo],
+) -> Option<El> {
+    if streams.is_empty() {
+        return None;
     }
-    area
+    let mut chips = row()
+        .key("also-live")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .flex_wrap()
+        .child(faint(t, "Also live:"));
+    for stream in streams {
+        chips = chips.child(live_chip(s, t, supported, stream));
+    }
+    Some(chips)
+}
+
+/// One stream as a button that joins it: who, and what they share.
+fn live_chip(s: &App, t: &Theme, supported: bool, stream: &streaming::StreamInfo) -> El {
+    let blocked = watch_blocked(s, supported, stream);
+    button(
+        t,
+        &format!("watch-{}", stream.id),
+        format!("{} · {}", publisher_name(s, stream.publisher), stream.name),
+        Some(&icons::MONITOR_PLAY),
+        Variant::Secondary,
+        blocked
+            .is_none()
+            .then(|| Message::WatchStream(stream.id.clone())),
+    )
+    .help(blocked.unwrap_or("Watch beside the others"))
 }
 
 /// The margin around several streams on the stage.
@@ -1198,7 +1285,7 @@ fn others(s: &App) -> usize {
     if streaming.stage().is_none() {
         return 0;
     }
-    streaming.watching.len() - 1 + unwatched(s).len()
+    streaming.watching.len() - 1 + offered(s).len()
 }
 
 /// The tab at the foot of a stream on its own that brings the tucked-away streams back.
@@ -1672,6 +1759,10 @@ fn tile(s: &App, t: &Theme, watch: &Watching, mode: Mode, width: f32) -> El {
                 .gap(8.0)
                 .padding(STAGE_PAD)
                 .children((hidden > 0).then(|| show_others(t, hidden).self_center()))
+                .children(
+                    also_live(s, t, supported(s), &tucked(s))
+                        .map(|chips| holds_overlays(chips.justify_center())),
+                )
                 .child(
                     holds_overlays(controls(s, t, watch, mode, width))
                         .key("solo-bar")

@@ -40,6 +40,7 @@ pub const SCENES: &[Scene] = &[
     ("home", home),
     ("connected", connected),
     ("connected-quiet", connected_quiet),
+    ("connected-system-clients", connected_system_clients),
     ("connected-deafened", connected_deafened),
     ("member-states", member_states),
     ("streaming-elsewhere", streaming_elsewhere),
@@ -252,6 +253,10 @@ pub const SCENES: &[Scene] = &[
     ("watching-toolbar", watching_toolbar),
     ("watching-1440p", watching_1440p),
     ("streams-live", streams_live),
+    ("streams-live-hidden", streams_live_hidden),
+    ("watching-hide-unjoined", watching_hide_unjoined),
+    ("watching-hide-unjoined-hover", watching_hide_unjoined_hover),
+    ("watching-two-hide-unjoined", watching_two_hide_unjoined),
     ("sharing-watching", sharing_watching),
     ("watching-five", watching_five),
     ("watching-five-below", watching_five_below),
@@ -1250,6 +1255,7 @@ fn member(id: u16, name: &str, is_self: bool, mic_muted: bool) -> client::Member
             _ => vec![8],
         },
         channel_group: if id == 4 { 5 } else { 7 },
+        system: false,
     }
 }
 
@@ -2289,6 +2295,26 @@ fn monster_flavour_new(s: &mut App) {
     use crate::monster::{FLAVOURS, Section};
     stocked(s);
     s.monster.section = Section::Flavour(FLAVOURS.len() - 1);
+}
+
+/// Hide system clients turned off: the server's query login sits in the Lobby. With it on,
+/// as by default, the connection leaves them out and the tree reads as `connected`.
+fn connected_system_clients(s: &mut App) {
+    connected(s);
+    s.hide_system_clients
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let admin = client::Member {
+        system: true,
+        can_move: None,
+        can_kick_channel: None,
+        can_kick_server: None,
+        can_ban: None,
+        server_groups: vec![2],
+        ..member(9, "serveradmin", false, false)
+    };
+    let state = &mut s.server_mut().state;
+    state.channels[0].members.insert(2, admin);
+    state.current = Some(state.channels[0].clone());
 }
 
 fn settings_page(s: &mut App) {
@@ -3581,6 +3607,48 @@ fn watching_1440p(s: &mut App) {
 }
 
 /// Streams running in the channel that you haven't joined.
+/// Hide streams you haven't joined, watching nothing: the pane names who is live instead.
+fn streams_live_hidden(s: &mut App) {
+    streams_live(s);
+    s.stream_view.hide_unjoined = true;
+}
+
+/// Hide streams you haven't joined, watching one: it fills the pane on its own.
+fn watching_hide_unjoined(s: &mut App) {
+    watching(s);
+    s.stream_view.hide_unjoined = true;
+}
+
+/// The same with the pointer over it: the others wait above the bar, one click from joining.
+fn watching_hide_unjoined_hover(s: &mut App) {
+    watching_hide_unjoined(s);
+    s.ui.streams_hover = true;
+}
+
+/// Hide streams you haven't joined, watching two: they share the stage, the third is a button.
+fn watching_two_hide_unjoined(s: &mut App) {
+    use crate::streaming::Phase;
+    watch(
+        s,
+        &[
+            ("s1", 2, "Mara’s screen", Phase::Receiving),
+            ("s3", 3, "Theo’s window", Phase::Receiving),
+        ],
+    );
+    s.server_mut()
+        .streaming
+        .catalog
+        .push(crate::streaming::StreamInfo {
+            id: "s2".into(),
+            publisher: 4,
+            name: "Ines’s game".into(),
+            viewers: 1,
+            has_audio: false,
+            server_relayed: false,
+        });
+    s.stream_view.hide_unjoined = true;
+}
+
 fn streams_live(s: &mut App) {
     connected(s);
     for (id, publisher, name, viewers, has_audio) in [
