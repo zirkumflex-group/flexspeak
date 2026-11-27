@@ -32,6 +32,8 @@ pub enum Operation {
     Move,
     Moderate,
     Groups,
+    /// Someone's Stats page in the member menu.
+    MemberStats,
 }
 impl Operation {
     pub fn label(self) -> &'static str {
@@ -55,6 +57,7 @@ impl Operation {
             Self::Move => "client move",
             Self::Moderate => "kick or ban",
             Self::Groups => "group change",
+            Self::MemberStats => "stats request",
         }
     }
     pub fn optional(self) -> bool {
@@ -434,6 +437,7 @@ mod tests {
             Operation::Move,
             Operation::Moderate,
             Operation::Groups,
+            Operation::MemberStats,
             Operation::StreamJoin,
             Operation::StreamStart,
         ] {

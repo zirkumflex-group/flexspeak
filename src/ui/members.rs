@@ -50,6 +50,7 @@ pub fn interactive(s: &App, t: &Theme, member: &client::Member, row: El) -> El {
                 s.server_mut().selected_members.clear();
             }
             s.ui.member_menu = Some((id, point));
+            s.ui.member_stats = false;
             s.ui.channel_menu = None;
             s.ui.move_menu = false;
             s.ui.groups_menu = None;
@@ -150,6 +151,7 @@ pub fn channel_in_path(path: &str) -> Option<u64> {
 
 fn close(s: &mut App) {
     s.ui.member_menu = None;
+    s.ui.member_stats = false;
     s.ui.move_menu = false;
     s.ui.groups_menu = None;
     s.server_mut().group_edit = None;
@@ -235,6 +237,10 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
         icon(glyph, 14.0).color(if enabled { color } else { t.faint })
     };
     let neutral = |glyph: &'static rune::Icon, enabled: bool| tinted(glyph, t.muted, enabled);
+    if s.ui.member_stats && ids.len() == 1 {
+        stats(s, t, k, layer, member, title, point);
+        return;
+    }
     let mut menu = context_menu("member-menu", el(), Some(point))
         .min_width(200.0)
         .on_close(close)
@@ -294,6 +300,15 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
                         dispatch(s, tx, Message::ToggleAutoWatch(id));
                     }),
             );
+    }
+    if ids.len() == 1 {
+        menu = menu.item(
+            MenuItem::new("Stats")
+                .lead(neutral(&icons::CHART_LINE, true))
+                .on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                    dispatch(s, tx, Message::MemberStats(id));
+                }),
+        );
     }
     let channels: Vec<MenuEntry> = s
         .server()
@@ -423,6 +438,177 @@ pub fn menu(s: &App, t: &Theme, k: &Kit, layer: &mut Vec<El>) {
     let _ = menu.build(k, layer);
 }
 
+/// The member menu's Stats page: how long they have been online and inactive, and what the
+/// server keeps about them, in place of the actions until Back.
+fn stats(
+    s: &App,
+    t: &Theme,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    member: &client::Member,
+    title: String,
+    point: PointerPress,
+) {
+    let mut menu = context_menu("member-menu", el(), Some(point))
+        .min_width(260.0)
+        .on_close(close)
+        .group_label(title)
+        .item(
+            MenuItem::new("Back")
+                .lead(icon(&icons::ARROW_LEFT, 14.0).color(t.muted))
+                .on_select(|s: &mut App| s.ui.member_stats = false),
+        )
+        .separator();
+    let Some((at, stats)) = s.server().member_stats.get(&member.id) else {
+        menu = menu.group_label("Asking the server…");
+        let _ = menu.build(k, layer);
+        return;
+    };
+    // Both were true when the server answered and have kept counting since.
+    let since = at.elapsed();
+    let now = chrono::Local::now();
+    let mut rows: Vec<(&'static str, Vec<StatRow>)> = vec![
+        ("This visit", Vec::new()),
+        ("History", Vec::new()),
+        ("Client", Vec::new()),
+    ];
+    if let Some(online) = stats.online {
+        rows[0]
+            .1
+            .push(("Online for", &icons::CLOCK, span(online + since)));
+    }
+    if let Some(idle) = stats.idle {
+        let idle = idle + since;
+        let value = if idle < ACTIVE {
+            "Active now".to_owned()
+        } else {
+            let from = now - chrono::Duration::from_std(idle).unwrap_or_default();
+            format!("{} · since {}", span(idle), from.format("%H:%M"))
+        };
+        rows[0].1.push(("Inactive", &icons::MOON, value));
+    }
+    if let Some(at) = stats.first_seen {
+        rows[1]
+            .1
+            .push(("First seen", &icons::CALENDAR, day(at, now)));
+    }
+    if let Some(at) = stats.last_connected {
+        rows[1]
+            .1
+            .push(("Last visit", &icons::HISTORY, moment(at, now)));
+    }
+    if let Some(count) = stats.connections {
+        rows[1].1.push(("Visits", &icons::HASH, thousands(count)));
+    }
+    let client = [stats.version.as_deref(), stats.platform.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !client.is_empty() {
+        rows[2].1.push(("Version", &icons::MONITOR, client));
+    }
+    if let Some(country) = stats.country.as_deref().filter(|code| !code.is_empty()) {
+        rows[2]
+            .1
+            .push(("Country", &icons::GLOBE, country.to_uppercase()));
+    }
+    if let (Some(down), Some(up)) = (stats.month_down, stats.month_up) {
+        rows[2].1.push((
+            "This month",
+            &icons::DOWNLOAD,
+            format!(
+                "↓ {}  ↑ {}",
+                crate::usage::format_bytes(down as f64),
+                crate::usage::format_bytes(up as f64)
+            ),
+        ));
+    }
+    let mut first = true;
+    for (section, entries) in rows.into_iter().filter(|(_, entries)| !entries.is_empty()) {
+        if !first {
+            menu = menu.separator();
+        }
+        first = false;
+        menu = menu.group_label(section);
+        for (label, glyph, value) in entries {
+            menu = menu.item(
+                MenuItem::new(label)
+                    .lead(icon(glyph, 14.0).color(t.muted))
+                    .shortcut(value),
+            );
+        }
+    }
+    if first {
+        menu = menu.group_label("The server didn't say");
+    }
+    let _ = menu.build(k, layer);
+}
+
+/// One line of the Stats page: its label, icon and value.
+type StatRow = (&'static str, &'static rune::Icon, String);
+
+/// Inactive for less than this reads as active: the server counts from their last sound or
+/// click.
+const ACTIVE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A length of time in its two largest units: "3 d 4 h", "2 h 14 min", "45 min".
+fn span(time: std::time::Duration) -> String {
+    let minutes = time.as_secs() / 60;
+    let (days, hours, minutes) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    match (days, hours) {
+        (0, 0) if minutes == 0 => "under a minute".into(),
+        (0, 0) => format!("{minutes} min"),
+        (0, _) if minutes == 0 => format!("{hours} h"),
+        (0, _) => format!("{hours} h {minutes} min"),
+        (_, 0) => format!("{days} d"),
+        _ => format!("{days} d {hours} h"),
+    }
+}
+
+fn local(unix: i64) -> Option<chrono::DateTime<chrono::Local>> {
+    chrono::DateTime::from_timestamp(unix, 0).map(|at| at.with_timezone(&chrono::Local))
+}
+
+/// A date, with its year only when it isn't this one: "14 Mar 2024", "2 Nov".
+fn day(unix: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    use chrono::Datelike;
+    local(unix).map_or_else(String::new, |at| {
+        if at.year() == now.year() {
+            at.format("%-d %b").to_string()
+        } else {
+            at.format("%-d %b %Y").to_string()
+        }
+    })
+}
+
+/// A moment, by its day when that is recent: "Today 09:12", "Yesterday 21:40", "2 Nov, 18:05".
+fn moment(unix: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    let Some(at) = local(unix) else {
+        return String::new();
+    };
+    let time = at.format("%H:%M");
+    match (now.date_naive() - at.date_naive()).num_days() {
+        0 => format!("Today {time}"),
+        1 => format!("Yesterday {time}"),
+        _ => format!("{}, {time}", day(unix, now)),
+    }
+}
+
+/// A count with thin separators every three digits: "1 284".
+fn thousands(count: u32) -> String {
+    let digits = count.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{202f}');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// The label that follows the pointer while members are dragged.
 pub fn ghost(s: &App, t: &Theme, layer: &mut Vec<El>) {
     let Some(drag) = &s.ui.drag else {
@@ -472,7 +658,29 @@ pub fn ghost(s: &App, t: &Theme, layer: &mut Vec<El>) {
 
 #[cfg(test)]
 mod tests {
-    use super::channel_in_path;
+    use super::{channel_in_path, moment, span, thousands};
+    use std::time::Duration;
+
+    #[test]
+    fn stats_read_in_words_people_use() {
+        assert_eq!(span(Duration::from_secs(30)), "under a minute");
+        assert_eq!(span(Duration::from_secs(45 * 60)), "45 min");
+        assert_eq!(span(Duration::from_secs(2 * 3600)), "2 h");
+        assert_eq!(span(Duration::from_secs(2 * 3600 + 14 * 60)), "2 h 14 min");
+        assert_eq!(
+            span(Duration::from_secs(3 * 86400 + 4 * 3600 + 59)),
+            "3 d 4 h"
+        );
+        assert_eq!(span(Duration::from_secs(86400 + 30 * 60)), "1 d");
+        assert_eq!(thousands(7), "7");
+        assert_eq!(thousands(1284), "1\u{202f}284");
+        assert_eq!(thousands(1_000_000), "1\u{202f}000\u{202f}000");
+        let now = chrono::Local::now();
+        let at = now.timestamp();
+        assert!(moment(at, now).starts_with("Today "));
+        assert!(moment(at - 86400, now).starts_with("Yesterday "));
+        assert!(moment(at - 10 * 86400, now).contains(", "));
+    }
 
     #[test]
     fn a_drop_finds_the_innermost_channel_in_a_key_path() {

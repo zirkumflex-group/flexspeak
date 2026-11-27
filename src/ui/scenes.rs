@@ -194,6 +194,8 @@ pub const SCENES: &[Scene] = &[
     ("member-menu", member_menu),
     ("member-menu-auto-join", member_menu_auto_join),
     ("member-menu-restricted", member_menu_restricted),
+    ("member-stats", member_stats),
+    ("member-stats-loading", member_stats_loading),
     ("member-groups", member_groups),
     ("member-groups-selection", member_groups_selection),
     ("member-channel-group", member_channel_group),
@@ -2727,6 +2729,36 @@ fn member_menu_restricted(s: &mut App) {
     s.ui.member_menu = Some((3, rune::PointerPress { x: 150.0, y: 220.0 }));
 }
 
+/// The member menu switched to its Stats page, with what the server said about them.
+fn member_stats(s: &mut App) {
+    member_stats_loading(s);
+    let now = chrono::Local::now().timestamp();
+    s.server_mut().member_stats.insert(
+        2,
+        (
+            Instant::now(),
+            client::MemberStats {
+                online: Some(Duration::from_secs(2 * 3600 + 14 * 60)),
+                idle: Some(Duration::from_secs(12 * 60)),
+                first_seen: Some(1_710_403_200),
+                last_connected: Some(now - 20 * 3600),
+                connections: Some(1284),
+                version: Some("6.0.0-beta3".into()),
+                platform: Some("Windows".into()),
+                country: Some("de".into()),
+                month_down: Some(5_153_960_755),
+                month_up: Some(1_288_490_188),
+            },
+        ),
+    );
+}
+
+/// The Stats page before the server has answered.
+fn member_stats_loading(s: &mut App) {
+    member_menu(s);
+    s.ui.member_stats = true;
+}
+
 fn with_groups(s: &mut App) {
     let group = |id: u64, name: &str| client::Group {
         id,
@@ -4629,7 +4661,7 @@ mod tests {
             .unwrap()
             .wanted
             .clear();
-        let row = "member-menu-item8-sub-item";
+        let row = "member-menu-item9-sub-item";
         click(&mut rt, &format!("{row}1"));
         settle(&mut rt);
         click(&mut rt, &format!("{row}4"));

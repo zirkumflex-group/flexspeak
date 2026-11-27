@@ -269,6 +269,8 @@ pub struct UiState {
     pub open: Option<&'static str>,
     /// The member a context menu is open for, and where it opened.
     pub member_menu: Option<(u16, rune::PointerPress)>,
+    /// The member menu shows its Stats page instead of its actions.
+    pub member_stats: bool,
     /// The server in the rail a context menu is open for, and where it opened.
     pub rail_menu: Option<(crate::hub::SessionId, rune::PointerPress)>,
     /// The channel a context menu is open for, and where it opened.
@@ -386,6 +388,7 @@ impl Default for UiState {
             moderation_reason: TextEdit::new(""),
             open: None,
             member_menu: None,
+            member_stats: false,
             rail_menu: None,
             channel_menu: None,
             move_menu: false,

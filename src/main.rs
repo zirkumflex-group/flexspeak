@@ -425,6 +425,8 @@ struct ServerSession {
     /// Who just opened a Monster card, shown on their row for a few seconds.
     unboxed: BTreeMap<u16, monster::Lit>,
     client_usage: BTreeMap<u16, Result<usage::ServerUsage, &'static str>>,
+    /// What the server said about each person whose Stats page was opened, and when it said it.
+    member_stats: BTreeMap<u16, (Instant, client::MemberStats)>,
     /// Each sampled peer's health as their globe shows it.
     client_health: BTreeMap<u16, usage::SteadyHealth>,
     /// Your own health as the footer shows it.
@@ -498,6 +500,7 @@ impl ServerSession {
             talking: BTreeSet::new(),
             unboxed: BTreeMap::new(),
             client_usage: BTreeMap::new(),
+            member_stats: BTreeMap::new(),
             client_health: BTreeMap::new(),
             connection_health: usage::SteadyHealth::default(),
             limited: false,
@@ -794,6 +797,10 @@ fn trace_event(id: hub::SessionId, event: &client::Event) {
         Event::Done(source) => {
             tracing::debug!(target: "flexspeak::connection", session, ?source, "done")
         }
+        Event::MemberStats { id, stats } => tracing::debug!(
+            target: "flexspeak::connection", session, client = id,
+            online = stats.online.is_some(), history = stats.connections.is_some(), "member stats"
+        ),
         Event::Stopped(reason) => match reason {
             Some((source, detail)) => tracing::warn!(
                 target: "flexspeak::connection", session, ?source, detail = detail.as_str(), "stopped"
@@ -1513,6 +1520,8 @@ enum Message {
     /// Moves clients into a channel; your own client joins it instead.
     MoveMembers(Vec<u16>, u64),
     OpenPoke(u16),
+    /// Switches the member menu to someone's Stats page and asks the server for them.
+    MemberStats(u16),
     PokeText(String),
     SubmitPoke,
     CancelPoke,
@@ -1927,6 +1936,7 @@ impl App {
         self.level = 0.0;
         self.ui.open = None;
         self.ui.member_menu = None;
+        self.ui.member_stats = false;
         self.ui.channel_menu = None;
         self.ui.move_menu = false;
         self.ui.groups_menu = None;
@@ -5475,6 +5485,16 @@ impl App {
                     return self.update(Message::Join(channel));
                 }
             }
+            Message::MemberStats(id) => {
+                self.ui.member_stats = true;
+                self.ui.move_menu = false;
+                self.ui.groups_menu = None;
+                // A client number can pass to someone else, so the page waits for fresh figures.
+                self.server_mut().member_stats.remove(&id);
+                if self.find_member(id).is_some() && self.server().connected && !self.loopback {
+                    self.command(client::Command::MemberStats(id));
+                }
+            }
             Message::OpenPoke(id) => {
                 if let Some(member) = self.find_member(id).filter(|member| !member.is_self)
                     && self.server().connected
@@ -6029,6 +6049,7 @@ impl App {
                 session.streaming.reset();
                 session.clear_client_details();
                 session.client_usage.clear();
+                session.member_stats.clear();
                 session.client_health.clear();
                 session.connection_health = usage::SteadyHealth::default();
                 session.limited = false;
@@ -6388,6 +6409,11 @@ impl App {
                     .update(connection.health(), Instant::now());
                 if session.connected && !loopback {
                     session.connection_history.push(Instant::now(), connection);
+                }
+            }
+            client::Event::MemberStats { id: client, stats } => {
+                if session.connected {
+                    session.member_stats.insert(client, (Instant::now(), stats));
                 }
             }
             client::Event::ClientUsage { id: client, result } => {
@@ -9376,6 +9402,43 @@ mod tests {
         // Nobody to move when everyone is already there.
         let _ = app.update(Message::MoveMembers(vec![2], 1));
         assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn stats_ask_the_server_and_show_what_comes_back() {
+        let (mut app, mut commands) = session_fixture();
+        let id = app.active.unwrap();
+        let stale = client::MemberStats {
+            connections: Some(3),
+            ..Default::default()
+        };
+        app.server_mut()
+            .member_stats
+            .insert(2, (Instant::now(), stale));
+        let _ = app.update(Message::MemberStats(2));
+        assert!(app.ui.member_stats);
+        assert!(
+            app.server().member_stats.is_empty(),
+            "a client number can pass to someone else"
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(client::Command::MemberStats(2))
+        ));
+        let stats = client::MemberStats {
+            online: Some(std::time::Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let _ = app.update(Message::Backend(
+            id,
+            client::Event::MemberStats {
+                id: 2,
+                stats: stats.clone(),
+            },
+        ));
+        assert_eq!(app.server().member_stats[&2].1, stats);
+        let _ = app.update(Message::Backend(id, client::Event::Stopped(None)));
+        assert!(app.server().member_stats.is_empty());
     }
 
     #[test]
